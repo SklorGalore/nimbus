@@ -29,11 +29,16 @@ pub struct Gpu {
     config: wgpu::SurfaceConfiguration,
 }
 
+/// Failures while setting up the GPU for a window. All are fatal at startup.
 #[derive(Debug)]
 pub enum GpuError {
+    /// No GPU (or software fallback) can present to this window.
     NoAdapter,
+    /// The OS refused to give us a drawable surface for the window.
     Surface(wgpu::CreateSurfaceError),
+    /// The adapter exists but would not open a device with our required limits.
     Device(wgpu::RequestDeviceError),
+    /// The adapter cannot present to this surface in any format.
     Unsupported,
 }
 
@@ -75,7 +80,15 @@ impl Gpu {
     ///
     /// Blocks on adapter and device creation; this happens once at startup and
     /// is part of the time-to-first-frame budget, so it is logged.
-    pub fn new(window: Arc<Window>) -> Result<Self, GpuError> {
+    ///
+    /// The surface keeps its own clone of `window` alive, because a surface
+    /// must never outlive the window it draws into.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`GpuError`] if no adapter can present to the window, the
+    /// device cannot be opened, or the surface cannot be created or configured.
+    pub fn new(window: &Arc<Window>) -> Result<Self, GpuError> {
         // Backends and debug flags can be overridden with WGPU_BACKEND /
         // WGPU_DEBUG environment variables, handy when something misrenders.
         let instance =
@@ -152,6 +165,8 @@ impl Gpu {
         self.surface.configure(&self.device, &self.config);
     }
 
+    /// Current surface size in physical pixels, as `(width, height)`.
+    #[must_use]
     pub fn size(&self) -> (u32, u32) {
         (self.config.width, self.config.height)
     }
@@ -161,6 +176,11 @@ impl Gpu {
     /// Returns `Ok(false)` when the frame was skipped (window occluded, GPU
     /// timeout, stale swapchain) and the caller should simply try again on
     /// the next redraw request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FrameError`] when the surface is lost or acquiring the frame
+    /// raised a validation error. Neither can be fixed by retrying.
     pub fn render(&mut self) -> Result<bool, FrameError> {
         use wgpu::CurrentSurfaceTexture as T;
 

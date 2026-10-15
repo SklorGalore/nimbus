@@ -25,21 +25,35 @@ struct Options {
     smoke: bool,
 }
 
+/// Write a line to stdout. Command-line output such as `--version` and the
+/// `--smoke` timing is the program's job, so it is not logging.
+#[expect(clippy::print_stdout, reason = "CLI output, not diagnostics")]
+fn print_out(line: &str) {
+    println!("{line}");
+}
+
+/// Write a line to stderr, for errors that happen before logging matters or
+/// that the user must see even with logging filtered out.
+#[expect(clippy::print_stderr, reason = "CLI errors shown to the user")]
+fn print_err(line: &str) {
+    eprintln!("{line}");
+}
+
 fn parse_options() -> Options {
     let mut smoke = false;
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--smoke" => smoke = true,
             "--version" | "-V" => {
-                println!("nimbus {}", nimbus_core::VERSION);
+                print_out(&format!("nimbus {}", nimbus_core::VERSION));
                 std::process::exit(0);
             }
             "--help" | "-h" => {
-                println!("usage: nimbus [--smoke] [--version]");
+                print_out("usage: nimbus [--smoke] [--version]");
                 std::process::exit(0);
             }
             other => {
-                eprintln!("nimbus: unknown argument {other:?}");
+                print_err(&format!("nimbus: unknown argument {other:?}"));
                 std::process::exit(2);
             }
         }
@@ -86,7 +100,7 @@ impl ApplicationHandler for App {
             }
         };
 
-        match Gpu::new(window.clone()) {
+        match Gpu::new(&window) {
             Ok(gpu) => self.gpu = Some(gpu),
             Err(e) => {
                 log::error!("{e}");
@@ -113,11 +127,6 @@ impl ApplicationHandler for App {
                 window.request_redraw();
             }
 
-            // winit follows a ScaleFactorChanged with a Resized carrying the new
-            // physical size, so nothing to do here yet. Font metrics will care
-            // about this in milestone 1.
-            WindowEvent::ScaleFactorChanged { .. } => {}
-
             WindowEvent::RedrawRequested => {
                 match gpu.render() {
                     Ok(true) => self.frames += 1,
@@ -136,12 +145,18 @@ impl ApplicationHandler for App {
                     let elapsed = self.started.elapsed();
                     log::info!("first frame in {elapsed:?}");
                     if self.options.smoke {
-                        println!("first-frame-ms={:.1}", elapsed.as_secs_f64() * 1000.0);
+                        print_out(&format!(
+                            "first-frame-ms={:.1}",
+                            elapsed.as_secs_f64() * 1000.0
+                        ));
                         event_loop.exit();
                     }
                 }
             }
 
+            // Includes ScaleFactorChanged: winit follows it with a Resized
+            // carrying the new physical size, so nothing to do yet. Font
+            // metrics will care about it in milestone 1.
             _ => {}
         }
     }
@@ -157,7 +172,7 @@ fn main() {
     let event_loop = match EventLoop::new() {
         Ok(el) => el,
         Err(e) => {
-            eprintln!("nimbus: could not start event loop: {e}");
+            print_err(&format!("nimbus: could not start event loop: {e}"));
             std::process::exit(1);
         }
     };
@@ -167,7 +182,7 @@ fn main() {
 
     let mut app = App::new(options);
     if let Err(e) = event_loop.run_app(&mut app) {
-        eprintln!("nimbus: event loop error: {e}");
+        print_err(&format!("nimbus: event loop error: {e}"));
         std::process::exit(1);
     }
 }

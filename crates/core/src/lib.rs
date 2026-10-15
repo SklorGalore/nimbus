@@ -10,7 +10,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(test)]
 mod tests {
     #[test]
-    fn version_is_set() {
-        assert!(!super::VERSION.is_empty());
+    fn version_is_semver_triple() {
+        let parts: Vec<&str> = super::VERSION.split('.').collect();
+        assert_eq!(parts.len(), 3, "version {:?}", super::VERSION);
+        assert!(parts.iter().all(|p| p.parse::<u32>().is_ok()));
     }
 }

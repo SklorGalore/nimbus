@@ -10,3 +10,6 @@ nimbus-core = { version = "0.1.0", path = "../core" }
 nimbus-render = { version = "0.1.0", path = "../render" }
 nimbus-syntax = { version = "0.1.0", path = "../syntax" }
 winit = "0.30"
+
+[lints]
+workspace = true
