@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# Release profile tuned for a small, fast single binary (DESIGN.md §5).
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Keep debug builds reasonably fast to run: optimize dependencies only.
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+
+  release-size:
+    name: release binary size
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev
+      - run: cargo build --release -p nimbus
+      - name: Enforce 15 MB budget (DESIGN.md §5)
+        shell: bash
+        run: |
+          size=$(stat -c %s target/release/nimbus)
+          echo "nimbus release binary: $((size / 1024 / 1024)) MB ($size bytes)"
+          test "$size" -le $((15 * 1024 * 1024))

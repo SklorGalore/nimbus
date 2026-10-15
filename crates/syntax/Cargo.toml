@@ -1,0 +1,7 @@
+[package]
+name = "nimbus-syntax"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nimbus-core = { version = "0.1.0", path = "../core" }
