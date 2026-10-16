@@ -5,8 +5,10 @@
 //! table over the initial text), and one also through [`AnyBuffer`]. The
 //! mapped buffer gets tiny [`Limits`], so the paths that normally need
 //! megabytes run on a few bytes: removals over 4 bytes are recorded as
-//! pieces, add-buffer segments seal every 16 bytes, and inserted text is cut
-//! into pieces of at most 6 bytes.
+//! pieces, add-buffer segments seal every 16 bytes, inserted text is cut
+//! into pieces of at most 6 bytes, and line breaks more than 3 bytes away
+//! are found through the line index, which has a checkpoint every 2 lines
+//! or 5 bytes.
 //!
 //! The oracle is the obvious, slow implementation: a `String` edited with
 //! `replace_range`, with lines found by splitting on `'\n'`. Every answer the
@@ -24,6 +26,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use nimbus_core::line_index::{LineIndex, Spacing};
 use nimbus_core::{
     AnyBuffer, Buffer, Content, Edit, EditError, Limits, MappedBuffer, RopeBuffer, Text, VecSource,
 };
@@ -56,6 +59,8 @@ const TINY: Limits = Limits {
     copy_limit: 4,
     segment: 16,
     max_piece: 6,
+    scan: 3,
+    pseudo_line: 8,
 };
 
 /// A buffer implementation under test.
@@ -80,8 +85,10 @@ impl Backend for RopeBuffer {
 }
 
 impl Backend for MappedBuffer {
+    #[expect(clippy::unwrap_used, reason = "test helper")]
     fn build(text: &str) -> Self {
-        MappedBuffer::with_limits(Arc::new(VecSource::from(text)), TINY)
+        let index = LineIndex::build(text.as_bytes(), Spacing::new(2, 5));
+        MappedBuffer::with_index(Arc::new(VecSource::from(text)), index, TINY).unwrap()
     }
 
     fn copy_limit() -> Option<usize> {

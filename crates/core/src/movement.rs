@@ -6,6 +6,12 @@
 //! that survives passing through shorter lines (the "sticky column").
 //!
 //! The functions take [`Text`], not a buffer, so they work on snapshots too.
+//!
+//! In a mapped file with bytes that are not UTF-8, the text these functions
+//! read shows each invalid byte as the control character SUB
+//! ([`crate::SUBSTITUTE`]), one byte for one byte. A control character is
+//! always a grapheme of its own, so the cursor steps over an invalid byte
+//! by itself and every stop is a unit boundary of the raw bytes.
 
 use std::ops::Range;
 
@@ -54,13 +60,20 @@ pub fn next_grapheme(t: &dyn Text, pos: usize) -> usize {
 /// The next cursor stop to the left of `pos`.
 #[must_use]
 pub fn prev_grapheme(t: &dyn Text, pos: usize) -> usize {
-    let span = t.line_span(pos);
+    let mut span = t.line_span(pos);
     if pos <= span.start {
-        return if span.start == 0 {
-            0
-        } else {
-            t.line_span(span.start - 1).end
-        };
+        if span.start == 0 {
+            return 0;
+        }
+        let prev = t.line_span(span.start - 1);
+        if prev.end < span.start {
+            // Step over the line ending to the end of the line above.
+            return prev.end;
+        }
+        // A pseudo-line break (a mapped file cuts very long lines it has
+        // not indexed yet): there is no line ending, so step back one
+        // character within the piece before it.
+        span = prev;
     }
     if pos > span.end {
         // Between the \r and \n of a line ending.

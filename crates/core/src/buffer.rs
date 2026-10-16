@@ -30,11 +30,17 @@ pub const SUBSTITUTE: char = '\u{1a}';
 
 /// One line found from a byte position, without needing its line number
 /// (which a mapped file may not know yet).
+///
+/// In the part of a mapped file not indexed yet, a very long line may be
+/// cut into *pseudo-lines* (see [`crate::mapped`]) so that finding it never
+/// means scanning the whole file. A pseudo-line has no line ending, so its
+/// `end` equals its `next`; a real line always has `end < next`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineSpan {
     /// Where the line starts.
     pub start: usize,
-    /// Where its content ends: before the `\n` or `\r\n`.
+    /// Where its content ends: before the `\n` or `\r\n`, or at `next` for
+    /// a pseudo-line.
     pub end: usize,
     /// Where the next line starts; `None` on the last line.
     pub next: Option<usize>,
@@ -47,6 +53,8 @@ pub trait Text {
 
     /// Number of lines: one more than the number of `\n`s, so an empty text
     /// has one empty line and a text ending in `\n` ends with an empty line.
+    /// While a mapped file is still being indexed, only the lines starting
+    /// at or before [`Text::indexed_bytes`] are counted: a lower bound.
     fn len_lines(&self) -> usize;
 
     /// Line `idx` without its line ending. Borrowed when the line is stored
@@ -56,7 +64,8 @@ pub trait Text {
     fn line(&self, idx: usize) -> Cow<'_, str>;
 
     /// The line containing byte offset `byte`. Offsets past the end map to
-    /// the last line.
+    /// the last line, and while a mapped file is being indexed, offsets
+    /// past [`Text::indexed_bytes`] map to the last line counted.
     fn byte_to_line(&self, byte: usize) -> usize;
 
     /// Byte offset where line `line` starts. Lines past the end map to
@@ -67,7 +76,8 @@ pub trait Text {
     fn slice(&self, range: Range<usize>) -> Cow<'_, str>;
 
     /// Whether `byte` is a valid cursor position: within the text and on a
-    /// UTF-8 character boundary.
+    /// unit boundary, which is a UTF-8 character boundary in valid text and
+    /// also either side of each invalid byte.
     fn is_char_boundary(&self, byte: usize) -> bool;
 
     /// The contiguous piece of storage containing byte `byte`, as raw
@@ -103,12 +113,15 @@ pub trait Text {
     }
 
     /// The number of the line containing `byte`, or `None` if lines that
-    /// far in are not counted yet (a mapped file still indexing).
+    /// far in are not counted yet (a mapped file still indexing): exactly
+    /// when `byte` is past [`Text::indexed_bytes`] and that is short of
+    /// the end.
     fn line_number(&self, byte: usize) -> Option<usize> {
         Some(self.byte_to_line(byte))
     }
 
-    /// Line numbers are exact for every offset up to this one.
+    /// Line numbers are exact for every offset up to this one: the length,
+    /// except in a mapped file whose line index is still being built.
     fn indexed_bytes(&self) -> usize {
         self.len_bytes()
     }
@@ -185,12 +198,14 @@ impl Content {
         }
     }
 
-    /// Whether it contains a line break.
+    /// Whether it contains a line break. For [`Content::Pieces`] taken from
+    /// a part of a file not indexed yet this scans the run (see
+    /// [`PieceRun::has_newline`]).
     #[must_use]
     pub fn has_newline(&self) -> bool {
         match self {
             Self::Bytes(b) => b.contains(&b'\n'),
-            Self::Pieces(run) => run.newlines() > 0,
+            Self::Pieces(run) => run.has_newline(),
         }
     }
 
@@ -348,9 +363,10 @@ pub trait Buffer: Text {
     /// A read-only copy for use on another thread.
     fn snapshot(&self) -> Box<dyn Snapshot>;
 
-    /// Whether every line has been located. Always true for in-memory
-    /// buffers; a mapped buffer indexes in the background (M7), and until it
-    /// finishes [`Text::len_lines`] is a lower bound.
+    /// Whether every line has been counted, so that [`Text::len_lines`] is
+    /// exact and [`Text::indexed_bytes`] is the length. Always true for
+    /// in-memory buffers; a mapped buffer indexes in the background (M7),
+    /// and until it finishes [`Text::len_lines`] is a lower bound.
     fn is_fully_indexed(&self) -> bool {
         true
     }

@@ -23,6 +23,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nimbus_core::line_index::{LineIndex, Spacing};
 use nimbus_core::undo::COALESCE_WINDOW;
 use nimbus_core::{
     Buffer, Content, Edit, EditError, History, Limits, MappedBuffer, RopeBuffer, Selection,
@@ -78,6 +79,8 @@ const TINY: Limits = Limits {
     copy_limit: 4,
     segment: 16,
     max_piece: 6,
+    scan: 3,
+    pseudo_line: 8,
 };
 
 /// A buffer implementation under test.
@@ -99,8 +102,10 @@ impl Backend for RopeBuffer {
 }
 
 impl Backend for MappedBuffer {
+    #[expect(clippy::unwrap_used, reason = "test helper")]
     fn build(text: &str) -> Self {
-        MappedBuffer::with_limits(Arc::new(VecSource::from(text)), TINY)
+        let index = LineIndex::build(text.as_bytes(), Spacing::new(2, 5));
+        MappedBuffer::with_index(Arc::new(VecSource::from(text)), index, TINY).unwrap()
     }
 
     fn copy_limit() -> Option<usize> {

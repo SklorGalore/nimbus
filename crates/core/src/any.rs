@@ -74,6 +74,16 @@ impl AnyBuffer {
             Self::Rope(_) => None,
         }
     }
+
+    /// The mapped buffer, if this is one, to change: for example to merge
+    /// more of its line index ([`MappedBuffer::merge_index`]).
+    #[must_use]
+    pub fn as_mapped_mut(&mut self) -> Option<&mut MappedBuffer> {
+        match self {
+            Self::Mapped(b) => Some(b),
+            Self::Rope(_) => None,
+        }
+    }
 }
 
 /// Run the same expression on whichever backend `$self` holds, with the
@@ -182,6 +192,8 @@ mod tests {
             copy_limit: 4,
             segment: 8,
             max_piece: 6,
+            scan: 3,
+            pseudo_line: 8,
         };
         [
             RopeBuffer::from_text(INITIAL).into(),
@@ -226,6 +238,7 @@ mod tests {
         assert!(!rope.is_mapped() && mapped.is_mapped());
         assert!(rope.as_rope().is_some() && rope.as_mapped().is_none());
         assert!(mapped.as_mapped().is_some() && mapped.as_rope().is_none());
+        assert!(rope.as_mapped_mut().is_none() && mapped.as_mapped_mut().is_some());
         assert_eq!(answers(&rope), answers(&mapped));
 
         for b in [&mut rope, &mut mapped] {

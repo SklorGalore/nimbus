@@ -273,7 +273,7 @@ impl Scanner {
     }
 }
 
-/// Why [`LineIndex::merge`] refused a chunk.
+/// Why a chunk (or a whole index) could not be merged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MergeError {
     /// The chunk does not start where the index ends: a chunk was skipped,
@@ -286,6 +286,16 @@ pub enum MergeError {
     },
     /// The index was already complete and the chunk would extend it.
     AfterDone,
+    /// The chunk or index covers more bytes than the document's original
+    /// file has, so it was built from a different file. Only
+    /// [`crate::mapped::MappedBuffer`] can tell; [`LineIndex::merge`] never
+    /// returns this.
+    PastEnd {
+        /// Bytes the chunk or index claims to cover.
+        upto: u64,
+        /// The original file's length.
+        len: u64,
+    },
 }
 
 impl fmt::Display for MergeError {
@@ -299,6 +309,10 @@ impl fmt::Display for MergeError {
                 "line index chunk starts at byte {chunk_from} but the index ends at {indexed}"
             ),
             Self::AfterDone => f.write_str("line index chunk arrived after the index was complete"),
+            Self::PastEnd { upto, len } => write!(
+                f,
+                "line index covers {upto} bytes but the file has only {len}"
+            ),
         }
     }
 }
@@ -326,6 +340,24 @@ impl LineIndex {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The finished index of `bytes`, scanned in one go: for files small
+    /// enough to index before showing them, and for tests.
+    #[must_use]
+    pub fn build(bytes: &[u8], spacing: Spacing) -> Self {
+        let mut scanner = Scanner::new(spacing);
+        scanner.feed(bytes);
+        scanner.finish();
+        let chunk = scanner.take_chunk();
+        // An empty index ends at byte 0, where a fresh scanner's first
+        // chunk starts, so this merge cannot fail; the fallback only avoids
+        // a panic path.
+        let mut index = Self::new();
+        match index.merge(chunk) {
+            Ok(()) => index,
+            Err(_) => Self::new(),
+        }
     }
 
     /// Appends the next chunk from the scanner.
@@ -417,6 +449,7 @@ impl LineIndex {
         let start = usize::try_from(cp.offset).ok()?;
         let end = usize::try_from(x).ok()?;
         let between = src.get(start..end)?;
+        meter::add(between.len());
         Some(cp.newlines + to_u64(memchr::memchr_iter(b'\n', between).count()))
     }
 
@@ -442,9 +475,42 @@ impl LineIndex {
         let start = usize::try_from(cp.offset).ok()?;
         let end = usize::try_from(self.upto).ok()?;
         let hay = src.get(start..end)?;
-        let i = nth_newline(hay, n - cp.newlines).ok()?;
+        let found = nth_newline(hay, n - cp.newlines);
+        meter::add(found.map_or(hay.len(), |i| i + 1));
+        let i = found.ok()?;
         Some(cp.offset + to_u64(i + 1))
     }
+}
+
+/// Counts the bytes scanned for line breaks on the current thread, so tests
+/// can check that lookups stay bounded however big the file (for example,
+/// that a file without line breaks is never scanned whole). Outside tests
+/// it compiles to nothing.
+#[cfg(test)]
+pub(crate) mod meter {
+    use std::cell::Cell;
+
+    thread_local! {
+        static SCANNED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Record that `n` bytes were scanned.
+    pub(crate) fn add(n: usize) {
+        SCANNED.with(|c| c.set(c.get().saturating_add(n)));
+    }
+
+    /// Bytes scanned on this thread since the previous call.
+    pub(crate) fn take() -> usize {
+        SCANNED.with(|c| c.replace(0))
+    }
+}
+
+/// Outside tests, counting scanned bytes costs nothing.
+#[cfg(not(test))]
+pub(crate) mod meter {
+    /// Does nothing; see the test version.
+    #[inline]
+    pub(crate) fn add(_: usize) {}
 }
 
 /// Lossless on every platform Rust supports (`usize` is at most 64 bits).
@@ -689,6 +755,17 @@ mod tests {
         other.feed(b"more");
         assert_eq!(index.merge(other.take_chunk()), Err(MergeError::AfterDone));
         assert!(MergeError::AfterDone.to_string().contains("complete"));
+    }
+
+    #[test]
+    fn build_indexes_everything_in_one_go() {
+        let src = b"a\nbb\nccc\n";
+        let index = LineIndex::build(src, Spacing::new(1, 4));
+        assert!(index.is_done());
+        assert_eq!((index.indexed(), index.lines()), (9, 3));
+        assert_eq!(index.select(src, 2), Some(5));
+        assert_eq!(index.rank(src, 6), Some(2));
+        assert!(LineIndex::build(b"", Spacing::DEFAULT).is_done());
     }
 
     #[test]

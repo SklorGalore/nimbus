@@ -18,13 +18,85 @@
 //! document and how many line breaks come before it (*prefix sums*). Both
 //! grow along the list, so "which piece holds byte 3,000,000,000?" and
 //! "which piece holds the 50,000th line break?" are binary searches. Inside
-//! a piece of the original file, line breaks are found with the file's line
-//! index; inside an add-buffer piece, by scanning it, which is cheap because
+//! a piece of the original file, line breaks are found with the file's
+//! sparse [`LineIndex`], which scans at most the gap between two of its
+//! checkpoints, or by scanning a short stretch directly. Inside an
+//! add-buffer piece they are found by scanning it, which is cheap because
 //! add pieces are at most [`MAX_PIECE`] long.
 //!
 //! The list is a plain `Vec`: human editing makes at most thousands of
 //! pieces, so updating the prefix sums after an edit is a few microseconds.
 //! A tree would make that logarithmic, if profiling ever asks for it.
+//!
+//! # Line numbers while the file is still being indexed
+//!
+//! Counting the line breaks of a 4 GB file takes seconds, so the original
+//! file's [`LineIndex`] is built by a background worker and handed over in
+//! chunks with [`MappedBuffer::merge_index`]. Until it is done, only a
+//! prefix of the file is indexed: its first `F` bytes, the *frontier*.
+//!
+//! A piece of the original file that ends at or before `F` has a known
+//! line-break count. One that reaches past `F` does not (`None`); it is
+//! counted when a merge moves `F` past its end. Add-buffer pieces are
+//! always known, because their bytes were counted when they were stored.
+//! The original's pieces stay in file order (invariant 6), so the unknown
+//! pieces are exactly the original pieces from the first one reaching past
+//! `F` onward: everything before that piece, and its part below `F`, is
+//! counted. The document offset where that counted part ends is `K`
+//! ([`Text::indexed_bytes`]).
+//!
+//! Line numbers are exact up to `K`. Past it nothing is numbered:
+//! [`Text::line_number`] is `None`, [`Text::len_lines`] counts only the
+//! lines that start at or before `K` (a lower bound), and
+//! [`Text::byte_to_line`] stops at the last of those. Editing before `K`
+//! moves it along with the text, editing after it leaves it where it is,
+//! and merging more of the index moves it forward until it reaches the
+//! end, when the buffer is fully indexed.
+//!
+//! # Finding lines without line numbers
+//!
+//! [`Text::line_span`] works anywhere, indexed or not, by looking for the
+//! nearest `\n` on either side with `memchr`, which checks 16 or 32 bytes
+//! per instruction. It looks [`Limits::scan`] bytes (64 KiB) each way.
+//! Further away than that the line is long, and:
+//!
+//! - before `K`, the index finds where it starts and ends;
+//! - past `K` there is no index, so a long line is cut into *pseudo-lines*,
+//!   short enough to find by scanning, so that a file without line breaks
+//!   never needs a scan of the whole file.
+//!
+//! The rule for pseudo-lines: take each multiple of [`Limits::pseudo_line`]
+//! (1 MiB) of document offset, moved back to a unit boundary (see below).
+//! If it is past `K` and there is no `\n` within [`Limits::scan`] bytes
+//! before it nor at it, a pseudo-line starts there. The rule depends only on
+//! the bytes and `K`, never on where a lookup started, so walking forward
+//! and walking backward always find the same lines. A pseudo-line has no
+//! line ending: its `end` equals the next line's start. Once indexing
+//! passes them, the pseudo-lines join back into one long line.
+//!
+//! # Bytes that are not UTF-8
+//!
+//! A mapped file may hold bytes that are not UTF-8: a binary file, a log
+//! with a stray Latin-1 byte, a file cut off mid-character. They are kept
+//! exactly. A *unit* of text is a valid UTF-8 character or one invalid
+//! byte, split the way [`<[u8]>::utf8_chunks`] splits them: every byte of
+//! an invalid sequence is a unit of its own. Cursor positions and the ends
+//! of edits are unit boundaries ([`Text::is_char_boundary`]). Strings handed
+//! out show each invalid byte as [`SUBSTITUTE`], one byte for one byte, so
+//! their offsets are still file offsets, and a range between unit
+//! boundaries decodes the same on its own as in place.
+//!
+//! Whether an offset is inside a character depends only on the 3 bytes
+//! before it and the 2 after it: it is exactly when a lead byte 1 to 3
+//! bytes back starts a *valid* character long enough to reach it. So the
+//! check takes constant time; nothing is decoded from the start of a line.
+//!
+//! [`Buffer::replace`] cuts only at unit boundaries and inserts valid
+//! UTF-8, which never changes how the bytes around it decode. A deletion
+//! can: removing `41` ("A") from the bytes `E2 41 82 AC` joins the three
+//! invalid bytes left into `€`. Undo must still put the `41` back at offset
+//! 1, which is now inside a character, so [`Buffer::put`] checks bounds
+//! only.
 //!
 //! # Sharing with other threads
 //!
@@ -43,6 +115,9 @@
 //!   and copies the open one, so at most [`SEGMENT`] bytes are copied, and
 //!   appending afterwards (which may move the open `Vec` in memory) cannot
 //!   affect it. No `unsafe` is needed for any of this.
+//! - The line index sits behind an `Arc` too, and merging more of it
+//!   copies its short list of chunk pointers if a snapshot shares it, so a
+//!   snapshot keeps the index as it was when taken.
 //!
 //! # Undo without copying
 //!
@@ -55,28 +130,34 @@
 //!
 //! Everything below relies on these; the tests check them.
 //!
-//! 1. No piece is empty, and each entry's prefix sums equal the totals of
-//!    the pieces before it. (Binary searches return the right piece.)
-//! 2. A piece's `newlines` is the number of `\n` in its bytes. (Line lookups
-//!    trust it and skip pieces without line breaks.)
+//! 1. No piece is empty. Each entry's `at` is the total length of the
+//!    pieces before it, and its `lines` is the total of their line-break
+//!    counts, taking unknown counts as 0. (Binary searches find the right
+//!    piece; `lines` is exact up to and including the first unknown piece,
+//!    which is as far as line numbers are used.)
+//! 2. A piece's `newlines` is known exactly for add-buffer pieces and for
+//!    pieces of the original that end at or before the frontier `F`, and
+//!    then it is the number of `\n` in its bytes. (Line lookups trust it,
+//!    and skip pieces known to have none.)
 //! 3. The original file's bytes and every sealed segment never change, and
 //!    the open segment only grows. (A piece's bytes never change.)
 //! 4. Add-buffer pieces are at most [`MAX_PIECE`] bytes. (Scanning one for
 //!    line breaks is bounded.)
-//! 5. In a valid UTF-8 document every piece starts and ends on a character
-//!    boundary, so a range inside one piece is valid UTF-8 by itself and
-//!    can be lent out as a `&str` without copying.
+//! 5. In a valid UTF-8 document made by typing, every piece starts and ends
+//!    on a character boundary, so a range inside one piece can be lent out
+//!    as a `&str` without copying. Correctness never depends on this: a
+//!    deletion that joins invalid bytes into a character can leave a piece
+//!    boundary inside it, and readers only need ranges on unit boundaries.
 //! 6. Pieces of the original file appear in increasing file order and do
 //!    not overlap. Edits only cut pieces and add new add-buffer pieces, and
-//!    undo puts pieces back exactly where they came from, so this holds;
-//!    saving (M7 task 12) relies on it to stream the file in order.
+//!    undo puts pieces back exactly where they came from, so this holds.
+//!    Saving (M7 task 12) relies on it to stream the file in order, and `K`
+//!    relies on it to be a single place.
 //! 7. A [`PieceRun`] only refers to sealed segments (the open one is sealed
 //!    first), so the run's own `Arc`s keep every byte it names alive.
-//!
-//! This version assumes the original file is valid UTF-8 and indexes all its
-//! line breaks when the buffer is made. Invalid bytes and the background,
-//! sparse line index come next (M7 task 8): only `OriginalLines` and
-//! character boundaries need to change for them.
+//! 8. The cached frontier (the first unknown piece, `K` and the lines
+//!    before it) matches the piece list and the index: it is brought up to
+//!    date after every edit and every merge.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -89,6 +170,7 @@ use crate::buffer::{
     Buffer, Content, Edit, EditError, LineSpan, SUBSTITUTE, Snapshot, Text, check_range,
     check_sorted,
 };
+use crate::line_index::{IndexChunk, LineIndex, MergeError, Spacing, meter};
 use crate::source::{Source, VecSource};
 
 /// Removals longer than this many bytes are kept in undo as pieces instead
@@ -102,8 +184,19 @@ pub const SEGMENT: usize = 64 * 1024;
 /// Inserted text is split into pieces of at most this many bytes: 1 MiB.
 pub const MAX_PIECE: usize = 1024 * 1024;
 
-/// Sizes that trade memory against copying. The defaults are the constants
-/// above; tests use tiny ones so that every path runs on small texts.
+/// How far [`Text::line_span`] looks for a line break on each side before
+/// treating the line as long: 64 KiB, the size at which
+/// [`crate::long_line`] starts reading lines in windows.
+pub const SCAN: usize = 64 * 1024;
+
+/// Past the indexed part of a file, long lines are cut into pseudo-lines at
+/// multiples of this many bytes: 1 MiB, the line index's checkpoint
+/// spacing, so a lookup scans about as far either way.
+pub const PSEUDO_LINE: usize = 1024 * 1024;
+
+/// Sizes that trade memory against copying and scanning. The defaults are
+/// the constants above; tests use tiny ones so that every path runs on
+/// small texts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// Removals longer than this are recorded as [`Content::Pieces`].
@@ -114,15 +207,44 @@ pub struct Limits {
     /// Add-buffer pieces are at most this long (at least 4, the longest
     /// UTF-8 character, so a piece can always end on a character boundary).
     pub max_piece: usize,
+    /// How far [`Text::line_span`] scans for a line break on each side
+    /// before turning to the line index or to pseudo-lines (at least 1).
+    /// Also the longest stretch of the original file whose line breaks are
+    /// counted by scanning it rather than through the index.
+    pub scan: usize,
+    /// Spacing of pseudo-line breaks in the part of the document not yet
+    /// indexed (see the module documentation). At least `scan + 4`, so a
+    /// scan window never holds two of them.
+    pub pseudo_line: usize,
+}
+
+impl Limits {
+    /// The default limits: [`COPY_LIMIT`], [`SEGMENT`], [`MAX_PIECE`],
+    /// [`SCAN`] and [`PSEUDO_LINE`].
+    pub const DEFAULT: Self = Self {
+        copy_limit: COPY_LIMIT,
+        segment: SEGMENT,
+        max_piece: MAX_PIECE,
+        scan: SCAN,
+        pseudo_line: PSEUDO_LINE,
+    };
+
+    /// Each size raised to its minimum.
+    fn normalized(self) -> Self {
+        let scan = self.scan.max(1);
+        Self {
+            copy_limit: self.copy_limit,
+            segment: self.segment.max(1),
+            max_piece: self.max_piece.max(4),
+            scan,
+            pseudo_line: self.pseudo_line.max(scan.saturating_add(4)),
+        }
+    }
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self {
-            copy_limit: COPY_LIMIT,
-            segment: SEGMENT,
-            max_piece: MAX_PIECE,
-        }
+        Self::DEFAULT
     }
 }
 
@@ -144,8 +266,9 @@ struct Piece {
     start: usize,
     /// Length in bytes; never 0 in a piece list.
     len: usize,
-    /// How many `\n` bytes it holds.
-    newlines: usize,
+    /// How many `\n` bytes it holds; `None` for a piece of the original
+    /// reaching past the indexed frontier (invariant 2).
+    newlines: Option<usize>,
 }
 
 /// A piece in the document's list, with its prefix sums.
@@ -154,7 +277,8 @@ struct Entry {
     piece: Piece,
     /// Where the piece starts in the document.
     at: usize,
-    /// How many `\n` come before it in the document.
+    /// How many `\n` come before it in the document, taking unknown counts
+    /// as 0: exact up to and including the first unknown piece.
     lines: usize,
 }
 
@@ -185,13 +309,29 @@ fn piece_bytes<'a>(
     clippy::naive_bytecount,
     reason = "the compiler vectorises this loop; not worth a crate"
 )]
-fn count_newlines(bytes: &[u8]) -> usize {
+fn count_nl(bytes: &[u8]) -> usize {
+    meter::add(bytes.len());
     bytes.iter().filter(|&&b| b == b'\n').count()
 }
 
 /// Whether `b` continues a multi-byte UTF-8 character (`10xxxxxx`).
 fn is_continuation(b: u8) -> bool {
     b & 0xC0 == 0x80
+}
+
+/// Length of the valid UTF-8 character at the start of `bytes`, if one is
+/// there whole: 1 to 4. `None` for a byte that cannot start one, or a start
+/// whose following bytes are missing or wrong: truncated, overlong, a
+/// surrogate, or past U+10FFFF.
+fn scalar_len(bytes: &[u8]) -> Option<usize> {
+    let n = match *bytes.first()? {
+        0x00..=0x7F => 1,
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => return None,
+    };
+    std::str::from_utf8(bytes.get(..n)?).ok().map(|_| n)
 }
 
 /// `bytes` as text: lent as is when valid UTF-8, otherwise copied with each
@@ -215,68 +355,48 @@ fn push_substituted(out: &mut String, bytes: &[u8]) {
     }
 }
 
-/// Where the line breaks of the original file are: the offset of every
-/// `\n`, sorted, built once when the buffer is made.
-///
-/// This full index costs 8 bytes per line, fine for tests and modest files
-/// but 320 MB for a 4 GB log. M7 task 8 replaces it with the sparse,
-/// background-built index of `line_index.rs`; the four questions below are
-/// all the piece table asks of it.
-#[derive(Clone)]
-struct OriginalLines {
-    at: Arc<[usize]>,
+/// `n` as a `usize`, saturating. Lossless on 64-bit targets, and a file
+/// over 4 GB cannot be mapped on a 32-bit one anyway.
+fn to_usize(n: u64) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
 }
 
-impl OriginalLines {
-    fn build(bytes: &[u8]) -> Self {
-        Self {
-            at: memchr_iter(b'\n', bytes).collect(),
-        }
-    }
-
-    fn total(&self) -> usize {
-        self.at.len()
-    }
-
-    /// How many line breaks come before `offset`.
-    fn below(&self, offset: usize) -> usize {
-        self.at.partition_point(|&p| p < offset)
-    }
-
-    /// How many line breaks are in `range`.
-    fn count(&self, range: Range<usize>) -> usize {
-        self.below(range.end)
-            .saturating_sub(self.below(range.start))
-    }
-
-    /// The first line break in `range`.
-    fn first(&self, range: Range<usize>) -> Option<usize> {
-        self.nth(range, 0)
-    }
-
-    /// The last line break in `range`.
-    fn last(&self, range: Range<usize>) -> Option<usize> {
-        let i = self.below(range.end).checked_sub(1)?;
-        self.at.get(i).copied().filter(|&p| p >= range.start)
-    }
-
-    /// Line break number `k` (from 0) in `range`.
-    fn nth(&self, range: Range<usize>, k: usize) -> Option<usize> {
-        let i = self.below(range.start).checked_add(k)?;
-        self.at.get(i).copied().filter(|&p| p < range.end)
-    }
+/// `n` as a `u64`. Lossless on every platform Rust supports.
+fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
 }
 
-/// A mapped document as it is at one moment: the piece list and the stores
-/// it points into. A [`MappedBuffer`] edits one of these in place, and
-/// [`Buffer::snapshot`] hands out a copy of it that later edits do not
-/// affect. It is `Send + Sync`, so a worker thread can read it.
+/// Where line numbers stop being known (see "Line numbers while the file is
+/// still being indexed" above). Cached, because nearly every line query
+/// needs it.
+#[derive(Debug, Clone, Copy, Default)]
+struct Frontier {
+    /// Index of the first entry whose line-break count is unknown, or the
+    /// number of entries when every count is known.
+    entry: usize,
+    /// `K`: line numbers are exact up to this document offset.
+    offset: usize,
+    /// How many `\n` come before `K`.
+    lines: usize,
+    /// `base` is the number of `\n` in the original file before offset
+    /// `base_at`, kept for the first unknown piece's start so that line
+    /// lookups in that piece need not ask the index for it again.
+    base_at: usize,
+    base: usize,
+}
+
+/// A mapped document as it is at one moment: the piece list, the stores it
+/// points into and the original file's line index. A [`MappedBuffer`] edits
+/// one of these in place, and [`Buffer::snapshot`] hands out a copy of it
+/// that later edits do not affect. It is `Send + Sync`, so a worker thread
+/// can read it.
 #[derive(Clone)]
 pub struct MappedSnapshot {
     /// The original file.
     source: Arc<dyn Source>,
-    /// Line breaks of the original file.
-    lines: OriginalLines,
+    /// Line breaks of the original file, perhaps only of a prefix of it.
+    /// Shared with snapshots, and copied on write like the piece list.
+    index: Arc<LineIndex>,
     /// Full add-buffer segments, never written again.
     sealed: Segments,
     /// The add-buffer segment being appended to. Its number is
@@ -284,41 +404,48 @@ pub struct MappedSnapshot {
     open: Vec<u8>,
     /// The document: pieces in order, with prefix sums.
     table: Arc<Vec<Entry>>,
+    limits: Limits,
+    frontier: Frontier,
 }
 
 impl MappedSnapshot {
-    fn new(source: Arc<dyn Source>) -> Self {
-        let lines = OriginalLines::build(source.bytes());
+    /// The unedited document of `source`, whose line index is `index`. The
+    /// index must not cover more than the source.
+    fn new(source: Arc<dyn Source>, index: LineIndex, limits: Limits) -> Self {
         let len = source.len();
-        let mut table = Vec::new();
+        let mut snap = Self {
+            source,
+            index: Arc::new(index),
+            sealed: Arc::new(Vec::new()),
+            open: Vec::new(),
+            table: Arc::new(Vec::new()),
+            limits,
+            frontier: Frontier::default(),
+        };
         if len > 0 {
-            table.push(Entry {
+            let newlines = (snap.original_indexed() >= len).then(|| to_usize(snap.index.lines()));
+            snap.table = Arc::new(vec![Entry {
                 piece: Piece {
                     store: Store::Original,
                     start: 0,
                     len,
-                    newlines: lines.total(),
+                    newlines,
                 },
                 at: 0,
                 lines: 0,
-            });
+            }]);
         }
-        Self {
-            source,
-            lines,
-            sealed: Arc::new(Vec::new()),
-            open: Vec::new(),
-            table: Arc::new(table),
-        }
+        snap.refresh(0);
+        snap
     }
 
     fn len(&self) -> usize {
         self.table.last().map_or(0, |e| e.at + e.piece.len)
     }
 
-    /// Number of `\n` in the document.
-    fn newlines(&self) -> usize {
-        self.table.last().map_or(0, |e| e.lines + e.piece.newlines)
+    /// `F`: how many bytes of the original file the line index covers.
+    fn original_indexed(&self) -> usize {
+        to_usize(self.index.indexed()).min(self.source.len())
     }
 
     fn bytes(&self, piece: &Piece) -> &[u8] {
@@ -340,103 +467,372 @@ impl MappedSnapshot {
         self.table.get(self.find(byte))
     }
 
-    /// Line breaks in bytes `from..to` of `piece`.
-    fn count(&self, piece: &Piece, from: usize, to: usize) -> usize {
-        if from >= to {
-            return 0;
+    /// Copy the document's bytes from offset `from` into `buf`, as many as
+    /// fit and exist, and return how many were copied.
+    fn peek(&self, from: usize, buf: &mut [u8]) -> usize {
+        let end = from.saturating_add(buf.len()).min(self.len());
+        let mut n = 0;
+        let mut pos = from;
+        for e in self.table.iter().skip(self.find(from)) {
+            if pos >= end {
+                break;
+            }
+            let Some(off) = pos.checked_sub(e.at) else {
+                break;
+            };
+            let part = self.bytes(&e.piece).get(off..).unwrap_or_default();
+            let take = part.len().min(end - pos);
+            for (dst, &src) in buf.iter_mut().skip(n).zip(part.iter().take(take)) {
+                *dst = src;
+            }
+            n += take;
+            pos += take;
         }
-        if from == 0 && to >= piece.len {
+        n
+    }
+
+    /// The last unit boundary at or before `byte` (within the text): at
+    /// most 3 bytes back.
+    fn floor_boundary(&self, mut byte: usize) -> usize {
+        while byte > 0 && !self.is_char_boundary(byte) {
+            byte -= 1;
+        }
+        byte
+    }
+
+    /// Line breaks in the original file before offset `x`, which must be
+    /// indexed. Scans at most one checkpoint gap of the index.
+    fn rank(&self, x: usize) -> Option<usize> {
+        let r = self.index.rank(self.source.bytes(), to_u64(x))?;
+        Some(to_usize(r))
+    }
+
+    /// Offset in the original file of its line break number `n`, counting
+    /// from 1, which must be indexed.
+    fn select_nl(&self, n: usize) -> Option<usize> {
+        let start = self.index.select(self.source.bytes(), to_u64(n))?;
+        to_usize(start).checked_sub(1)
+    }
+
+    /// Line breaks in bytes `a..z` of the original file, which must be
+    /// indexed (`z <= F`): scanned if short, otherwise from the index.
+    fn count_original(&self, a: usize, z: usize) -> Option<usize> {
+        if z <= a {
+            return Some(0);
+        }
+        if z - a <= self.limits.scan {
+            return Some(count_nl(self.source.bytes().get(a..z)?));
+        }
+        Some(self.rank(z)?.saturating_sub(self.rank(a)?))
+    }
+
+    /// Line breaks in bytes `from..to` of `piece`; `None` if they reach past
+    /// the indexed part of the original file.
+    fn count(&self, piece: &Piece, from: usize, to: usize) -> Option<usize> {
+        let to = to.min(piece.len);
+        if from >= to {
+            return Some(0);
+        }
+        if from == 0 && to == piece.len {
             return piece.newlines;
         }
-        match piece.store {
-            Store::Original => self.lines.count(piece.start + from..piece.start + to),
-            Store::Add(_) => {
-                // Scan whichever is shorter: the range, or what is outside it.
-                let b = self.bytes(piece);
-                if 2 * (to - from) <= piece.len {
-                    count_newlines(b.get(from..to).unwrap_or_default())
-                } else {
-                    let outside = count_newlines(b.get(..from).unwrap_or_default())
-                        + count_newlines(b.get(to..).unwrap_or_default());
-                    piece.newlines.saturating_sub(outside)
-                }
-            }
-        }
-    }
-
-    /// Offset in `piece` of its first line break at or after `from`.
-    fn first_newline(&self, piece: &Piece, from: usize) -> Option<usize> {
-        if piece.newlines == 0 {
+        if piece.store == Store::Original && piece.start + to > self.original_indexed() {
             return None;
         }
+        let bytes = self.bytes(piece);
+        let part = |a: usize, z: usize| count_nl(bytes.get(a..z).unwrap_or_default());
+        // Scan whichever is short: the range, or what is outside it.
+        let short = match piece.store {
+            Store::Add(_) => piece.len / 2,
+            Store::Original => self.limits.scan,
+        };
+        let inside = to - from;
+        if inside <= short {
+            return Some(part(from, to));
+        }
+        if let Some(total) = piece.newlines
+            && piece.len - inside <= short
+        {
+            return Some(total.saturating_sub(part(0, from) + part(to, piece.len)));
+        }
         match piece.store {
-            Store::Original => self
-                .lines
-                .first(piece.start + from..piece.start + piece.len)
-                .map(|p| p - piece.start),
-            Store::Add(_) => memchr(b'\n', self.bytes(piece).get(from..)?).map(|i| i + from),
+            Store::Add(_) => Some(part(from, to)),
+            Store::Original => self.count_original(piece.start + from, piece.start + to),
         }
     }
 
-    /// Offset in `piece` of its last line break before `to`.
-    fn last_newline(&self, piece: &Piece, to: usize) -> Option<usize> {
-        if piece.newlines == 0 {
-            return None;
-        }
-        match piece.store {
-            Store::Original => self
-                .lines
-                .last(piece.start..piece.start + to)
-                .map(|p| p - piece.start),
-            Store::Add(_) => memrchr(b'\n', self.bytes(piece).get(..to)?),
-        }
-    }
-
-    /// Offset in `piece` of its line break number `k` (from 0).
+    /// Offset in `piece` of its line break number `k` (from 0). Only asked
+    /// about line breaks before `K`, which are all counted.
     fn nth_newline(&self, piece: &Piece, k: usize) -> Option<usize> {
-        if k >= piece.newlines {
-            return None;
-        }
+        let bytes = self.bytes(piece);
         match piece.store {
-            Store::Original => self
-                .lines
-                .nth(piece.start..piece.start + piece.len, k)
-                .map(|p| p - piece.start),
             Store::Add(_) => {
-                // Scan from whichever end is nearer.
-                let b = self.bytes(piece);
-                if k < piece.newlines / 2 {
-                    memchr_iter(b'\n', b).nth(k)
-                } else {
-                    memrchr_iter(b'\n', b).nth(piece.newlines - 1 - k)
+                let total = piece.newlines?;
+                if k >= total {
+                    return None;
                 }
+                meter::add(bytes.len());
+                // Scan from whichever end is nearer.
+                if k < total / 2 {
+                    memchr_iter(b'\n', bytes).nth(k)
+                } else {
+                    memrchr_iter(b'\n', bytes).nth(total - 1 - k)
+                }
+            }
+            Store::Original if piece.len <= self.limits.scan => {
+                meter::add(bytes.len());
+                memchr_iter(b'\n', bytes).nth(k)
+            }
+            Store::Original => {
+                let base = if piece.start == self.frontier.base_at {
+                    self.frontier.base
+                } else {
+                    self.rank(piece.start)?
+                };
+                let at = self.select_nl(base.checked_add(k)?.checked_add(1)?)?;
+                at.checked_sub(piece.start).filter(|&off| off < piece.len)
             }
         }
     }
 
-    /// Document offset of line break number `n` (from 0).
+    /// Document offset of line break number `n` (from 0), if it is before
+    /// `K`.
     fn newline_pos(&self, n: usize) -> Option<usize> {
-        let i = self
-            .table
-            .partition_point(|e| e.lines + e.piece.newlines <= n);
+        if n >= self.frontier.lines {
+            return None;
+        }
+        // The entries before the first unknown one have exact prefix sums;
+        // a line break past all of them is in that piece's counted part.
+        let known = self.table.get(..self.frontier.entry).unwrap_or(&self.table);
+        let i = known.partition_point(|e| e.lines + e.piece.newlines.unwrap_or(0) <= n);
         let e = self.table.get(i)?;
-        let k = n.checked_sub(e.lines)?;
-        Some(e.at + self.nth_newline(&e.piece, k)?)
+        Some(e.at + self.nth_newline(&e.piece, n.checked_sub(e.lines)?)?)
+    }
+
+    /// How many `\n` come before `byte`, for `byte` up to `K`; for any
+    /// later byte, how many come before `K`.
+    fn lines_before(&self, byte: usize) -> usize {
+        if byte >= self.frontier.offset {
+            return self.frontier.lines;
+        }
+        let Some(e) = self.entry(byte) else {
+            return self.frontier.lines;
+        };
+        // No need to count in a piece known to have no line break before
+        // K, which is every piece of a file without line breaks.
+        let after = match e.piece.newlines {
+            Some(n) => e.lines + n,
+            None => self.frontier.lines,
+        };
+        if after == e.lines {
+            return e.lines;
+        }
+        e.lines + self.count(&e.piece, 0, byte - e.at).unwrap_or(0)
     }
 
     /// Where the content of the line starting at `start` ends, given where
-    /// the next line starts: before the `\n`, and before a `\r` ahead of it.
+    /// the next line starts: before the `\n`, and before a `\r` ahead of
+    /// it. A pseudo-line has no line ending, so it ends where the next
+    /// starts.
     fn line_end(&self, start: usize, next: Option<usize>) -> usize {
-        match next {
-            Some(n) => {
-                let lf = n - 1;
+        let Some(next) = next else {
+            return self.len();
+        };
+        match next.checked_sub(1) {
+            Some(lf) if self.byte_at(lf) == Some(b'\n') => {
                 if lf > start && self.byte_at(lf - 1) == Some(b'\r') {
                     lf - 1
                 } else {
                     lf
                 }
             }
-            None => self.len(),
+            _ => next,
+        }
+    }
+
+    /// Offset of the last `\n` in document bytes `lo..end`. Pieces known to
+    /// hold no line break are skipped without reading them.
+    fn prev_nl(&self, end: usize, lo: usize) -> Option<usize> {
+        let end = end.min(self.len());
+        if lo >= end {
+            return None;
+        }
+        let mut i = self.find(end - 1);
+        loop {
+            let e = self.table.get(i)?;
+            let from = lo.max(e.at) - e.at;
+            let to = end.min(e.at + e.piece.len).saturating_sub(e.at);
+            if from < to && e.piece.newlines != Some(0) {
+                let bytes = self.bytes(&e.piece).get(from..to).unwrap_or_default();
+                meter::add(bytes.len());
+                if let Some(p) = memrchr(b'\n', bytes) {
+                    return Some(e.at + from + p);
+                }
+            }
+            if e.at <= lo {
+                return None;
+            }
+            i = i.checked_sub(1)?;
+        }
+    }
+
+    /// Offset of the first `\n` in document bytes `start..hi`. Pieces known
+    /// to hold no line break are skipped without reading them.
+    fn next_nl(&self, start: usize, hi: usize) -> Option<usize> {
+        let hi = hi.min(self.len());
+        if start >= hi {
+            return None;
+        }
+        for e in self.table.iter().skip(self.find(start)) {
+            if e.at >= hi {
+                break;
+            }
+            let from = start.max(e.at) - e.at;
+            let to = hi.min(e.at + e.piece.len) - e.at;
+            if from < to && e.piece.newlines != Some(0) {
+                let bytes = self.bytes(&e.piece).get(from..to).unwrap_or_default();
+                meter::add(bytes.len());
+                if let Some(p) = memchr(b'\n', bytes) {
+                    return Some(e.at + from + p);
+                }
+            }
+        }
+        None
+    }
+
+    /// Pseudo-line point number `m` (from 1): `m * pseudo_line` moved back
+    /// to a unit boundary, if that multiple is inside the text.
+    fn pseudo(&self, m: usize) -> Option<usize> {
+        let x = m
+            .checked_mul(self.limits.pseudo_line)
+            .filter(|&x| x > 0 && x < self.len())?;
+        Some(self.floor_boundary(x))
+    }
+
+    /// The last pseudo-line point at or before `byte`.
+    fn pseudo_at_or_before(&self, byte: usize) -> Option<usize> {
+        let m = byte / self.limits.pseudo_line;
+        // Point m + 1 is moved back by up to 3 bytes, so it may land at or
+        // before `byte`.
+        if let Some(q) = self.pseudo(m + 1).filter(|&q| q <= byte) {
+            return Some(q);
+        }
+        // Point m is at or before `byte`. It is missing only when its
+        // multiple is the end of the text; then point m - 1 is the one.
+        self.pseudo(m).or_else(|| self.pseudo(m.checked_sub(1)?))
+    }
+
+    /// The first pseudo-line point after `byte`.
+    fn pseudo_after(&self, byte: usize) -> Option<usize> {
+        let m = byte / self.limits.pseudo_line;
+        let q = self.pseudo(m + 1)?;
+        if q > byte {
+            Some(q)
+        } else {
+            self.pseudo(m + 2)
+        }
+    }
+
+    /// Where the line holding `byte` (at most the length) starts: the last
+    /// line start at or before it, by the rules in the module docs.
+    fn line_start_at(&self, byte: usize) -> usize {
+        let scan = self.limits.scan;
+        let k = self.frontier.offset;
+        // `[free, byte)` is known to hold no line break.
+        let mut free = byte.saturating_sub(scan);
+        if let Some(p) = self.prev_nl(byte, free) {
+            return p + 1;
+        }
+        if free == 0 {
+            return 0;
+        }
+        if byte <= k {
+            // A long line in the indexed part: the index knows its start.
+            return self.line_to_byte(self.lines_before(byte));
+        }
+        // Past K the line starts after a `\n`, at a pseudo-line break, or
+        // where the line holding K starts. Pseudo-line points are more than
+        // `scan` apart, so only the nearest one at or before `byte` can be
+        // the start, unless it is `byte` itself and a `\n` there stops it
+        // being a break; then it is the one before.
+        let mut cand = self.pseudo_at_or_before(byte);
+        loop {
+            match cand {
+                Some(q) if q > k => {
+                    let lo = q.saturating_sub(scan);
+                    if lo < free {
+                        // A `\n` here starts the line, after q or (being in
+                        // q's window) instead of it.
+                        if let Some(p) = self.prev_nl(free, lo) {
+                            return p + 1;
+                        }
+                        free = lo;
+                    }
+                    // No `\n` in `[q - scan, byte)`: q is a break unless a
+                    // `\n` sits at q, which can only be when q is `byte`.
+                    if q < byte || self.byte_at(q) != Some(b'\n') {
+                        return q;
+                    }
+                    cand = q.checked_sub(1).and_then(|x| self.pseudo_at_or_before(x));
+                }
+                _ => {
+                    // No pseudo-line break in `(K, byte]`: the line starts
+                    // after the last `\n` from K on, or is the one holding K.
+                    if k < free
+                        && let Some(p) = self.prev_nl(free, k)
+                    {
+                        return p + 1;
+                    }
+                    return self.line_to_byte(self.frontier.lines);
+                }
+            }
+        }
+    }
+
+    /// Where the line after the one holding `byte` (before the end) starts,
+    /// by the rules in the module docs; `None` if that is the last line.
+    fn next_line_start(&self, byte: usize) -> Option<usize> {
+        let scan = self.limits.scan;
+        let k = self.frontier.offset;
+        let len = self.len();
+        // `[byte, from)` is known to hold no line break.
+        let mut from = byte;
+        if byte < k {
+            let near = byte.saturating_add(scan).min(k);
+            if let Some(p) = self.next_nl(byte, near) {
+                return Some(p + 1);
+            }
+            if near < k {
+                let line = self.lines_before(byte);
+                if line < self.frontier.lines {
+                    // The next line starts by K: the index knows where.
+                    return Some(self.line_to_byte(line + 1));
+                }
+            }
+            // No `\n` in `[byte, K)`, so K is not a line start either (the
+            // byte before it would be a `\n`): carry on from K.
+            from = k;
+        }
+        let mut cand = self.pseudo_after(from);
+        loop {
+            // Scan up to and including the candidate point, because a
+            // `\n` at it means it is not a break.
+            let limit = cand.map_or(len, |q| (q + 1).min(len));
+            if let Some(p) = self.next_nl(from, limit) {
+                return Some(p + 1);
+            }
+            let q = cand?;
+            // `[byte, q]` holds no `\n`. q is a break unless one is in the
+            // rest of its window, before `byte`.
+            let lo = q.saturating_sub(scan);
+            if lo < byte && self.prev_nl(byte, lo).is_some() {
+                // The next point is more than `scan` past q, so its window
+                // is all in `[byte, ...)`: it will be decided by the scan.
+                from = q + 1;
+                cand = self.pseudo_after(q);
+                continue;
+            }
+            return Some(q);
         }
     }
 
@@ -497,8 +893,8 @@ impl MappedSnapshot {
         }
     }
 
-    /// `range` clamped to the text and widened outward to character
-    /// boundaries, as [`Text::slice`] promises.
+    /// `range` clamped to the text and widened outward to unit boundaries,
+    /// as [`Text::slice`] promises.
     fn widen(&self, range: Range<usize>) -> Range<usize> {
         let len = self.len();
         let mut start = range.start.min(len);
@@ -512,8 +908,8 @@ impl MappedSnapshot {
         start..end
     }
 
-    /// The text in `range` (within the text, on boundaries). Lent without
-    /// copying when it lies in one piece.
+    /// The text in `range` (within the text, on unit boundaries). Lent
+    /// without copying when it lies in one piece and is valid UTF-8.
     fn get(&self, range: Range<usize>) -> Cow<'_, str> {
         if range.is_empty() {
             return Cow::Borrowed("");
@@ -559,6 +955,92 @@ impl MappedSnapshot {
                 },
             })
     }
+
+    /// Bring the cached frontier up to date (invariant 8) after the entries
+    /// from `from` on changed or the index grew. Entries before `from` must
+    /// be as they were when the frontier was last computed.
+    fn refresh(&mut self, from: usize) {
+        let old = self.frontier;
+        let count = self.table.len();
+        let entry = if old.entry < from {
+            old.entry
+        } else {
+            let rest = self.table.get(from..).unwrap_or_default();
+            rest.iter()
+                .position(|e| e.piece.newlines.is_none())
+                .map_or(count, |i| from + i)
+        };
+        let f = self.original_indexed();
+        self.frontier = match self.table.get(entry) {
+            None => Frontier {
+                entry: count,
+                offset: self.len(),
+                lines: self
+                    .table
+                    .last()
+                    .map_or(0, |e| e.lines + e.piece.newlines.unwrap_or(0)),
+                ..old
+            },
+            Some(e) => {
+                let p = e.piece;
+                let base = if p.start >= f {
+                    None
+                } else if p.start == old.base_at {
+                    Some(old.base)
+                } else {
+                    self.rank(p.start)
+                };
+                match base {
+                    // The piece's part below F is counted by the index.
+                    Some(base) => Frontier {
+                        entry,
+                        offset: e.at + (f - p.start),
+                        lines: e.lines + to_usize(self.index.lines()).saturating_sub(base),
+                        base_at: p.start,
+                        base,
+                    },
+                    None => Frontier {
+                        entry,
+                        offset: e.at,
+                        lines: e.lines,
+                        ..old
+                    },
+                }
+            }
+        };
+    }
+
+    /// After the index grew: count the pieces of the original it now covers
+    /// whole (invariant 2), then move the frontier.
+    fn fill_counts(&mut self) {
+        let from = self.frontier.entry;
+        let f = self.original_indexed();
+        let mut counted = Vec::new();
+        for (i, e) in self.table.iter().enumerate().skip(from) {
+            let p = &e.piece;
+            if p.store != Store::Original || p.newlines.is_some() {
+                continue;
+            }
+            // Pieces of the original are in file order, so once one
+            // reaches past F, so do all after it.
+            if p.start + p.len > f {
+                break;
+            }
+            if let Some(n) = self.count_original(p.start, p.start + p.len) {
+                counted.push((i, n));
+            }
+        }
+        if !counted.is_empty() {
+            let entries = Arc::make_mut(&mut self.table);
+            for (i, n) in counted {
+                if let Some(e) = entries.get_mut(i) {
+                    e.piece.newlines = Some(n);
+                }
+            }
+            fix_prefix(entries, from);
+        }
+        self.refresh(from);
+    }
 }
 
 impl Text for MappedSnapshot {
@@ -566,27 +1048,30 @@ impl Text for MappedSnapshot {
         self.len()
     }
 
+    /// The lines starting at or before `K`: all of them once fully indexed,
+    /// a lower bound before.
     fn len_lines(&self) -> usize {
-        self.newlines() + 1
+        self.frontier.lines + 1
     }
 
+    /// Lines past [`Text::len_lines`] are empty. While indexing, the last
+    /// counted line may continue past `K`; it is then cut where its
+    /// [`Text::line_span`] ends, which may be a pseudo-line break.
     fn line(&self, idx: usize) -> Cow<'_, str> {
-        let total = self.newlines();
-        if idx > total {
+        if idx > self.frontier.lines {
             return Cow::Borrowed("");
         }
-        let start = self.line_to_byte(idx);
-        let next = (idx < total).then(|| self.line_to_byte(idx + 1));
-        self.get(start..self.line_end(start, next))
+        let span = self.line_span(self.line_to_byte(idx));
+        self.get(span.start..span.end)
     }
 
+    /// Exact up to `K`; any later byte gives the last line counted so far.
     fn byte_to_line(&self, byte: usize) -> usize {
-        match self.entry(byte) {
-            Some(e) => e.lines + self.count(&e.piece, 0, byte - e.at),
-            None => self.newlines(),
-        }
+        self.lines_before(byte)
     }
 
+    /// Lines past [`Text::len_lines`], which may not be counted yet, give
+    /// the length.
     fn line_to_byte(&self, line: usize) -> usize {
         match line.checked_sub(1) {
             None => 0,
@@ -598,12 +1083,31 @@ impl Text for MappedSnapshot {
         self.get(self.widen(range))
     }
 
+    /// True at unit boundaries: between two valid characters, either side
+    /// of an invalid byte, and at both ends. Looks at no more than 3 bytes
+    /// back and 2 ahead.
     fn is_char_boundary(&self, byte: usize) -> bool {
-        match byte.cmp(&self.len()) {
-            std::cmp::Ordering::Less => self.byte_at(byte).is_some_and(|b| !is_continuation(b)),
-            std::cmp::Ordering::Equal => true,
-            std::cmp::Ordering::Greater => false,
+        let len = self.len();
+        if byte >= len {
+            return byte == len;
         }
+        // Only a continuation byte (10xxxxxx) can be inside a character.
+        if !self.byte_at(byte).is_some_and(is_continuation) {
+            return true;
+        }
+        // It is inside one when a lead byte k = 1 to 3 bytes back starts a
+        // valid character more than k bytes long. Read those bytes: from 3
+        // back to 2 ahead.
+        let from = byte.saturating_sub(3);
+        let mut buf = [0u8; 6];
+        let n = self.peek(from, &mut buf);
+        let window = buf.get(..n).unwrap_or_default();
+        !(1..=byte - from).any(|k| {
+            window
+                .get(byte - k - from..)
+                .and_then(scalar_len)
+                .is_some_and(|len| len > k)
+        })
     }
 
     fn chunk_at(&self, byte: usize) -> (&[u8], usize) {
@@ -619,44 +1123,34 @@ impl Text for MappedSnapshot {
     }
 
     /// Finds the line around `byte` by looking for the nearest line breaks
-    /// either side of it, in its own piece first. Pieces without line
-    /// breaks are skipped using the prefix sums, so this costs the length
-    /// of the line within add-buffer pieces and a few binary searches
-    /// otherwise, however long the document.
+    /// either side of it, then turning to the index or to pseudo-lines for
+    /// long lines (see the module documentation). Each lookup scans at most
+    /// about two pseudo-lines plus two index checkpoint gaps, however long
+    /// the line or the document.
     fn line_span(&self, byte: usize) -> LineSpan {
-        let Some(e) = self.entry(byte) else {
-            // At or past the end: the last line.
-            let start = self.line_to_byte(self.newlines());
-            return LineSpan {
-                start,
-                end: self.len(),
-                next: None,
-            };
-        };
-        let off = byte - e.at;
-        let start = match self.last_newline(&e.piece, off) {
-            Some(p) => e.at + p + 1,
-            // The last line break before this piece, if any.
-            None => match e.lines.checked_sub(1) {
-                Some(n) => self.newline_pos(n).map_or(0, |p| p + 1),
-                None => 0,
-            },
-        };
-        let next = if let Some(p) = self.first_newline(&e.piece, off) {
-            Some(e.at + p + 1)
+        let len = self.len();
+        let byte = byte.min(len);
+        let start = self.line_start_at(byte);
+        let next = if byte < len {
+            self.next_line_start(byte)
         } else {
-            // The first line break after this piece, if any.
-            let n = e.lines + e.piece.newlines;
-            (n < self.newlines())
-                .then(|| self.newline_pos(n))
-                .flatten()
-                .map(|p| p + 1)
+            None
         };
         LineSpan {
             start,
             end: self.line_end(start, next),
             next,
         }
+    }
+
+    /// `None` past `K` while the document is not fully indexed.
+    fn line_number(&self, byte: usize) -> Option<usize> {
+        let k = self.frontier.offset;
+        (byte <= k || k == self.len()).then(|| self.lines_before(byte))
+    }
+
+    fn indexed_bytes(&self) -> usize {
+        self.frontier.offset
     }
 
     fn read_into(&self, range: Range<usize>, out: &mut Vec<u8>) -> std::io::Result<()> {
@@ -709,6 +1203,7 @@ impl fmt::Debug for MappedSnapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MappedSnapshot")
             .field("len", &self.len())
+            .field("indexed", &self.frontier.offset)
             .field("pieces", &self.table.len())
             .field("sealed_segments", &self.sealed.len())
             .field("open_segment", &self.open.len())
@@ -732,7 +1227,8 @@ pub struct PieceRun(Arc<Run>);
 struct Run {
     pieces: Vec<Piece>,
     len: usize,
-    newlines: usize,
+    /// `None` if a piece's count was unknown when the run was made.
+    newlines: Option<usize>,
     source: Arc<dyn Source>,
     /// The document's sealed segments when the run was made. Segments are
     /// only ever added, so the numbers in `pieces` mean the same in the
@@ -753,10 +1249,27 @@ impl PieceRun {
         self.0.len == 0
     }
 
-    /// How many line breaks it holds.
+    /// How many line breaks it holds, if known: `None` when it took text
+    /// from a part of the original file that was not indexed yet.
     #[must_use]
-    pub fn newlines(&self) -> usize {
+    pub fn newlines(&self) -> Option<usize> {
         self.0.newlines
+    }
+
+    /// Whether it holds a line break. When the count is unknown this scans
+    /// the uncounted pieces until it finds one, which for a long run with
+    /// no line breaks reads all of it.
+    #[must_use]
+    pub fn has_newline(&self) -> bool {
+        let run = &*self.0;
+        if let Some(n) = run.newlines {
+            return n > 0;
+        }
+        run.pieces.iter().any(|p| match p.newlines {
+            Some(n) => n > 0,
+            // Invariant 7: no piece names the open segment.
+            None => memchr(b'\n', piece_bytes(&*run.source, &run.sealed, &[], p)).is_some(),
+        })
     }
 
     /// How many pieces it is made of.
@@ -794,10 +1307,19 @@ impl PartialEq for PieceRun {
                 _ => false,
             },
         };
+        let same_place = |a: &Piece, b: &Piece| {
+            // Counts may differ only by one having been unknown.
+            (a.store, a.start, a.len) == (b.store, b.start, b.len)
+        };
         Arc::ptr_eq(&self.0, &other.0)
             || (mine.len == theirs.len
                 && std::ptr::addr_eq(Arc::as_ptr(&mine.source), Arc::as_ptr(&theirs.source))
-                && mine.pieces == theirs.pieces
+                && mine.pieces.len() == theirs.pieces.len()
+                && mine
+                    .pieces
+                    .iter()
+                    .zip(&theirs.pieces)
+                    .all(|(a, b)| same_place(a, b))
                 && mine.pieces.iter().all(same_segment))
     }
 }
@@ -842,13 +1364,14 @@ fn split_point(bytes: &[u8], from: usize, max: usize) -> usize {
 }
 
 /// `a` followed by `b` as one piece, if they are adjacent in the same store
-/// and the result is not too long for an add piece.
+/// and the result is not too long for an add piece. The count is unknown
+/// if either part's is.
 fn merged(a: &Piece, b: &Piece, max_piece: usize) -> Option<Piece> {
     let adjacent = a.store == b.store && a.start + a.len == b.start;
     let fits = a.store == Store::Original || a.len + b.len <= max_piece;
     (adjacent && fits).then_some(Piece {
         len: a.len + b.len,
-        newlines: a.newlines + b.newlines,
+        newlines: a.newlines.zip(b.newlines).map(|(x, y)| x + y),
         ..*a
     })
 }
@@ -872,17 +1395,20 @@ fn merge_adjacent(pieces: &mut Vec<Piece>, max_piece: usize) {
     pieces.truncate(kept);
 }
 
-/// Recompute the prefix sums of `entries` from index `from` on.
+/// Recompute the prefix sums of `entries` from index `from` on, taking
+/// unknown counts as 0 (invariant 1).
 fn fix_prefix(entries: &mut [Entry], from: usize) {
     let (mut at, mut lines) = from
         .checked_sub(1)
         .and_then(|i| entries.get(i))
-        .map_or((0, 0), |e| (e.at + e.piece.len, e.lines + e.piece.newlines));
+        .map_or((0, 0), |e| {
+            (e.at + e.piece.len, e.lines + e.piece.newlines.unwrap_or(0))
+        });
     for e in entries.iter_mut().skip(from) {
         e.at = at;
         e.lines = lines;
         at += e.piece.len;
-        lines += e.piece.newlines;
+        lines += e.piece.newlines.unwrap_or(0);
     }
 }
 
@@ -893,7 +1419,6 @@ fn fix_prefix(entries: &mut [Entry], from: usize) {
 pub struct MappedBuffer {
     /// The document now; snapshots are copies of it.
     state: MappedSnapshot,
-    limits: Limits,
     /// Reused between edits so that typing does not allocate: the pieces
     /// of the text being inserted, and the stretch of the piece list being
     /// rebuilt around an edit.
@@ -903,31 +1428,60 @@ pub struct MappedBuffer {
 
 impl MappedBuffer {
     /// A buffer showing `source` unchanged, with the default [`Limits`].
+    /// The bytes may be anything, UTF-8 or not.
     ///
-    /// Indexes every line break of the source first (until M7 task 8 moves
-    /// that to the background), so this reads the whole source once.
+    /// Indexes every line break of the source first, so this reads the
+    /// whole source once; a huge file should use
+    /// [`MappedBuffer::with_index`] with a partial index instead.
     #[must_use]
     pub fn new(source: Arc<dyn Source>) -> Self {
-        Self::with_limits(source, Limits::default())
+        Self::with_limits(source, Limits::DEFAULT)
     }
 
     /// A buffer showing `source` unchanged, with the given limits (raised
-    /// to their minimums if below them).
+    /// to their minimums if below them). Indexes the whole source first,
+    /// like [`MappedBuffer::new`].
     #[must_use]
     pub fn with_limits(source: Arc<dyn Source>, limits: Limits) -> Self {
+        let index = LineIndex::build(source.bytes(), Spacing::DEFAULT);
+        Self::build(source, index, limits)
+    }
+
+    /// A buffer showing `source` unchanged, whose line index is `index`,
+    /// which may cover only a prefix of the source (or nothing): line
+    /// numbers are known that far, and [`MappedBuffer::merge_index`] adds
+    /// the rest as a background scan finds it. This is how a huge file
+    /// opens without reading it all first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MergeError::PastEnd`] if the index covers more bytes than
+    /// the source has, which means it was made from another file.
+    pub fn with_index(
+        source: Arc<dyn Source>,
+        index: LineIndex,
+        limits: Limits,
+    ) -> Result<Self, MergeError> {
+        let len = to_u64(source.len());
+        if index.indexed() > len {
+            return Err(MergeError::PastEnd {
+                upto: index.indexed(),
+                len,
+            });
+        }
+        Ok(Self::build(source, index, limits))
+    }
+
+    fn build(source: Arc<dyn Source>, index: LineIndex, limits: Limits) -> Self {
         Self {
-            state: MappedSnapshot::new(source),
-            limits: Limits {
-                copy_limit: limits.copy_limit,
-                segment: limits.segment.max(1),
-                max_piece: limits.max_piece.max(4),
-            },
+            state: MappedSnapshot::new(source, index, limits.normalized()),
             inserted: Vec::new(),
             window: Vec::new(),
         }
     }
 
-    /// A buffer whose original content is `bytes`, held in memory.
+    /// A buffer whose original content is `bytes`, held in memory. The
+    /// bytes may be anything, UTF-8 or not.
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         Self::new(Arc::new(VecSource::new(bytes)))
@@ -936,13 +1490,45 @@ impl MappedBuffer {
     /// The limits in use.
     #[must_use]
     pub fn limits(&self) -> Limits {
-        self.limits
+        self.state.limits
     }
 
     /// The original content the document was opened from.
     #[must_use]
     pub fn source(&self) -> &Arc<dyn Source> {
         &self.state.source
+    }
+
+    /// The original file's line index as merged so far.
+    #[must_use]
+    pub fn line_index(&self) -> &LineIndex {
+        &self.state.index
+    }
+
+    /// Extend the original file's line index with the next chunk from the
+    /// [`crate::line_index::Scanner`] reading it. Pieces of the original
+    /// that the index now covers get their line counts, and line numbers
+    /// become known further into the document ([`Text::indexed_bytes`]).
+    /// Snapshots taken earlier keep the index they had.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`LineIndex::merge`] errors for a chunk that does not
+    /// continue where the index ends, and [`MergeError::PastEnd`] for one
+    /// reaching past the end of the source. Nothing changes on error.
+    pub fn merge_index(&mut self, chunk: IndexChunk) -> Result<(), MergeError> {
+        let len = to_u64(self.state.source.len());
+        if chunk.upto() > len {
+            return Err(MergeError::PastEnd {
+                upto: chunk.upto(),
+                len,
+            });
+        }
+        // Copies the index's list of chunk pointers first if a snapshot
+        // shares it. A refused chunk leaves the index unchanged.
+        Arc::make_mut(&mut self.state.index).merge(chunk)?;
+        self.state.fill_counts();
+        Ok(())
     }
 
     /// How many pieces the document is made of: 1 for an unedited file,
@@ -979,7 +1565,8 @@ impl MappedBuffer {
         if bytes.is_empty() {
             return;
         }
-        let (segment, base) = if bytes.len() > self.limits.segment {
+        let limits = self.state.limits;
+        let (segment, base) = if bytes.len() > limits.segment {
             // Too big for the open segment: a sealed segment of its own.
             // The open one is sealed first, so the new segment does not
             // take its number.
@@ -988,7 +1575,7 @@ impl MappedBuffer {
             sealed.push(Arc::new(bytes.to_vec()));
             (sealed.len() - 1, 0)
         } else {
-            if self.state.open.len() + bytes.len() > self.limits.segment {
+            if self.state.open.len() + bytes.len() > limits.segment {
                 self.seal();
             }
             let base = self.state.open.len();
@@ -997,12 +1584,12 @@ impl MappedBuffer {
         };
         let mut from = 0;
         while from < bytes.len() {
-            let to = split_point(bytes, from, self.limits.max_piece);
+            let to = split_point(bytes, from, limits.max_piece);
             self.inserted.push(Piece {
                 store: Store::Add(segment),
                 start: base + from,
                 len: to - from,
-                newlines: count_newlines(bytes.get(from..to).unwrap_or_default()),
+                newlines: Some(count_nl(bytes.get(from..to).unwrap_or_default())),
             });
             from = to;
         }
@@ -1011,7 +1598,7 @@ impl MappedBuffer {
     /// Record what `range` holds before it is replaced: a copy, or the
     /// pieces themselves when longer than the copy limit.
     fn removed(&mut self, range: Range<usize>) -> Content {
-        if range.len() <= self.limits.copy_limit {
+        if range.len() <= self.state.limits.copy_limit {
             let mut bytes = Vec::with_capacity(range.len());
             self.state.read_raw(range, &mut bytes);
             return Content::Bytes(bytes);
@@ -1046,6 +1633,15 @@ impl MappedBuffer {
             }
             Insert::Run(run) => {
                 self.inserted.extend_from_slice(&run.0.pieces);
+                // Pieces that reached past the frontier when the run was
+                // made may be indexed by now; count them (invariant 2).
+                let state = &self.state;
+                let f = state.original_indexed();
+                for p in &mut self.inserted {
+                    if p.store == Store::Original && p.newlines.is_none() && p.start + p.len <= f {
+                        p.newlines = state.count_original(p.start, p.start + p.len);
+                    }
+                }
                 Content::Pieces(run.clone())
             }
         };
@@ -1065,7 +1661,7 @@ impl MappedBuffer {
     /// touches plus one untouched neighbour each side, so a typed character
     /// can merge into the piece before it and pieces put back by undo can
     /// merge with what they were cut from. Then the prefix sums after it
-    /// are brought up to date.
+    /// and the frontier are brought up to date.
     fn splice(&mut self, range: Range<usize>) {
         let table = &self.state.table;
         // Entries lo..hi overlap the range; for an insertion inside a
@@ -1095,7 +1691,7 @@ impl MappedBuffer {
             }
         }
         window.extend(table[hi..b].iter().map(|e| e.piece));
-        merge_adjacent(window, self.limits.max_piece);
+        merge_adjacent(window, self.state.limits.max_piece);
 
         // Copies the list first if a snapshot shares it.
         let entries = Arc::make_mut(&mut self.state.table);
@@ -1108,6 +1704,7 @@ impl MappedBuffer {
             }),
         );
         fix_prefix(entries, a);
+        self.state.refresh(a);
     }
 }
 
@@ -1195,6 +1792,12 @@ impl Buffer for MappedBuffer {
         Box::new(self.state.clone())
     }
 
+    /// True once every line break is counted: the original file is indexed
+    /// as far as the document still uses it.
+    fn is_fully_indexed(&self) -> bool {
+        self.state.frontier.entry >= self.state.table.len()
+    }
+
     /// Builds the new piece list in one pass over the old one, instead of
     /// one splice per item, so replacing 100,000 matches is linear in the
     /// number of pieces rather than quadratic.
@@ -1228,7 +1831,7 @@ impl Buffer for MappedBuffer {
             pos = range.end;
         }
         state.copy_range(i, pos..state.len(), &mut pieces);
-        merge_adjacent(&mut pieces, self.limits.max_piece);
+        merge_adjacent(&mut pieces, state.limits.max_piece);
         let mut entries: Vec<Entry> = pieces
             .into_iter()
             .map(|piece| Entry {
@@ -1239,6 +1842,7 @@ impl Buffer for MappedBuffer {
             .collect();
         fix_prefix(&mut entries, 0);
         self.state.table = Arc::new(entries);
+        self.state.refresh(0);
 
         // Applied from the last item to the first, so each edit's start is
         // its item's start.
@@ -1260,7 +1864,7 @@ impl fmt::Debug for MappedBuffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MappedBuffer")
             .field("state", &self.state)
-            .field("limits", &self.limits)
+            .field("limits", &self.state.limits)
             .finish_non_exhaustive()
     }
 }
@@ -1268,7 +1872,8 @@ impl fmt::Debug for MappedBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{History, RopeBuffer, Selections};
+    use crate::line_index::Scanner;
+    use crate::{History, RopeBuffer, Selections, movement};
 
     fn text(t: &dyn Text) -> String {
         t.slice(0..usize::MAX).into_owned()
@@ -1279,41 +1884,80 @@ mod tests {
         copy_limit: 3,
         segment: 8,
         max_piece: 5,
+        scan: 3,
+        pseudo_line: 8,
     };
 
     fn tiny(initial: &str) -> MappedBuffer {
         MappedBuffer::with_limits(Arc::new(VecSource::from(initial)), TINY)
     }
 
-    /// Invariants 1, 2, 4, 6 and that no two neighbours could be merged.
+    /// A buffer over `bytes` whose line index covers only the first
+    /// `indexed` bytes, with a checkpoint every 2 lines or 5 bytes, and the
+    /// scanner that made it, to feed the rest later.
+    fn partly_indexed(bytes: &[u8], indexed: usize, limits: Limits) -> (MappedBuffer, Scanner) {
+        let mut scanner = Scanner::new(Spacing::new(2, 5));
+        scanner.feed(&bytes[..indexed]);
+        let mut index = LineIndex::new();
+        index.merge(scanner.take_chunk()).unwrap();
+        let source = Arc::new(VecSource::new(bytes.to_vec()));
+        let b = MappedBuffer::with_index(source, index, limits).unwrap();
+        (b, scanner)
+    }
+
+    /// Invariants 1, 2, 4, 6 and 8, and that no two neighbours could be
+    /// merged.
     fn check_invariants(b: &MappedBuffer) {
         let s = &b.state;
+        let f = s.original_indexed();
         let (mut at, mut lines) = (0, 0);
+        let mut first_unknown = None;
         for (i, e) in s.table.iter().enumerate() {
             assert!(e.piece.len > 0, "piece {i} is empty");
             assert_eq!((e.at, e.lines), (at, lines), "prefix sums of piece {i}");
             let bytes = s.bytes(&e.piece);
             assert_eq!(bytes.len(), e.piece.len, "piece {i} fits its store");
-            assert_eq!(count_newlines(bytes), e.piece.newlines, "newlines of {i}");
-            if let Store::Add(_) = e.piece.store {
-                assert!(e.piece.len <= b.limits.max_piece, "add piece {i} too long");
+            let known = match e.piece.store {
+                Store::Add(_) => {
+                    assert!(
+                        e.piece.len <= b.limits().max_piece,
+                        "add piece {i} too long"
+                    );
+                    true
+                }
+                Store::Original => e.piece.start + e.piece.len <= f,
+            };
+            assert_eq!(
+                e.piece.newlines,
+                known.then(|| count_nl(bytes)),
+                "newlines of {i}"
+            );
+            if !known && first_unknown.is_none() {
+                first_unknown = Some(i);
             }
             if i > 0 {
                 let prev = &s.table[i - 1].piece;
                 assert!(
-                    merged(prev, &e.piece, b.limits.max_piece).is_none(),
+                    merged(prev, &e.piece, b.limits().max_piece).is_none(),
                     "pieces {} and {i} should have been merged",
                     i - 1
                 );
             }
             at += e.piece.len;
-            lines += e.piece.newlines;
+            lines += e.piece.newlines.unwrap_or(0);
         }
         let mut prev_end = 0;
         for r in b.original_ranges() {
             assert!(r.start >= prev_end, "original pieces out of order: {r:?}");
             prev_end = r.end;
         }
+        // The cached frontier is what computing it afresh gives.
+        let mut fresh = s.clone();
+        fresh.frontier = Frontier::default();
+        fresh.refresh(0);
+        let parts = |f: &Frontier| (f.entry, f.offset, f.lines);
+        assert_eq!(parts(&s.frontier), parts(&fresh.frontier), "frontier");
+        assert_eq!(s.frontier.entry, first_unknown.unwrap_or(s.table.len()));
     }
 
     #[test]
@@ -1333,6 +1977,7 @@ mod tests {
         assert_eq!((b.len_bytes(), b.len_lines(), b.piece_count()), (0, 1, 0));
         assert_eq!(b.line(0), "");
         assert_eq!(b.chunk_at(0), (&[][..], 0));
+        assert!(b.is_fully_indexed());
         b.replace(0..0, "hi").unwrap();
         assert_eq!(text(&b), "hi");
     }
@@ -1468,7 +2113,10 @@ mod tests {
         let Content::Pieces(run) = &e.removed else {
             panic!("expected pieces, got {:?}", e.removed);
         };
-        assert_eq!((run.len(), run.newlines(), run.piece_count()), (10, 3, 3));
+        assert_eq!(
+            (run.len(), run.newlines(), run.piece_count()),
+            (10, Some(3), 3)
+        );
         assert!(e.removed.has_newline());
         assert_eq!(e.removed.as_bytes(), None);
         let mut bytes = Vec::new();
@@ -1517,17 +2165,130 @@ mod tests {
 
     #[test]
     fn invalid_utf8_reads_back_raw_and_shows_as_substitutes() {
-        // Full support is task 8; this only checks nothing panics and
-        // lengths are kept.
         let b = MappedBuffer::from_bytes(b"ok\xff\xfe\n\x80end".to_vec());
         assert_eq!(b.line(0), "ok\u{1a}\u{1a}");
-        assert_eq!(b.line(1).len(), 4);
+        assert_eq!(b.line(1), "\u{1a}end");
         let mut raw = Vec::new();
         b.read_into(0..usize::MAX, &mut raw).unwrap();
         assert_eq!(raw, b"ok\xff\xfe\n\x80end");
         let mut s = String::from(">");
         b.slice_into(0..b.len_bytes(), &mut s);
-        assert_eq!(s.len(), 1 + b.len_bytes());
+        assert_eq!(s, ">ok\u{1a}\u{1a}\n\u{1a}end");
+    }
+
+    /// The unit boundaries of `bytes`, worked out from `utf8_chunks`: every
+    /// character boundary of each valid run, and both sides of every
+    /// invalid byte.
+    fn unit_boundaries(bytes: &[u8]) -> Vec<bool> {
+        let mut out = vec![false; bytes.len() + 1];
+        let mut at = 0;
+        for chunk in bytes.utf8_chunks() {
+            for (i, _) in chunk.valid().char_indices() {
+                out[at + i] = true;
+            }
+            at += chunk.valid().len();
+            for _ in chunk.invalid() {
+                out[at] = true;
+                at += 1;
+            }
+        }
+        out[bytes.len()] = true;
+        out
+    }
+
+    /// `bytes` as the buffer shows them, worked out byte by byte: each
+    /// invalid byte becomes SUB.
+    fn substituted(bytes: &[u8]) -> String {
+        let bounds = unit_boundaries(bytes);
+        let mut out = String::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            let mut end = at + 1;
+            while !bounds[end] {
+                end += 1;
+            }
+            match std::str::from_utf8(&bytes[at..end]) {
+                Ok(s) => out.push_str(s),
+                Err(_) => out.push('\u{1a}'),
+            }
+            at = end;
+        }
+        out
+    }
+
+    #[test]
+    fn boundaries_follow_utf8_chunks_within_and_across_pieces() {
+        const PARTS: &[&[u8]] = &[
+            b"a",
+            b"\n",
+            "é".as_bytes(),
+            "€".as_bytes(),
+            "😀".as_bytes(),
+            b"\xff",
+            b"\xe2\x82",
+            b"\xe2",
+            b"\x82\xac",
+            b"\xf0\x9f",
+            b"\x98\x80",
+            b"\xed\xa0\x80",
+            b"\xc0\xaf",
+            b"\xf4\x90\x80\x80",
+            b"\x80",
+        ];
+        for a in PARTS {
+            for b in PARTS {
+                for c in PARTS {
+                    let bytes = [*a, *b, *c].concat();
+                    let want = unit_boundaries(&bytes);
+                    let whole =
+                        MappedBuffer::with_limits(Arc::new(VecSource::new(bytes.clone())), TINY);
+                    // The same bytes as three add-buffer pieces that cannot
+                    // merge (put in reverse, so they are out of store order).
+                    let mut split = MappedBuffer::with_limits(Arc::new(VecSource::default()), TINY);
+                    for part in [c, b, a] {
+                        split.put(0..0, &Content::Bytes(part.to_vec())).unwrap();
+                    }
+                    for t in [&whole, &split] {
+                        for (i, &w) in want.iter().enumerate() {
+                            assert_eq!(t.is_char_boundary(i), w, "{bytes:x?} at {i}");
+                        }
+                        assert!(!t.is_char_boundary(bytes.len() + 1));
+                        assert_eq!(text(t), substituted(&bytes), "{bytes:x?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_can_join_invalid_bytes_and_undo_splits_them_again() {
+        let mut b = MappedBuffer::from_bytes(b"\xe2A\x82\xac\n".to_vec());
+        assert_eq!(b.line(0), "\u{1a}A\u{1a}\u{1a}");
+        assert!((0..=5).all(|i| b.is_char_boundary(i)));
+        let mut hist = History::new();
+        let sel = Selections::default();
+        let e = b.replace(1..2, "").unwrap();
+        hist.record_group(vec![e], &sel, &sel);
+        assert_eq!(b.line(0), "€", "three invalid bytes became a character");
+        let bounds: Vec<bool> = (0..=4).map(|i| b.is_char_boundary(i)).collect();
+        assert_eq!(bounds, [true, false, false, true, true]);
+        assert_eq!(
+            b.replace(1..1, "x"),
+            Err(EditError::NotCharBoundary { offset: 1 })
+        );
+        assert_eq!(movement::next_grapheme(&b, 0), 3);
+        assert_eq!(movement::prev_grapheme(&b, 3), 0);
+
+        // Undo puts the A back at offset 1, inside the character.
+        hist.undo(&mut b, &mut |_, _| {}).unwrap();
+        let mut raw = Vec::new();
+        b.read_into(0..usize::MAX, &mut raw).unwrap();
+        assert_eq!(raw, b"\xe2A\x82\xac\n");
+        assert_eq!(b.line(0), "\u{1a}A\u{1a}\u{1a}");
+        assert_eq!(movement::next_grapheme(&b, 0), 1);
+        hist.redo(&mut b, &mut |_, _| {}).unwrap();
+        assert_eq!(b.line(0), "€");
+        check_invariants(&b);
     }
 
     #[test]
@@ -1543,6 +2304,251 @@ mod tests {
                 assert_eq!(out, format!("~{}", b.slice(s..e)), "slice_into({s}..{e})");
             }
         }
+    }
+
+    #[test]
+    fn line_numbers_are_known_up_to_the_frontier() {
+        let src = b"ab\ncd\nef\ngh\n";
+        let (mut b, mut scanner) = partly_indexed(src, 4, TINY);
+        assert_eq!(b.indexed_bytes(), 4);
+        assert!(!b.is_fully_indexed());
+        assert_eq!(b.len_lines(), 2, "lines starting by byte 4");
+        assert_eq!(b.line_number(4), Some(1));
+        assert_eq!(b.line_number(5), None);
+        assert_eq!(b.byte_to_line(10), 1, "clamped to the last line counted");
+        assert_eq!(b.line_to_byte(1), 3);
+        assert_eq!(b.line_to_byte(2), src.len(), "not counted yet");
+        assert_eq!(b.line(1), "cd");
+        assert_eq!(b.line(2), "");
+        // Lines are found past the frontier all the same.
+        assert_eq!(
+            b.line_span(7),
+            LineSpan {
+                start: 6,
+                end: 8,
+                next: Some(9)
+            }
+        );
+        check_invariants(&b);
+
+        // An edit behind the frontier moves it; one ahead of it does not.
+        b.replace(0..0, "x\n").unwrap();
+        assert_eq!((b.indexed_bytes(), b.len_lines()), (6, 3));
+        check_invariants(&b);
+        b.replace(10..10, "\n\n").unwrap();
+        assert_eq!((b.indexed_bytes(), b.len_lines()), (6, 3));
+        assert_eq!(b.line_number(7), None);
+        check_invariants(&b);
+
+        // Indexing the rest makes everything exact.
+        scanner.feed(&src[4..]);
+        scanner.finish();
+        b.merge_index(scanner.take_chunk()).unwrap();
+        assert!(b.is_fully_indexed());
+        assert_eq!(text(&b), "x\nab\ncd\nef\n\n\ngh\n");
+        assert_eq!((b.indexed_bytes(), b.len_lines()), (b.len_bytes(), 8));
+        assert_eq!(b.line_number(7), Some(2));
+        assert_eq!(b.line_to_byte(6), 13);
+        check_invariants(&b);
+    }
+
+    #[test]
+    fn long_lines_past_the_frontier_are_cut_into_pseudo_lines() {
+        let limits = Limits {
+            scan: 4,
+            pseudo_line: 10,
+            ..TINY
+        };
+        let starts = |b: &MappedBuffer| {
+            let mut out = vec![0];
+            let mut at = 0;
+            while let Some(n) = b.line_span(at).next {
+                out.push(n);
+                at = n;
+            }
+            out
+        };
+        let (b, _) = partly_indexed(&[b'x'; 35], 0, limits);
+        assert_eq!(starts(&b), [0, 10, 20, 30]);
+        for i in 0..=36 {
+            let s = b.line_span(i);
+            let start = i.min(35) / 10 * 10;
+            assert_eq!(s.start, start, "start at {i}");
+            assert_eq!(s.end, s.next.unwrap_or(35), "no line ending at {i}");
+        }
+        assert_eq!(
+            b.line(0),
+            "x".repeat(10),
+            "the last line counted is cut too"
+        );
+
+        // A line break within `scan` bytes before a point, or at it,
+        // cancels that point; one further back does not.
+        let mut src = vec![b'x'; 35];
+        src[7] = b'\n';
+        src[20] = b'\n';
+        let (mut b, mut scanner) = partly_indexed(&src, 0, limits);
+        assert_eq!(starts(&b), [0, 8, 21, 30]);
+        assert_eq!(
+            b.line_span(20),
+            LineSpan {
+                start: 8,
+                end: 20,
+                next: Some(21)
+            }
+        );
+        // Once indexed, they join back into lines.
+        scanner.feed(&src);
+        b.merge_index(scanner.take_chunk()).unwrap();
+        assert_eq!(starts(&b), [0, 8, 21]);
+        check_invariants(&b);
+    }
+
+    #[test]
+    fn the_cursor_crosses_pseudo_line_breaks_one_character_at_a_time() {
+        let limits = Limits {
+            scan: 4,
+            pseudo_line: 10,
+            ..TINY
+        };
+        // 日 is 3 bytes, so the points at 10 and 20 move back to 9 and 18.
+        let (b, _) = partly_indexed("日".repeat(10).as_bytes(), 0, limits);
+        assert_eq!(b.line_span(10).start, 9);
+        assert_eq!(b.line_span(17).next, Some(18));
+        let mut right = vec![0];
+        let mut at = 0;
+        while at < b.len_bytes() {
+            at = movement::next_grapheme(&b, at);
+            right.push(at);
+        }
+        assert_eq!(right, (0..=30).step_by(3).collect::<Vec<_>>());
+        let mut left = vec![b.len_bytes()];
+        while at > 0 {
+            at = movement::prev_grapheme(&b, at);
+            left.push(at);
+        }
+        left.reverse();
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn a_file_without_line_breaks_is_never_scanned_whole() {
+        const MIB: usize = PSEUDO_LINE;
+        const LEN: usize = 3 * MIB;
+        // A lookup scans at most a pseudo-line and the scan distance each
+        // way; the whole file is 3 MiB.
+        const BOUND: usize = 2 * (PSEUDO_LINE + SCAN) + 64;
+        let src = vec![b'a'; LEN];
+        for indexed in [0, MIB] {
+            let mut feeder = Scanner::default();
+            feeder.feed(&src[..indexed]);
+            let mut index = LineIndex::new();
+            index.merge(feeder.take_chunk()).unwrap();
+            let source = Arc::new(VecSource::new(src.clone()));
+            let b = MappedBuffer::with_index(source, index, Limits::DEFAULT).unwrap();
+            meter::take();
+            let mut starts = Vec::new();
+            let mut at = 0;
+            loop {
+                let span = b.line_span(at);
+                let scanned = meter::take();
+                assert!(scanned <= BOUND, "line_span({at}) scanned {scanned} bytes");
+                starts.push(span.start);
+                match span.next {
+                    Some(n) => at = n,
+                    None => break,
+                }
+            }
+            // Pseudo-lines start at each MiB past the indexed part.
+            let want = if indexed == 0 {
+                vec![0, MIB, 2 * MIB]
+            } else {
+                vec![0, 2 * MIB]
+            };
+            assert_eq!(starts, want, "indexed {indexed}");
+            for at in [1, MIB - 1, MIB, MIB + 1, 2 * MIB + 5, LEN - 1, LEN] {
+                let span = b.line_span(at);
+                let scanned = meter::take();
+                assert!(scanned <= BOUND, "line_span({at}) scanned {scanned} bytes");
+                assert!(span.start <= at && span.next.unwrap_or(LEN + 1) > at.min(LEN - 1));
+                assert_eq!(movement::prev_grapheme(&b, at.max(1)), at.max(1) - 1);
+                assert!(meter::take() <= 2 * BOUND, "moving left from {at}");
+            }
+            // Line numbers past K cost nothing.
+            assert_eq!((b.byte_to_line(LEN), b.len_lines()), (0, 1));
+            assert_eq!(b.line_number(LEN), None);
+            assert_eq!(meter::take(), 0);
+        }
+    }
+
+    #[test]
+    fn merging_checks_that_the_chunk_fits() {
+        let src = b"one\ntwo\nthree\n";
+        let (mut b, mut scanner) = partly_indexed(src, 5, TINY);
+        let mut other = Scanner::new(Spacing::new(2, 5));
+        other.feed(b"one\ntwo");
+        assert_eq!(
+            b.merge_index(other.take_chunk()),
+            Err(MergeError::Gap {
+                indexed: 5,
+                chunk_from: 0
+            })
+        );
+        scanner.feed(&src[5..]);
+        scanner.feed(b"more");
+        assert_eq!(
+            b.merge_index(scanner.take_chunk()),
+            Err(MergeError::PastEnd { upto: 18, len: 14 })
+        );
+        assert_eq!(b.indexed_bytes(), 5);
+        let long = LineIndex::build(b"longer than the source", Spacing::DEFAULT);
+        let short: Arc<dyn Source> = Arc::new(VecSource::from("short"));
+        assert!(matches!(
+            MappedBuffer::with_index(short, long, TINY),
+            Err(MergeError::PastEnd { upto: 22, len: 5 })
+        ));
+        assert!(
+            MergeError::PastEnd { upto: 22, len: 5 }
+                .to_string()
+                .contains("only 5")
+        );
+    }
+
+    #[test]
+    fn snapshots_keep_the_index_they_were_taken_with() {
+        let src = b"a\nb\nc\nd\n";
+        let (mut b, mut scanner) = partly_indexed(src, 2, TINY);
+        let snap = b.snapshot();
+        scanner.feed(&src[2..]);
+        scanner.finish();
+        b.merge_index(scanner.take_chunk()).unwrap();
+        assert_eq!((snap.indexed_bytes(), snap.len_lines()), (2, 2));
+        assert_eq!((b.indexed_bytes(), b.len_lines()), (8, 5));
+        assert_eq!(snap.line_number(3), None);
+        assert_eq!(b.line_number(3), Some(1));
+        check_invariants(&b);
+    }
+
+    #[test]
+    fn pieces_removed_before_indexing_are_counted_when_put_back_after() {
+        let src = b"aa\nbb\ncc\ndd\nee\n";
+        let (mut b, mut scanner) = partly_indexed(src, 3, TINY);
+        let e = b.replace(4..13, "").unwrap();
+        let Content::Pieces(run) = &e.removed else {
+            panic!("expected pieces, got {:?}", e.removed);
+        };
+        assert_eq!(run.newlines(), None, "removed from the unindexed part");
+        assert!(e.removed.has_newline());
+        check_invariants(&b);
+        scanner.feed(&src[3..]);
+        scanner.finish();
+        b.merge_index(scanner.take_chunk()).unwrap();
+        assert!(b.is_fully_indexed());
+        b.put(4..4, &e.removed).unwrap();
+        assert!(b.is_fully_indexed(), "the pieces put back were counted");
+        assert_eq!(b.len_lines(), 6);
+        assert_eq!(b.piece_count(), 1);
+        check_invariants(&b);
     }
 
     #[test]
@@ -1707,7 +2713,7 @@ mod tests {
     fn debug_output_is_small() {
         let b = MappedBuffer::from_bytes(vec![b'x'; 10_000]);
         let s = format!("{b:?}");
-        assert!(s.len() < 300, "{s}");
+        assert!(s.len() < 400, "{s}");
         assert!(s.contains("len: 10000"));
     }
 }
