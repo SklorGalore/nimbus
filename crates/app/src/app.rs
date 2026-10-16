@@ -1801,7 +1801,7 @@ impl App {
         }
         let doc = self.doc_mut();
         doc.history.seal();
-        let result = doc.delete_back().map(drop);
+        let result = doc.delete_selections().map(drop);
         doc.history.seal();
         result
     }
