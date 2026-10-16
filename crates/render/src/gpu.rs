@@ -8,12 +8,13 @@ use crate::atlas::Atlas;
 use crate::font::{Font, Metrics};
 use crate::frame::FrameBuilder;
 use crate::pipeline::{Globals, GlyphPipeline, Pipelines, RectPipeline};
-use crate::text::{LineStyle, TextRenderer};
+use crate::text::{ColorRun, LineStyle, TextRenderer};
 
 /// Columns per tab stop until the app sets one with [`Gpu::set_tab_width`].
 const DEFAULT_TAB_WIDTH: usize = 4;
 
-/// Background colour of the editor area. Will come from the theme later.
+/// The default background colour, until the app sets the theme's with
+/// [`Gpu::set_background`].
 pub const BACKGROUND: wgpu::Color = wgpu::Color {
     r: 0.102,
     g: 0.110,
@@ -41,6 +42,8 @@ pub struct Gpu {
     /// Set by [`Gpu::request_capture`]; the next frame is copied back.
     capture_requested: bool,
     captured: Option<Capture>,
+    /// What each frame is cleared to.
+    background: wgpu::Color,
     /// The swapchain reported Suboptimal; reconfigure after presenting.
     /// Reconfiguring while a frame is acquired is an error in wgpu.
     reconfigure: bool,
@@ -404,6 +407,7 @@ impl Gpu {
             frame: FrameBuilder::default(),
             capture_requested: false,
             captured: None,
+            background: BACKGROUND,
             reconfigure: false,
         }
     }
@@ -438,7 +442,11 @@ impl Gpu {
             &self.device,
             &self.queue,
             &mut encoder,
-            (&view, [self.config.width, self.config.height]),
+            (
+                &view,
+                [self.config.width, self.config.height],
+                self.background,
+            ),
             &mut self.pipelines,
             &self.atlas,
         );
@@ -578,6 +586,13 @@ impl Gpu {
         self.captured.take()
     }
 
+    /// The colour each frame is cleared to, as straight RGBA in the same
+    /// space as rectangle colours.
+    pub fn set_background(&mut self, color: [f32; 4]) {
+        let [r, g, b, a] = color.map(f64::from);
+        self.background = wgpu::Color { r, g, b, a };
+    }
+
     /// Start a new frame, discarding anything queued for the previous one.
     pub fn begin_frame(&mut self) {
         self.frame.clear();
@@ -623,6 +638,21 @@ impl Gpu {
         color: [f32; 4],
         clip_left: f32,
     ) {
+        self.push_text_runs(origin, text, start_col, &[], color, clip_left);
+    }
+
+    /// As [`Gpu::push_text_span`], with colours by byte range: each glyph
+    /// takes the colour of the run covering its first byte, or `color` past
+    /// the last run.
+    pub fn push_text_runs(
+        &mut self,
+        origin: [f32; 2],
+        text: &str,
+        start_col: usize,
+        runs: &[ColorRun],
+        color: [f32; 4],
+        clip_left: f32,
+    ) {
         self.text.push_line(
             &self.queue,
             &mut self.atlas,
@@ -631,6 +661,7 @@ impl Gpu {
             text,
             LineStyle {
                 color,
+                runs,
                 clip_left,
                 start_col,
             },
@@ -643,7 +674,7 @@ impl Gpu {
         (self.config.width, self.config.height)
     }
 
-    /// Draw the queued frame: clear to [`BACKGROUND`], then rectangles, then text.
+    /// Draw the queued frame: clear to the background, then rectangles, then text.
     ///
     /// The returned [`FrameStatus`] tells the caller whether to schedule
     /// another redraw.

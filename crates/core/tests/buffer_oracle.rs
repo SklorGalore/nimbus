@@ -4,7 +4,8 @@
 //! The oracle is the obvious, slow implementation: a `String` edited with
 //! `replace_range`, with lines found by splitting on `'\n'`. Every answer the
 //! buffer gives (text, lengths, lines, offset conversions, edit records,
-//! errors, slices, snapshots) is compared against it after every edit.
+//! errors, slices, snapshots) is compared against it after every edit, and
+//! the storage chunks `chunk_at` hands out must be consistent with it.
 //!
 //! The generated text deliberately mixes the cases that break naive code:
 //! `\r\n` (whose `\r` is part of the line ending), a lone `\r` (ordinary
@@ -213,9 +214,56 @@ fn oracle_slice(s: &str, range: &Range<usize>) -> String {
 // ---------------------------------------------------------------------------
 // Checks.
 
+/// `chunk_at` hands out the buffer's storage as it is, so there is no
+/// oracle answer for where chunks split; instead every answer must be
+/// consistent with the oracle text. Checked at every byte offset (aligned
+/// or not) up to a few past the end, plus `usize::MAX`: a chunk is a piece
+/// of the text at the start it reports and contains the offset asked for;
+/// at or past the end the answer is `("", len)`. Walking from 0, asking for
+/// the byte just past each chunk, must visit contiguous non-empty chunks
+/// that rebuild the whole text, which is how the parser streams it.
+fn check_chunks<T: Text + ?Sized>(t: &T, oracle: &str) {
+    let len = oracle.len();
+    for b in (0..=len + 5).chain([usize::MAX]) {
+        let (chunk, start) = t.chunk_at(b);
+        if b >= len {
+            assert_eq!(
+                (chunk, start),
+                ("", len),
+                "chunk_at({b}) at or past the end"
+            );
+            continue;
+        }
+        assert!(
+            start <= b && b < start + chunk.len(),
+            "chunk_at({b}) = {chunk:?} at {start} does not contain it, in {oracle:?}"
+        );
+        assert_eq!(
+            oracle.get(start..start + chunk.len()),
+            Some(chunk),
+            "chunk_at({b}) is not the text at {start} of {oracle:?}"
+        );
+    }
+
+    let mut rebuilt = String::with_capacity(len);
+    let mut pos = 0;
+    while pos < len {
+        let (chunk, start) = t.chunk_at(pos);
+        assert_eq!(
+            start, pos,
+            "the chunk after one ending at {pos} starts there"
+        );
+        assert_ne!(chunk, "", "chunk_at({pos}) is empty before the end");
+        rebuilt.push_str(chunk);
+        pos = start + chunk.len();
+    }
+    assert_eq!(rebuilt, oracle, "chunks rebuild the text");
+}
+
 /// Compare every read-only answer of `t` with the oracle.
 fn check_text<T: Text + ?Sized>(t: &T, oracle: &str) {
     let len = oracle.len();
+    check_chunks(t, oracle);
     assert_eq!(t.len_bytes(), len, "len_bytes of {oracle:?}");
     assert_eq!(t.slice(0..len), oracle, "full text");
 
@@ -514,6 +562,7 @@ proptest! {
                 Op::Invalid { .. } | Op::Snapshot => {}
             }
         }
+        check_chunks(&buf, &oracle);
         let len = oracle.len();
         for (a, b) in &ranges {
             let range = a.resolve(len)..b.resolve(len);

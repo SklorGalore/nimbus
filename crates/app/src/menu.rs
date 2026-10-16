@@ -51,6 +51,7 @@ mod native {
             &[
                 "app.palette",
                 "view.toggleWrap",
+                "view.toggleTheme",
                 "-",
                 "tab.next",
                 "tab.previous",

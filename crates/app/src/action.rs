@@ -376,6 +376,12 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::ToggleWrap,
         Keys::all(&["Alt+Z"]),
     ),
+    act(
+        "view.toggleTheme",
+        "Toggle Light/Dark Theme",
+        Command::ToggleTheme,
+        Keys::NONE,
+    ),
     // Cursor movement and selection.
     act(
         "cursor.left",

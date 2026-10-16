@@ -19,7 +19,8 @@ pub struct Config {
     pub tab_width: usize,
     /// Start new tabs with soft wrap on.
     pub soft_wrap: bool,
-    /// Colour theme name. Only "dark" exists until M5.
+    /// Colour theme: "dark", "light", or the name of a user theme in the
+    /// config directory's `themes` folder. Checked when the theme loads.
     pub theme: String,
     /// Key binding overrides: action id to chords; an empty list unbinds.
     pub keys: HashMap<String, Vec<String>>,
@@ -62,7 +63,7 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # font_size = 14.0
 # tab_width = 4
 # soft_wrap = false
-# theme = "dark"
+# theme = "dark"            # or "light", or NAME for themes/NAME.toml here
 
 # Key bindings: action id = list of chords. "Primary" is Cmd on macOS and
 # Ctrl elsewhere. An empty list unbinds the action. The command palette
@@ -121,13 +122,6 @@ impl Config {
             ));
             config.tab_width = Self::default().tab_width;
         }
-        if config.theme != "dark" {
-            warnings.push(format!(
-                "config: theme {:?} not available yet; using dark",
-                config.theme
-            ));
-            "dark".clone_into(&mut config.theme);
-        }
         (config, warnings)
     }
 
@@ -178,11 +172,12 @@ mod tests {
         let (_, w) = Config::parse("tab_widht = 2\n");
         assert!(w[0].contains("tab_widht"), "{w:?}");
         let (c, w) = Config::parse("tab_width = 99\nfont_size = 2.0\ntheme = \"solar\"\n");
+        // The theme name is checked when the theme loads, not here.
         assert_eq!(
             (c.tab_width, c.font_size, c.theme.as_str()),
-            (4, 14.0, "dark")
+            (4, 14.0, "solar")
         );
-        assert_eq!(w.len(), 3, "{w:?}");
+        assert_eq!(w.len(), 2, "{w:?}");
         let (c, w) = Config::parse("tab_width = \"wide\"\n");
         assert_eq!(c, Config::default());
         assert_eq!(w.len(), 1);

@@ -40,6 +40,12 @@ pub trait Text {
     /// Whether `byte` is a valid cursor position: within the text and on a
     /// UTF-8 character boundary.
     fn is_char_boundary(&self, byte: usize) -> bool;
+
+    /// The contiguous piece of storage containing byte `byte`, and the
+    /// offset where that piece starts. For readers that stream the whole
+    /// text without copying it, such as the syntax parser. At or past the
+    /// end it returns `("", len_bytes)`.
+    fn chunk_at(&self, byte: usize) -> (&str, usize);
 }
 
 /// A record of one replacement, enough to undo it and to tell other systems

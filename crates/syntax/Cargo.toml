@@ -4,7 +4,36 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+log = "0.4.34"
 nimbus-core = { version = "0.1.0", path = "../core" }
+streaming-iterator = "0.1.9"
+tree-sitter = "0.27"
+tree-sitter-bash = { version = "0.25.1", optional = true }
+tree-sitter-javascript = { version = "0.25.0", optional = true }
+tree-sitter-json = { version = "0.24.8", optional = true }
+tree-sitter-md = { version = "0.5.3", optional = true }
+tree-sitter-python = { version = "0.25.0", optional = true }
+tree-sitter-rust = { version = "0.24.2", optional = true }
+tree-sitter-toml-ng = { version = "0.7.0", optional = true }
+tree-sitter-typescript = { version = "0.23.2", optional = true }
+tree-sitter-yaml = { version = "0.7.2", optional = true }
+
+[features]
+# One feature per grammar, so a grammar that costs too much binary size can
+# be left out (DESIGN.md §4.2). JavaScript is needed by TypeScript's query.
+default = ["rust", "markdown", "json", "toml", "yaml", "python", "javascript", "typescript", "bash"]
+rust = ["dep:tree-sitter-rust"]
+markdown = ["dep:tree-sitter-md"]
+json = ["dep:tree-sitter-json"]
+toml = ["dep:tree-sitter-toml-ng"]
+yaml = ["dep:tree-sitter-yaml"]
+python = ["dep:tree-sitter-python"]
+javascript = ["dep:tree-sitter-javascript"]
+typescript = ["javascript", "dep:tree-sitter-typescript"]
+bash = ["dep:tree-sitter-bash"]
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+proptest = "1.12.0"

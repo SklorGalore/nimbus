@@ -14,6 +14,7 @@ mod io;
 mod keymap;
 mod menu;
 mod picker;
+mod theme;
 mod view;
 
 use std::path::{Path, PathBuf};
@@ -53,6 +54,8 @@ pub struct Options {
     /// With `--headless`: draw an open picker, `palette` or `files`,
     /// optionally with a query after a colon (`files:main`).
     pub picker: Option<String>,
+    /// Use this theme instead of the config's.
+    pub theme: Option<String>,
 }
 
 /// Write a line to stdout. Command-line output such as `--version` and the
@@ -103,6 +106,7 @@ fn parse_options() -> Options {
     let mut wrap = false;
     let mut headless = None;
     let mut picker = None;
+    let mut theme = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -125,6 +129,7 @@ fn parse_options() -> Options {
             }
             Some("--wrap") => wrap = true,
             Some("--picker") => picker = args.next().and_then(|p| p.into_string().ok()),
+            Some("--theme") => theme = args.next().and_then(|t| t.into_string().ok()),
             Some("--headless") => {
                 let size = args.next().and_then(|a| {
                     let a = a.into_string().ok()?;
@@ -150,7 +155,7 @@ fn parse_options() -> Options {
             }
             Some("--help" | "-h") => {
                 print_out(
-                    "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--wrap] [--headless WxH] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
+                    "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--wrap] [--theme NAME] [--headless WxH] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
                 );
                 std::process::exit(0);
             }
@@ -170,6 +175,7 @@ fn parse_options() -> Options {
         wrap,
         headless,
         picker,
+        theme,
     }
 }
 
@@ -265,7 +271,10 @@ fn main() {
         }
     };
 
-    let (config, warnings) = Config::load();
+    let (mut config, warnings) = Config::load();
+    if let Some(theme) = &options.theme {
+        config.theme.clone_from(theme);
+    }
     let (docs, root) = open_files(&options);
     log::debug!(
         "startup: config and {} file(s) loaded at {:?}",

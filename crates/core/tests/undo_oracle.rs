@@ -144,6 +144,15 @@ fn any_op() -> BoxedStrategy<Op> {
     .boxed()
 }
 
+/// A callback for undo and redo that applies each reported edit to `mirror`
+/// and checks it against the buffer's length after the edit.
+fn replay_into(mirror: &mut String) -> impl FnMut(&dyn Text, &Edit) + '_ {
+    |after, edit| {
+        mirror.replace_range(edit.old_range(), &edit.inserted);
+        assert_eq!(mirror.len(), after.len_bytes());
+    }
+}
+
 fn steps(op: BoxedStrategy<Op>, max: usize) -> impl Strategy<Value = Vec<(Op, u64)>> {
     prop::collection::vec((op, delay()), 0..max)
 }
@@ -348,6 +357,8 @@ impl Session {
     fn step(&mut self, op: &Op, delay_ms: u64) -> Outcome {
         self.now += Duration::from_millis(delay_ms);
         let bounds = self.boundaries();
+        // What undo and redo report, replayed onto the text before them.
+        let mut mirror = self.text.clone();
         let outcome = match op {
             Op::Type(t) => {
                 let c = self.cursor;
@@ -383,18 +394,24 @@ impl Session {
             }
             Op::Undo => {
                 let before = self.text.clone();
-                let got = self.hist.undo(&mut self.buf);
+                let got = self.hist.undo(&mut self.buf, &mut replay_into(&mut mirror));
                 let expected = self.model.undo();
                 self.after_step(got, expected, &before)
             }
             Op::Redo => {
                 let before = self.text.clone();
-                let got = self.hist.redo(&mut self.buf);
+                let got = self.hist.redo(&mut self.buf, &mut replay_into(&mut mirror));
                 let expected = self.model.redo();
                 self.after_step(got, expected, &before)
             }
         };
         assert_eq!(self.buffer_text(), self.text, "buffer drifted from oracle");
+        if matches!(op, Op::Undo | Op::Redo) {
+            assert_eq!(
+                mirror, self.text,
+                "undo/redo reported edits that do not replay"
+            );
+        }
         outcome
     }
 

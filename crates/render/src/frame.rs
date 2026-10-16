@@ -9,7 +9,6 @@
 use std::ops::Range;
 
 use crate::atlas::{Atlas, AtlasSlot};
-use crate::gpu::BACKGROUND;
 use crate::pipeline::{GlyphInstance, Pipelines, RectInstance};
 
 /// One layer: a clip region and the instances drawn in it.
@@ -94,18 +93,19 @@ impl FrameBuilder {
 
     /// Upload the instances, then record one render pass: clear, then each
     /// layer's rects and glyphs within its clip. Uploads come first because
-    /// the pass borrows the encoder. `size` is the frame's size in pixels.
+    /// the pass borrows the encoder. `target` is the view, its size in pixels,
+    /// and the colour to clear it to.
     pub(crate) fn record(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        target: (&wgpu::TextureView, [u32; 2]),
+        target: (&wgpu::TextureView, [u32; 2], wgpu::Color),
         pipelines: &mut Pipelines,
         atlas: &Atlas,
     ) {
         self.close_layer();
-        let (view, [width, height]) = target;
+        let (view, [width, height], background) = target;
         pipelines.rect.instances.upload(device, queue, &self.rects);
         pipelines
             .glyph
@@ -118,7 +118,7 @@ impl FrameBuilder {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(BACKGROUND),
+                    load: wgpu::LoadOp::Clear(background),
                     store: wgpu::StoreOp::Store,
                 },
             })],

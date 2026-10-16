@@ -10,6 +10,9 @@ use nimbus_core::{
     Buffer, Edit, EditError, History, LineEnding, RopeBuffer, Selection, Selections, Text,
 };
 
+use nimbus_syntax::LanguageId;
+use nimbus_syntax::state::SyntaxState;
+
 use crate::input::Motion;
 use crate::io::{self, OpenError, SaveError};
 
@@ -35,6 +38,8 @@ pub struct Document {
     pub version: u64,
     /// Undo and redo.
     pub history: History,
+    /// The syntax tree for highlighting, kept in step with every edit.
+    pub syntax: SyntaxState,
     /// [`History::top_id`] when last saved or opened. The document is dirty
     /// whenever the top of the history differs, so undoing back to the saved
     /// point makes it clean again.
@@ -70,13 +75,33 @@ impl Document {
             Err(OpenError::NotFound) => (RopeBuffer::default(), LineEnding::default(), false),
             Err(e) => return Err(e),
         };
-        Ok(Self {
+        let mut doc = Self {
             buffer,
             path: Some(path.to_path_buf()),
             line_ending,
             bom,
             ..Self::default()
-        })
+        };
+        doc.detect_language();
+        Ok(doc)
+    }
+
+    /// Pick the language from the path, or a `#!` line, and start its
+    /// syntax state over. Keeps the state when the language is unchanged.
+    pub fn detect_language(&mut self) {
+        // Only a shebang needs the text, and only its start: never copy a
+        // whole (possibly huge) first line.
+        let language = self
+            .path
+            .as_deref()
+            .and_then(LanguageId::from_path)
+            .or_else(|| {
+                let head = self.buffer.slice(0..self.buffer.len_bytes().min(256));
+                LanguageId::from_shebang(head.lines().next().unwrap_or(""))
+            });
+        if language != self.syntax.language() || self.syntax.off_reason().is_some() {
+            self.syntax.reset(language, self.buffer.len_bytes());
+        }
     }
 
     /// Whether there are unsaved changes.
@@ -149,6 +174,7 @@ impl Document {
     pub fn replace(&mut self, range: Range<usize>, text: &str) -> Result<Edit, EditError> {
         let before = self.selections.clone();
         let edit = self.buffer.replace(range, text)?;
+        self.syntax.edit(&self.buffer, &edit);
         self.set_selection(Selection::cursor(edit.new_range().end));
         self.history
             .record(edit.clone(), &before, &self.selections, Instant::now());
@@ -174,7 +200,10 @@ impl Document {
         let mut result = Ok(());
         for (range, text) in items.iter().rev() {
             match self.buffer.replace(range.clone(), text) {
-                Ok(edit) => edits.push(edit),
+                Ok(edit) => {
+                    self.syntax.edit(&self.buffer, &edit);
+                    edits.push(edit);
+                }
                 Err(e) => {
                     result = Err(e);
                     break;
@@ -530,7 +559,11 @@ impl Document {
     /// Returns an [`EditError`] if the history no longer matches the text,
     /// which would be a bug.
     pub fn undo(&mut self) -> Result<bool, EditError> {
-        let Some(restored) = self.history.undo(&mut self.buffer)? else {
+        let syntax = &mut self.syntax;
+        let Some(restored) = self
+            .history
+            .undo(&mut self.buffer, &mut |text, edit| syntax.edit(text, edit))?
+        else {
             return Ok(false);
         };
         self.restore(&restored);
@@ -543,7 +576,11 @@ impl Document {
     ///
     /// As for [`Document::undo`].
     pub fn redo(&mut self) -> Result<bool, EditError> {
-        let Some(restored) = self.history.redo(&mut self.buffer)? else {
+        let syntax = &mut self.syntax;
+        let Some(restored) = self
+            .history
+            .redo(&mut self.buffer, &mut |text, edit| syntax.edit(text, edit))?
+        else {
             return Ok(false);
         };
         self.restore(&restored);

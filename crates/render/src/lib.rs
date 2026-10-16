@@ -15,3 +15,4 @@ mod text;
 pub use font::{Font, FontError, Metrics};
 pub use gpu::{BACKGROUND, Capture, FrameError, FrameStatus, Gpu, GpuContext, GpuError};
 pub use pipeline::{GlyphInstance, RectInstance};
+pub use text::ColorRun;

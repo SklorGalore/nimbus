@@ -112,6 +112,7 @@ pub trait Text {                                   // read-only; also what snaps
     fn line_to_byte(&self, l: usize) -> usize;
     fn slice(&self, range: Range<usize>) -> Cow<'_, str>; // clamped, widened to char boundaries
     fn is_char_boundary(&self, b: usize) -> bool;
+    fn chunk_at(&self, b: usize) -> (&str, usize);   // contiguous piece holding b, and its start
 }
 pub trait Snapshot: Text + Send + Sync {}          // owned by worker threads
 pub trait Buffer: Text {
@@ -165,7 +166,11 @@ Other `core` responsibilities:
 `tree-sitter` 0.27 with grammars compiled into the binary as crates. Starter
 set, confirmed at approval: Rust, Markdown, JSON, TOML, YAML, Python,
 JavaScript, TypeScript, Bash. Each grammar sits behind a cargo feature so a
-grammar that costs too much binary size can be dropped (M5 measures).
+grammar that costs too much binary size can be dropped. M5 measured each
+(macOS release binary): TypeScript 1.42 MB, Bash 1.37 MB, Python 0.46 MB,
+Markdown 0.38 MB, YAML 0.18 MB; the tree-sitter runtime plus Rust about
+1.8 MB. TSX is not included: it would add about 1.5 MB. If the binary
+budget is ever tight, Bash goes first, then TypeScript.
 
 Highlighting runs our own query loop rather than `tree-sitter-highlight`:
 that crate wants the whole document as one `&[u8]`, and our text lives in a
@@ -174,21 +179,40 @@ reading text through a chunk callback, avoids copying the document.
 
 Rules that protect the performance goals:
 
-- Grammars are initialized lazily on first use of that language. Startup
-  never pays for a parser.
+- Grammars are initialized lazily on first use of that language, on the
+  worker that runs the first parse. Startup never pays for a parser.
 - The first parse of a file runs on a worker thread against a snapshot; the
   edits made meanwhile are replayed into the tree when it returns.
 - After that, parsing is incremental on the main thread: every `Edit` is fed
-  to the parser with the old tree, so a keystroke costs microseconds.
-- Highlighting is computed only for the visible line range plus a margin.
+  to the tree (including undo and redo, which report their edits through a
+  callback), and each frame reparses once with the old tree. A reparse gets
+  2 ms; if it runs over (tree-sitter's progress callback stops it), it
+  restarts on a worker and the edited old tree keeps colouring the view.
+- Tree-sitter reads the text through `Text::chunk_at`, one rope chunk at a
+  time, so neither parsing nor queries copy the document.
+- Highlighting is computed only for the lines that can be on screen, and
+  cached until the tree or the range changes.
 - Above 16 MB, or for any `MappedBuffer`, highlighting is off.
+- `nimbus-syntax` starts no threads: `SyntaxState` hands out `Job`s and the
+  app runs them, so tests and headless rendering parse in place.
+
+Memory: a tree keeps about 28 bytes per byte of Rust source (2.7 million
+nodes of about 108 bytes for 10 MB, one node per 3.9 bytes). That is far
+outside the per-file budget in §1, which was set for text storage; see §9.
 
 Markdown needs a second, inline grammar injected into each paragraph. M5
 ships block-level Markdown highlighting; inline emphasis and code spans are
 an M8 stretch item.
 
 The `app` crate maps capture names to colours via the theme, with
-longest-prefix matching (`keyword.control` falls back to `keyword`).
+longest-prefix matching (`keyword.control` falls back to `keyword`),
+resolved once per language into an array indexed by capture.
+
+Queries come from the grammar crates, except Rust's, which is vendored in
+`crates/syntax/queries/rust.scm`: upstream's constant pattern has a stray
+quote in its regex and sits before `@constructor`, so `FOO` never coloured
+as a constant. When captures overlap, the innermost node wins, and for one
+node the later pattern wins, the convention the queries are written for.
 
 ### 4.3 render: GPU text
 
@@ -280,7 +304,13 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
   overrides. A missing file means defaults; a broken one is reported in the
   message line, never fatal.
 - **Themes**: built-in dark and light themes as TOML compiled in with
-  `include_str!`; user themes use the same format in the config directory.
+  `include_str!` (`crates/app/themes/`); user themes use the same format in
+  `themes/NAME.toml` in the config directory, selected by `theme = "NAME"`.
+  A `[ui]` table of interface colours and a `[syntax]` table keyed by
+  capture name, as `"#rrggbb"` or `"#rrggbbaa"`. A user theme starts from
+  its `base` (dark unless given), so it lists only what it changes. Bad
+  entries are warnings that keep the base colour. "Toggle Light/Dark
+  Theme" switches the built-ins for the session.
 
 ## 5. Quality and performance enforcement
 
@@ -359,7 +389,7 @@ introduces and points at the code.
 | 2 | Editable | **Done** | Open, edit, scroll and save a file | [m2](docs/milestones/m2-editable.md) |
 | 3 | Editing essentials | **Done** | Select, clipboard, undo, find and replace, soft wrap, auto-indent | [m3](docs/milestones/m3-editing-essentials.md) |
 | 4 | Many files | **Done** | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
-| 5 | Highlighting | Next | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
+| 5 | Highlighting | **Built on `m5-wip`, owner checks pending** | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
 | 6 | File tree | Planned | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
 | 7 | Huge files | Planned | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
 | 8 | Polish | Planned | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
@@ -375,6 +405,13 @@ which is contained inside `render`.
    and memory and may move it.
 2. **Dependency updates.** Add Dependabot for cargo and GitHub Actions, or
    update by hand at each milestone? The Node 20 deprecation was a hand fix.
+3. **Syntax tree memory.** A tree costs about 28× its file's size (§4.2), so
+   a highlighted file breaks the 1.5× budget in §1 at any size. A typical
+   200 KB source file costs about 6 MB; a 16 MB file, the highlighting
+   limit, about 450 MB. Options for the owner: count highlighting outside
+   the per-file budget and keep the 16 MB limit; or lower the limit (4 MB is
+   about 110 MB of tree); or, later, parse only a window around the view
+   for large files, at the cost of wrong colours where context is missing.
 
 Resolved at approval: the two-backend buffer (§4.1), bidi out of scope (§2),
 the nine starter languages (§4.2), binary name `nimbus`. Resolved at the start
@@ -418,3 +455,9 @@ memory budget is per file, at most 1.5× file size over an empty window (§1).
 | 2026-10-16 | Physical-key fallback only for Alt/Option or non-ASCII layouts | §4.4 |
 | 2026-10-16 | Config settings parsed one by one; overrides beat defaults | §4.4 |
 | 2026-10-16 | Shortcut labels in words on macOS until font fallback (M8) | §4.3 |
+| 2026-10-16 | Each grammar a cargo feature; TSX left out for binary size | §4.2 |
+| 2026-10-16 | Rust highlights query vendored to fix its constant pattern | §4.2 |
+| 2026-10-16 | `Text::chunk_at` added so tree-sitter reads rope chunks directly | §4.1, §4.2 |
+| 2026-10-16 | `History::undo`/`redo` report each edit through a callback | §4.1, §4.2 |
+| 2026-10-16 | Main-thread reparse budget 2 ms, then a worker; syntax crate starts no threads | §4.2 |
+| 2026-10-16 | Themes are TOML, built in or in the config directory, hex colours | §4.4 |
