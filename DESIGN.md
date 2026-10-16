@@ -525,4 +525,5 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Reloading a file changed on disk clears its undo history | §4.4 |
 | 2026-10-16 | The file watcher runs on its own thread; the main thread never calls `notify` | §4.4 |
 | 2026-10-16 | M9 diffs large files in layers: trim common ends, full diff, anchored block diff; long lines split | §8 (m9) |
+| 2026-10-16 | M7 design approved: SUB for invalid bytes, walking by byte, `Content` undo, `unsafe` mapping in app, pread for bulk reads | §4.1, m7 |
 | 2026-10-16 | Compare and merge (two- and three-way) added as milestone 9, after Polish, held to the editor's budgets | §4.4, §8 |
