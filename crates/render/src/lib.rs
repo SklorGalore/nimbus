@@ -3,6 +3,7 @@
 //! DESIGN.md §4.3.
 
 pub mod atlas;
+pub mod fallback;
 pub mod font;
 pub mod frame;
 mod gpu;

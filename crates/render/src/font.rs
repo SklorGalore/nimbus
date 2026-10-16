@@ -84,6 +84,14 @@ impl Font {
             .ok_or(FontError)
     }
 
+    /// A font from `data`, face `index` of it (a `.ttc` file holds several).
+    /// For fallback fonts read from the system, whose bytes live for the
+    /// rest of the session.
+    #[must_use]
+    pub fn from_data(data: &'static [u8], index: u32) -> Option<Self> {
+        FontRef::from_index(data, usize::try_from(index).ok()?).map(|face| Self { face })
+    }
+
     /// The bold weight of the bundled font.
     ///
     /// # Errors

@@ -31,6 +31,21 @@ pub struct ShapedGlyph {
     pub y: f32,
     /// Byte offset in the line of the grapheme this glyph belongs to.
     pub cluster: u32,
+    /// Set when this is the missing-glyph box for a grapheme the font
+    /// lacks: where that grapheme's cells are, so a glyph from a fallback
+    /// font can be centred in them instead.
+    pub missing: Option<MissingCells>,
+}
+
+/// The cells of a grapheme the font has no glyph for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MissingCells {
+    /// Left edge of the first cell, in pixels from the start of the line.
+    pub x: f32,
+    /// How many cells it takes: 2 for most CJK characters and emoji.
+    pub cols: u8,
+    /// Its length in bytes (at most 255).
+    pub len: u8,
 }
 
 /// Grid parameters for laying out one line.
@@ -140,6 +155,7 @@ impl Shaper {
                     x: x0,
                     y: 0.0,
                     cluster: u32::try_from(start).unwrap_or(u32::MAX),
+                    missing: None,
                 });
             } else if g == "\t" || glyphs.is_empty() {
                 // Nothing to draw.
@@ -151,6 +167,11 @@ impl Shaper {
                     x: x0 + (cols(w) - 1.0) * cell / 2.0,
                     y: 0.0,
                     cluster: glyphs[0].cluster,
+                    missing: Some(MissingCells {
+                        x: x0,
+                        cols: u8::try_from(w).unwrap_or(u8::MAX),
+                        len: u8::try_from(g.len()).unwrap_or(u8::MAX),
+                    }),
                 });
             } else {
                 let base = glyphs[0].x;
@@ -160,6 +181,7 @@ impl Shaper {
                         x: x0 + (r.x - base),
                         y: r.y,
                         cluster: r.cluster,
+                        missing: None,
                     });
                 }
             }

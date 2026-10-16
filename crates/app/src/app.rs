@@ -49,6 +49,9 @@ use crate::{Options, effective_scale, print_err, print_out, save_screenshot, to_
 pub enum AppEvent {
     /// Results from a background search.
     Search(SearchBatch),
+    /// A system font for a character the bundled font lacks has been
+    /// loaded: draw again to use it.
+    FontLoaded,
     /// The picker's matcher has new results.
     PickerChanged,
     /// A menu item was chosen; carries its action id.
@@ -2510,36 +2513,41 @@ pub fn run_headless(
         name: doc.display_name(),
         dirty: false,
     };
-    let mut scene = Scene {
-        doc: &doc,
-        view: &mut view,
-        theme: &mut theme,
-        find: &find,
-        message: None,
-        cursor_visible: true,
-        preedit: None,
-        tab_width: config.tab_width,
-    };
-    paint_scene(&mut gpu, &layout, &mut scene);
     let labels = if labels.is_empty() {
         vec![label]
     } else {
         labels
     };
-    view::draw_tabs(&mut gpu, &theme.ui, &layout, &labels, 0);
-    sidebar::draw(
-        &mut gpu,
-        &theme.ui,
-        &layout,
-        &sidebar,
-        doc.canonical.as_deref(),
-    );
-    if options.debug_overlay {
-        let mut debug = Debug::new(true);
-        debug.draw(&mut gpu, &theme.ui, &layout, debug_facts(&doc, &find));
-    }
-    if let Some(spec) = &options.picker {
-        draw_headless_picker(&mut gpu, &theme.ui, &layout, (spec, &root), &doc, config);
+    // Characters the bundled font lacks are looked for in system fonts on
+    // a worker; with no later frame to show them in, wait for them once
+    // everything has been painted, and paint again if any arrived.
+    for pass in 0..2 {
+        paint_scene(
+            &mut gpu,
+            &layout,
+            &mut Scene {
+                doc: &doc,
+                view: &mut view,
+                theme: &mut theme,
+                find: &find,
+                message: None,
+                cursor_visible: true,
+                preedit: None,
+                tab_width: config.tab_width,
+            },
+        );
+        let ui = &theme.ui;
+        view::draw_tabs(&mut gpu, ui, &layout, &labels, 0);
+        sidebar::draw(&mut gpu, ui, &layout, &sidebar, doc.canonical.as_deref());
+        if options.debug_overlay {
+            Debug::new(true).draw(&mut gpu, ui, &layout, debug_facts(&doc, &find));
+        }
+        if let Some(spec) = &options.picker {
+            draw_headless_picker(&mut gpu, ui, &layout, (spec, &root), &doc, config);
+        }
+        if pass == 1 || !gpu.wait_for_fonts(Duration::from_secs(5)) {
+            break;
+        }
     }
     gpu.request_capture();
     if let Err(e) = gpu.render() {
@@ -2754,6 +2762,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.save_event(event, event_loop);
                 self.changed(false);
             }
+            AppEvent::FontLoaded => self.changed(false),
             AppEvent::WatchWarning(warning) => {
                 self.say(warning, true);
                 self.changed(false);
@@ -2826,6 +2835,10 @@ impl ApplicationHandler<AppEvent> for App {
         match Gpu::new(&window, context, font, self.font_px(scale)) {
             Ok(mut gpu) => {
                 gpu.set_tab_width(self.tab_width());
+                let proxy = self.proxy.clone();
+                gpu.set_font_notify(Arc::new(move || {
+                    let _ = proxy.send_event(AppEvent::FontLoaded);
+                }));
                 self.gpu = Some(gpu);
             }
             Err(e) => {

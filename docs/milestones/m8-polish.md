@@ -24,14 +24,18 @@ release builds for all three platforms.
       (last and worst of the last 100), atlas occupancy, buffer backend,
       background task status. `--debug-overlay` shows it from the start,
       also in headless renders.
-- [ ] **Font fallback**: a missing glyph (CJK, emoji) is found in a system
+- [x] **Font fallback**: a missing glyph (CJK, emoji) is found in a system
       font through `fontdb`, loaded on a background thread, and drawn when
-      ready; the `.notdef` box shows until then.
+      ready; the `.notdef` box shows until then. Owner's choice: the
+      smallest suitable font file is copied into memory (no `unsafe`);
+      colour-only emoji fonts are skipped, so emoji draw as outlines where
+      a font has them (headless renders; fallback tests).
 - [x] **Bold and italic** in themes, via bundled variants or synthesis:
       Hack Bold bundled (+2.7 MB), italic by slanting (theme, raster and
       font tests; headless render with a styled theme).
-- [ ] Shortcut labels use ⌘ ⌥ ⌃ ⌫ symbols on macOS once fallback fonts
+- [x] Shortcut labels use ⌘ ⌥ ⌃ ⌫ symbols on macOS once fallback fonts
       provide them (M4 shows `Cmd+Shift+P` because the bundled font lacks them).
+      Now `⇧⌘P`, in macOS's modifier order (headless palette render).
 - [x] **Scrollbar** with a draggable thumb (view test of its geometry
       and dragging; headless renders, including the 4 GB log).
 - [ ] **Markdown inline highlighting** (stretch; skip without blocking).

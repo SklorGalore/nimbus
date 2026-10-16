@@ -677,6 +677,26 @@ impl Gpu {
         );
     }
 
+    /// Call `notify` (from a worker thread) when a fallback font arrives
+    /// for a character the bundled font lacks; the window should then draw
+    /// again, and the next frame uses the font.
+    pub fn set_font_notify(&mut self, notify: crate::fallback::Notify) {
+        self.text.set_font_notify(notify);
+    }
+
+    /// Wait up to `timeout` for fallback fonts still being looked for, for
+    /// a headless render, which has no later frame to show them in.
+    /// Returns whether any arrived: draw the frame again if so.
+    pub fn wait_for_fonts(&mut self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut any = self.text.receive_fonts();
+        while self.text.fonts_pending() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            any |= self.text.receive_fonts();
+        }
+        any
+    }
+
     /// Counts for the debug overlay: glyphs queued so far in the frame being
     /// built, and how full the glyph atlas is.
     #[must_use]
