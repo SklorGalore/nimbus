@@ -1,0 +1,14 @@
+# Dependabot opens a pull request when an action used by CI has a new
+# version, so deprecations (like the Node 20 runner one) are caught early.
+# Cargo crates are updated by hand at each milestone instead: wgpu, winit
+# and swash change their APIs between versions, and each bump needs care.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # One pull request for all action updates in a week.
+    groups:
+      actions:
+        patterns: ["*"]
