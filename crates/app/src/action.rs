@@ -395,6 +395,12 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::all(&["Primary+Shift+E"]),
     ),
     act(
+        "view.toggleDebugOverlay",
+        "Toggle Debug Overlay",
+        Command::ToggleDebugOverlay,
+        Keys::all(&["F12"]),
+    ),
+    act(
         "view.toggleIgnored",
         "Show/Hide Ignored Files in Sidebar",
         Command::ToggleIgnored,

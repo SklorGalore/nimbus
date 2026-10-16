@@ -28,6 +28,7 @@ cargo run -- . --headless 1600x900 --picker files:main --screenshot /tmp/p.bmp  
 cargo test --release -p nimbus-core -- --ignored --nocapture # opt-in benchmarks (e.g. wrapping a 1 MB line)
 bench/gen.sh logs && ./target/release/nimbus bench/out/log-4gb.log --headless 1400x700 --screenshot /tmp/l.bmp --wait-index   # huge-file check (mapped buffer, all lines counted first)
 ./target/release/nimbus FILE --backend rope|mapped ...      # force a buffer backend (measurement)
+cargo run -- FILE --debug-overlay --headless 1400x500 --screenshot /tmp/d.bmp   # the F12 overlay, shown from the start
 bench/gen.sh sizes && bench/threshold.sh                    # rope vs mapped open time and memory at 64-512 MB
 cargo test --release -p nimbus-syntax -- --ignored --nocapture --test-threads 1   # keystroke and first-parse cost, tree memory (needs bench/gen.sh)
 cargo test --workspace

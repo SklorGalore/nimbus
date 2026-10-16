@@ -91,6 +91,8 @@ pub enum Command<'a> {
     FocusSidebar,
     /// Show or hide `.gitignore`d files in the sidebar.
     ToggleIgnored,
+    /// Show or hide the debug overlay: frame time, latency, atlas use.
+    ToggleDebugOverlay,
     /// Replace the text with the file on disk.
     ReloadFromDisk,
     /// Keep the edits here over a change on disk.

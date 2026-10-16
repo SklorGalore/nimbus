@@ -132,6 +132,15 @@ impl std::fmt::Display for GpuError {
 
 impl std::error::Error for GpuError {}
 
+/// Counts for the debug overlay ([`Gpu::stats`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FrameStats {
+    /// Glyphs queued in the frame.
+    pub glyphs: usize,
+    /// How full the glyph atlas is, from 0 to 1.
+    pub atlas: f32,
+}
+
 /// Unrecoverable (from inside `render`) per-frame failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameError {
@@ -666,6 +675,16 @@ impl Gpu {
                 start_col,
             },
         );
+    }
+
+    /// Counts for the debug overlay: glyphs queued so far in the frame being
+    /// built, and how full the glyph atlas is.
+    #[must_use]
+    pub fn stats(&self) -> FrameStats {
+        FrameStats {
+            glyphs: self.frame.glyph_count(),
+            atlas: self.atlas.occupancy(),
+        }
     }
 
     /// Current surface size in physical pixels, as `(width, height)`.

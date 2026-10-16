@@ -244,6 +244,21 @@ impl SyntaxState {
         self.language
     }
 
+    /// A word for the current phase, for the debug overlay: `off`,
+    /// `simple` (line-by-line rules), `waiting`, `parsing`, `ready`, or
+    /// `stale` (a tree that a reparse will bring up to date).
+    #[must_use]
+    pub fn phase_name(&self) -> &'static str {
+        match &self.phase {
+            Phase::Off(_) => "off",
+            Phase::Lexical(_) => "simple",
+            Phase::Waiting => "waiting",
+            Phase::Parsing { .. } => "parsing",
+            Phase::Ready { dirty: false, .. } => "ready",
+            Phase::Ready { dirty: true, .. } => "stale",
+        }
+    }
+
     /// Why there is no highlighting, if there is none.
     #[must_use]
     pub fn off_reason(&self) -> Option<Off> {

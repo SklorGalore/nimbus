@@ -26,6 +26,7 @@ use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
 use crate::config::{self, Config};
+use crate::debug::Debug;
 use crate::document::{DiskChange, Document, MAX_COPY_BYTES};
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::input::{self, Command, Motion};
@@ -273,34 +274,6 @@ impl Blink {
     }
 }
 
-/// Keystroke-to-present latency tracking (DESIGN.md §5). The M8 overlay
-/// shows these values; until then they are logged at debug level.
-#[derive(Default)]
-struct Latency {
-    /// When the oldest input not yet on screen arrived.
-    pending: Option<Instant>,
-    worst: Duration,
-    /// Every sample, kept only during `--bench-typing`.
-    samples: Option<Vec<Duration>>,
-}
-
-impl Latency {
-    fn input(&mut self, now: Instant) {
-        self.pending.get_or_insert(now);
-    }
-
-    fn presented(&mut self) {
-        if let Some(started) = self.pending.take() {
-            let took = started.elapsed();
-            self.worst = self.worst.max(took);
-            log::debug!("keystroke to present: {took:?} (worst {:?})", self.worst);
-            if let Some(samples) = &mut self.samples {
-                samples.push(took);
-            }
-        }
-    }
-}
-
 pub struct App {
     options: Options,
     started: Instant,
@@ -329,7 +302,8 @@ pub struct App {
     active: usize,
     blink: Blink,
     preedit: Option<Preedit>,
-    latency: Latency,
+    /// The debug overlay and the timings it shows.
+    debug: Debug,
     /// Last mouse position in physical pixels; clicks carry no position.
     mouse: PhysicalPosition<f64>,
     /// Last rectangle sent to the IME, to avoid resending it every frame.
@@ -422,6 +396,7 @@ impl App {
         proxy: EventLoopProxy<AppEvent>,
         warnings: Vec<String>,
     ) -> Self {
+        let debug_overlay = options.debug_overlay;
         let (keymap, key_warnings) = Keymap::new(&config.keys);
         let (theme, theme_warnings) = Theme::load(&config.theme);
         let ui_state = State::load();
@@ -471,7 +446,7 @@ impl App {
             active: 0,
             blink: Blink::new(started),
             preedit: None,
-            latency: Latency::default(),
+            debug: Debug::new(debug_overlay),
             mouse: PhysicalPosition::new(0.0, 0.0),
             ime_area: None,
             title_key: None,
@@ -527,6 +502,12 @@ impl App {
         let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
         let scale = to_f32(effective_scale(window.scale_factor()));
         Some(layout_for(gpu, scale, self.doc(), &self.find).with_sidebar(self.sidebar.px(scale)))
+    }
+
+    /// What the debug overlay reports about the active document and the
+    /// work running for it.
+    fn debug_facts(&self) -> crate::debug::Facts {
+        debug_facts(self.doc(), &self.find)
     }
 
     /// Show a short message at the bottom of the window.
@@ -646,6 +627,10 @@ impl App {
                 self.find.focused = false;
                 self.show_sidebar();
                 self.remember();
+            }
+            Command::ToggleDebugOverlay => {
+                self.debug.visible = !self.debug.visible;
+                self.changed(false);
             }
             Command::ToggleIgnored => {
                 let show = !self.sidebar.tree.show_ignored;
@@ -1671,6 +1656,7 @@ impl App {
             | Command::GoToLine
             | Command::FocusSidebar
             | Command::ToggleIgnored
+            | Command::ToggleDebugOverlay
             | Command::ReloadFromDisk
             | Command::KeepMine
             | Command::OpenFile
@@ -2086,6 +2072,8 @@ impl App {
         view::draw_tabs(gpu, &self.theme.ui, layout, &labels, self.active);
         let active = self.tabs[self.active].doc.canonical.as_deref();
         sidebar::draw(gpu, &self.theme.ui, layout, &self.sidebar, active);
+        let facts = self.debug_facts();
+        self.debug.draw(gpu, &self.theme.ui, layout, facts);
         if let Some(p) = &self.picker {
             let ui = &self.theme.ui;
             draw_picker_overlay(gpu, ui, layout, p, &self.keymap, self.blink.visible);
@@ -2093,6 +2081,7 @@ impl App {
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        let frame_started = Instant::now();
         // The first parse runs on a worker while this frame shows the
         // text plain; colours follow when it finishes. Before the layout,
         // which leaves room for any message this adds.
@@ -2156,7 +2145,8 @@ impl App {
                 return;
             }
         }
-        self.latency.presented();
+        self.debug.latency.presented();
+        self.debug.frames.push(frame_started.elapsed());
 
         // Tell the IME where the cursor is, so its candidate window appears
         // next to it. Physical pixels, relative to the window.
@@ -2207,7 +2197,7 @@ impl App {
 
     /// One step of `--bench-typing`: type a character, or report and exit.
     fn bench_step(&mut self, event_loop: &ActiveEventLoop) {
-        let samples = self.latency.samples.get_or_insert_with(Vec::new);
+        let samples = self.debug.latency.samples.get_or_insert_with(Vec::new);
         if samples.len() >= self.options.bench_typing {
             let mut s = std::mem::take(samples);
             s.sort();
@@ -2223,7 +2213,7 @@ impl App {
             return;
         }
         let ch = ["a", "b", "c", " ", "x", "y"][samples.len() % 6];
-        self.latency.input(Instant::now());
+        self.debug.latency.input(Instant::now());
         self.run(Command::Insert(ch), event_loop);
     }
 
@@ -2234,12 +2224,12 @@ impl App {
             Ime::Enabled => {}
             Ime::Preedit(text, cursor) => {
                 self.preedit = (!text.is_empty()).then_some(Preedit { text, cursor });
-                self.latency.input(now);
+                self.debug.latency.input(now);
                 self.changed(false);
             }
             Ime::Commit(text) => {
                 self.preedit = None;
-                self.latency.input(now);
+                self.debug.latency.input(now);
                 // Routed like typing: into the find bar if it has focus.
                 self.run(Command::Insert(&text), event_loop);
             }
@@ -2264,6 +2254,54 @@ fn line_estimate(t: &dyn Text) -> usize {
     let estimate =
         u128::from(before as u64) * u128::from(len as u64) * 11 / (u128::from(counted as u64) * 10);
     usize::try_from(estimate).unwrap_or(usize::MAX).max(lines)
+}
+
+/// `--picker KIND[:QUERY]` with `--headless`: open the palette, file opener
+/// or go-to-line picker with `QUERY` typed, let it settle, and draw it.
+fn draw_headless_picker(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    (spec, root): (&str, &Path),
+    doc: &Document,
+    config: &Config,
+) {
+    // "palette" or "files", optionally followed by ":query".
+    let (kind, query) = spec.split_once(':').unwrap_or((spec, ""));
+    let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+    let mut p = match kind {
+        "files" => Picker::files(root, notify),
+        "line" => Picker::go_to_line(notify, Some(doc.buffer.len_lines())),
+        _ => Picker::palette(notify),
+    };
+    let _ = p.input.insert(query);
+    // Let the walk and matcher finish, up to two seconds.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while p.tick() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (keymap, _) = Keymap::new(&config.keys);
+    draw_picker_overlay(gpu, ui, layout, &p, &keymap, true);
+}
+
+/// What the debug overlay reports about `doc` and the work running for it.
+fn debug_facts(doc: &Document, find: &FindBar) -> crate::debug::Facts {
+    let t = &doc.buffer;
+    crate::debug::Facts {
+        backend: match (t.is_mapped(), doc.saves_on_worker()) {
+            (false, _) => "rope",
+            (true, false) => "bytes in memory",
+            (true, true) => "mapped file",
+        },
+        len: t.len_bytes(),
+        syntax: doc.syntax.phase_name(),
+        searching: find.open && !find.complete,
+        #[expect(clippy::cast_precision_loss, reason = "a percentage for display")]
+        counting: doc
+            .counting_lines()
+            .then(|| t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64),
+        saving: doc.is_saving(),
+    }
 }
 
 /// Geometry for the window `gpu` draws to, with room for the find bar when
@@ -2418,23 +2456,12 @@ pub fn run_headless(
         &sidebar,
         doc.canonical.as_deref(),
     );
+    if options.debug_overlay {
+        let mut debug = Debug::new(true);
+        debug.draw(&mut gpu, &theme.ui, &layout, debug_facts(&doc, &find));
+    }
     if let Some(spec) = &options.picker {
-        // "palette" or "files", optionally followed by ":query".
-        let (kind, query) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
-        let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
-        let mut p = match kind {
-            "files" => Picker::files(&root, notify),
-            "line" => Picker::go_to_line(notify, Some(doc.buffer.len_lines())),
-            _ => Picker::palette(notify),
-        };
-        let _ = p.input.insert(query);
-        // Let the walk and matcher finish, up to two seconds.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while p.tick() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let (keymap, _) = Keymap::new(&config.keys);
-        draw_picker_overlay(&mut gpu, &theme.ui, &layout, &p, &keymap, true);
+        draw_headless_picker(&mut gpu, &theme.ui, &layout, (spec, &root), &doc, config);
     }
     gpu.request_capture();
     if let Err(e) = gpu.render() {
@@ -2865,7 +2892,7 @@ impl ApplicationHandler<AppEvent> for App {
                 );
                 if let Some(cmd) = cmd {
                     self.blink.reset(now);
-                    self.latency.input(now);
+                    self.debug.latency.input(now);
                     self.run(cmd, event_loop);
                 }
             }

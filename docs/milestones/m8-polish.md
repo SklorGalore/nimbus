@@ -18,9 +18,10 @@ release builds for all three platforms.
 - [x] **Status bar**: line and column, selection length, line ending,
       encoding note for lossy files, language, indexing progress.
       Messages show on its left (view test; headless renders).
-- [ ] **Debug overlay** (`F12`): frame time, keystroke-to-present latency
+- [x] **Debug overlay** (`F12`): frame time, keystroke-to-present latency
       (last and worst of the last 100), atlas occupancy, buffer backend,
-      background task status.
+      background task status. `--debug-overlay` shows it from the start,
+      also in headless renders.
 - [ ] **Font fallback**: a missing glyph (CJK, emoji) is found in a system
       font through `fontdb`, loaded on a background thread, and drawn when
       ready; the `.notdef` box shows until then.
