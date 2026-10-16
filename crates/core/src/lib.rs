@@ -9,12 +9,15 @@ pub mod column;
 pub mod line_ending;
 pub mod movement;
 pub mod rope;
+pub mod search;
 pub mod selection;
+pub mod undo;
 
 pub use buffer::{Buffer, Edit, EditError, Snapshot, Text};
 pub use line_ending::LineEnding;
 pub use rope::RopeBuffer;
 pub use selection::{Selection, Selections};
+pub use undo::History;
 
 /// Crate version, surfaced in the window title and the debug overlay.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

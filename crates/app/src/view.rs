@@ -6,16 +6,27 @@
 
 use std::fmt::Write as _;
 
+use std::ops::Range;
+
 use nimbus_core::{Text, column};
 use nimbus_render::{Gpu, Metrics};
 
 use crate::document::Document;
+use crate::find::{Field, FindBar};
 
 const TEXT_COLOR: [f32; 4] = [0.85, 0.87, 0.91, 1.0];
 const GUTTER_COLOR: [f32; 4] = [0.42, 0.45, 0.52, 1.0];
 const CURRENT_LINE_NUMBER: [f32; 4] = [0.75, 0.78, 0.84, 1.0];
 const CURSOR_COLOR: [f32; 4] = [0.98, 0.75, 0.30, 1.0];
 const PREEDIT_COLOR: [f32; 4] = [0.98, 0.75, 0.30, 1.0];
+const SELECTION_COLOR: [f32; 4] = [0.25, 0.36, 0.55, 0.65];
+const MATCH_COLOR: [f32; 4] = [0.55, 0.45, 0.15, 0.45];
+const CURRENT_MATCH_COLOR: [f32; 4] = [0.85, 0.62, 0.20, 0.70];
+const BAR_COLOR: [f32; 4] = [0.14, 0.15, 0.18, 1.0];
+const FIELD_COLOR: [f32; 4] = [0.08, 0.09, 0.11, 1.0];
+const FIELD_FOCUS_COLOR: [f32; 4] = [0.30, 0.42, 0.62, 1.0];
+const TOGGLE_ON_COLOR: [f32; 4] = [0.30, 0.42, 0.62, 1.0];
+const ERROR_COLOR: [f32; 4] = [0.95, 0.45, 0.42, 1.0];
 
 #[expect(
     clippy::cast_precision_loss,
@@ -32,6 +43,19 @@ pub struct Preedit {
     pub text: String,
     /// The IME's cursor or highlighted clause within `text`, as a byte range.
     pub cursor: Option<(usize, usize)>,
+}
+
+/// What to show besides the text: cursor, composition and search matches.
+#[derive(Debug, Clone)]
+pub struct Decorations<'a> {
+    /// Draw the editor cursor (blink phase, and the editor has focus).
+    pub cursor_visible: bool,
+    /// Text being composed with an input method.
+    pub preedit: Option<&'a Preedit>,
+    /// Search matches to highlight, sorted.
+    pub matches: &'a [Range<usize>],
+    /// The current search match, highlighted more strongly.
+    pub current: Option<Range<usize>>,
 }
 
 /// Pixel geometry for one frame, from the window size and font metrics.
@@ -51,6 +75,10 @@ pub struct Layout {
     pub text_left: f32,
     /// Scale factor, for sizes that should look the same on any display.
     pub scale: f32,
+    /// Top of the text area: below the margin and any bar at the top.
+    pub top: f32,
+    /// Bottom of the text area: above any message line.
+    pub bottom: f32,
 }
 
 impl Layout {
@@ -71,7 +99,27 @@ impl Layout {
             gutter_cols,
             text_left,
             scale,
+            top: margin,
+            bottom: height,
         }
+    }
+
+    /// Reserve `top_rows` text rows at the top (the find bar) and
+    /// `bottom_rows` at the bottom (the message line).
+    #[must_use]
+    pub fn with_bars(mut self, top_rows: usize, bottom_rows: usize) -> Self {
+        let lh = self.metrics.line_height;
+        if top_rows > 0 {
+            // The bar has its own padding: margin above and below its rows.
+            self.top = 3.0 * self.margin + f(top_rows) * lh;
+        }
+        self.bottom = (self.height - f(bottom_rows) * lh).max(self.top + lh);
+        self
+    }
+
+    /// Height of the find bar area, if any rows are reserved for it.
+    fn bar_height(&self) -> f32 {
+        (self.top - self.margin).max(0.0)
     }
 
     /// Lines that fit entirely in the window: one "page" for Page Up/Down.
@@ -82,7 +130,7 @@ impl Layout {
         reason = "a small non-negative line count"
     )]
     pub fn full_lines(&self) -> usize {
-        (((self.height - self.margin) / self.metrics.line_height).floor() as usize).max(1)
+        (((self.bottom - self.top) / self.metrics.line_height).floor() as usize).max(1)
     }
 }
 
@@ -150,7 +198,7 @@ impl View {
         } else {
             -f(self.scroll_line - line)
         };
-        layout.margin + rel * layout.metrics.line_height - self.px()
+        layout.top + rel * layout.metrics.line_height - self.px()
     }
 
     /// Scroll vertically by `dy` pixels (positive moves toward the end).
@@ -212,7 +260,7 @@ impl View {
     #[must_use]
     pub fn hit(&self, x: f32, y: f32, doc: &Document, layout: &Layout, tab_width: usize) -> usize {
         let lh = layout.metrics.line_height;
-        let rows = ((y - layout.margin + self.px()) / lh).floor().max(0.0);
+        let rows = ((y - layout.top + self.px()) / lh).floor().max(0.0);
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -258,6 +306,52 @@ impl View {
         ]
     }
 
+    /// Draw the cursor's line with the composition `p` spliced in at byte
+    /// `at`, underlined, with the IME's own cursor or clause marked.
+    fn draw_preedit(
+        &mut self,
+        gpu: &mut Gpu,
+        (text, at): (&str, usize),
+        p: &Preedit,
+        origin: [f32; 2],
+        (layout, tab_width): (&Layout, usize),
+        (first_col, width_cols): (usize, usize),
+    ) {
+        let m = layout.metrics;
+        let (cell, lh, top) = (m.cell_width, m.line_height, origin[1]);
+        let thin = (1.5 * layout.scale).round().max(1.0);
+        self.spliced.clear();
+        self.spliced.push_str(text.get(..at).unwrap_or(text));
+        self.spliced.push_str(&p.text);
+        self.spliced.push_str(text.get(at..).unwrap_or(""));
+        let start = column::col_at(&self.spliced, at, tab_width);
+        let end = column::col_at(&self.spliced, at + p.text.len(), tab_width);
+        let underline_y = top + m.baseline + thin;
+        gpu.push_rect(
+            [origin[0] + f(start) * cell, underline_y],
+            [f(end - start) * cell, thin],
+            PREEDIT_COLOR,
+        );
+        if let Some((a, b)) = p.cursor {
+            let ca = column::col_at(&self.spliced, at + a, tab_width);
+            let cb = column::col_at(&self.spliced, at + b, tab_width);
+            if cb > ca {
+                gpu.push_rect(
+                    [origin[0] + f(ca) * cell, underline_y],
+                    [f(cb - ca) * cell, 2.0 * thin],
+                    PREEDIT_COLOR,
+                );
+            } else {
+                gpu.push_rect([origin[0] + f(ca) * cell, top], [thin, lh], CURSOR_COLOR);
+            }
+        }
+        let spliced = std::mem::take(&mut self.spliced);
+        draw_span(
+            gpu, &spliced, origin, first_col, width_cols, tab_width, layout,
+        );
+        self.spliced = spliced;
+    }
+
     /// Queue everything visible for one frame.
     pub fn draw(
         &mut self,
@@ -265,21 +359,36 @@ impl View {
         doc: &Document,
         layout: &Layout,
         tab_width: usize,
-        cursor_visible: bool,
-        preedit: Option<&Preedit>,
+        deco: Decorations<'_>,
     ) {
+        let Decorations {
+            cursor_visible,
+            preedit,
+            matches,
+            current,
+        } = deco;
         let m = layout.metrics;
         let lh = m.line_height;
         let cell = m.cell_width;
         let cursor = doc.cursor();
         let cursor_line = doc.buffer.byte_to_line(cursor);
-        let thin = (1.5 * layout.scale).round().max(1.0);
 
         gpu.begin_frame();
+        // The text area is its own layer, clipped so lines scrolled under a
+        // bar above or below do not show through it.
+        gpu.begin_layer(Some([
+            0.0,
+            layout.top,
+            layout.width,
+            layout.bottom - layout.top,
+        ]));
+        // Matches before the first visible line can be skipped at once.
+        let first_byte = doc.buffer.line_to_byte(self.scroll_line);
+        let mut next_match = matches.partition_point(|m| m.end <= first_byte);
         let mut line = self.scroll_line;
         loop {
             let top = self.line_top(line, layout);
-            if top >= layout.height || line >= doc.buffer.len_lines() {
+            if top >= layout.bottom || line >= doc.buffer.len_lines() {
                 break;
             }
             // Line number, right-aligned in the gutter.
@@ -295,6 +404,27 @@ impl View {
 
             let text = doc.buffer.line(line);
             let origin = [layout.text_left - self.scroll_x, top];
+            if let Some((a, b)) = selected_columns(doc, line, &text, tab_width) {
+                let x0 = (origin[0] + f(a) * cell).max(layout.text_left);
+                let x1 = origin[0] + f(b) * cell;
+                if x1 > x0 {
+                    gpu.push_rect([x0, top], [x1 - x0, lh], SELECTION_COLOR);
+                }
+            }
+            // Search matches on this line, over the selection so the current
+            // match stays visible when it is selected.
+            next_match = draw_matches(
+                gpu,
+                LineGeom {
+                    text: &text,
+                    start: doc.buffer.line_to_byte(line),
+                    origin,
+                },
+                matches,
+                next_match,
+                current.as_ref(),
+                (layout, tab_width),
+            );
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
@@ -307,40 +437,14 @@ impl View {
             match preedit {
                 Some(p) if line == cursor_line && !p.text.is_empty() => {
                     let at = cursor - doc.buffer.line_to_byte(line);
-                    self.spliced.clear();
-                    self.spliced.push_str(text.get(..at).unwrap_or(&text));
-                    self.spliced.push_str(&p.text);
-                    self.spliced.push_str(text.get(at..).unwrap_or(""));
-                    let start = column::col_at(&self.spliced, at, tab_width);
-                    let end = column::col_at(&self.spliced, at + p.text.len(), tab_width);
-                    let underline_y = top + m.baseline + thin;
-                    gpu.push_rect(
-                        [origin[0] + f(start) * cell, underline_y],
-                        [f(end - start) * cell, thin],
-                        PREEDIT_COLOR,
+                    self.draw_preedit(
+                        gpu,
+                        (&text, at),
+                        p,
+                        origin,
+                        (layout, tab_width),
+                        (first_col, width_cols),
                     );
-                    if let Some((a, b)) = p.cursor {
-                        let ca = column::col_at(&self.spliced, at + a, tab_width);
-                        let cb = column::col_at(&self.spliced, at + b, tab_width);
-                        if cb > ca {
-                            gpu.push_rect(
-                                [origin[0] + f(ca) * cell, underline_y],
-                                [f(cb - ca) * cell, 2.0 * thin],
-                                PREEDIT_COLOR,
-                            );
-                        } else {
-                            gpu.push_rect(
-                                [origin[0] + f(ca) * cell, top],
-                                [thin, lh],
-                                CURSOR_COLOR,
-                            );
-                        }
-                    }
-                    let spliced = std::mem::take(&mut self.spliced);
-                    draw_span(
-                        gpu, &spliced, origin, first_col, width_cols, tab_width, layout,
-                    );
-                    self.spliced = spliced;
                 }
                 _ => draw_span(gpu, &text, origin, first_col, width_cols, tab_width, layout),
             }
@@ -348,6 +452,7 @@ impl View {
         }
 
         if cursor_visible && preedit.is_none_or(|p| p.text.is_empty()) {
+            // Still inside the text-area layer, so it is clipped too.
             let [x, y, _, h] = self.cursor_rect(doc, layout, tab_width, None);
             if x >= layout.text_left {
                 gpu.push_rect(
@@ -358,6 +463,213 @@ impl View {
             }
         }
     }
+}
+
+/// Where one logical line is drawn.
+#[derive(Debug, Clone, Copy)]
+struct LineGeom<'a> {
+    text: &'a str,
+    /// Byte offset of the line in the document.
+    start: usize,
+    /// Screen position of column 0 of the line.
+    origin: [f32; 2],
+}
+
+/// Highlight the search matches that touch `line`, starting at index
+/// `next` in `matches`. Returns the index to continue from on the next line.
+fn draw_matches(
+    gpu: &mut Gpu,
+    line: LineGeom<'_>,
+    matches: &[Range<usize>],
+    mut next: usize,
+    current: Option<&Range<usize>>,
+    (layout, tab_width): (&Layout, usize),
+) -> usize {
+    let cell = layout.metrics.cell_width;
+    let end = line.start + line.text.len();
+    while let Some(m) = matches.get(next) {
+        if m.start > end {
+            break;
+        }
+        let a = column::col_at(line.text, m.start.max(line.start) - line.start, tab_width);
+        let b = column::col_at(line.text, m.end.min(end) - line.start, tab_width);
+        let color = if current == Some(m) {
+            CURRENT_MATCH_COLOR
+        } else {
+            MATCH_COLOR
+        };
+        let x0 = (line.origin[0] + f(a) * cell).max(layout.text_left);
+        let x1 = line.origin[0] + f(b.max(a + 1)) * cell;
+        if x1 > x0 {
+            gpu.push_rect(
+                [x0, line.origin[1]],
+                [x1 - x0, layout.metrics.line_height],
+                color,
+            );
+        }
+        if m.end > end {
+            break; // continues on the next line
+        }
+        next += 1;
+    }
+    next
+}
+
+/// Draw the find bar at the top of the window, as an overlay layer.
+pub fn draw_find_bar(gpu: &mut Gpu, bar: &FindBar, layout: &Layout, cursor_visible: bool) {
+    let m = layout.metrics;
+    let (cell, lh) = (m.cell_width, m.line_height);
+    let height = layout.bar_height();
+    gpu.begin_layer(None);
+    gpu.push_rect([0.0, 0.0], [layout.width, height], BAR_COLOR);
+
+    let label_x = layout.margin;
+    let field_x = (label_x + 9.0 * cell).round();
+    // Right side: toggles and the match count.
+    let status = bar.status();
+    let right_cols = 8 + status.chars().count().max(10);
+    let field_w =
+        (layout.width - field_x - f(right_cols) * cell - 2.0 * layout.margin).max(10.0 * cell);
+
+    let rows: &[(Field, &str)] = if bar.replace_mode {
+        &[(Field::Find, "Find"), (Field::Replace, "Replace")]
+    } else {
+        &[(Field::Find, "Find")]
+    };
+    for (row, (field, label)) in rows.iter().enumerate() {
+        let y = layout.margin + f(row) * (lh + layout.margin);
+        gpu.push_text_line([label_x, y], label, GUTTER_COLOR);
+        let focused = bar.focused && bar.focus == *field;
+        if focused {
+            let b = layout.scale.round().max(1.0);
+            gpu.push_rect(
+                [field_x - b, y - b],
+                [field_w + 2.0 * b, lh + 2.0 * b],
+                FIELD_FOCUS_COLOR,
+            );
+        }
+        gpu.push_rect([field_x, y], [field_w, lh], FIELD_COLOR);
+        let doc = match field {
+            Field::Find => &bar.find,
+            Field::Replace => &bar.replace,
+        };
+        draw_field(
+            gpu,
+            doc,
+            [field_x, y],
+            field_w,
+            layout,
+            focused && cursor_visible,
+        );
+    }
+
+    // Toggles: case and regex, then the status.
+    let y = layout.margin;
+    let mut x = field_x + field_w + 2.0 * cell;
+    for (on, text) in [(bar.case_sensitive, "Aa"), (bar.regex, ".*")] {
+        if on {
+            gpu.push_rect([x - cell / 2.0, y], [3.0 * cell, lh], TOGGLE_ON_COLOR);
+        }
+        gpu.push_text_line([x, y], text, TEXT_COLOR);
+        x += 3.5 * cell;
+    }
+    let color = if bar.error.is_some() {
+        ERROR_COLOR
+    } else {
+        GUTTER_COLOR
+    };
+    gpu.push_text_line([x.round(), y], &status, color);
+}
+
+/// Draw a one-line text field: its first line, selection and cursor,
+/// clipped to `width` pixels from `origin`.
+fn draw_field(
+    gpu: &mut Gpu,
+    doc: &Document,
+    origin: [f32; 2],
+    width: f32,
+    layout: &Layout,
+    cursor: bool,
+) {
+    let m = layout.metrics;
+    let cell = m.cell_width;
+    let text = doc.buffer.line(0);
+    let line_end = text.len();
+    let cursor_col = column::col_at(&text, doc.cursor().min(line_end), 4);
+    // Scroll the field so the cursor stays inside it.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a small non-negative column count"
+    )]
+    let visible = ((width / cell).floor() as usize).saturating_sub(1).max(1);
+    let first = cursor_col.saturating_sub(visible);
+    let x0 = origin[0] - f(first) * cell;
+    gpu.begin_layer(Some([origin[0], origin[1], width, m.line_height]));
+    if let Some((a, b)) = selected_columns(doc, 0, &text, 4) {
+        gpu.push_rect(
+            [x0 + f(a) * cell, origin[1]],
+            [f(b - a) * cell, m.line_height],
+            SELECTION_COLOR,
+        );
+    }
+    let (start, end, start_col) = visible_span(&text, first, visible + 1, 4);
+    gpu.push_text_span(
+        [x0 + f(start_col) * cell, origin[1]],
+        &text[start..end],
+        start_col,
+        TEXT_COLOR,
+        origin[0],
+    );
+    if cursor {
+        let w = (2.0 * layout.scale).round().max(1.0);
+        gpu.push_rect(
+            [x0 + f(cursor_col) * cell, origin[1]],
+            [w, m.line_height],
+            CURSOR_COLOR,
+        );
+    }
+    gpu.begin_layer(None);
+}
+
+/// Draw a one-line message at the bottom of the window, as an overlay.
+pub fn draw_message(gpu: &mut Gpu, text: &str, layout: &Layout, is_error: bool) {
+    let lh = layout.metrics.line_height;
+    gpu.begin_layer(None);
+    gpu.push_rect(
+        [0.0, layout.bottom],
+        [layout.width, layout.height - layout.bottom],
+        BAR_COLOR,
+    );
+    let color = if is_error { ERROR_COLOR } else { TEXT_COLOR };
+    let y = (layout.bottom + (layout.height - layout.bottom - lh) / 2.0).round();
+    gpu.push_text_line([layout.margin, y], text, color);
+}
+
+/// The selected columns of `line` (number `line_idx`, content `text`), as
+/// a half-open column range, or `None` if nothing on it is selected. A
+/// selection continuing past the end of the line adds one column, showing
+/// that the line break is selected too.
+fn selected_columns(
+    doc: &Document,
+    line_idx: usize,
+    text: &str,
+    tab_width: usize,
+) -> Option<(usize, usize)> {
+    let sel = doc.selection().range();
+    if sel.is_empty() {
+        return None;
+    }
+    let start = doc.buffer.line_to_byte(line_idx);
+    let end = start + text.len();
+    let next = doc.buffer.line_to_byte(line_idx + 1);
+    if sel.end <= start || sel.start > end || (sel.start == end && sel.end <= end) {
+        return None;
+    }
+    let a = column::col_at(text, sel.start.max(start) - start, tab_width);
+    let b = column::col_at(text, sel.end.min(end) - start, tab_width);
+    let past_end = sel.end > end && next > end;
+    Some((a, b + usize::from(past_end)))
 }
 
 /// Draw the visible span of `line`, whose column 0 is at `origin`.
@@ -387,7 +699,28 @@ fn draw_span(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nimbus_core::RopeBuffer;
+
+    #[test]
+    fn selection_columns_per_line() {
+        let mut d = doc("abc\n日x\nlast");
+        d.select(1..7);
+        assert_eq!(
+            selected_columns(&d, 0, "abc", 4),
+            Some((1, 4)),
+            "with the line break"
+        );
+        assert_eq!(selected_columns(&d, 1, "日x", 4), Some((0, 2)));
+        assert_eq!(selected_columns(&d, 2, "last", 4), None);
+        d.select(3..3);
+        assert_eq!(selected_columns(&d, 0, "abc", 4), None, "empty selection");
+        d.select(3..4);
+        assert_eq!(
+            selected_columns(&d, 0, "abc", 4),
+            Some((3, 4)),
+            "just the line break"
+        );
+        assert_eq!(selected_columns(&d, 1, "日x", 4), None);
+    }
 
     #[test]
     fn visible_span_covers_only_what_is_on_screen() {
@@ -416,10 +749,7 @@ mod tests {
     }
 
     fn doc(text: &str) -> Document {
-        Document {
-            buffer: RopeBuffer::from_text(text),
-            ..Document::untitled()
-        }
+        Document::from_text(text)
     }
 
     #[test]
@@ -459,10 +789,10 @@ mod tests {
         let mut d = doc(&text);
         let l = layout(51);
         let mut v = View::default();
-        d.click(d.buffer.line_to_byte(30));
+        d.click(d.buffer.line_to_byte(30), false);
         v.ensure_cursor_visible(&d, &l, 4);
         assert_eq!(v.scroll_line, 21, "line 30 is the last full line");
-        d.click(d.buffer.line_to_byte(5));
+        d.click(d.buffer.line_to_byte(5), false);
         v.ensure_cursor_visible(&d, &l, 4);
         assert_eq!(v.scroll_line, 5);
     }

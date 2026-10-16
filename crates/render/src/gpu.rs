@@ -464,7 +464,22 @@ impl Gpu {
         self.text.begin_frame(&mut self.atlas, &self.queue);
     }
 
-    /// Queue a filled rectangle for this frame. Rectangles draw under text.
+    /// Start a new layer drawn above everything queued so far, clipped to
+    /// `clip` as `[x, y, width, height]` in physical pixels (`None` for the
+    /// whole window). Overlays use this to cover the text beneath them.
+    pub fn begin_layer(&mut self, clip: Option<[f32; 4]>) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "window pixel coordinates, clamped to be non-negative"
+        )]
+        let to_px = |v: f32| v.max(0.0).round() as u32;
+        self.frame
+            .begin_layer(clip.map(|[x, y, w, h]| [to_px(x), to_px(y), to_px(w), to_px(h)]));
+    }
+
+    /// Queue a filled rectangle for this frame. Within a layer, rectangles
+    /// draw under text.
     pub fn push_rect(&mut self, pos: [f32; 2], size: [f32; 2], color: [f32; 4]) {
         self.frame.push_rect(pos, size, color);
     }
@@ -553,7 +568,7 @@ impl Gpu {
             &self.device,
             &self.queue,
             &mut encoder,
-            &view,
+            (&view, [self.config.width, self.config.height]),
             &mut self.pipelines,
             &self.atlas,
         );

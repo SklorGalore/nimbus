@@ -7,7 +7,9 @@
 //!
 //! The functions take [`Text`], not a buffer, so they work on snapshots too.
 
-use unicode_segmentation::GraphemeCursor;
+use std::ops::Range;
+
+use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 use crate::Text;
 use crate::column;
@@ -79,6 +81,116 @@ pub fn line_start(t: &dyn Text, pos: usize) -> usize {
 #[must_use]
 pub fn line_end(t: &dyn Text, pos: usize) -> usize {
     content_end(t, t.byte_to_line(pos))
+}
+
+/// Character classes for word movement. Code-editor style: `.`, `(` and
+/// friends split words, unlike the Unicode word rules for prose, which keep
+/// `bar.baz` together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    Word,
+    Space,
+    Punct,
+}
+
+fn class(grapheme: &str) -> Class {
+    match grapheme.chars().next() {
+        Some(c) if c.is_alphanumeric() || c == '_' => Class::Word,
+        Some(c) if c.is_whitespace() => Class::Space,
+        _ => Class::Punct,
+    }
+}
+
+/// Runs of graphemes of one class, as `(start, end, class)` byte offsets.
+/// A plain iterator: word movement runs per keystroke and must not allocate.
+fn segments(line: &str) -> impl Iterator<Item = (usize, usize, Class)> + '_ {
+    let mut graphemes = line.grapheme_indices(true).peekable();
+    std::iter::from_fn(move || {
+        let (start, g) = graphemes.next()?;
+        let c = class(g);
+        let mut end = start + g.len();
+        while let Some(&(i, next)) = graphemes.peek() {
+            if class(next) != c {
+                break;
+            }
+            end = i + next.len();
+            graphemes.next();
+        }
+        Some((start, end, c))
+    })
+}
+
+/// Start of the previous word, as Alt+Left (macOS) or Ctrl+Left does. At
+/// the start of a line, moves to the end of the previous line.
+#[must_use]
+pub fn word_left(t: &dyn Text, pos: usize) -> usize {
+    let l = t.byte_to_line(pos);
+    let start = t.line_to_byte(l);
+    if pos <= start {
+        return prev_grapheme(t, pos);
+    }
+    let line = t.line(l);
+    let off = (pos - start).min(line.len());
+    segments(&line)
+        .take_while(|&(i, _, _)| i < off)
+        .filter(|&(_, _, c)| c != Class::Space)
+        .last()
+        .map_or(start, |(i, _, _)| start + i)
+}
+
+/// End of the next word, as Alt+Right (macOS) or Ctrl+Right does. At the
+/// end of a line, moves to the start of the next line.
+#[must_use]
+pub fn word_right(t: &dyn Text, pos: usize) -> usize {
+    let l = t.byte_to_line(pos);
+    let start = t.line_to_byte(l);
+    let line = t.line(l);
+    let off = pos.saturating_sub(start);
+    if off >= line.len() {
+        return next_grapheme(t, pos);
+    }
+    segments(&line)
+        .find(|&(_, end, c)| end > off && c != Class::Space)
+        .map_or(start + line.len(), |(_, end, _)| start + end)
+}
+
+/// The word, run of spaces, or run of punctuation under `pos`, for a
+/// double-click. At the end of a line it is the run before the position.
+#[must_use]
+pub fn word_at(t: &dyn Text, pos: usize) -> Range<usize> {
+    let l = t.byte_to_line(pos);
+    let start = t.line_to_byte(l);
+    let line = t.line(l);
+    let off = pos.saturating_sub(start).min(line.len());
+    let mut before = None;
+    for (i, end, _) in segments(&line) {
+        if i <= off && off < end {
+            return start + i..start + end;
+        }
+        if end == off {
+            before = Some(start + i..start + end);
+        }
+    }
+    before.unwrap_or(pos..pos)
+}
+
+/// The whole line containing `pos`, including its line ending, for a
+/// triple-click.
+#[must_use]
+pub fn line_range(t: &dyn Text, pos: usize) -> Range<usize> {
+    let l = t.byte_to_line(pos);
+    t.line_to_byte(l)..t.line_to_byte(l + 1)
+}
+
+/// Home: the first non-blank character of the line, or column 0 if the
+/// cursor is already there (so pressing Home twice toggles).
+#[must_use]
+pub fn smart_home(t: &dyn Text, pos: usize) -> usize {
+    let start = line_start(t, pos);
+    let line = t.line(t.byte_to_line(pos));
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let first = start + indent;
+    if pos == first { start } else { first }
 }
 
 /// Display column of `pos` on its line.
@@ -266,6 +378,47 @@ mod tests {
                 preferred_col: 3
             }
         );
+    }
+
+    #[test]
+    fn word_movement_skips_punctuation_and_spaces() {
+        // Runs: let | ␠ | foo_bar | ␠ | = | ␠ | baz | ( | 1 | );
+        let t = RopeBuffer::from_text("let foo_bar = baz(1);\nnext");
+        assert_eq!(word_right(&t, 0), 3);
+        assert_eq!(word_right(&t, 3), 11);
+        assert_eq!(word_right(&t, 11), 13, "punctuation is a stop");
+        assert_eq!(word_right(&t, 13), 17);
+        assert_eq!(word_right(&t, 17), 18);
+        assert_eq!(word_right(&t, 19), 21);
+        assert_eq!(word_right(&t, 21), 22, "line end: next line");
+        assert_eq!(word_left(&t, 22), 21, "line start: previous line end");
+        assert_eq!(word_left(&t, 21), 19);
+        assert_eq!(word_left(&t, 14), 12);
+        assert_eq!(word_left(&t, 2), 0);
+    }
+
+    #[test]
+    fn word_at_picks_the_segment_under_the_cursor() {
+        let t = RopeBuffer::from_text("foo  bar.baz");
+        assert_eq!(word_at(&t, 1), 0..3);
+        assert_eq!(word_at(&t, 3), 3..5, "spaces select as a run");
+        assert_eq!(word_at(&t, 8), 8..9);
+        assert_eq!(word_at(&t, 12), 9..12, "end of line takes the word before");
+    }
+
+    #[test]
+    fn line_range_includes_the_line_ending() {
+        let t = RopeBuffer::from_text("ab\r\ncd");
+        assert_eq!(line_range(&t, 1), 0..4);
+        assert_eq!(line_range(&t, 5), 4..6);
+    }
+
+    #[test]
+    fn smart_home_toggles_between_indent_and_column_zero() {
+        let t = RopeBuffer::from_text("  \tfoo");
+        assert_eq!(smart_home(&t, 6), 3);
+        assert_eq!(smart_home(&t, 3), 0);
+        assert_eq!(smart_home(&t, 0), 3);
     }
 
     #[test]
