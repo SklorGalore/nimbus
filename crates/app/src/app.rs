@@ -20,19 +20,21 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
 
-use nimbus_core::Text;
+use nimbus_core::line_index::IndexChunk;
+use nimbus_core::{Buffer, Text};
 use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
 use crate::config::{self, Config};
-use crate::document::{DiskChange, Document};
-use crate::find::{Field, FindBar, SearchBatch};
+use crate::document::{DiskChange, Document, MAX_COPY_BYTES};
+use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::input::{self, Command, Motion};
 use crate::io;
 use crate::keymap::Keymap;
 use crate::languages::Languages;
 use crate::menu::{self, MenuBar};
 use crate::picker::{self, Item, Kind, Picker};
+use crate::saver::{self, ReplacePolicy, SaveEvent, SaveStep};
 use crate::sidebar::{self, Sidebar};
 use crate::state::State;
 use crate::theme::{Theme, Ui};
@@ -58,6 +60,12 @@ pub enum AppEvent {
     Disk(Vec<Change>),
     /// The file watcher could not watch everything asked of it.
     WatchWarning(String),
+    /// A chunk of a huge file's line index, for the document with that
+    /// indexing token, and why counting stopped if a read failed (the
+    /// file was cut short).
+    Index(u64, IndexChunk, Option<String>),
+    /// Progress or the end of saving a huge file ([`crate::saver`]).
+    Save(SaveEvent),
 }
 
 /// List a folder for the sidebar on its own thread.
@@ -136,6 +144,12 @@ pub struct Tab {
     pub view: View,
     /// The "too large to highlight" note has been shown.
     noted_size: bool,
+    /// What to do when the save of a huge file under way ends.
+    after_save: AfterSave,
+    /// The answer "Don't Save" during a quit that is waiting for another
+    /// tab's save: the history's top id then, so the question is not asked
+    /// again when the quit goes on, unless the text changed since.
+    discard_at: Option<u64>,
 }
 
 impl Tab {
@@ -148,8 +162,62 @@ impl Tab {
             doc,
             view,
             noted_size: false,
+            after_save: AfterSave::default(),
+            discard_at: None,
         }
     }
+}
+
+/// What to do when a huge file's save, which runs on a worker, ends.
+#[derive(Debug, Default)]
+struct AfterSave {
+    /// Set for Save As.
+    save_as: Option<SaveAs>,
+    /// Close the tab once saved (Close was chosen while saving).
+    close: bool,
+}
+
+/// A Save As under way.
+#[derive(Debug)]
+struct SaveAs {
+    /// The name before, to go back to if the save fails.
+    old_path: Option<PathBuf>,
+}
+
+/// Saves of huge files, which run on workers, and what waits for them.
+#[derive(Debug, Default)]
+struct Saves {
+    /// Quit once the save under way has finished (Quit was chosen while a
+    /// huge file was being saved).
+    quit_after: bool,
+    /// Check again at this time whether a written save can replace its
+    /// file (Windows waits for the old file to be released).
+    poll_at: Option<Instant>,
+    /// A search was stopped so a save could replace its file; search again
+    /// when the save ends.
+    search_stopped: bool,
+}
+
+/// What became of a request to save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Saved {
+    /// Saved.
+    Yes,
+    /// A huge file's save started on a worker; it reports when done.
+    Started,
+    /// Not saved: failed, or the user cancelled the dialog.
+    No,
+}
+
+/// The answer to "save changes before closing?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Discard {
+    /// Go ahead: saved, nothing to save, or "Don't Save".
+    Yes,
+    /// Keep the tab: cancelled, or the save failed.
+    Cancel,
+    /// A save is under way; go ahead once it has finished.
+    Wait,
 }
 
 /// Cursor blink timing.
@@ -303,10 +371,14 @@ pub struct App {
     resize_cursor: bool,
     /// Watching has started (after the first frame).
     watching: bool,
+    /// A go-to-line waiting for a huge file's lines to be counted.
+    pending_line: Option<usize>,
     /// Open files that changed on disk too soon after their last reload,
     /// to look at again at `recheck_at`.
     recheck: Vec<PathBuf>,
     recheck_at: Option<Instant>,
+    /// Saves of huge files under way, and what waits for them.
+    saves: Saves,
 }
 
 /// Multi-click detection and drag state. winit reports presses, not
@@ -427,8 +499,10 @@ impl App {
             ui_state,
             resize_cursor: false,
             watching: false,
+            pending_line: None,
             recheck: Vec::new(),
             recheck_at: None,
+            saves: Saves::default(),
         }
     }
 
@@ -548,6 +622,7 @@ impl App {
             }
             Command::GoToTab(i) => self.switch_to(i.min(self.tabs.len() - 1)),
             Command::QuickOpen => self.open_picker(Kind::Files),
+            Command::GoToLine => self.open_picker(Kind::Line),
             Command::Palette => self.open_picker(Kind::Palette),
             Command::ReloadConfig => self.reload_config(),
             Command::ToggleTheme => {
@@ -588,6 +663,7 @@ impl App {
                     false,
                 );
             }
+            Command::ReloadFromDisk if self.waits_for_save() => {}
             Command::ReloadFromDisk => {
                 let languages = &self.languages;
                 match self.tabs[self.active].doc.reload(languages) {
@@ -615,6 +691,9 @@ impl App {
 
     /// Editing, movement and find commands on the active tab.
     fn run_edit(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
+        if cmd.edits_text() && self.waits_for_save() {
+            return Ok(());
+        }
         let page = self.layout().map_or(1, |l| l.full_lines());
         let tab_width = self.tab_width();
         match cmd {
@@ -711,6 +790,82 @@ impl App {
         self.changed(false);
     }
 
+    /// Move the cursor to the start of line `n` (counting from 1). Past the
+    /// last line it goes to the last line; in a huge file whose lines are
+    /// still being counted, the jump waits until counting reaches it.
+    fn go_to_line(&mut self, n: usize) {
+        let t = &self.tabs[self.active].doc.buffer;
+        let line = n.saturating_sub(1);
+        if line >= t.len_lines() && self.tabs[self.active].doc.counting_lines() {
+            self.pending_line = Some(n);
+            self.say(
+                format!("Going to line {n} once lines are counted that far"),
+                false,
+            );
+            return;
+        }
+        self.pending_line = None;
+        let pos = t.line_to_byte(line.min(t.len_lines().saturating_sub(1)));
+        let doc = self.doc_mut();
+        doc.click(pos, false);
+        doc.preferred_column = None;
+        self.changed(true);
+    }
+
+    /// Start line counting for any mapped document that has not started.
+    fn start_indexing(&mut self) {
+        for tab in &mut self.tabs {
+            if let Some(job) = tab.doc.indexing.take() {
+                let proxy = self.proxy.clone();
+                job.spawn(move |token, chunk, error| {
+                    proxy
+                        .send_event(AppEvent::Index(token, chunk, error))
+                        .is_ok()
+                });
+            }
+        }
+    }
+
+    /// A chunk of line index arrived: merge it, report progress, and finish
+    /// a go-to-line that was waiting for it.
+    fn index_arrived(&mut self, token: u64, chunk: IndexChunk, error: Option<String>) {
+        let Some(i) = self
+            .tabs
+            .iter_mut()
+            .position(|t| t.doc.index_token == Some(token))
+        else {
+            return; // closed or reloaded meanwhile
+        };
+        let merged = self.tabs[i].doc.merge_index(token, chunk);
+        if error.is_some() {
+            // Nothing more comes: stop waiting for it.
+            self.tabs[i].doc.stop_indexing();
+        }
+        if !merged || i != self.active {
+            return;
+        }
+        let t = &self.tabs[i].doc.buffer;
+        if let Some(e) = error {
+            #[expect(clippy::cast_precision_loss, reason = "a percentage for display")]
+            let pct = t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64;
+            self.say(format!("Stopped counting lines at {pct:.0}%: {e}"), true);
+        } else if t.is_fully_indexed() {
+            let lines = t.len_lines();
+            self.say(format!("{lines} lines"), false);
+        } else {
+            #[expect(clippy::cast_precision_loss, reason = "a percentage for display")]
+            let pct = t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64;
+            self.say(format!("Counting lines… {pct:.0}%"), false);
+        }
+        if let Some(n) = self.pending_line {
+            let t = &self.tabs[i].doc.buffer;
+            if n <= t.len_lines() || !self.tabs[i].doc.counting_lines() {
+                self.go_to_line(n);
+            }
+        }
+        self.changed(false);
+    }
+
     /// Start folder listings for the sidebar on worker threads.
     fn start_listings(&self, requests: Vec<ListRequest>) {
         for req in requests {
@@ -792,8 +947,11 @@ impl App {
                 continue;
             }
             // A file written to over and over (a growing log) reloads at
-            // most once per RELOAD_GAP; the rest wait for the timer.
+            // most once per RELOAD_GAP; the rest wait for the timer. Not a
+            // mapped one: it never reloads by itself unless cut short, and
+            // that must be handled at once.
             if let Some(at) = tab.doc.reloaded_at
+                && !tab.doc.buffer.is_mapped()
                 && now.duration_since(at) < RELOAD_GAP
             {
                 let due = at + RELOAD_GAP;
@@ -812,6 +970,21 @@ impl App {
                     format!(
                         "{name} changed on disk. Run Reload from Disk, or Keep My Version, \
                          from the command palette"
+                    )
+                }
+                DiskChange::NotReloaded => format!(
+                    "{name} changed on disk; huge files do not reload by themselves. \
+                     Run Reload from Disk from the command palette to see the changes"
+                ),
+                DiskChange::Truncated { reloaded: true } => {
+                    is_error = true;
+                    format!("{name} was truncated on disk; reloaded it")
+                }
+                DiskChange::Truncated { reloaded: false } => {
+                    is_error = true;
+                    format!(
+                        "{name} was truncated on disk. Reload it now (Reload from Disk in the \
+                         command palette): reading the missing part can crash Nimbus"
                     )
                 }
                 DiskChange::Deleted => {
@@ -917,11 +1090,19 @@ impl App {
         }
     }
 
-    /// Save tab `i`; an untitled tab asks for a name. Returns whether it
-    /// was saved.
-    fn save(&mut self, i: usize) -> bool {
+    /// Save tab `i`; an untitled tab asks for a name. A huge (mapped) file
+    /// saves on a worker: this starts it and returns [`Saved::Started`],
+    /// and [`App::save_ended`] finishes.
+    fn save(&mut self, i: usize) -> Saved {
         if self.tabs[i].doc.path.is_none() {
             return self.save_as(i);
+        }
+        if self.tabs[i].doc.is_saving() {
+            self.say("Already saving; edits wait until it is done", false);
+            return Saved::Started;
+        }
+        if self.tabs[i].doc.saves_on_worker() {
+            return self.start_save(i);
         }
         match self.tabs[i].doc.save() {
             Ok(()) => {
@@ -929,18 +1110,189 @@ impl App {
                 log::info!("saved {name}");
                 self.title_key = None;
                 self.say(format!("Saved {name}"), false);
-                true
+                Saved::Yes
             }
             Err(e) => {
                 log::error!("{e}");
                 self.dialog(MessageLevel::Error, "Could not save", &e.to_string());
-                false
+                Saved::No
             }
         }
     }
 
+    /// Start saving the mapped document in tab `i` on a worker.
+    fn start_save(&mut self, i: usize) -> Saved {
+        let doc = &mut self.tabs[i].doc;
+        let name = doc.display_name();
+        let job = match doc.begin_save(ReplacePolicy::default()) {
+            Ok(job) => job,
+            Err(e) => {
+                log::error!("{e}");
+                self.dialog(MessageLevel::Error, "Could not save", &e.to_string());
+                return Saved::No;
+            }
+        };
+        let token = job.token;
+        let proxy = self.proxy.clone();
+        if let Err(e) = job.spawn(move |event| proxy.send_event(AppEvent::Save(event)).is_ok()) {
+            log::error!("could not start the save thread: {e}");
+            // Nothing was written; end the save so edits go on.
+            let failed = Err(io::SaveError {
+                step: "starting the save",
+                source: e,
+            });
+            let step = self.tabs[i].doc.save_written(token, failed, Instant::now());
+            log::debug!("save of {name} ended before it began: {step:?}");
+            self.dialog(
+                MessageLevel::Error,
+                "Could not save",
+                "Could not start saving; nothing was written",
+            );
+            return Saved::No;
+        }
+        log::info!("saving {name} on a worker");
+        self.say(format!("Saving {name}…"), false);
+        Saved::Started
+    }
+
+    /// Progress or the end of a huge file's save.
+    fn save_event(&mut self, event: SaveEvent, event_loop: &ActiveEventLoop) {
+        match event {
+            SaveEvent::Progress {
+                token,
+                written,
+                total,
+            } => {
+                let Some(i) = self.tab_saving(token) else {
+                    return;
+                };
+                if i == self.active {
+                    let name = self.tabs[i].doc.display_name();
+                    let pct = written.saturating_mul(100) / total.max(1);
+                    self.say(format!("Saving {name}… {pct}%"), false);
+                }
+            }
+            SaveEvent::Done { token, result } => {
+                // No tab: it went away, and dropping the result deletes the
+                // temp file.
+                let Some(i) = self.tab_saving(token) else {
+                    return;
+                };
+                let step = self.tabs[i]
+                    .doc
+                    .save_written(token, *result, Instant::now());
+                self.save_step(i, step, event_loop);
+            }
+        }
+    }
+
+    /// The tab whose save is `token`.
+    fn tab_saving(&self, token: u64) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|t| t.doc.save_token() == Some(token))
+    }
+
+    /// A save of tab `i` moved on to `step`.
+    fn save_step(&mut self, i: usize, step: SaveStep, event_loop: &ActiveEventLoop) {
+        match step {
+            SaveStep::Waiting => {
+                // Windows: a search may be reading the old file, which keeps
+                // it mapped. Stop it; it runs again once the save is done.
+                self.saves.search_stopped |= self.find.stop();
+                let due = Instant::now() + saver::POLL;
+                self.saves.poll_at = Some(self.saves.poll_at.map_or(due, |t| t.min(due)));
+            }
+            SaveStep::Stale => {}
+            step => self.save_ended(i, step, event_loop),
+        }
+    }
+
+    /// Check whether written saves can replace their files yet (Windows).
+    fn poll_saves(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        // From the end: finishing a save may close its tab.
+        for i in (0..self.tabs.len()).rev() {
+            if i < self.tabs.len() && self.tabs[i].doc.is_replacing() {
+                let step = self.tabs[i].doc.poll_replace(now);
+                self.save_step(i, step, event_loop);
+            }
+        }
+    }
+
+    /// A save of tab `i` that ran on a worker ended: report it, and close
+    /// the tab or quit if that was waiting for it.
+    fn save_ended(&mut self, i: usize, step: SaveStep, event_loop: &ActiveEventLoop) {
+        let after = std::mem::take(&mut self.tabs[i].after_save);
+        let name = self.tabs[i].doc.display_name();
+        self.title_key = None;
+        if self.saves.search_stopped && !self.tabs.iter().any(|t| t.doc.is_replacing()) {
+            self.saves.search_stopped = false;
+            if self.find.open {
+                self.search(false);
+            }
+        }
+        let failure = match step {
+            SaveStep::Saved => None,
+            SaveStep::NotReplaced(message) => Some(message),
+            SaveStep::Failed(e) => Some(e.to_string()),
+            SaveStep::Waiting | SaveStep::Stale => return,
+        };
+        let saved = failure.is_none();
+        if let Some(message) = failure {
+            log::error!("{message}");
+            if let Some(save_as) = &after.save_as {
+                self.tabs[i].doc.path.clone_from(&save_as.old_path);
+            }
+            // Whatever was waiting for this save must not go ahead.
+            self.saves.quit_after = false;
+            for tab in &mut self.tabs {
+                tab.discard_at = None;
+            }
+            self.say(message.clone(), true);
+            self.dialog(MessageLevel::Error, "Could not save", &message);
+        } else {
+            log::info!("saved {name}");
+            self.say(format!("Saved {name}"), false);
+            if after.save_as.is_some() {
+                // Saved under a new name (see App::save_as).
+                self.tabs[i].doc.detect_language(&self.languages);
+                self.sync_watch();
+                self.reveal_active();
+            }
+        }
+        // Changes on disk while it ran were set aside; look now, after the
+        // report so that any warning stays on screen.
+        if let Some(path) = self.tabs[i].doc.canonical.clone() {
+            self.disk_changed(&[Change {
+                path,
+                structural: false,
+            }]);
+        }
+        if saved && after.close {
+            self.close_tab(i, event_loop);
+        } else if saved && self.saves.quit_after {
+            self.quit(event_loop);
+        }
+    }
+
+    /// Say that edits to the active document wait for its save, if one is
+    /// under way. Returns whether it is.
+    fn waits_for_save(&mut self) -> bool {
+        if !self.doc().is_saving() {
+            return false;
+        }
+        let name = self.doc().display_name();
+        self.say(format!("Saving {name}… edits wait until it is done"), false);
+        true
+    }
+
     /// Ask for a file name and save tab `i` there.
-    fn save_as(&mut self, i: usize) -> bool {
+    fn save_as(&mut self, i: usize) -> Saved {
+        if self.tabs[i].doc.is_saving() {
+            self.say("Already saving; edits wait until it is done", false);
+            return Saved::Started;
+        }
         let doc = &self.tabs[i].doc;
         let dir = doc
             .path
@@ -954,20 +1306,26 @@ impl App {
             dialog = dialog.set_parent(window.as_ref());
         }
         let Some(path) = dialog.save_file() else {
-            return false;
+            return Saved::No;
         };
         let old = self.tabs[i].doc.path.replace(path);
         self.title_key = None;
         let saved = self.save(i);
-        if saved {
-            // A new name can mean a new language: untitled to `notes.md`.
-            self.tabs[i].doc.detect_language(&self.languages);
-            self.sync_watch();
-            self.reveal_active();
-        } else {
-            // Keep pointing at the old file, so the next save does not
-            // silently retry the path that failed.
-            self.tabs[i].doc.path = old;
+        match saved {
+            Saved::Yes => {
+                // A new name can mean a new language: untitled to `notes.md`.
+                self.tabs[i].doc.detect_language(&self.languages);
+                self.sync_watch();
+                self.reveal_active();
+            }
+            // A huge file: App::save_ended does the above, or goes back to
+            // the old name.
+            Saved::Started => self.tabs[i].after_save.save_as = Some(SaveAs { old_path: old }),
+            Saved::No => {
+                // Keep pointing at the old file, so the next save does not
+                // silently retry the path that failed.
+                self.tabs[i].doc.path = old;
+            }
         }
         saved
     }
@@ -984,14 +1342,21 @@ impl App {
         dialog.show();
     }
 
-    /// Offer to save tab `i` if it has unsaved changes. Returns `false` if
-    /// the user cancelled, or the save failed, and the tab must stay open.
-    fn confirm_discard(&mut self, i: usize) -> bool {
+    /// Offer to save tab `i` if it has unsaved changes. Returns
+    /// [`Discard::Cancel`] if the user cancelled, or the save failed, and
+    /// the tab must stay open; [`Discard::Wait`] while a save runs.
+    fn confirm_discard(&mut self, i: usize) -> Discard {
         let unattended = self.options.smoke || self.options.screenshot.is_some();
         let doc = &self.tabs[i].doc;
+        if doc.is_saving() {
+            return Discard::Wait;
+        }
         // A deleted file's tab holds the only copy left, edited or not.
         if !(doc.is_dirty() || doc.deleted) || unattended {
-            return true;
+            return Discard::Yes;
+        }
+        if self.tabs[i].discard_at == Some(doc.history.top_id()) {
+            return Discard::Yes; // answered earlier in this quit
         }
         self.switch_to(i);
         let doc = &self.tabs[i].doc;
@@ -1013,19 +1378,36 @@ impl App {
         if let Some(window) = &self.window {
             dialog = dialog.set_parent(window.as_ref());
         }
-        match dialog.show() {
-            MessageDialogResult::Yes => self.save(i),
-            MessageDialogResult::Custom(label) if label == "Save" => self.save(i),
-            MessageDialogResult::No => true,
-            MessageDialogResult::Custom(label) if label == "Don't Save" => true,
-            _ => false, // Cancel or dismissed: keep editing.
+        let save = match dialog.show() {
+            MessageDialogResult::Yes => true,
+            MessageDialogResult::Custom(label) if label == "Save" => true,
+            MessageDialogResult::No => false,
+            MessageDialogResult::Custom(label) if label == "Don't Save" => false,
+            _ => return Discard::Cancel, // Cancel or dismissed: keep editing.
+        };
+        if !save {
+            self.tabs[i].discard_at = Some(self.tabs[i].doc.history.top_id());
+            return Discard::Yes;
+        }
+        match self.save(i) {
+            Saved::Yes => Discard::Yes,
+            Saved::Started => Discard::Wait,
+            Saved::No => Discard::Cancel,
         }
     }
 
-    /// Close tab `i`, offering to save it. Closing the last tab quits.
+    /// Close tab `i`, offering to save it. Closing the last tab quits. A
+    /// tab whose huge file is being saved closes once that is done.
     fn close_tab(&mut self, i: usize, event_loop: &ActiveEventLoop) {
-        if !self.confirm_discard(i) {
-            return;
+        match self.confirm_discard(i) {
+            Discard::Yes => {}
+            Discard::Cancel => return,
+            Discard::Wait => {
+                self.tabs[i].after_save.close = true;
+                let name = self.tabs[i].doc.display_name();
+                self.say(format!("Saving {name}; it closes when that is done"), false);
+                return;
+            }
         }
         if self.tabs.len() == 1 {
             event_loop.exit();
@@ -1044,11 +1426,27 @@ impl App {
         self.reveal_active();
     }
 
-    /// Quit, offering to save every tab with unsaved changes.
+    /// Quit, offering to save every tab with unsaved changes. If a huge
+    /// file is being saved, quitting waits for it and then goes on
+    /// ([`App::save_ended`]), without asking again about tabs already
+    /// answered.
     fn quit(&mut self, event_loop: &ActiveEventLoop) {
         for i in 0..self.tabs.len() {
-            if !self.confirm_discard(i) {
-                return;
+            match self.confirm_discard(i) {
+                Discard::Yes => {}
+                Discard::Cancel => {
+                    self.saves.quit_after = false;
+                    for tab in &mut self.tabs {
+                        tab.discard_at = None;
+                    }
+                    return;
+                }
+                Discard::Wait => {
+                    self.saves.quit_after = true;
+                    let name = self.tabs[i].doc.display_name();
+                    self.say(format!("Saving {name}; quitting when that is done"), false);
+                    return;
+                }
             }
         }
         event_loop.exit();
@@ -1121,6 +1519,10 @@ impl App {
         self.picker = Some(match kind {
             Kind::Palette => Picker::palette(notify),
             Kind::Files => Picker::files(&self.root, notify),
+            Kind::Line => {
+                let t = &self.doc().buffer;
+                Picker::go_to_line(notify, t.is_fully_indexed().then(|| t.len_lines()))
+            }
         });
         self.find.focused = false;
         self.tick_picker();
@@ -1158,6 +1560,7 @@ impl App {
                 match chosen {
                     Some(Item::Action(a)) => self.run(a.command, event_loop),
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
+                    Some(Item::Line(n)) => self.go_to_line(n),
                     None => {}
                 }
             }
@@ -1271,6 +1674,7 @@ impl App {
             | Command::ToggleWrap
             | Command::ToggleTheme
             | Command::ToggleSidebar
+            | Command::GoToLine
             | Command::FocusSidebar
             | Command::ToggleIgnored
             | Command::ReloadFromDisk
@@ -1307,11 +1711,15 @@ impl App {
     /// Replace the current match (if the editor's selection is one) and go
     /// to the next.
     fn replace_one(&mut self) {
+        if self.waits_for_save() {
+            return;
+        }
         let sel = self.doc().selection().range();
         let is_match = self.find.current.and_then(|i| self.find.matches.get(i)) == Some(&sel);
         if is_match && !sel.is_empty() {
-            let replacement = self.find.replacement_for(self.doc(), sel.clone());
-            if let Err(e) = self.doc_mut().replace(sel, &replacement) {
+            if let Some(replacement) = self.find.replacement_for(self.doc(), sel.clone())
+                && let Err(e) = self.doc_mut().replace(sel, &replacement)
+            {
                 log::error!("replace refused: {e}");
             }
             self.doc_mut().history.seal();
@@ -1327,17 +1735,45 @@ impl App {
 
     /// Replace every match as one undo step.
     fn replace_all(&mut self) {
-        if !self.find.complete {
+        if self.waits_for_save() {
+            return;
+        }
+        if !self.find.complete && !self.find.capped {
+            let doc = &self.tabs[self.active].doc;
+            if doc.buffer.is_mapped() {
+                // Finishing the search here could read gigabytes on the
+                // main thread.
+                self.say("Still searching; Replace All once the count is final", true);
+                return;
+            }
             // A background search is still running: finish it here so no
             // match is missed.
-            let doc = &self.tabs[self.active].doc;
             self.find.search_now(doc);
+        }
+        if self.find.capped {
+            self.say(
+                format!(
+                    "Too many matches to replace all (over {}); narrow the search",
+                    find::MAX_KEPT
+                ),
+                true,
+            );
+            return;
         }
         let items: Vec<(std::ops::Range<usize>, String)> = self
             .find
             .matches
             .iter()
-            .map(|r| (r.clone(), self.find.replacement_for(self.doc(), r.clone())))
+            .filter_map(|r| {
+                // A byte-level pattern can match inside a character;
+                // replacing there would be refused, and with it the rest.
+                let t = &self.doc().buffer;
+                if !t.is_char_boundary(r.start) || !t.is_char_boundary(r.end) {
+                    return None;
+                }
+                let rep = self.find.replacement_for(self.doc(), r.clone())?;
+                Some((r.clone(), rep))
+            })
             .collect();
         match self.doc_mut().replace_many(&items) {
             Ok(n) => {
@@ -1362,6 +1798,19 @@ impl App {
                 Some(text) => self.doc_mut().paste(&text).map(drop),
                 None => Ok(()),
             };
+        }
+        let len = self.doc().selection().range().len();
+        if len > MAX_COPY_BYTES {
+            // Refused before reading anything, and Cut deletes nothing.
+            self.say(
+                format!(
+                    "The selection is {} MB; copy and cut take at most {} MB",
+                    len >> 20,
+                    MAX_COPY_BYTES >> 20
+                ),
+                true,
+            );
+            return Ok(());
         }
         let Some(text) = self.doc().selected_text() else {
             return Ok(());
@@ -1587,6 +2036,7 @@ impl App {
                 match chosen {
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
                     Some(Item::Action(a)) => self.pending_action = Some(a.command),
+                    Some(Item::Line(n)) => self.go_to_line(n),
                     None => {}
                 }
             }
@@ -1807,6 +2257,21 @@ impl App {
     }
 }
 
+/// The number of lines, or while a huge file is still being counted, an
+/// estimate from the part counted so far (a little high), so the gutter is
+/// wide enough from the start instead of widening as counting goes on.
+fn line_estimate(t: &dyn Text) -> usize {
+    let (counted, len) = (t.indexed_bytes(), t.len_bytes());
+    let lines = t.len_lines();
+    if counted >= len || counted == 0 {
+        return lines;
+    }
+    let before = t.line_number(counted).unwrap_or(lines);
+    let estimate =
+        u128::from(before as u64) * u128::from(len as u64) * 11 / (u128::from(counted as u64) * 10);
+    usize::try_from(estimate).unwrap_or(usize::MAX).max(lines)
+}
+
 /// Geometry for the window `gpu` draws to, with room for the find bar and
 /// message line when they are shown.
 pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar, message: bool) -> Layout {
@@ -1816,7 +2281,7 @@ pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar, message
         (true, false) => 1,
         (true, true) => 2,
     };
-    Layout::new(gpu.metrics(), w, h, scale, doc.buffer.len_lines())
+    Layout::new(gpu.metrics(), w, h, scale, line_estimate(&doc.buffer))
         .with_chrome(true, bar_rows, message)
 }
 
@@ -1912,6 +2377,9 @@ pub fn run_headless(
     gpu.set_tab_width(config.tab_width);
     let mut view = View::default();
     view.set_wrap(options.wrap || config.soft_wrap);
+    if options.wait_index {
+        index_now(&mut doc);
+    }
     let find = headless_find(options.find.as_deref(), &mut doc);
     let (sidebar, layout) = headless_sidebar(
         &root,
@@ -1960,10 +2428,10 @@ pub fn run_headless(
         // "palette" or "files", optionally followed by ":query".
         let (kind, query) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
         let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
-        let mut p = if kind == "files" {
-            Picker::files(&root, notify)
-        } else {
-            Picker::palette(notify)
+        let mut p = match kind {
+            "files" => Picker::files(&root, notify),
+            "line" => Picker::go_to_line(notify, Some(doc.buffer.len_lines())),
+            _ => Picker::palette(notify),
         };
         let _ = p.input.insert(query);
         // Let the walk and matcher finish, up to two seconds.
@@ -1980,6 +2448,19 @@ pub fn run_headless(
         return 1;
     }
     i32::from(!save_screenshot(path, gpu.take_capture().as_ref()))
+}
+
+/// `--wait-index`: count all of a huge file's lines on this thread.
+fn index_now(doc: &mut Document) {
+    if let Some(job) = doc.indexing.take() {
+        let started = Instant::now();
+        job.run(|token, chunk, _| doc.merge_index(token, chunk));
+        log::info!(
+            "indexed {} lines in {:?}",
+            doc.buffer.len_lines(),
+            started.elapsed()
+        );
+    }
 }
 
 /// `--find PATTERN`: the find bar searching, with the first match selected.
@@ -2039,12 +2520,18 @@ fn draw_picker_overlay(
         (Kind::Palette, false) => "commands",
         (Kind::Files, true) => "file",
         (Kind::Files, false) => "files",
+        (Kind::Line, _) => "",
     };
     let more = if p.loading() { "…" } else { "" };
-    let status = format!("{n} {noun}{more}");
+    let status = if p.kind == Kind::Line {
+        String::new()
+    } else {
+        format!("{n} {noun}{more}")
+    };
     let placeholder = match p.kind {
         Kind::Palette => "Type a command",
         Kind::Files => "Type a file name",
+        Kind::Line => "Type a line number",
     };
     let pv = PickerView {
         input: &p.input,
@@ -2163,6 +2650,11 @@ impl ApplicationHandler<AppEvent> for App {
                 self.changed(false);
             }
             AppEvent::Disk(paths) => self.disk_changed(&paths),
+            AppEvent::Index(token, chunk, error) => self.index_arrived(token, chunk, error),
+            AppEvent::Save(event) => {
+                self.save_event(event, event_loop);
+                self.changed(false);
+            }
             AppEvent::WatchWarning(warning) => {
                 self.say(warning, true);
                 self.changed(false);
@@ -2264,8 +2756,13 @@ impl ApplicationHandler<AppEvent> for App {
         }
     }
 
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: StartCause) {
         let now = Instant::now();
+        if self.saves.poll_at.is_some_and(|t| now >= t) {
+            // Redraws only when a save ends (it reports with a message).
+            self.saves.poll_at = None;
+            self.poll_saves(event_loop);
+        }
         let blink_changed = self.blink.tick(now);
         let retry_due = self.hidden_retry.is_some_and(|(at, _)| now >= at);
         if self.research_at.is_some_and(|t| now >= t) {
@@ -2301,6 +2798,11 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.frames > 0 {
+            // Huge files count their lines in the background, started
+            // after the first frame so the disk is not shared with it.
+            self.start_indexing();
+        }
         if self.frames > 0 && !self.watching {
             // Starting watches can take milliseconds (macOS restarts its
             // event stream for each folder), so not before the first frame.
@@ -2332,6 +2834,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.message.as_ref().map(|m| m.until),
             self.research_at,
             self.recheck_at,
+            self.saves.poll_at,
             (unattended && self.frames == 0).then_some(deadline),
         ]
         .into_iter()

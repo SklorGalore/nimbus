@@ -34,6 +34,6 @@ repeated in each file:
 | 4 | [Many files](m4-many-files.md) | Done |
 | 5 | [Highlighting](m5-highlighting.md) | Done |
 | 6 | [File tree](m6-file-tree.md) | Done |
-| 7 | [Huge files](m7-huge-files.md) | Next |
-| 8 | [Polish](m8-polish.md) | Planned |
+| 7 | [Huge files](m7-huge-files.md) | Done |
+| 8 | [Polish](m8-polish.md) | Next |
 | 9 | [Compare and merge](m9-diff.md) | Planned |

@@ -9,6 +9,7 @@ dirs = "7"
 env_logger = "0.11.11"
 ignore = "0.4"
 log = "0.4.34"
+memmap2 = "0.9"
 nimbus-core = { version = "0.1.0", path = "../core" }
 nimbus-render = { version = "0.1.0", path = "../render" }
 nimbus-syntax = { version = "0.1.0", path = "../syntax" }

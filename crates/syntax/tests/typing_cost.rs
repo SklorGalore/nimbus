@@ -72,7 +72,9 @@ fn keystroke_cost_in_a_1mb_file() {
         let top = buf.line_to_byte(line.saturating_sub(30));
         let bottom = buf.line_to_byte((line + 30).min(buf.len_lines() - 1));
         let parsed = Instant::now();
-        let n = h.spans(&state, &buf, top..bottom).len();
+        let n = h
+            .spans(&state, &buf, std::slice::from_ref(&(top..bottom)))
+            .len();
         highlight.push(parsed.elapsed());
         samples.push(start.elapsed());
         assert_ne!(n, 0);

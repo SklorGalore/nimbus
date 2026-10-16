@@ -131,7 +131,17 @@ impl Shaper {
             }
             let glyphs = &self.raw[first..j];
             let x0 = cols(col) * cell;
-            if g == "\t" || glyphs.is_empty() {
+            if g == "\u{1a}" {
+                // The stand-in for a byte that is not UTF-8 (one byte for
+                // one byte, so offsets stay put): draw it as the
+                // replacement character, or the missing-glyph box.
+                out.push(ShapedGlyph {
+                    id: font.glyph_id('\u{fffd}'),
+                    x: x0,
+                    y: 0.0,
+                    cluster: u32::try_from(start).unwrap_or(u32::MAX),
+                });
+            } else if g == "\t" || glyphs.is_empty() {
                 // Nothing to draw.
             } else if glyphs.iter().any(|r| r.id == 0) {
                 // The font lacks part of this grapheme: one box, centred.

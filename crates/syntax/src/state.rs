@@ -42,7 +42,8 @@ pub enum Off {
 
 enum Phase {
     Off(Off),
-    /// Larger than [`MAX_HIGHLIGHT_BYTES`]: line-by-line rules, no tree.
+    /// Larger than [`MAX_HIGHLIGHT_BYTES`], a user-defined language, or a
+    /// mapped document: line-by-line rules, no tree.
     Lexical(Lexical),
     /// The language is known; no parse has started.
     Waiting,
@@ -157,6 +158,9 @@ impl Job {
 pub struct SyntaxState {
     language: Option<LanguageId>,
     phase: Phase,
+    /// Keep the simple rules even when the text is small enough to parse:
+    /// set by [`SyntaxState::reset_lexical`] for a mapped document.
+    lexical_only: bool,
     /// Set when the document goes away or is reset, so a running job stops.
     cancel: Arc<AtomicBool>,
     /// Increases whenever highlighting may have changed; highlight caches
@@ -199,6 +203,7 @@ impl SyntaxState {
         Self {
             language,
             phase,
+            lexical_only: false,
             cancel: Arc::new(AtomicBool::new(false)),
             rev: 0,
         }
@@ -220,6 +225,18 @@ impl SyntaxState {
         self.phase = Phase::Lexical(Lexical::new(rules));
     }
 
+    /// Start over with the simple rules of the built-in `language`, and
+    /// keep them at any size: for a memory-mapped document (M7), whose text
+    /// is read from disk as needed. A tree-sitter parse would read all of
+    /// it, so even a small mapped file (one that is not valid UTF-8) is
+    /// never parsed.
+    pub fn reset_lexical(&mut self, language: LanguageId) {
+        self.reset(None, 0);
+        self.language = Some(language);
+        self.phase = Phase::Lexical(Lexical::new(lexical::builtin(language)));
+        self.lexical_only = true;
+    }
+
     /// The built-in language, if one was detected (`None` for a
     /// user-defined language).
     #[must_use]
@@ -236,7 +253,8 @@ impl SyntaxState {
         }
     }
 
-    /// The simple highlighter, when the document is too large to parse.
+    /// The simple highlighter, when the document is not parsed: too large,
+    /// a user-defined language, or mapped.
     #[must_use]
     pub fn lexical(&self) -> Option<&Lexical> {
         match &self.phase {
@@ -254,6 +272,13 @@ impl SyntaxState {
         }
         let (_, grammar) = self.tree()?;
         Some((self.language?.index(), grammar.highlights.capture_names()))
+    }
+
+    /// Note that the highlighting may have changed without an edit (a huge
+    /// file's line numbers were counted further), so cached colours are
+    /// worked out again.
+    pub fn touch(&mut self) {
+        self.rev += 1;
     }
 
     /// Changes whenever the highlighting may have changed.
@@ -285,7 +310,10 @@ impl SyntaxState {
     /// Record an edit just applied to `text` (the text after the edit).
     pub fn edit(&mut self, text: &dyn Text, edit: &Edit) {
         if let Phase::Lexical(lexical) = &self.phase {
-            if self.language.is_some() && text.len_bytes() <= MAX_HIGHLIGHT_BYTES {
+            if self.language.is_some()
+                && !self.lexical_only
+                && text.len_bytes() <= MAX_HIGHLIGHT_BYTES
+            {
                 // A built-in language shrunk back under the limit (an
                 // undone paste): parse.
                 self.phase = Phase::Waiting;
@@ -300,7 +328,12 @@ impl SyntaxState {
         }
         // The start of an edit is unchanged by it, so its position can be
         // read from the text after.
-        let ie = input_edit(edit, point_at(text, edit.start));
+        let Some(ie) = input_edit(edit, point_at(text, edit.start)) else {
+            // Positions unknown: start over with a fresh parse.
+            self.phase = Phase::Waiting;
+            self.rev += 1;
+            return;
+        };
         match &mut self.phase {
             Phase::Parsing { pending, stale, .. } => {
                 pending.push(ie);
@@ -519,6 +552,28 @@ mod tests {
         assert!(state.lexical().is_none());
         state.parse_now(&buf);
         assert_eq!(sexp(&state), fresh("fn a() {}\n"));
+    }
+
+    #[test]
+    fn a_mapped_document_keeps_the_simple_rules_when_small() {
+        let mut buf = nimbus_core::MappedBuffer::from_bytes(b"fn a() {}\n".to_vec());
+        let mut state = SyntaxState::default();
+        let rev = state.rev();
+        state.reset_lexical(LanguageId::Rust);
+        assert!(state.rev() > rev);
+        assert!(state.lexical().is_some());
+        assert_eq!(state.language(), Some(LanguageId::Rust));
+        assert!(state.take_job(&buf).is_none(), "never parsed");
+        let edit = buf.replace(0..0, "// x\n").unwrap();
+        state.edit(&buf, &edit);
+        assert!(state.lexical().is_some(), "an edit does not start a parse");
+        assert!(state.take_job(&buf).is_none());
+        assert!(state.refresh(&buf, Duration::MAX).is_none());
+
+        // A reset (a reload that opened as a rope) parses again.
+        state.reset(Some(LanguageId::Rust), buf.len_bytes());
+        assert!(state.lexical().is_none());
+        assert!(state.take_job(&buf).is_some());
     }
 
     #[test]

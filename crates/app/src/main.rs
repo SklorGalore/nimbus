@@ -9,12 +9,15 @@ mod bmp;
 mod config;
 mod document;
 mod find;
+mod indexer;
 mod input;
 mod io;
 mod keymap;
 mod languages;
+mod mapping;
 mod menu;
 mod picker;
+mod saver;
 mod sidebar;
 mod state;
 mod theme;
@@ -57,11 +60,17 @@ pub struct Options {
     /// Render without a window at this size in physical pixels (with
     /// `--screenshot`), for checks while the screen is locked.
     pub headless: Option<(u32, u32)>,
-    /// With `--headless`: draw an open picker, `palette` or `files`,
+    /// With `--headless`: draw an open picker, `palette`, `files` or `line`,
     /// optionally with a query after a colon (`files:main`).
     pub picker: Option<String>,
     /// Use this theme instead of the config's.
     pub theme: Option<String>,
+    /// Open every file in this backend, whatever its size (`--backend
+    /// rope|mapped`), for measuring one against the other.
+    pub backend: Option<io::Backend>,
+    /// With `--headless`: count all of a huge file's lines before drawing,
+    /// instead of drawing with only the first part counted.
+    pub wait_index: bool,
 }
 
 /// Write a line to stdout. Command-line output such as `--version` and the
@@ -113,6 +122,8 @@ fn parse_options() -> Options {
     let mut headless = None;
     let mut picker = None;
     let mut theme = None;
+    let mut wait_index = false;
+    let mut backend = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -134,8 +145,19 @@ fn parse_options() -> Options {
                     });
             }
             Some("--wrap") => wrap = true,
+            Some("--wait-index") => wait_index = true,
             Some("--picker") => picker = args.next().and_then(|p| p.into_string().ok()),
             Some("--theme") => theme = args.next().and_then(|t| t.into_string().ok()),
+            Some("--backend") => {
+                let Some(b) = args
+                    .next()
+                    .and_then(|b| b.to_str().and_then(io::Backend::parse))
+                else {
+                    print_err("nimbus: --backend needs rope or mapped");
+                    std::process::exit(2);
+                };
+                backend = Some(b);
+            }
             Some("--headless") => {
                 let size = args.next().and_then(|a| {
                     let a = a.into_string().ok()?;
@@ -161,7 +183,7 @@ fn parse_options() -> Options {
             }
             Some("--help" | "-h") => {
                 print_out(
-                    "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--wrap] [--theme NAME] [--headless WxH] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
+                    "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--headless WxH [--wait-index]] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
                 );
                 std::process::exit(0);
             }
@@ -182,6 +204,8 @@ fn parse_options() -> Options {
         headless,
         picker,
         theme,
+        backend,
+        wait_index,
     }
 }
 
@@ -267,6 +291,9 @@ fn main() {
         .format_timestamp_millis()
         .init();
     let options = parse_options();
+    if let Some(backend) = options.backend {
+        io::force_backend(backend);
+    }
 
     // Start opening the GPU next, so the driver work overlaps reading the
     // file, event-loop setup and window creation (DESIGN.md §4.3).

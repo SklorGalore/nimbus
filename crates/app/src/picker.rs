@@ -33,6 +33,8 @@ pub enum Item {
     Action(&'static ActionInfo),
     /// A file, as a path relative to the project folder.
     File(PathBuf),
+    /// A line to go to, counting from 1.
+    Line(usize),
 }
 
 /// Which picker is open.
@@ -42,6 +44,8 @@ pub enum Kind {
     Palette,
     /// The file opener.
     Files,
+    /// Go to line: the query is a line number.
+    Line,
 }
 
 /// One row to draw.
@@ -72,6 +76,8 @@ pub struct Picker {
     stop: Arc<AtomicBool>,
     /// The project folder files are relative to.
     pub root: PathBuf,
+    /// For go-to-line: how many lines the document has, if all are counted.
+    lines: Option<usize>,
 }
 
 impl std::fmt::Debug for Picker {
@@ -174,12 +180,34 @@ impl Picker {
             walk_done: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(AtomicBool::new(false)),
             root,
+            lines: None,
         }
+    }
+
+    /// Open go-to-line for a document of `lines` lines (`None` while a
+    /// huge file is still being counted). No list to match: the query is
+    /// the line number.
+    pub fn go_to_line(notify: Arc<dyn Fn() + Send + Sync>, lines: Option<usize>) -> Self {
+        let mut picker = Self::new(Kind::Line, Config::DEFAULT, notify, PathBuf::new());
+        picker.walk_done.store(true, Ordering::Relaxed);
+        picker.lines = lines;
+        picker
+    }
+
+    /// The line number typed, counting from 1; a leading `:` is allowed, as
+    /// some editors write it.
+    fn line_target(&self) -> Option<usize> {
+        let query = self.input.buffer.line(0);
+        let digits = query.trim().trim_start_matches(':').trim();
+        digits.parse::<usize>().ok().filter(|n| *n > 0)
     }
 
     /// Feed the current query to the matcher and let it work for up to a
     /// millisecond. Returns whether results changed or are still coming.
     pub fn tick(&mut self) -> bool {
+        if self.kind == Kind::Line {
+            return false;
+        }
         let query = self.input.buffer.line(0).into_owned();
         if query != self.last_query {
             // Appending lets nucleo narrow the previous results instead of
@@ -203,6 +231,9 @@ impl Picker {
     /// Number of items matching the query.
     #[must_use]
     pub fn match_count(&self) -> usize {
+        if self.kind == Kind::Line {
+            return usize::from(self.line_target().is_some());
+        }
         self.matcher.snapshot().matched_item_count() as usize
     }
 
@@ -231,6 +262,9 @@ impl Picker {
     /// The highlighted item.
     #[must_use]
     pub fn chosen(&self) -> Option<Item> {
+        if self.kind == Kind::Line {
+            return self.line_target().map(Item::Line);
+        }
         let i = u32::try_from(self.selected).ok()?;
         self.matcher
             .snapshot()
@@ -241,6 +275,21 @@ impl Picker {
     /// The rows currently visible, with the index of the highlighted one.
     #[must_use]
     pub fn rows(&self, keymap: &Keymap) -> (Vec<Row>, Option<usize>) {
+        if self.kind == Kind::Line {
+            let Some(n) = self.line_target() else {
+                return (Vec::new(), None);
+            };
+            let detail = match self.lines {
+                Some(total) if n > total => format!("past the last line, {total}"),
+                Some(total) => format!("of {total}"),
+                None => "lines still being counted".to_owned(),
+            };
+            let row = Row {
+                text: format!("Go to line {n}"),
+                detail,
+            };
+            return (vec![row], Some(0));
+        }
         let snap = self.matcher.snapshot();
         let n = snap.matched_item_count();
         let start = u32::try_from(self.scroll).unwrap_or(0).min(n);
@@ -253,6 +302,10 @@ impl Picker {
                 Item::Action(a) => Row {
                     text: a.title.to_owned(),
                     detail: keymap.label(a.id),
+                },
+                Item::Line(n) => Row {
+                    text: format!("Go to line {n}"),
+                    detail: String::new(),
                 },
                 Item::File(p) => Row {
                     text: p
@@ -362,5 +415,22 @@ mod tests {
         assert_eq!(p.scroll, n - VISIBLE_ROWS);
         p.move_selection(1);
         assert_eq!((p.selected, p.scroll), (0, 0));
+    }
+
+    #[test]
+    fn go_to_line_reads_a_number() {
+        let mut p = Picker::go_to_line(no_notify(), Some(40));
+        assert_eq!(p.match_count(), 0);
+        let _ = p.input.insert(":12");
+        assert!(!p.tick());
+        assert_eq!(p.match_count(), 1);
+        assert!(matches!(p.chosen(), Some(Item::Line(12))));
+        let (rows, sel) = p.rows(&Keymap::default());
+        assert_eq!(
+            (rows[0].text.as_str(), rows[0].detail.as_str(), sel),
+            ("Go to line 12", "of 40", Some(0))
+        );
+        let _ = p.input.insert("x");
+        assert!(p.chosen().is_none());
     }
 }

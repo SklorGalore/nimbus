@@ -4,6 +4,8 @@
 #   bench/gen.sh            10 MB and 100 MB source-like files
 #   bench/gen.sh logs       also 1 GB and 4 GB log files (for M7)
 #   bench/gen.sh longline   a single 100 MB line of minified JSON (for M7)
+#   bench/gen.sh sizes      64, 128, 256 and 512 MB source files (for M7's
+#                           rope-versus-mapped threshold; see threshold.sh)
 #
 # Output goes to bench/out/, which git ignores. Files are reused if present.
 set -euo pipefail
@@ -72,6 +74,11 @@ case "${1:-}" in
     longline)
         long_line longline-100mb.json $((100 * 1024 * 1024))
         ;;
+    sizes)
+        for mb in 64 128 256 512; do
+            source_like "src-${mb}mb.rs" $((mb * 1024 * 1024))
+        done
+        ;;
     "") ;;
-    *) echo "usage: $0 [logs|longline]" >&2; exit 2 ;;
+    *) echo "usage: $0 [logs|longline|sizes]" >&2; exit 2 ;;
 esac

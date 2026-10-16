@@ -117,13 +117,13 @@ impl Text for RopeBuffer {
         }
     }
 
-    fn chunk_at(&self, byte: usize) -> (&str, usize) {
+    fn chunk_at(&self, byte: usize) -> (&[u8], usize) {
         if byte >= self.rope.len_bytes() {
-            return ("", self.rope.len_bytes());
+            return (&[], self.rope.len_bytes());
         }
         match self.rope.get_chunk_at_byte(byte) {
-            Some((chunk, start, _, _)) => (chunk, start),
-            None => ("", self.rope.len_bytes()),
+            Some((chunk, start, _, _)) => (chunk.as_bytes(), start),
+            None => (&[], self.rope.len_bytes()),
         }
     }
 }
@@ -138,8 +138,8 @@ impl Buffer for RopeBuffer {
         self.rope.insert(start_char, text);
         Ok(Edit {
             start: range.start,
-            removed,
-            inserted: text.to_owned(),
+            removed: removed.into(),
+            inserted: text.into(),
         })
     }
 
@@ -220,15 +220,15 @@ mod tests {
         let text = "abcdefghij\n".repeat(500);
         let b = RopeBuffer::from_text(&text);
         let mut pos = 0;
-        let mut rebuilt = String::new();
+        let mut rebuilt = Vec::new();
         while pos < b.len_bytes() {
             let (chunk, start) = b.chunk_at(pos);
             assert!(start <= pos && pos < start + chunk.len());
-            rebuilt.push_str(&chunk[pos - start..]);
+            rebuilt.extend_from_slice(&chunk[pos - start..]);
             pos = start + chunk.len();
         }
-        assert_eq!(rebuilt, text);
-        assert_eq!(b.chunk_at(b.len_bytes()), ("", b.len_bytes()));
+        assert_eq!(rebuilt, text.as_bytes());
+        assert_eq!(b.chunk_at(b.len_bytes()), (&[][..], b.len_bytes()));
     }
 
     #[test]

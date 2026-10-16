@@ -1692,6 +1692,7 @@ dependencies = [
  "env_logger",
  "ignore",
  "log",
+ "memmap2",
  "muda",
  "nimbus-core",
  "nimbus-render",
@@ -1710,6 +1711,7 @@ dependencies = [
 name = "nimbus-core"
 version = "0.1.0"
 dependencies = [
+ "memchr",
  "proptest",
  "regex",
  "ropey",

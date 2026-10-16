@@ -1,19 +1,23 @@
 //! Find: literal or regex search over a [`Text`], in chunks.
 //!
-//! Searching works on chunks of whole lines (about 1 MB each) rather than
-//! the whole document at once, for two reasons: the text may not be in one
-//! piece (a rope, or a memory-mapped file in M7), and a search on a
-//! background thread can stop between chunks when the user types a new
-//! query. Each chunk is searched together with a little of the text after
-//! it ([`OVERLAP`]), so a match that starts near the end of one chunk is
-//! still found; matches are only *kept* if they start inside the chunk, so
-//! none are reported twice. The honest limit: a match longer than the
+//! Searching works on the raw bytes in chunks of [`CHUNK`] rather than the
+//! whole document at once, for two reasons: the text may not be in one
+//! piece (a rope, or a memory-mapped file), and a search on a background
+//! thread can stop between chunks when the user types a new query. Bytes
+//! rather than strings, so files with invalid UTF-8 can be searched, and
+//! chunks need no line numbers, so a file still being indexed can be.
+//!
+//! Each chunk is searched together with a little text before it
+//! ([`CONTEXT`]), so `^` and `\b` see what precedes the chunk, and a little
+//! after it ([`OVERLAP`]), so a match that starts near the end of one chunk
+//! is still found. Matches are only *kept* if they start inside the chunk,
+//! so none are reported twice. The honest limit: a match longer than the
 //! overlap that crosses a chunk boundary is missed.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use regex::{Regex, RegexBuilder};
+use regex::bytes::{Regex, RegexBuilder};
 
 use crate::Text;
 
@@ -23,6 +27,11 @@ pub const CHUNK: usize = 1024 * 1024;
 /// Extra text searched after each chunk, so matches crossing the chunk end
 /// are found. Also the longest such match that is guaranteed to be found.
 pub const OVERLAP: usize = 4096;
+
+/// Text included before each chunk so that `^`, `$` and `\b` at its start
+/// look at the real text before it; one character is enough, and this is
+/// a few.
+pub const CONTEXT: usize = 16;
 
 /// What to search for.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -97,69 +106,90 @@ impl Generation {
 /// each chunk (in order, possibly empty) as soon as that chunk is searched.
 /// `found` returns `false` to stop early.
 ///
-/// Returns `false` if the search stopped early (cancelled or `found`
-/// declined), `true` if it reached the end.
+/// Returns `false` if the search stopped early (cancelled, `found`
+/// declined, or the text could not be read), `true` if it reached the end.
 pub fn find_all(
     text: &dyn Text,
     re: &Regex,
+    keep_going: impl FnMut() -> bool,
+    found: impl FnMut(&[Range<usize>]) -> bool,
+) -> bool {
+    find_all_in_chunks(text, re, CHUNK, keep_going, found)
+}
+
+/// [`find_all`] with chunks of `chunk` bytes, so tests can cross many chunk
+/// boundaries with small texts.
+fn find_all_in_chunks(
+    text: &dyn Text,
+    re: &Regex,
+    chunk: usize,
     mut keep_going: impl FnMut() -> bool,
     mut found: impl FnMut(&[Range<usize>]) -> bool,
 ) -> bool {
     let len = text.len_bytes();
-    let mut start = 0;
+    let mut start: usize = 0;
     let mut batch = Vec::new();
+    let mut window = Vec::with_capacity(CONTEXT + chunk + OVERLAP);
     // End of the last match kept. A match that ran past a chunk boundary
     // ends inside the next chunk; anything found there that starts before
     // this point would overlap it, and replacing overlapping ranges would
     // corrupt the text.
     let mut kept_end = 0;
-    while start < len || (start == 0 && len == 0) {
+    // End of the last match found, kept or not, as an offset in the text.
+    // It carries over from chunk to chunk: an empty match right where a
+    // match in the previous chunk ended is not reported, as in one search.
+    let mut last_end = None;
+    loop {
         if !keep_going() {
             return false;
         }
-        let end = chunk_end(text, start);
-        let window_end = (end + OVERLAP).min(len);
-        let window = text.slice(start..window_end);
+        let end = start.saturating_add(chunk).min(len);
+        let window_start = start.saturating_sub(CONTEXT);
+        let window_end = end.saturating_add(OVERLAP).min(len);
+        window.clear();
+        if text
+            .read_into(window_start..window_end, &mut window)
+            .is_err()
+        {
+            return false;
+        }
+        let at = start - window_start;
         batch.clear();
-        for m in re.find_iter(&window) {
-            let s = start + m.start();
+        let mut pos = at;
+        while pos <= window.len() {
+            let Some(m) = re.find_at(&window, pos) else {
+                break;
+            };
+            // As the regex crate's own iterator does: an empty match moves
+            // the search on by one byte, and none is reported right where
+            // the previous match ended.
+            pos = if m.end() > m.start() {
+                m.end()
+            } else {
+                m.end() + 1
+            };
+            let s = window_start + m.start();
+            if m.start() == m.end() && last_end == Some(s) {
+                continue;
+            }
             if s >= end && end < len {
                 break; // starts in the overlap: the next chunk reports it
             }
+            last_end = Some(window_start + m.end());
             if s < kept_end {
                 continue;
             }
-            if m.start() == m.end() && s == len && len > 0 && !batch.is_empty() {
-                continue;
-            }
-            kept_end = start + m.end();
+            kept_end = window_start + m.end();
             batch.push(s..kept_end);
         }
         if !found(&batch) {
             return false;
         }
         if end >= len {
-            break;
+            return true;
         }
         start = end;
     }
-    true
-}
-
-/// End of the chunk starting at `start`: the first line start at least
-/// [`CHUNK`] bytes later, or the end of the text.
-fn chunk_end(text: &dyn Text, start: usize) -> usize {
-    let len = text.len_bytes();
-    let target = start.saturating_add(CHUNK);
-    if target >= len {
-        return len;
-    }
-    // Chunks end at a line start, so patterns anchored with ^ or \b never
-    // see a false start. The last line just makes the last chunk a little
-    // longer. Lines are at most 1 MB (`MAX_LINE_BYTES` in the app), so a
-    // chunk is at most about twice `CHUNK`.
-    let line = text.byte_to_line(target);
-    text.line_to_byte(line + 1).min(len)
 }
 
 /// Index of the first match at or after `pos`, wrapping to the first match.
@@ -259,7 +289,7 @@ mod tests {
             ..Query::default()
         };
         let re = q.compile().unwrap().unwrap();
-        let expected: Vec<_> = re.find_iter(&text).map(|m| m.range()).collect();
+        let expected: Vec<_> = re.find_iter(text.as_bytes()).map(|m| m.range()).collect();
         assert_eq!(all(&text, &q), expected);
         // A match spanning a line break, also across chunk boundaries.
         let q = Query {
@@ -268,7 +298,7 @@ mod tests {
             ..Query::default()
         };
         let re = q.compile().unwrap().unwrap();
-        assert_eq!(all(&text, &q).len(), re.find_iter(&text).count());
+        assert_eq!(all(&text, &q).len(), re.find_iter(text.as_bytes()).count());
     }
 
     #[test]
@@ -286,16 +316,44 @@ mod tests {
             assert!(pair[0].end <= pair[1].start, "{pair:?} overlap");
         }
         let re = q.compile().unwrap().unwrap();
-        assert_eq!(found.len(), re.find_iter(&text).count());
+        assert_eq!(found.len(), re.find_iter(text.as_bytes()).count());
     }
 
     #[test]
-    fn chunks_end_at_line_starts() {
-        let text = "x".repeat(10) + "\n" + &"y".repeat(CHUNK) + "\nzz";
-        let t = RopeBuffer::from_text(&text);
-        let end = chunk_end(&t, 0);
-        assert_eq!(end, text.len() - 2, "the line after the 1 MB target");
-        assert_eq!(chunk_end(&t, end), text.len());
+    fn anchors_and_boundaries_hold_at_chunk_edges() {
+        // Chunk edges fall mid-line; `^`, `$` and `\b` must still only
+        // match where they would in the whole text.
+        let line = "ab cd ".repeat(10_000) + "\n";
+        let text = line.repeat(40);
+        for pattern in [r"^ab", r"cd $", r"\bcd\b", r"b c"] {
+            let q = Query {
+                pattern: pattern.into(),
+                regex: true,
+                case_sensitive: true,
+            };
+            let re = q.compile().unwrap().unwrap();
+            let expected: Vec<_> = re.find_iter(text.as_bytes()).map(|m| m.range()).collect();
+            assert_eq!(all(&text, &q), expected, "{pattern}");
+        }
+    }
+
+    #[test]
+    fn a_3_mb_line_without_breaks_is_searched() {
+        let text = "x".repeat(3 * CHUNK) + "needle" + &"y".repeat(10);
+        assert_eq!(all(&text, &lit("needle")), vec![3 * CHUNK..3 * CHUNK + 6]);
+    }
+
+    #[test]
+    fn empty_matches_are_found_once_each() {
+        let q = Query {
+            pattern: "x*".into(),
+            regex: true,
+            ..Query::default()
+        };
+        let re = q.compile().unwrap().unwrap();
+        let text = "axxb";
+        let expected: Vec<_> = re.find_iter(text.as_bytes()).map(|m| m.range()).collect();
+        assert_eq!(all(text, &q), expected);
     }
 
     #[test]
@@ -336,5 +394,43 @@ mod tests {
         let b = g.bump();
         assert!(b > a);
         assert_eq!(g.current(), b);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 256,
+            failure_persistence: None,
+            ..Default::default()
+        })]
+
+        /// Searching in tiny chunks finds exactly what one search of the
+        /// whole text finds, for patterns that look at line starts, word
+        /// boundaries and line breaks around the chunk edges.
+        #[test]
+        fn chunked_search_equals_one_search(
+            pieces in proptest::collection::vec(
+                proptest::sample::select(vec!["ab", "a", "b", " ", "\n", "\r\n", "é", "日", "ba ", "aaa"]),
+                0..80,
+            ),
+            pattern in proptest::sample::select(vec![
+                "a", "ab", "^a", "b$", r"\ba", r"a\b", r"\s+", "a+", "b\na", "^$", "é", r"\w+",
+                // Patterns that can match nothing, next to a match that
+                // ended at a chunk boundary.
+                "a*", "b?", r"\s*",
+            ]),
+            chunk in 1usize..12,
+        ) {
+            let text: String = pieces.concat();
+            let q = Query { pattern: pattern.into(), regex: true, case_sensitive: true };
+            let re = q.compile().unwrap().unwrap();
+            let expected: Vec<_> = re.find_iter(text.as_bytes()).map(|m| m.range()).collect();
+            let t = RopeBuffer::from_text(&text);
+            let mut got = Vec::new();
+            find_all_in_chunks(&t, &re, chunk, || true, |b| {
+                got.extend_from_slice(b);
+                true
+            });
+            proptest::prop_assert_eq!(got, expected, "{:?} in {:?}", pattern, text);
+        }
     }
 }

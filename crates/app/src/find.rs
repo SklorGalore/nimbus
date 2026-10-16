@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use nimbus_core::search::{self, Generation, Query};
 use nimbus_core::{Buffer, Snapshot, Text};
-use regex::Regex;
+use regex::bytes::Regex;
 
 use crate::document::Document;
 
@@ -70,6 +70,8 @@ pub struct FindBar {
     pub current: Option<usize>,
     /// The search has reached the end of the document.
     pub complete: bool,
+    /// More matches were found than are kept ([`MAX_KEPT`]).
+    pub capped: bool,
     /// The pattern is not a valid regex.
     pub error: Option<String>,
     /// Document version the matches belong to.
@@ -93,12 +95,17 @@ impl Default for FindBar {
             current: None,
             complete: true,
             error: None,
+            capped: false,
             version: 0,
             generation: Arc::new(Generation::default()),
             compiled: None,
         }
     }
 }
+
+/// Matches kept for one search, about 4 MB of ranges; past this they are
+/// counted as "+" but not stored, and Replace All is refused.
+pub const MAX_KEPT: usize = 250_000;
 
 /// Text of a single-line field document.
 fn field_text(doc: &Document) -> String {
@@ -227,6 +234,18 @@ impl FindBar {
         false
     }
 
+    /// Stop a background search, keeping the matches found so far (the
+    /// count then shows as incomplete). Returns whether one was running.
+    /// Saving a huge file on Windows does this, because the search's
+    /// snapshot keeps the old file mapped; the app searches again after.
+    pub fn stop(&mut self) -> bool {
+        if self.complete {
+            return false;
+        }
+        self.generation.bump();
+        true
+    }
+
     /// Search `doc` to the end on this thread, replacing any results so far.
     /// Used before replace all, which must see every match.
     pub fn search_now(&mut self, doc: &Document) {
@@ -246,6 +265,7 @@ impl FindBar {
                 self.error = Some(e.0);
             }
         }
+        self.capped = false;
         if let Some(re) = self.compiled.clone() {
             let mut all = Vec::new();
             search::find_all(
@@ -254,9 +274,14 @@ impl FindBar {
                 || true,
                 |batch| {
                     all.extend_from_slice(batch);
-                    true
+                    // Past the cap there is nothing more to keep.
+                    all.len() <= MAX_KEPT
                 },
             );
+            if all.len() > MAX_KEPT {
+                all.truncate(MAX_KEPT);
+                self.capped = true;
+            }
             self.matches = all;
         }
         self.complete = true;
@@ -268,9 +293,18 @@ impl FindBar {
         if batch.generation != self.generation.current() || batch.version != self.version {
             return false;
         }
-        self.matches.extend(batch.matches);
+        self.keep(batch.matches);
         self.complete |= batch.done;
         true
+    }
+
+    /// Add matches, up to [`MAX_KEPT`] in all.
+    fn keep(&mut self, found: Vec<Range<usize>>) {
+        let room = MAX_KEPT.saturating_sub(self.matches.len());
+        if found.len() > room {
+            self.capped = true;
+        }
+        self.matches.extend(found.into_iter().take(room));
     }
 
     /// Pick the match at or after `pos` (or before, with `backwards`) as
@@ -286,34 +320,34 @@ impl FindBar {
 
     /// The replacement for the match at `range` in `doc`: capture groups
     /// like `$1` expand in regex mode; the replacement is literal otherwise.
+    /// `None` when the text there no longer matches: leave it alone.
     ///
     /// The regex runs again on the match *with the text around it*, so
     /// assertions such as `\b`, `\B`, `^` and `$` see what they saw during
     /// the search. Run on the bare match they could fail and leave the
     /// match unreplaced.
+    ///
+    /// Captured text that is not valid UTF-8 (from a file with invalid
+    /// bytes) is inserted with each bad sequence replaced by `�`.
     #[must_use]
-    pub fn replacement_for(&self, doc: &Document, range: Range<usize>) -> String {
+    pub fn replacement_for(&self, doc: &Document, range: Range<usize>) -> Option<String> {
         const CONTEXT: usize = 256;
         let rep = field_text(&self.replace);
         let (Some(re), true) = (&self.compiled, self.regex) else {
-            return rep;
+            return Some(rep);
         };
-        let mut ctx_start = range.start.saturating_sub(CONTEXT);
-        while !doc.buffer.is_char_boundary(ctx_start) {
-            ctx_start -= 1;
-        }
+        let ctx_start = range.start.saturating_sub(CONTEXT);
         let ctx_end = (range.end + CONTEXT).min(doc.buffer.len_bytes());
-        let window = doc.buffer.slice(ctx_start..ctx_end);
+        let mut window = Vec::new();
+        doc.buffer.read_into(ctx_start..ctx_end, &mut window).ok()?;
         let at = range.start - ctx_start;
-        match re.captures_at(&window, at) {
-            Some(caps) if caps.get(0).map(|m| m.range()) == Some(at..at + range.len()) => {
-                let mut out = String::new();
-                caps.expand(&rep, &mut out);
-                out
-            }
-            // The text changed under the match; leave it as it is.
-            _ => doc.buffer.slice(range).into_owned(),
+        let caps = re.captures_at(&window, at)?;
+        if caps.get(0).map(|m| m.range()) != Some(at..at + range.len()) {
+            return None; // the text changed under the match
         }
+        let mut out = Vec::new();
+        caps.expand(rep.as_bytes(), &mut out);
+        Some(String::from_utf8_lossy(&out).into_owned())
     }
 
     /// Short status for the bar, such as "3 of 120" or "no matches".
@@ -325,7 +359,11 @@ impl FindBar {
         if self.find.buffer.len_bytes() == 0 {
             return String::new();
         }
-        let more = if self.complete { "" } else { "+" };
+        let more = if self.complete && !self.capped {
+            ""
+        } else {
+            "+"
+        };
         match (self.matches.len(), self.current) {
             (0, _) if self.complete => "no matches".to_owned(),
             (n, Some(i)) => format!("{} of {n}{more}", i + 1),
@@ -375,9 +413,16 @@ mod tests {
         bar.regex = true;
         let _ = bar.replace.insert("$2=$1");
         bar.search(&doc, |_| true);
-        assert_eq!(bar.replacement_for(&doc, 0..9), "value=key");
+        assert_eq!(
+            bar.replacement_for(&doc, 0..9).as_deref(),
+            Some("value=key")
+        );
         bar.regex = false;
-        assert_eq!(bar.replacement_for(&doc, 0..9), "$2=$1", "literal mode");
+        assert_eq!(
+            bar.replacement_for(&doc, 0..9).as_deref(),
+            Some("$2=$1"),
+            "literal mode"
+        );
     }
 
     #[test]
@@ -388,7 +433,7 @@ mod tests {
         let _ = bar.replace.insert("bar");
         bar.search(&doc, |_| true);
         assert_eq!(bar.matches, vec![0..3]);
-        assert_eq!(bar.replacement_for(&doc, 0..3), "bar");
+        assert_eq!(bar.replacement_for(&doc, 0..3).as_deref(), Some("bar"));
     }
 
     #[test]
@@ -417,7 +462,7 @@ mod tests {
 
     #[test]
     fn a_new_search_makes_old_batches_stale() {
-        let text = "needle\n".repeat(300_000);
+        let text = "needle\n".repeat(200_000);
         let doc = Document::from_text(&text);
         let mut bar = bar_with("needle");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -433,8 +478,18 @@ mod tests {
         assert!(fresh > 0);
         assert_eq!(
             bar.matches.len(),
-            300_000,
+            200_000,
             "no duplicates from the old search"
         );
+    }
+
+    #[test]
+    fn matches_past_the_cap_are_counted_not_kept() {
+        let doc = Document::from_text(&"x".repeat(MAX_KEPT + 10));
+        let mut bar = bar_with("x");
+        bar.search_now(&doc);
+        assert_eq!(bar.matches.len(), MAX_KEPT);
+        assert!(bar.capped);
+        assert!(bar.status().contains('+'), "{}", bar.status());
     }
 }

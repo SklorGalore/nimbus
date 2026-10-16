@@ -8,3 +8,6 @@
 # Owner-managed local test files.
 /test-fixtures/
 /bigfile.txt
+
+# Worktrees made for Claude Code helper agents
+.claude/worktrees/
