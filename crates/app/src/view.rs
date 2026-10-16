@@ -236,13 +236,16 @@ fn highlight_range(
         (scroll_x / cell).max(0.0).floor() as usize,
         ((layout.width - layout.text_left) / cell).ceil().max(0.0) as usize,
     );
-    let first = t.line_to_byte(at.line);
-    let last_line = at.line + rows;
-    let end = if last_line >= t.len_lines() {
-        t.len_bytes()
-    } else {
-        t.line_to_byte(last_line)
-    };
+    let first = at.start;
+    // The start of the line `rows` lines down, or the end of the text.
+    let mut end = first;
+    for _ in 0..rows {
+        let Some(next) = t.line_span(end).next else {
+            end = t.len_bytes();
+            break;
+        };
+        end = next;
+    }
     if end - first <= WHOLE_LINES_LIMIT {
         first..end
     } else {
@@ -267,9 +270,10 @@ fn visible_bytes(
 ) -> Range<usize> {
     let (mut lo, mut hi) = (usize::MAX, 0);
     let mut left = rows;
-    while left > 0 && at.line < t.len_lines() {
-        let text = t.line(at.line);
-        let line_start = t.line_to_byte(at.line);
+    while left > 0 {
+        let span = t.line_span(at.start);
+        let text = t.slice(span.start..span.end);
+        let line_start = span.start;
         let starts: &[RowStart] = w.rows(&text);
         for r in at.row..starts.len() {
             if left == 0 {
@@ -283,8 +287,11 @@ fn visible_bytes(
             lo = lo.min(line_start + range.start + s);
             hi = hi.max(line_start + range.start + e);
         }
+        let Some(next) = span.next else {
+            break;
+        };
         at = RowPos {
-            line: at.line + 1,
+            start: next,
             row: 0,
         };
     }
@@ -306,25 +313,20 @@ fn wrapper<'a>(
     WrapView::new(cache, wrap.then_some(layout.wrap_cols), tab_width)
 }
 
-/// The top visible row, from the anchored scroll position.
-fn anchor(scroll: (usize, usize), t: &dyn Text, w: &mut WrapView<'_>) -> RowPos {
-    let line = scroll.0.min(t.len_lines().saturating_sub(1));
-    let text = t.line(line);
-    RowPos {
-        line,
-        row: wrap::row_of(w.rows(&text), scroll.1),
-    }
+/// The top visible row: the row containing `scroll_top`. Snapping to the
+/// containing row keeps this right after edits above the top, and after
+/// wrapping changes.
+fn anchor(scroll_top: usize, t: &dyn Text, w: &mut WrapView<'_>) -> RowPos {
+    wrap::row_pos_of(t, w, scroll_top.min(t.len_bytes()))
 }
 
 /// Scroll state and per-frame scratch space.
 #[derive(Debug, Default)]
 pub struct View {
-    /// Logical line of the top row.
-    pub scroll_line: usize,
-    /// Byte within `scroll_line` where the top row starts. Stored as a byte
-    /// rather than a row number so the same text stays at the top when a
-    /// resize rewraps the line.
-    pub scroll_byte: usize,
+    /// Byte where the top row starts. A byte rather than a line and row:
+    /// the same text stays at the top when a resize rewraps the line, and
+    /// it needs no line number, which a mapped file may not know yet.
+    pub scroll_top: usize,
     /// How far the top row is scrolled up out of view, `0..line_height`.
     pub scroll_px: f32,
     /// Horizontal scroll in pixels; always 0 while wrapping.
@@ -389,15 +391,15 @@ impl View {
 
     fn set_anchor(&mut self, t: &dyn Text, layout: &Layout, tab_width: usize, at: RowPos) {
         let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
-        let text = t.line(at.line);
-        self.scroll_line = at.line;
-        self.scroll_byte = w.rows(&text).get(at.row).map_or(0, |r| r.byte);
+        let span = t.line_span(at.start);
+        self.scroll_top = span.start + w.rows_at(t, span).get(at.row).map_or(0, |r| r.byte);
     }
 
     /// Turn soft wrap on or off, keeping the top line where it is.
     pub fn set_wrap(&mut self, on: bool) {
+        // The top stays in the same line: drawing snaps `scroll_top` to the
+        // row containing it.
         self.wrap = on;
-        self.scroll_byte = 0;
         self.scroll_x = 0.0;
         if !on {
             self.cache.clear();
@@ -416,7 +418,7 @@ impl View {
         )]
         let k = k_f as isize;
         let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
-        let anchor = anchor((self.scroll_line, self.scroll_byte), t, &mut w);
+        let anchor = anchor(self.scroll_top, t, &mut w);
         let (to, moved) = wrap::step_rows(t, &mut w, anchor, k);
         let (end, _) = wrap::step_rows(t, &mut w, to, 1);
         let mut rest = px - k_f * lh;
@@ -442,7 +444,7 @@ impl View {
         let full = layout.full_lines();
         let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
         let cursor_row = wrap::row_pos_of(t, &mut w, cursor);
-        let top_row = anchor((self.scroll_line, self.scroll_byte), t, &mut w);
+        let top_row = anchor(self.scroll_top, t, &mut w);
         let new_anchor = if cursor_row < top_row || (cursor_row == top_row && self.scroll_px > 0.0)
         {
             Some(cursor_row)
@@ -499,11 +501,12 @@ impl View {
         )]
         let half = (x_text / (layout.metrics.cell_width / 2.0)).floor() as usize;
         let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
-        let anchor = anchor((self.scroll_line, self.scroll_byte), t, &mut w);
+        let anchor = anchor(self.scroll_top, t, &mut w);
         let (at, _) = wrap::step_rows(t, &mut w, anchor, rows_down);
-        let text = t.line(at.line);
+        let span = t.line_span(at.start);
+        let text = t.slice(span.start..span.end);
         let rows = w.rows(&text);
-        t.line_to_byte(at.line) + wrap::byte_at_row_half_col(&text, rows, at.row, half, tab_width)
+        span.start + wrap::byte_at_row_half_col(&text, rows, at.row, half, tab_width)
     }
 
     /// The cursor's rectangle on screen as `[x, y, width, height]` from the
@@ -534,7 +537,7 @@ impl View {
         let lh = layout.metrics.line_height;
         let cell = layout.metrics.cell_width;
         let cursor = doc.cursor();
-        let cursor_line = t.byte_to_line(cursor);
+        let cursor_line = t.line_span(cursor).start;
         self.cache.next_frame();
         self.cursor_at = None;
 
@@ -552,18 +555,10 @@ impl View {
         let px = self.px();
         let (wrapping, scroll_x) = (self.wrap, self.scroll_x);
         let mut w = wrapper(&mut self.cache, wrapping, layout, tab_width);
-        let mut at = {
-            let line = self.scroll_line.min(t.len_lines().saturating_sub(1));
-            let text = t.line(line);
-            RowPos {
-                line,
-                row: wrap::row_of(w.rows(&text), self.scroll_byte),
-            }
-        };
-        let mut next_match = {
-            let first = t.line_to_byte(at.line) + self.scroll_byte;
-            deco.matches.partition_point(|m| m.end <= first)
-        };
+        let mut at = anchor(self.scroll_top, t, &mut w);
+        let mut next_match = deco.matches.partition_point(|m| m.end <= at.start);
+        // Counted once for the top line, then by one per line while known.
+        let mut number = t.line_number(at.start);
         let spans: &[Span] = if deco.captures.is_empty() {
             &[]
         } else {
@@ -585,10 +580,11 @@ impl View {
             spliced: &mut self.spliced,
             cursor_at: None,
         };
-        while top < layout.bottom && at.line < t.len_lines() {
-            let text = t.line(at.line);
-            let line_start = t.line_to_byte(at.line);
-            let has_break = t.line_to_byte(at.line + 1) > line_start + text.len();
+        while top < layout.bottom {
+            let span = t.line_span(at.start);
+            let text = t.slice(span.start..span.end);
+            let line_start = span.start;
+            let has_break = span.next.is_some();
             let rows: &[RowStart] = w.rows(&text);
             for r in at.row..rows.len() {
                 if top >= layout.bottom {
@@ -606,13 +602,17 @@ impl View {
                     left: layout.text_left - if wrapping { 0.0 } else { scroll_x },
                 };
                 if r == 0 {
-                    painter.gutter(at.line, at.line == cursor_line, top);
+                    painter.gutter(number, line_start == cursor_line, top);
                 }
                 next_match = painter.row(&row, next_match, scroll_x / cell);
                 top += lh;
             }
+            let Some(next) = span.next else {
+                break;
+            };
+            number = number.and_then(|n| (next <= t.indexed_bytes()).then_some(n + 1));
             at = RowPos {
-                line: at.line + 1,
+                start: next,
                 row: 0,
             };
         }
@@ -639,11 +639,17 @@ struct Painter<'a, 'g> {
 }
 
 impl Painter<'_, '_> {
-    /// The line number, right-aligned in the gutter, on a line's first row.
-    fn gutter(&mut self, line: usize, current: bool, top: f32) {
+    /// The line number, right-aligned in the gutter, on a line's first row;
+    /// `~` where it is not known yet (a mapped file still indexing).
+    fn gutter(&mut self, line: Option<usize>, current: bool, top: f32) {
         let cell = self.layout.metrics.cell_width;
         self.number.clear();
-        let _ = write!(self.number, "{}", line + 1);
+        match line {
+            Some(n) => {
+                let _ = write!(self.number, "{}", n + 1);
+            }
+            None => self.number.push('~'),
+        }
         let pad = self.layout.gutter_cols.saturating_sub(self.number.len());
         let color = if current {
             self.deco.ui.current_line_number
@@ -1278,7 +1284,7 @@ mod tests {
         let buf = RopeBuffer::from_text(&format!("short\n{long}\nend\n"));
         let mut cache = WrapCache::default();
         let l = layout(3);
-        let at = RowPos { line: 1, row: 0 };
+        let at = RowPos { start: 6, row: 0 };
         // No wrap, scrolled 1000 columns right, 50 columns wide.
         let mut w = wrapper(&mut cache, false, &l, 4);
         let r = visible_bytes(&buf, &mut w, at, 1, (1000, 50), 4);
@@ -1286,7 +1292,7 @@ mod tests {
         assert_eq!(r, start + 1000..start + 1051);
         // Wrapped: the rows on screen, from the top row on.
         let mut w = wrapper(&mut cache, true, &l, 4);
-        let at = RowPos { line: 1, row: 5 };
+        let at = RowPos { start: 6, row: 5 };
         let r = visible_bytes(&buf, &mut w, at, 3, (0, 50), 4);
         let cols = l.wrap_cols;
         assert_eq!(r.start, start + 5 * cols);
@@ -1327,20 +1333,26 @@ mod tests {
         assert_eq!(narrow(4).wrap_cols, 11);
     }
 
+    /// The top row as (line, byte within the line).
+    fn top(v: &View, d: &Document) -> (usize, usize) {
+        let line = d.buffer.byte_to_line(v.scroll_top);
+        (line, v.scroll_top - d.buffer.line_to_byte(line))
+    }
+
     #[test]
     fn scrolling_clamps_at_both_ends() {
         let d = doc(&"x\n".repeat(99));
         let l = layout(100);
         let mut v = View::default();
         v.scroll_by(-50.0, &d, &l, 4);
-        assert_eq!((v.scroll_line, v.scroll_px), (0, 0.0));
+        assert_eq!((top(&v, &d).0, v.scroll_px), (0, 0.0));
         v.scroll_by(45.0, &d, &l, 4);
-        assert_eq!(v.scroll_line, 2);
+        assert_eq!(top(&v, &d).0, 2);
         assert!((v.scroll_px - 5.0).abs() < 1e-3);
         v.scroll_by(-25.0, &d, &l, 4);
-        assert_eq!((v.scroll_line, v.scroll_px), (1, 0.0));
+        assert_eq!((top(&v, &d).0, v.scroll_px), (1, 0.0));
         v.scroll_by(1e6, &d, &l, 4);
-        assert_eq!((v.scroll_line, v.scroll_px), (99, 0.0));
+        assert_eq!((top(&v, &d).0, v.scroll_px), (99, 0.0));
     }
 
     #[test]
@@ -1350,7 +1362,10 @@ mod tests {
         let l = narrow(4);
         let mut v = View::default();
         v.set_wrap(true);
-        let at = |v: &View| (v.scroll_line, v.scroll_byte, v.scroll_px.round());
+        let at = |v: &View| {
+            let (line, byte) = top(v, &d);
+            (line, byte, v.scroll_px.round())
+        };
         v.scroll_by(25.0, &d, &l, 4);
         assert_eq!(at(&v), (0, 9, 5.0));
         v.scroll_by(40.0, &d, &l, 4);
@@ -1365,15 +1380,24 @@ mod tests {
 
     #[test]
     fn toggling_wrap_keeps_the_top_line() {
+        // The top is mid-line (row 1 of a wrapped line); unwrapped, the row
+        // containing it is the whole line, so the line stays at the top.
+        let d = doc("aaaaaaaa bbbbbbbb cccccccc\nx");
+        let l = narrow(4);
         let mut v = View {
-            scroll_line: 7,
-            scroll_byte: 9,
+            scroll_top: 9,
             scroll_x: 30.0,
             wrap: true,
             ..View::default()
         };
         v.set_wrap(false);
-        assert_eq!((v.scroll_line, v.scroll_byte, v.scroll_x), (7, 0, 0.0));
+        assert_eq!(v.scroll_x, 0.0);
+        let scroll_top = v.scroll_top;
+        let mut w = v.wrap_view(&l, 4);
+        assert_eq!(
+            anchor(scroll_top, &d.buffer, &mut w),
+            RowPos { start: 0, row: 0 }
+        );
     }
 
     #[test]
@@ -1387,10 +1411,10 @@ mod tests {
         let mut v = View::default();
         d.click(d.buffer.line_to_byte(30), false);
         v.ensure_cursor_visible(&d, &l, 4);
-        assert_eq!(v.scroll_line, 21, "line 30 is the last full line");
+        assert_eq!(top(&v, &d).0, 21, "line 30 is the last full line");
         d.click(d.buffer.line_to_byte(5), false);
         v.ensure_cursor_visible(&d, &l, 4);
-        assert_eq!(v.scroll_line, 5);
+        assert_eq!(top(&v, &d).0, 5);
     }
 
     #[test]
@@ -1402,10 +1426,10 @@ mod tests {
         v.set_wrap(true);
         d.click(6 * 18 + 9, false); // line 6, row 1
         v.ensure_cursor_visible(&d, &l, 4);
-        assert_eq!((v.scroll_line, v.scroll_byte), (2, 0));
+        assert_eq!(top(&v, &d), (2, 0));
         d.click(18 + 9, false); // line 1, row 1
         v.ensure_cursor_visible(&d, &l, 4);
-        assert_eq!((v.scroll_line, v.scroll_byte), (1, 9));
+        assert_eq!(top(&v, &d), (1, 9));
     }
 
     #[test]

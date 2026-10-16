@@ -256,9 +256,9 @@ pub fn vertical_rows(
     rows: isize,
 ) -> Vertical {
     let tab = w.tab_width();
-    let l = t.byte_to_line(pos);
-    let line = t.line(l);
-    let off = (pos - t.line_to_byte(l)).min(line.len());
+    let span = t.line_span(pos);
+    let line = t.slice(span.start..span.end);
+    let off = (pos - span.start).min(line.len());
     let (row, vcol) = {
         let rs = w.rows(&line);
         let row = wrap::row_of(rs, off);
@@ -267,22 +267,27 @@ pub fn vertical_rows(
             preferred.unwrap_or_else(|| wrap::visual_col(&line, rs, off, tab)),
         )
     };
-    let (to, moved) = wrap::step_rows(t, w, RowPos { line: l, row }, rows);
+    let from = RowPos {
+        start: span.start,
+        row,
+    };
+    let (to, moved) = wrap::step_rows(t, w, from, rows);
     if moved == 0 && rows != 0 {
         let end = if rows < 0 { 0 } else { t.len_bytes() };
-        let el = t.byte_to_line(end);
-        let eline = t.line(el);
-        let eoff = end - t.line_to_byte(el);
+        let espan = t.line_span(end);
+        let eline = t.slice(espan.start..espan.end);
+        let eoff = end - espan.start;
         let col = wrap::visual_col(&eline, w.rows(&eline), eoff, tab);
         return Vertical {
             pos: end,
             preferred_col: col,
         };
     }
-    let target = t.line(to.line);
+    let tspan = t.line_span(to.start);
+    let target = t.slice(tspan.start..tspan.end);
     let rs = w.rows(&target);
     Vertical {
-        pos: t.line_to_byte(to.line) + wrap::byte_at_row_col(&target, rs, to.row, vcol, tab),
+        pos: tspan.start + wrap::byte_at_row_col(&target, rs, to.row, vcol, tab),
         preferred_col: vcol,
     }
 }

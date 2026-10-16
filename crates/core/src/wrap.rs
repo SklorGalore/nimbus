@@ -19,8 +19,8 @@ use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::Text;
 use crate::column;
+use crate::{LineSpan, Text};
 
 /// Where one visual row starts within its logical line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +269,26 @@ impl<'a> WrapView<'a> {
         }
     }
 
+    /// Row starts for the line `span` of `t`. Reads the line's text only
+    /// when wrapping: unwrapped, every line is one row.
+    pub fn rows_at(&mut self, t: &dyn Text, span: LineSpan) -> &[RowStart] {
+        if self.width.is_none() {
+            return ONE_ROW;
+        }
+        let text = t.slice(span.start..span.end);
+        self.rows(&text)
+    }
+
+    /// Number of rows the line `span` of `t` takes; like
+    /// [`WrapView::row_count`], without reading the text when unwrapped.
+    pub fn row_count_at(&mut self, t: &dyn Text, span: LineSpan) -> usize {
+        if self.width.is_none() {
+            return 1;
+        }
+        let text = t.slice(span.start..span.end);
+        self.row_count(&text)
+    }
+
     /// Number of rows `line` takes. Unlike [`WrapView::rows`], a line not
     /// in the cache is wrapped into scratch space and not stored, so walking
     /// past many lines during a fast scroll does not fill the cache.
@@ -287,11 +307,14 @@ impl<'a> WrapView<'a> {
     }
 }
 
-/// A visual row in the document: a logical line and a row within it.
+/// A visual row in the document: a logical line, named by the byte where
+/// it starts, and a row within it. Lines are named by position rather than
+/// number because a mapped file may not have counted its lines that far
+/// yet; ordering by `start` is document order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RowPos {
-    /// Logical line.
-    pub line: usize,
+    /// Byte where the logical line starts.
+    pub start: usize,
     /// Row within the line.
     pub row: usize,
 }
@@ -300,30 +323,30 @@ pub struct RowPos {
 /// and last rows of the text. Returns the new position and how many rows
 /// were actually moved. Costs one row count per line passed.
 pub fn step_rows(t: &dyn Text, w: &mut WrapView<'_>, at: RowPos, n: isize) -> (RowPos, usize) {
-    let last = t.len_lines().saturating_sub(1);
+    let mut span = t.line_span(at.start);
     let mut p = RowPos {
-        line: at.line.min(last),
-        row: at.row,
+        start: span.start,
+        row: at.row.min(w.row_count_at(t, span).saturating_sub(1)),
     };
-    p.row = p.row.min(w.row_count(&t.line(p.line)).saturating_sub(1));
     let mut left = n.unsigned_abs();
     if n >= 0 {
         loop {
-            let rows = w.row_count(&t.line(p.line));
+            let rows = w.row_count_at(t, span);
             let room = rows - 1 - p.row;
             if left <= room {
                 p.row += left;
                 left = 0;
                 break;
             }
-            if p.line == last {
+            let Some(next) = span.next else {
                 left -= room;
                 p.row = rows - 1;
                 break;
-            }
+            };
             left -= room + 1;
+            span = t.line_span(next);
             p = RowPos {
-                line: p.line + 1,
+                start: span.start,
                 row: 0,
             };
         }
@@ -334,14 +357,17 @@ pub fn step_rows(t: &dyn Text, w: &mut WrapView<'_>, at: RowPos, n: isize) -> (R
                 left = 0;
                 break;
             }
-            if p.line == 0 {
+            if p.start == 0 {
                 left -= p.row;
                 p.row = 0;
                 break;
             }
             left -= p.row + 1;
-            p.line -= 1;
-            p.row = w.row_count(&t.line(p.line)) - 1;
+            span = t.line_span(p.start - 1);
+            p = RowPos {
+                start: span.start,
+                row: w.row_count_at(t, span) - 1,
+            };
         }
     }
     (p, n.unsigned_abs() - left)
@@ -349,12 +375,11 @@ pub fn step_rows(t: &dyn Text, w: &mut WrapView<'_>, at: RowPos, n: isize) -> (R
 
 /// The visual row containing byte offset `pos`.
 pub fn row_pos_of(t: &dyn Text, w: &mut WrapView<'_>, pos: usize) -> RowPos {
-    let line = t.byte_to_line(pos);
-    let off = pos - t.line_to_byte(line);
-    let text = t.line(line);
+    let span = t.line_span(pos);
+    let off = pos.saturating_sub(span.start);
     RowPos {
-        line,
-        row: row_of(w.rows(&text), off),
+        start: span.start,
+        row: row_of(w.rows_at(t, span), off),
     }
 }
 
@@ -474,28 +499,30 @@ mod tests {
         let t = RopeBuffer::from_text("aaaaaaaa bbbbbbbb cccccccc\nx\ny");
         let mut cache = WrapCache::default();
         let mut w = WrapView::new(&mut cache, Some(11), 4);
-        let start = RowPos { line: 0, row: 0 };
+        // Lines start at 0, 27 and 29.
+        let start = RowPos { start: 0, row: 0 };
         assert_eq!(
             step_rows(&t, &mut w, start, 2),
-            (RowPos { line: 0, row: 2 }, 2)
+            (RowPos { start: 0, row: 2 }, 2)
         );
         assert_eq!(
             step_rows(&t, &mut w, start, 3),
-            (RowPos { line: 1, row: 0 }, 3)
+            (RowPos { start: 27, row: 0 }, 3)
         );
         assert_eq!(
             step_rows(&t, &mut w, start, 99),
-            (RowPos { line: 2, row: 0 }, 4)
+            (RowPos { start: 29, row: 0 }, 4)
         );
-        let end = RowPos { line: 2, row: 0 };
+        let end = RowPos { start: 29, row: 0 };
         assert_eq!(
             step_rows(&t, &mut w, end, -3),
-            (RowPos { line: 0, row: 1 }, 3)
+            (RowPos { start: 0, row: 1 }, 3)
         );
         assert_eq!(step_rows(&t, &mut w, end, -99), (start, 4));
         assert_eq!(rows_between(&t, &mut w, start, end, 99), 4);
         assert_eq!(rows_between(&t, &mut w, start, end, 2), 2, "capped");
-        assert_eq!(row_pos_of(&t, &mut w, 20), RowPos { line: 0, row: 2 });
+        assert_eq!(row_pos_of(&t, &mut w, 20), RowPos { start: 0, row: 2 });
+        assert_eq!(row_pos_of(&t, &mut w, 28), RowPos { start: 27, row: 0 });
     }
 
     /// Wrapping cost for the longest allowed line (1 MB). Ignored by
@@ -532,9 +559,43 @@ mod tests {
         let mut cache = WrapCache::default();
         let mut w = WrapView::new(&mut cache, None, 4);
         assert_eq!(
-            step_rows(&t, &mut w, RowPos { line: 0, row: 0 }, 1).0,
-            RowPos { line: 1, row: 0 }
+            step_rows(&t, &mut w, RowPos { start: 0, row: 0 }, 1).0,
+            RowPos { start: 27, row: 0 }
         );
         assert!(cache.is_empty());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 256,
+            failure_persistence: None,
+            ..Default::default()
+        })]
+
+        /// Stepping n rows down and n back up returns to the same row,
+        /// unless the first step stopped early at the end of the text; and
+        /// every position's row steps back to itself through its line start.
+        #[test]
+        fn stepping_down_and_up_returns(
+            pieces in proptest::collection::vec(
+                proptest::sample::select(vec!["word ", "longerword ", "\n", "\r\n", "\t", "é", "日本 ", "x"]),
+                0..60,
+            ),
+            width in proptest::option::of(3usize..14),
+            from in 0usize..400,
+            n in 0isize..12,
+        ) {
+            let text: String = pieces.concat();
+            let t = RopeBuffer::from_text(&text);
+            let mut cache = WrapCache::default();
+            let mut w = WrapView::new(&mut cache, width, 4);
+            let pos = t.line_span(from.min(text.len())).start;
+            let start = row_pos_of(&t, &mut w, pos);
+            let (down, moved) = step_rows(&t, &mut w, start, n);
+            let moved = isize::try_from(moved).unwrap();
+            let (back, moved_back) = step_rows(&t, &mut w, down, -moved);
+            proptest::prop_assert_eq!(back, start, "{:?} wrapped at {:?}", text, width);
+            proptest::prop_assert_eq!(isize::try_from(moved_back).unwrap(), moved);
+        }
     }
 }
