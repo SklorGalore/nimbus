@@ -117,6 +117,8 @@ pub struct Document {
     pub syntax: SyntaxState,
     /// Key of the detected language (`Detected::key`), if any.
     language: Option<&'static str>,
+    /// Its name for the status bar.
+    language_name: Option<&'static str>,
     /// The file on disk as last read or written; a change event that still
     /// matches it is our own save.
     disk: Option<Stamp>,
@@ -481,6 +483,10 @@ impl Document {
             return;
         }
         self.language = key;
+        self.language_name = detected.map(|d| match d {
+            Detected::Builtin(id) => id.name(),
+            Detected::Simple(name, _) => name,
+        });
         match detected {
             // A mapped file is not in memory for tree-sitter to parse, so
             // it gets the simple rules at any size, even when small.
@@ -490,6 +496,27 @@ impl Document {
             Some(Detected::Builtin(id)) => self.syntax.reset(Some(id), self.buffer.len_bytes()),
             Some(Detected::Simple(_, rules)) => self.syntax.reset_simple(rules),
             None => self.syntax.reset(None, self.buffer.len_bytes()),
+        }
+    }
+
+    /// The detected language's name, for the status bar.
+    #[must_use]
+    pub fn language_name(&self) -> Option<&'static str> {
+        self.language_name
+    }
+
+    /// The encoding, as far as it is known, for the status bar. A rope
+    /// holds only UTF-8. A piece table held in memory holds a small file
+    /// that is not UTF-8. A huge mapped file's bytes are never checked as
+    /// a whole, so nothing is claimed for it.
+    #[must_use]
+    pub fn encoding_label(&self) -> Option<&'static str> {
+        match (self.buffer.is_mapped(), self.mapping.is_some(), self.bom) {
+            (false, _, false) => Some("UTF-8"),
+            (false, _, true) => Some("UTF-8 BOM"),
+            (true, false, _) => Some("Not UTF-8"),
+            (true, true, true) => Some("BOM"),
+            (true, true, false) => None,
         }
     }
 

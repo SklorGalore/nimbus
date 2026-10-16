@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 
 use nimbus_core::wrap::{self, RowPos, RowStart, WrapCache, WrapView};
-use nimbus_core::{Text, column, long_line};
+use nimbus_core::{LineEnding, Text, column, long_line};
 use nimbus_render::{ColorRun, Gpu, Metrics};
 use nimbus_syntax::highlight::{Highlighter, Span};
 
@@ -104,7 +104,7 @@ pub struct Layout {
     pub scale: f32,
     /// Top of the text area: below the margin and any bar at the top.
     pub top: f32,
-    /// Bottom of the text area: above any message line.
+    /// Bottom of the text area: above the status bar.
     pub bottom: f32,
     /// Columns that fit in the text area: the soft-wrap width.
     pub wrap_cols: usize,
@@ -167,9 +167,9 @@ impl Layout {
     }
 
     /// Reserve room for the window chrome: a tab bar, `find_rows` rows of
-    /// find bar below it, and a message line at the bottom.
+    /// find bar below it, and a status bar at the bottom.
     #[must_use]
-    pub fn with_chrome(mut self, tab_bar: bool, find_rows: usize, message: bool) -> Self {
+    pub fn with_chrome(mut self, tab_bar: bool, find_rows: usize, status: bool) -> Self {
         let lh = self.metrics.line_height;
         let m = self.margin;
         self.tabs_h = if tab_bar { (lh + 1.5 * m).round() } else { 0.0 };
@@ -181,7 +181,7 @@ impl Layout {
             0.0
         };
         self.top = self.tabs_h + find_h + m;
-        self.bottom = (self.height - if message { lh } else { 0.0 }).max(self.top + lh);
+        self.bottom = (self.height - if status { lh } else { 0.0 }).max(self.top + lh);
         self
     }
 
@@ -285,6 +285,25 @@ const WHOLE_LINES_LIMIT: usize = 64 * 1024;
 
 /// Visible ranges closer than this are highlighted as one.
 const MERGE_GAP: usize = 4096;
+
+/// Selections up to this many bytes show their length in characters in
+/// the status bar; longer ones in bytes, which needs no reading.
+const STATUS_COUNT_LIMIT: usize = 1024 * 1024;
+
+/// `n` bytes as a short human-readable size: `512 B`, `12.0 KB`, `3.4 MB`.
+fn human_bytes(n: usize) -> String {
+    #[expect(clippy::cast_precision_loss, reason = "a size for display")]
+    let x = n as f64;
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{:.1} KB", x / 1024.0)
+    } else if n < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", x / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", x / (1024.0 * 1024.0 * 1024.0))
+    }
+}
 
 /// Add `r` to the sorted ranges in `out`, joining it to the last one if
 /// they are close.
@@ -427,6 +446,8 @@ pub struct View {
     highlighter: Highlighter,
     /// Reused for each row's colour runs.
     runs: Vec<ColorRun>,
+    /// Reused for the right side of the status bar.
+    status: String,
 }
 
 /// Everything needed to draw one visual row.
@@ -541,6 +562,58 @@ impl View {
         let at = anchor(byte, t, &mut w);
         self.scroll_px = 0.0;
         self.set_anchor(t, layout, tab_width, at);
+    }
+
+    /// The right side of the status bar for `doc`: the cursor's line and
+    /// column (`~` for a line not counted yet in a huge file), how much is
+    /// selected, the line ending, the encoding, the language and, while a
+    /// huge file's lines are being counted, how far that has got. Built in
+    /// a reused string, so drawing it each frame allocates nothing.
+    pub fn status_info(&mut self, doc: &Document, tab_width: usize) -> &str {
+        let out = &mut self.status;
+        out.clear();
+        let t = &doc.buffer;
+        let sel = doc.selection();
+        if !sel.is_empty() {
+            let range = sel.range();
+            // Counting characters reads the selection; past a size where
+            // that costs, bytes say as much.
+            if range.len() <= STATUS_COUNT_LIMIT {
+                let n = t.slice(range).chars().count();
+                let _ = write!(out, "{n} selected   ");
+            } else {
+                let _ = write!(out, "{} selected   ", human_bytes(range.len()));
+            }
+        }
+        let head = sel.head;
+        let col = nimbus_core::movement::column_of(t, head, tab_width) + 1;
+        match t.line_number(head) {
+            Some(line) => {
+                let _ = write!(out, "Ln {}, Col {col}", line + 1);
+            }
+            None => {
+                let _ = write!(out, "Ln ~, Col {col}");
+            }
+        }
+        out.push_str("   ");
+        out.push_str(match doc.line_ending {
+            LineEnding::Lf => "LF",
+            LineEnding::CrLf => "CRLF",
+        });
+        if let Some(encoding) = doc.encoding_label() {
+            out.push_str("   ");
+            out.push_str(encoding);
+        }
+        if let Some(name) = doc.language_name() {
+            out.push_str("   ");
+            out.push_str(name);
+        }
+        if doc.counting_lines() {
+            #[expect(clippy::cast_precision_loss, reason = "a percentage for display")]
+            let pct = t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64;
+            let _ = write!(out, "   Counting lines {pct:.0}%");
+        }
+        &self.status
     }
 
     /// Scroll horizontally by `dx` pixels. Does nothing while wrapping.
@@ -1360,18 +1433,41 @@ pub fn draw_picker(
     }
 }
 
-/// Draw a one-line message at the bottom of the window, as an overlay.
-pub fn draw_message(gpu: &mut Gpu, ui: &Ui, text: &str, layout: &Layout, is_error: bool) {
+/// Draw the status bar along the bottom of the window: `message` (and
+/// whether it is an error) on the left, `info` (cursor position and the
+/// document's details, from [`View::status_info`]) on the right. A long
+/// message is cut short rather than drawn over the details.
+pub fn draw_status(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    message: Option<(&str, bool)>,
+    info: &str,
+) {
     let lh = layout.metrics.line_height;
+    let cell = layout.metrics.cell_width;
     gpu.begin_layer(None);
     gpu.push_rect(
         [0.0, layout.bottom],
         [layout.width, layout.height - layout.bottom],
         ui.bar,
     );
-    let color = if is_error { ui.error } else { ui.text };
     let y = (layout.bottom + (layout.height - layout.bottom - lh) / 2.0).round();
-    gpu.push_text_line([layout.margin, y], text, color);
+    let info_w = f(info.chars().count()) * cell;
+    let info_x = (layout.width - layout.margin - info_w).round();
+    gpu.push_text_line([info_x.max(layout.margin), y], info, ui.gutter);
+    if let Some((text, is_error)) = message {
+        // Columns left for the message, with two between it and the info.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small non-negative column count"
+        )]
+        let room = ((info_x - layout.margin) / cell - 2.0).max(0.0) as usize;
+        let end = text.char_indices().nth(room).map_or(text.len(), |(i, _)| i);
+        let color = if is_error { ui.error } else { ui.text };
+        gpu.push_text_line([layout.margin, y], &text[..end], color);
+    }
 }
 
 /// The selected columns of the first line of a one-line field.
@@ -1492,6 +1588,25 @@ mod tests {
     fn top(v: &View, d: &Document) -> (usize, usize) {
         let line = d.buffer.byte_to_line(v.scroll_top);
         (line, v.scroll_top - d.buffer.line_to_byte(line))
+    }
+
+    #[test]
+    fn the_status_bar_shows_position_selection_and_file_details() {
+        let mut d = doc("fn main() {\n\tlet é = 1;\n}\n");
+        d.line_ending = LineEnding::CrLf;
+        let mut v = View::default();
+        assert_eq!(v.status_info(&d, 4), "Ln 1, Col 1   CRLF   UTF-8");
+        // Line 2, after the tab (4 columns) and "let ": column 9.
+        d.click(12 + 1 + 4, false);
+        assert_eq!(v.status_info(&d, 4), "Ln 2, Col 9   CRLF   UTF-8");
+        // Selecting "é = 1" counts characters, not bytes.
+        d.select(17..23);
+        assert_eq!(
+            v.status_info(&d, 4),
+            "5 selected   Ln 2, Col 14   CRLF   UTF-8"
+        );
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(3 * 1024 * 1024 + 400 * 1024), "3.4 MB");
     }
 
     #[test]

@@ -15,8 +15,9 @@ release builds for all three platforms.
 - [ ] **Bracket matching**: the bracket pair around the cursor is
       highlighted, using the syntax tree where there is one and a bounded
       scan otherwise.
-- [ ] **Status bar**: line and column, selection length, line ending,
+- [x] **Status bar**: line and column, selection length, line ending,
       encoding note for lossy files, language, indexing progress.
+      Messages show on its left (view test; headless renders).
 - [ ] **Debug overlay** (`F12`): frame time, keystroke-to-present latency
       (last and worst of the last 100), atlas occupancy, buffer backend,
       background task status.

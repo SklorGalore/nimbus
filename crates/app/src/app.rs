@@ -526,10 +526,7 @@ impl App {
     fn layout(&self) -> Option<Layout> {
         let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
         let scale = to_f32(effective_scale(window.scale_factor()));
-        Some(
-            layout_for(gpu, scale, self.doc(), &self.find, self.message.is_some())
-                .with_sidebar(self.sidebar.px(scale)),
-        )
+        Some(layout_for(gpu, scale, self.doc(), &self.find).with_sidebar(self.sidebar.px(scale)))
     }
 
     /// Show a short message at the bottom of the window.
@@ -852,11 +849,8 @@ impl App {
         } else if t.is_fully_indexed() {
             let lines = t.len_lines();
             self.say(format!("{lines} lines"), false);
-        } else {
-            #[expect(clippy::cast_precision_loss, reason = "a percentage for display")]
-            let pct = t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64;
-            self.say(format!("Counting lines… {pct:.0}%"), false);
         }
+        // Progress meanwhile shows in the status bar.
         if let Some(n) = self.pending_line {
             let t = &self.tabs[i].doc.buffer;
             if n <= t.len_lines() || !self.tabs[i].doc.counting_lines() {
@@ -2272,9 +2266,9 @@ fn line_estimate(t: &dyn Text) -> usize {
     usize::try_from(estimate).unwrap_or(usize::MAX).max(lines)
 }
 
-/// Geometry for the window `gpu` draws to, with room for the find bar and
-/// message line when they are shown.
-pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar, message: bool) -> Layout {
+/// Geometry for the window `gpu` draws to, with room for the find bar when
+/// it is shown, and the status bar.
+pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar) -> Layout {
     let (w, h) = gpu.size();
     let bar_rows = match (find.open, find.replace_mode) {
         (false, _) => 0,
@@ -2282,7 +2276,7 @@ pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar, message
         (true, true) => 2,
     };
     Layout::new(gpu.metrics(), w, h, scale, line_estimate(&doc.buffer))
-        .with_chrome(true, bar_rows, message)
+        .with_chrome(true, bar_rows, true)
 }
 
 /// Everything one frame shows.
@@ -2298,7 +2292,7 @@ pub struct Scene<'a> {
     tab_width: usize,
 }
 
-/// Queue a whole frame: editor text, then the find bar and message line.
+/// Queue a whole frame: editor text, then the find bar and status bar.
 /// Shared by the window and headless rendering.
 pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     let find = scene.find;
@@ -2331,9 +2325,9 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     if find.open {
         view::draw_find_bar(gpu, &ui, find, layout, scene.cursor_visible);
     }
-    if let Some(m) = scene.message {
-        view::draw_message(gpu, &ui, &m.text, layout, m.is_error);
-    }
+    let message = scene.message.map(|m| (m.text.as_str(), m.is_error));
+    let info = scene.view.status_info(scene.doc, scene.tab_width);
+    view::draw_status(gpu, &ui, layout, message, info);
 }
 
 /// `--headless WxH --screenshot FILE`: render the first frame into an
@@ -2383,7 +2377,7 @@ pub fn run_headless(
     let find = headless_find(options.find.as_deref(), &mut doc);
     let (sidebar, layout) = headless_sidebar(
         &root,
-        layout_for(&gpu, to_f32(scale), &doc, &find, false),
+        layout_for(&gpu, to_f32(scale), &doc, &find),
         doc.canonical.as_deref(),
     );
     view.ensure_cursor_visible(&doc, &layout, config.tab_width);
