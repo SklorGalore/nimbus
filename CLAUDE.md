@@ -17,6 +17,8 @@ cargo build --release && ./target/release/nimbus --smoke   # the startup number 
 RUST_LOG=nimbus=debug ./target/release/nimbus --smoke       # same, with per-phase startup times
 cargo run -- --screenshot /tmp/frame.bmp                    # save the first frame; convert with `sips -s format png`
 NIMBUS_SCALE=1 cargo run -- --screenshot /tmp/1x.bmp         # debug builds: render at another scale factor
+./target/release/nimbus FILE --bench-typing 300            # type 300 chars through the edit path; prints latency percentiles
+bench/gen.sh                                                # 10 MB / 100 MB test files in bench/out (also: logs, longline)
 cargo test --workspace
 cargo test -p nimbus-core <test_name>    # single test in one crate
 cargo fmt --all --check
@@ -43,7 +45,7 @@ Rules behind those lints:
 - **Errors are typed per crate.** Library crates (`core`, `syntax`, `render`) expose their own error enums that implement `Display` and `Error`, like `GpuError`. No `anyhow` or `Box<dyn Error>` in library APIs. `app` may flatten errors for logging.
 - **No `dbg!` or stray `println!`.** Use `log::debug!` or `log::trace!` instead; they cost nothing when filtered out.
 - **Hot paths do not allocate per frame or per keystroke.** Reuse buffers such as instance `Vec`s with `clear()` rather than building new ones. Prefer borrowing (`&str`, `Cow`) over cloning `String`s out of the buffer.
-- **Tests live with the code.** Use `#[cfg(test)] mod tests` in the same file. Buffer logic needs property tests against a `String` oracle once `proptest` is added in milestone 2.
+- **Tests live with the code.** Use `#[cfg(test)] mod tests` in the same file. The exception is property-test suites that exercise a crate's public interface across modules, such as `crates/core/tests/buffer_oracle.rs`; those live in the crate's `tests/` directory. Every buffer backend must pass that oracle suite.
 - **Dependencies need a reason.** A new crate must fit the binary-size budget and be added with `cargo add` to the crate that uses it. Say why in the commit message.
 
 ## Subagents

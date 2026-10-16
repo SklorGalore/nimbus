@@ -17,7 +17,7 @@ and add a line to the decision log (§10).
 | Fast startup | First frame in < 500 ms, total time from the top of `main` | `nimbus --smoke` prints `first-frame-ms` | M1: 116–132 ms warm, of which about 3 ms is ours |
 | Typing latency | Keystroke to pixels in < 1 frame (≤ 8 ms at 120 Hz) | Frame timer in debug overlay | — |
 | Huge files | Open a 4 GB log, scroll and search it, under 1 s to interactive | Bench file from `bench/gen.sh` | — |
-| Low footprint | < 30 MB resident with one file open; single binary < 15 MB | `ps`, CI size job | M1: 7.3 MB binary |
+| Low footprint | Opening a file adds at most 1.5× its size over an empty window (rope backend); mapped files (M7) add roughly nothing. Total reported, not budgeted. Single binary < 15 MB | `vmmap` physical footprint after settling; CI size job | M2: 45 MB empty, 58 MB with a 10 MB file (1.3×); 7.5 MB binary |
 | Modeless editing | Type to insert; Cmd/Ctrl shortcuts; mouse works | — | — |
 
 Content we care about, in order: source code, prose and notes (Markdown),
@@ -100,21 +100,31 @@ the only backend. A narrow `Buffer` trait has two implementations:
    allowed; saving streams to a temp file and renames it over the original.
    Also used for files that are not valid UTF-8, at any size.
 
-The trait is intentionally narrow so both backends stay honest:
+The interface is intentionally narrow so both backends stay honest. As
+built in M2 (`crates/core/src/buffer.rs`), reading and editing are split:
 
 ```rust
-pub trait Buffer {
+pub trait Text {                                   // read-only; also what snapshots offer
     fn len_bytes(&self) -> usize;
-    fn len_lines(&self) -> usize;            // may be a lower bound while indexing
-    fn line(&self, idx: usize) -> Cow<str>;  // without trailing newline; lossy for invalid UTF-8
+    fn len_lines(&self) -> usize;                  // may be a lower bound while indexing
+    fn line(&self, idx: usize) -> Cow<'_, str>;    // without "\n" or "\r\n"
     fn byte_to_line(&self, b: usize) -> usize;
     fn line_to_byte(&self, l: usize) -> usize;
-    fn slice(&self, range: Range<usize>) -> Cow<str>;
-    fn replace(&mut self, range: Range<usize>, text: &str) -> Edit;
-    fn is_fully_indexed(&self) -> bool;
-    fn snapshot(&self) -> Box<dyn BufferSnapshot>; // cheap, Send, read-only; for worker threads
+    fn slice(&self, range: Range<usize>) -> Cow<'_, str>; // clamped, widened to char boundaries
+    fn is_char_boundary(&self, b: usize) -> bool;
+}
+pub trait Snapshot: Text + Send + Sync {}          // owned by worker threads
+pub trait Buffer: Text {
+    fn replace(&mut self, range: Range<usize>, text: &str) -> Result<Edit, EditError>;
+    fn snapshot(&self) -> Box<dyn Snapshot>;       // cheap: ropes share structure
+    fn is_fully_indexed(&self) -> bool { true }
 }
 ```
+
+`replace` returns an error for a range outside the text or inside a
+character, rather than panicking, because a panic aborts with unsaved work.
+Lines end only at `\n`; a `\r` before it belongs to the line ending and a
+lone `\r` is ordinary text. Both backends must agree on this.
 
 `snapshot` was added after the first draft: background search (M3) and
 initial parsing (M5) need to read the text off the main thread while the user
@@ -144,8 +154,10 @@ Other `core` responsibilities:
 - **Search**: literal and regex (`regex` crate) over `BufferSnapshot` in
   chunks, so it works on mapped files and runs off the main thread. Results
   are byte ranges.
-- **Line endings**: detected on open (LF, CRLF, or mixed, which normalises to
-  the majority) and preserved on save. Tabs are kept as tabs; display width
+- **Line endings**: detected on open (the majority of LF or CRLF wins) and
+  used for new lines typed with Enter. Saving writes the buffer's bytes
+  exactly, so unedited files round-trip byte for byte, mixed endings
+  included. Tabs are kept as tabs; display width
   is a setting.
 
 ### 4.2 syntax: highlighting
@@ -344,8 +356,8 @@ introduces and points at the code.
 |---|---|---|---|---|
 | 0 | Scaffold | **Done** | Run an empty window on all three OSes; CI builds all three | [m0](docs/milestones/m0-scaffold.md) |
 | 1 | Text on screen | **Done** | See a paragraph in a monospace font at correct DPI; cold start under 100 ms | [m1](docs/milestones/m1-text-on-screen.md) |
-| 2 | Editable | Next | Open, edit, scroll and save a file | [m2](docs/milestones/m2-editable.md) |
-| 3 | Editing essentials | Planned | Select, clipboard, undo, find and replace, soft wrap, auto-indent | [m3](docs/milestones/m3-editing-essentials.md) |
+| 2 | Editable | **Done** | Open, edit, scroll and save a file | [m2](docs/milestones/m2-editable.md) |
+| 3 | Editing essentials | Next | Select, clipboard, undo, find and replace, soft wrap, auto-indent | [m3](docs/milestones/m3-editing-essentials.md) |
 | 4 | Many files | Planned | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
 | 5 | Highlighting | Planned | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
 | 6 | File tree | Planned | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
@@ -367,7 +379,8 @@ which is contained inside `render`.
 Resolved at approval: the two-backend buffer (§4.1), bidi out of scope (§2),
 the nine starter languages (§4.2), binary name `nimbus`. Resolved at the start
 of M1: the bundled font is Hack Nerd Font Mono Regular (§4.3). Resolved after
-M1: the startup budget is under 500 ms total (§1).
+M1: the startup budget is under 500 ms total (§1). Resolved after M2: the
+memory budget is per file, at most 1.5× file size over an empty window (§1).
 
 ## 10. Decision log
 
@@ -389,3 +402,10 @@ M1: the startup budget is under 500 ms total (§1).
 | 2026-10-15 | `--screenshot` frame capture added in M1, ahead of M8 | §5 |
 | 2026-10-15 | `Gpu::render` reports `FrameStatus`; GPU validation errors are logged, never panic | §4.3 |
 | 2026-10-15 | Startup budget changed from 100 ms to under 500 ms total | §1 |
+| 2026-10-16 | Buffer interface split into `Text`/`Buffer`/`Snapshot`; `replace` returns `Result` | §4.1 |
+| 2026-10-16 | Saving writes bytes verbatim; detected line ending only governs Enter | §4.1 |
+| 2026-10-16 | Shared column math in `nimbus_core::column`; renderer snaps graphemes to columns | §4.3 |
+| 2026-10-16 | Only the visible column span of each line is shaped; lines over 1 MB refused until M7 | §4.1, §4.3 |
+| 2026-10-16 | winit's default macOS menu disabled so Cmd+Q reaches the unsaved prompt | §4.4 |
+| 2026-10-16 | Byte order mark kept out of the text, written back on save | §4.1 |
+| 2026-10-16 | Memory budget: a file adds at most 1.5× its size; totals reported, not budgeted | §1 |

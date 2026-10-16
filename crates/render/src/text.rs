@@ -11,7 +11,18 @@ use crate::atlas::{Atlas, AtlasError, AtlasSlot};
 use crate::font::{Font, Metrics};
 use crate::frame::FrameBuilder;
 use crate::raster::{GlyphKey, Rasterizer};
-use crate::shape::{ShapedGlyph, Shaper};
+use crate::shape::{Grid, ShapedGlyph, Shaper};
+
+/// How to draw one line of text.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LineStyle {
+    /// Straight RGBA text colour.
+    pub(crate) color: [f32; 4],
+    /// Glyphs whose pen position is left of this x are skipped.
+    pub(crate) clip_left: f32,
+    /// Column within its line where this text starts (see [`Grid`]).
+    pub(crate) start_col: usize,
+}
 
 /// A glyph already in the atlas, with its offset from the pen position.
 #[derive(Debug, Clone, Copy)]
@@ -25,7 +36,7 @@ struct CachedGlyph {
 pub(crate) struct TextRenderer {
     font: Font,
     metrics: Metrics,
-    tab_width: u32,
+    tab_width: usize,
     shaper: Shaper,
     raster: Rasterizer,
     /// `None` records glyphs with no bitmap (spaces), so they are not
@@ -47,7 +58,7 @@ fn px(v: i32) -> f32 {
 }
 
 impl TextRenderer {
-    pub(crate) fn new(font: Font, size_px: f32, tab_width: u32) -> Self {
+    pub(crate) fn new(font: Font, size_px: f32, tab_width: usize) -> Self {
         Self {
             font,
             metrics: font.metrics(size_px),
@@ -62,6 +73,18 @@ impl TextRenderer {
 
     pub(crate) fn metrics(&self) -> Metrics {
         self.metrics
+    }
+
+    pub(crate) fn grid(&self) -> Grid {
+        Grid {
+            cell_width: self.metrics.cell_width,
+            tab_width: self.tab_width,
+            start_col: 0,
+        }
+    }
+
+    pub(crate) fn set_tab_width(&mut self, tab_width: usize) {
+        self.tab_width = tab_width.max(1);
     }
 
     /// Change the pixel size, for a font-size or scale-factor change. Every
@@ -95,7 +118,9 @@ impl TextRenderer {
     }
 
     /// Queue the glyphs of `line` with the line's top-left corner at `origin`
-    /// (physical pixels; `origin[1]` should be a whole number).
+    /// (physical pixels; `origin[1]` should be a whole number). Glyphs whose
+    /// pen position is left of `clip_left` are skipped, so horizontally
+    /// scrolled text does not draw over the gutter.
     pub(crate) fn push_line(
         &mut self,
         queue: &wgpu::Queue,
@@ -103,7 +128,7 @@ impl TextRenderer {
         frame: &mut FrameBuilder,
         origin: [f32; 2],
         line: &str,
-        color: [f32; 4],
+        style: LineStyle,
     ) {
         let size_px = self.metrics.size_px;
         let baseline_y = origin[1] + self.metrics.baseline;
@@ -112,14 +137,25 @@ impl TextRenderer {
             // the start of the next frame.
             return;
         }
-        self.shaper
-            .shape_line(&self.font, size_px, line, self.tab_width, &mut self.shaped);
+        self.shaper.shape_line(
+            &self.font,
+            size_px,
+            line,
+            Grid {
+                start_col: style.start_col,
+                ..self.grid()
+            },
+            &mut self.shaped,
+        );
 
         for g in &self.shaped {
             // Split the pen position into a whole pixel and a fraction. The
             // fraction picks the subpixel variant of the bitmap, the whole
             // part places it, so every quad lands on the pixel grid.
             let pen = origin[0] + g.x;
+            if pen < style.clip_left {
+                continue;
+            }
             let whole = pen.floor();
             let key = GlyphKey::new(g.id, size_px, pen - whole);
 
@@ -145,7 +181,7 @@ impl TextRenderer {
                 // Shapers may shift a glyph vertically (combining marks);
                 // swash's y offset points up, screen y points down.
                 let y = (baseline_y - g.y).round() - px(c.top);
-                frame.push_glyph([whole + px(c.left), y], &c.slot, color);
+                frame.push_glyph([whole + px(c.left), y], &c.slot, style.color);
             }
         }
     }

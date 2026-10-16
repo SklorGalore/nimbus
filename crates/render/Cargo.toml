@@ -9,6 +9,7 @@ log = "0.4.34"
 nimbus-core = { version = "0.1.0", path = "../core" }
 pollster = "1.0.1"
 swash = "0.2.10"
+unicode-segmentation = "1.13.3"
 wgpu = "30.0.1"
 winit = "0.30"
 

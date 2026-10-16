@@ -1,7 +1,10 @@
 /target
-/bench/*.txt
-/bench/*.log
+/bench/out/
 .DS_Store
 
 # Local copy of the Hack Nerd Font family; the bundled file lives in crates/render/assets.
 /HackFontMono/
+
+# Owner-managed local test files.
+/test-fixtures/
+/bigfile.txt

@@ -9,6 +9,8 @@ log = "0.4.34"
 nimbus-core = { version = "0.1.0", path = "../core" }
 nimbus-render = { version = "0.1.0", path = "../render" }
 nimbus-syntax = { version = "0.1.0", path = "../syntax" }
+rfd = "0.17"
+unicode-segmentation = "1.13.3"
 winit = "0.30"
 
 [lints]

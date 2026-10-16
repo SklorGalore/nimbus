@@ -1,6 +1,6 @@
 # M3 — Editing essentials
 
-**Status: planned**
+**Status: next**
 
 ## Goal
 

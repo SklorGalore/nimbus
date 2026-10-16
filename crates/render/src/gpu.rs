@@ -8,7 +8,10 @@ use crate::atlas::Atlas;
 use crate::font::{Font, Metrics};
 use crate::frame::FrameBuilder;
 use crate::pipeline::{Globals, GlyphPipeline, Pipelines, RectPipeline};
-use crate::text::TextRenderer;
+use crate::text::{LineStyle, TextRenderer};
+
+/// Columns per tab stop until the app sets one with [`Gpu::set_tab_width`].
+const DEFAULT_TAB_WIDTH: usize = 4;
 
 /// Background colour of the editor area. Will come from the theme later.
 pub const BACKGROUND: wgpu::Color = wgpu::Color {
@@ -307,7 +310,7 @@ impl Gpu {
             glyph: GlyphPipeline::new(&device, config.format, &globals, &atlas),
             globals,
         };
-        let text = TextRenderer::new(font, font_size_px, 4);
+        let text = TextRenderer::new(font, font_size_px, DEFAULT_TAB_WIDTH);
 
         Ok(Self {
             surface,
@@ -425,6 +428,12 @@ impl Gpu {
         self.text.set_size(size_px, &mut self.atlas, &self.queue);
     }
 
+    /// Columns per tab stop. Must match the value cursor movement uses, or
+    /// the cursor drifts from the text after a tab.
+    pub fn set_tab_width(&mut self, tab_width: usize) {
+        self.text.set_tab_width(tab_width);
+    }
+
     /// Grid measurements for the current font size.
     #[must_use]
     pub fn metrics(&self) -> Metrics {
@@ -463,13 +472,33 @@ impl Gpu {
     /// Queue one line of text with its top-left corner at `origin`, in
     /// physical pixels. `line` must not contain a newline.
     pub fn push_text_line(&mut self, origin: [f32; 2], line: &str, color: [f32; 4]) {
+        self.push_text_span(origin, line, 0, color, f32::NEG_INFINITY);
+    }
+
+    /// Queue part of a line: `text` starts at column `start_col` of its
+    /// line, and `origin` is where that column is drawn. Tab stops are still
+    /// measured from the start of the line. Glyphs that start left of
+    /// `clip_left` are skipped, so horizontally scrolled text does not draw
+    /// over the gutter. Drawing only the visible span keeps long lines cheap.
+    pub fn push_text_span(
+        &mut self,
+        origin: [f32; 2],
+        text: &str,
+        start_col: usize,
+        color: [f32; 4],
+        clip_left: f32,
+    ) {
         self.text.push_line(
             &self.queue,
             &mut self.atlas,
             &mut self.frame,
             origin,
-            line,
-            color,
+            text,
+            LineStyle {
+                color,
+                clip_left,
+                start_col,
+            },
         );
     }
 

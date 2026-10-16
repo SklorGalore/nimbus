@@ -1,8 +1,20 @@
 //! Nimbus editor core: text buffers, edits, undo, cursors and search.
 //!
 //! This crate has no I/O and no GPU dependencies so that everything in it can
-//! be unit-tested without a window. Milestone 2 adds the `Buffer` trait and
-//! the rope-backed implementation described in DESIGN.md §4.1.
+//! be unit-tested without a window. All positions are byte offsets into UTF-8
+//! (DESIGN.md §4.1).
+
+pub mod buffer;
+pub mod column;
+pub mod line_ending;
+pub mod movement;
+pub mod rope;
+pub mod selection;
+
+pub use buffer::{Buffer, Edit, EditError, Snapshot, Text};
+pub use line_ending::LineEnding;
+pub use rope::RopeBuffer;
+pub use selection::{Selection, Selections};
 
 /// Crate version, surfaced in the window title and the debug overlay.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
