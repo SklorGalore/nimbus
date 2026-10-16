@@ -10,7 +10,7 @@
 use nimbus_core::{Buffer, RopeBuffer, Text};
 use nimbus_syntax::LanguageId;
 use nimbus_syntax::highlight::Span;
-use nimbus_syntax::lexical::{CHECKPOINT_LINES, Lexical};
+use nimbus_syntax::lexical::{self, CHECKPOINT_LINES, Lexical};
 use proptest::prelude::*;
 use proptest::sample::Index;
 use proptest::test_runner::Config;
@@ -72,7 +72,7 @@ proptest! {
     ) {
         let mut buf = RopeBuffer::from_text(&initial);
         let mut oracle = initial;
-        let lex = Lexical::new(language);
+        let lex = Lexical::new(lexical::builtin(language));
         for (a, b, insert) in edits {
             // Look at the bottom first, so checkpoints exist to invalidate.
             let len = oracle.len();
@@ -82,7 +82,7 @@ proptest! {
             let edit = buf.replace(range.clone(), &insert).unwrap();
             oracle.replace_range(range, &insert);
             lex.edit(&buf, &edit);
-            let fresh = Lexical::new(language);
+            let fresh = Lexical::new(lexical::builtin(language));
             let (p, q) = (boundary(&oracle, view.0), boundary(&oracle, view.1));
             let shown = p.min(q)..p.max(q);
             prop_assert_eq!(

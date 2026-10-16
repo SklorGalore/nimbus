@@ -12,6 +12,7 @@ mod find;
 mod input;
 mod io;
 mod keymap;
+mod languages;
 mod menu;
 mod picker;
 mod theme;
@@ -28,6 +29,7 @@ use nimbus_render::GpuContext;
 use crate::app::{App, AppEvent};
 use crate::config::Config;
 use crate::document::Document;
+use crate::languages::Languages;
 
 /// Command-line options.
 pub struct Options {
@@ -212,7 +214,7 @@ pub fn save_screenshot(path: &Path, capture: Option<&nimbus_render::Capture>) ->
 /// root for the file opener; otherwise the root is the first file's folder,
 /// or the current directory. A file that cannot be opened is reported and
 /// exits, as there is no window yet to show the error in.
-fn open_files(options: &Options) -> (Vec<Document>, PathBuf) {
+fn open_files(options: &Options, languages: &Languages) -> (Vec<Document>, PathBuf) {
     let mut docs = Vec::new();
     let mut root = None;
     for path in &options.files {
@@ -221,7 +223,8 @@ fn open_files(options: &Options) -> (Vec<Document>, PathBuf) {
             continue;
         }
         match Document::open(path) {
-            Ok(doc) => {
+            Ok(mut doc) => {
+                doc.detect_language(languages);
                 if root.is_none() {
                     root = std::fs::canonicalize(path)
                         .ok()
@@ -271,11 +274,16 @@ fn main() {
         }
     };
 
-    let (mut config, warnings) = Config::load();
+    let (mut config, mut warnings) = Config::load();
     if let Some(theme) = &options.theme {
         config.theme.clone_from(theme);
     }
-    let (docs, root) = open_files(&options);
+    if let Some(dir) = languages::queries_dir() {
+        nimbus_syntax::registry::set_user_queries(dir);
+    }
+    let (languages, language_warnings) = Languages::load(&config.languages);
+    warnings.extend(language_warnings);
+    let (docs, root) = open_files(&options, &languages);
     log::debug!(
         "startup: config and {} file(s) loaded at {:?}",
         docs.len(),
@@ -283,6 +291,10 @@ fn main() {
     );
 
     if let Some(size) = options.headless {
+        // No message line to show them in.
+        for w in &warnings {
+            print_err(&format!("nimbus: {w}"));
+        }
         let code = match gpu_init.join() {
             Ok(Ok(context)) => app::run_headless(&options, &config, (docs, root), size, context),
             Ok(Err(e)) => {
@@ -321,7 +333,7 @@ fn main() {
         options,
         started,
         gpu_init,
-        (config, docs, root),
+        (config, languages, docs, root),
         proxy,
         warnings,
     );

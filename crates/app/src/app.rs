@@ -28,6 +28,7 @@ use crate::document::Document;
 use crate::find::{Field, FindBar, SearchBatch};
 use crate::input::{self, Command, Motion};
 use crate::keymap::Keymap;
+use crate::languages::Languages;
 use crate::menu::{self, MenuBar};
 use crate::picker::{self, Item, Kind, Picker};
 use crate::theme::{Theme, Ui};
@@ -208,6 +209,8 @@ pub struct App {
     started: Instant,
     config: Config,
     theme: Theme,
+    /// Which language each file is, from the config and config directory.
+    languages: Languages,
     keymap: Keymap,
     /// Folder the file opener searches.
     root: PathBuf,
@@ -300,7 +303,7 @@ impl App {
         options: Options,
         started: Instant,
         gpu_init: JoinHandle<Result<GpuContext, GpuError>>,
-        (config, docs, root): (Config, Vec<Document>, PathBuf),
+        (config, languages, docs, root): (Config, Languages, Vec<Document>, PathBuf),
         proxy: EventLoopProxy<AppEvent>,
         warnings: Vec<String>,
     ) -> Self {
@@ -331,6 +334,7 @@ impl App {
             started,
             config,
             theme,
+            languages,
             keymap,
             root,
             gpu_init: Some(gpu_init),
@@ -608,7 +612,8 @@ impl App {
             return;
         }
         match Document::open(path) {
-            Ok(doc) => {
+            Ok(mut doc) => {
+                doc.detect_language(&self.languages);
                 // Replace a lone untouched untitled tab rather than keeping it.
                 let replace = self.tabs.len() == 1
                     && self.tabs[0].doc.path.is_none()
@@ -682,7 +687,7 @@ impl App {
         let saved = self.save(i);
         if saved {
             // A new name can mean a new language: untitled to `notes.md`.
-            self.tabs[i].doc.detect_language();
+            self.tabs[i].doc.detect_language(&self.languages);
         } else {
             // Keep pointing at the old file, so the next save does not
             // silently retry the path that failed.
@@ -773,6 +778,14 @@ impl App {
         let (theme, theme_warnings) = Theme::load(&config.theme);
         warnings.extend(theme_warnings);
         self.theme = theme;
+        // Language mappings and user languages may have changed; files
+        // whose language did not change keep their state.
+        let (languages, language_warnings) = Languages::load(&config.languages);
+        warnings.extend(language_warnings);
+        self.languages = languages;
+        for tab in &mut self.tabs {
+            tab.doc.detect_language(&self.languages);
+        }
         self.keymap = keymap;
         self.config = config;
         if let Some(menu) = &self.menu_bar {
@@ -1543,6 +1556,9 @@ pub fn run_headless(
     view.ensure_cursor_visible(&doc, &layout, config.tab_width);
     // One frame only: parse here rather than on a worker.
     doc.syntax.parse_now(&doc.buffer);
+    for w in nimbus_syntax::registry::take_warnings() {
+        print_err(&format!("nimbus: {w}"));
+    }
     let (mut theme, warnings) = Theme::load(&config.theme);
     for w in warnings {
         print_err(&format!("nimbus: {w}"));
@@ -1709,6 +1725,11 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 if let Some(Off::Failed) = doc.syntax.off_reason() {
                     log::warn!("highlighting failed for {}", doc.display_name());
+                }
+                // A user query that did not compile is found on this load.
+                let problems = nimbus_syntax::registry::take_warnings();
+                if !problems.is_empty() {
+                    self.say(problems.join("; "), true);
                 }
                 if i == self.active {
                     self.changed(false);

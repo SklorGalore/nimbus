@@ -24,6 +24,8 @@ pub struct Config {
     pub theme: String,
     /// Key binding overrides: action id to chords; an empty list unbinds.
     pub keys: HashMap<String, Vec<String>>,
+    /// File name or `*.ext` pattern to language name.
+    pub languages: HashMap<String, String>,
 }
 
 impl Default for Config {
@@ -34,6 +36,7 @@ impl Default for Config {
             soft_wrap: false,
             theme: "dark".to_owned(),
             keys: HashMap::new(),
+            languages: HashMap::new(),
         }
     }
 }
@@ -54,7 +57,14 @@ fn take<T: serde::de::DeserializeOwned>(
     }
 }
 
-const KNOWN: &[&str] = &["font_size", "tab_width", "soft_wrap", "theme", "keys"];
+const KNOWN: &[&str] = &[
+    "font_size",
+    "tab_width",
+    "soft_wrap",
+    "theme",
+    "keys",
+    "languages",
+];
 
 /// A commented starting point written by "Open Config File" when there is
 /// no config yet.
@@ -71,13 +81,27 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # [keys]
 # "view.toggleWrap" = ["Alt+W"]
 # "file.quickOpen" = ["Primary+P", "Primary+E"]
+
+# Languages: a file name or "*.ext" pattern = language. Built-in languages
+# are rust, markdown, json, toml, yaml, python, javascript, typescript and
+# bash. Add your own as languages/NAME.toml here (simple colouring rules),
+# and change a built-in's colours with queries/NAME.scm (restart to apply).
+# [languages]
+# "Justfile" = "bash"
+# "*.jsonc" = "json"
 "#;
 
 /// Where the config file lives: `~/Library/Application Support/nimbus` on
-/// macOS, `~/.config/nimbus` on Linux, `%APPDATA%\nimbus` on Windows.
+/// macOS, `~/.config/nimbus` on Linux, `%APPDATA%\nimbus` on Windows, or
+/// the folder in `NIMBUS_CONFIG_DIR` if set (for trying a config without
+/// touching the real one). Themes, languages and queries live beside it.
 #[must_use]
 pub fn path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("nimbus").join("config.toml"))
+    let dir = std::env::var_os("NIMBUS_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::config_dir().map(|d| d.join("nimbus")))?;
+    Some(dir.join("config.toml"))
 }
 
 impl Config {
@@ -108,6 +132,7 @@ impl Config {
         take(&table, "soft_wrap", &mut config.soft_wrap, &mut warnings);
         take(&table, "theme", &mut config.theme, &mut warnings);
         take(&table, "keys", &mut config.keys, &mut warnings);
+        take(&table, "languages", &mut config.languages, &mut warnings);
         if !(6.0..=72.0).contains(&config.font_size) {
             warnings.push(format!(
                 "config: font_size {} out of range 6–72",

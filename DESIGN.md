@@ -217,6 +217,19 @@ near zero at any size. On a 100 MB file: a jump to the middle 3 ms, a
 keystroke with 60 lines on screen 21 µs. Types, functions and the like stay
 plain; only tree-sitter tells those apart.
 
+**User additions** (`docs/customizing.md`). Without rebuilding, a user can:
+map file names and `*.ext` patterns to languages (`[languages]` in the
+config); define languages of their own as simple rules
+(`languages/NAME.toml`, the same rules as above, used at every size); and
+replace or extend a built-in language's highlight query
+(`queries/NAME.scm`, with `;; extends` to append). Detection order:
+config patterns, then user languages, then the built-in detection. User
+rules are checked (an empty delimiter would match everywhere) and stored
+for the program's lifetime, once per distinct rule set. New tree-sitter
+grammars still need a rebuild: loading compiled grammars at runtime means
+`unsafe` code and per-platform libraries, and WebAssembly grammars a
+runtime of 10 MB or more.
+
 Markdown needs a second, inline grammar injected into each paragraph. M5
 ships block-level Markdown highlighting; inline emphasis and code spans are
 an M8 stretch item.
@@ -478,3 +491,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Binary budget raised from 15 MB to 35 MB: grammars put Linux at 19 MB | §1, §5 |
 | 2026-10-16 | Highlighting memory not counted in the per-file budget | §1, §4.2 |
 | 2026-10-16 | Files over 16 MB get simple line-by-line highlighting, any backend | §4.2 |
+| 2026-10-16 | Users add languages as simple rules, map patterns, and override queries; no runtime grammars | §4.2 |

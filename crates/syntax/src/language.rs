@@ -44,6 +44,32 @@ impl LanguageId {
         Self::Bash,
     ];
 
+    /// Lower-case key used in file names and the config:
+    /// `queries/rust.scm`, `"*.tpl" = "bash"`.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Markdown => "markdown",
+            Self::Json => "json",
+            Self::Toml => "toml",
+            Self::Yaml => "yaml",
+            Self::Python => "python",
+            Self::JavaScript => "javascript",
+            Self::TypeScript => "typescript",
+            Self::Bash => "bash",
+        }
+    }
+
+    /// The language with this key or display name, ignoring case
+    /// (`"rust"`, `"Shell"`, `"bash"`).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|l| l.key().eq_ignore_ascii_case(name) || l.name().eq_ignore_ascii_case(name))
+    }
+
     /// Position in [`LanguageId::ALL`], for per-language tables.
     #[must_use]
     pub fn index(self) -> usize {
@@ -126,6 +152,16 @@ impl LanguageId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_and_keys_round_trip() {
+        for l in LanguageId::ALL {
+            assert_eq!(LanguageId::from_name(l.key()), Some(l));
+            assert_eq!(LanguageId::from_name(&l.name().to_uppercase()), Some(l));
+        }
+        assert_eq!(LanguageId::from_name("Shell"), Some(LanguageId::Bash));
+        assert_eq!(LanguageId::from_name("lua"), None);
+    }
 
     fn path(p: &str) -> Option<LanguageId> {
         LanguageId::from_path(Path::new(p))
