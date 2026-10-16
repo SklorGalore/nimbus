@@ -107,7 +107,7 @@ Invariants from DESIGN.md that code above the buffer must respect:
 ## Performance budgets (enforced or measured)
 
 - First frame under 500 ms in release, measured from the top of `main` by `--smoke`. M1 measured 116–132 ms warm on an M5 Pro, of which about 3 ms is ours and the rest is winit and AppKit. The headroom is for real features (opening files, config, highlighting), not for unnecessary work: keep startup work lazy or off the main thread. Check per-phase times with `RUST_LOG=nimbus=debug`.
-- Release binary under 15 MB; the `release-size` CI job fails above that.
+- Release binary under 35 MB (raised from 15 MB at M5 for the grammars; Linux is the largest build); the `release-size` CI job fails above that.
 - The release profile (`lto = "fat"`, `panic = "abort"`, `strip`) is deliberate; don't loosen it.
 
 ## wgpu version gotcha
