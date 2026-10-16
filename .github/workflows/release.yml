@@ -15,6 +15,7 @@
 #                                     Ubuntu so it runs on older systems
 #   nimbus-VERSION-windows-x86_64.zip   nimbus.exe (icon embedded) and the
 #                                     icon file
+#   SHA256SUMS                        each package's SHA-256, made last
 
 name: Release
 
@@ -117,3 +118,27 @@ jobs:
           Copy-Item crates/render/assets/HackNerdFont-LICENSE.md "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
           gh release upload $env:GITHUB_REF_NAME "dist/$name.zip" --clobber
+
+  # Once every package is attached: a SHA256SUMS file listing each one's
+  # SHA-256 hash, so a download can be checked for damage with
+  # `sha256sum -c SHA256SUMS --ignore-missing` (Linux) or
+  # `shasum -a 256 -c SHA256SUMS --ignore-missing` (macOS). It is computed
+  # from the files as uploaded, read back from the release.
+  checksums:
+    name: SHA256SUMS
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Hash the attached packages
+        shell: bash
+        run: |
+          mkdir dist && cd dist
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.zip' --pattern '*.tar.gz'
+          ls -l
+          test "$(ls | wc -l)" -eq 3
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
