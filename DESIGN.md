@@ -98,27 +98,42 @@ the only backend. A narrow `Buffer` trait has two implementations:
    indexed in the background with a sparse checkpoint index, so a 4 GB file
    costs kilobytes of index, not hundreds of megabytes (M7 doc). Edits are
    allowed; saving streams to a temp file and renames it over the original.
-   Also used for files that are not valid UTF-8, at any size.
+   Also used for files that are not valid UTF-8, at any size: under the
+   threshold the same piece table sits over the file's bytes in memory
+   instead of a mapping, since the rope attempt has already read them and
+   a mapping could crash if another program truncates the file.
 
-The interface is intentionally narrow so both backends stay honest. As
-built in M2 (`crates/core/src/buffer.rs`), reading and editing are split:
+The interface is intentionally narrow so both backends stay honest. Built
+in M2 and extended in M7 (`crates/core/src/buffer.rs`), reading and editing
+are split:
 
 ```rust
 pub trait Text {                                   // read-only; also what snapshots offer
     fn len_bytes(&self) -> usize;
-    fn len_lines(&self) -> usize;                  // may be a lower bound while indexing
+    fn len_lines(&self) -> usize;                  // a lower bound while indexing
     fn line(&self, idx: usize) -> Cow<'_, str>;    // without "\n" or "\r\n"
     fn byte_to_line(&self, b: usize) -> usize;
     fn line_to_byte(&self, l: usize) -> usize;
     fn slice(&self, range: Range<usize>) -> Cow<'_, str>; // clamped, widened to char boundaries
     fn is_char_boundary(&self, b: usize) -> bool;
-    fn chunk_at(&self, b: usize) -> (&str, usize);   // contiguous piece holding b, and its start
+    fn chunk_at(&self, b: usize) -> (&[u8], usize);  // contiguous raw bytes holding b, and their start
+    // M7: walking by byte, so nothing needs a line number
+    fn byte_at(&self, b: usize) -> Option<u8>;
+    fn line_span(&self, b: usize) -> LineSpan;       // { start, end, next } of the line holding b
+    fn line_number(&self, b: usize) -> Option<usize>; // None past the indexed part
+    fn indexed_bytes(&self) -> usize;
+    fn read_into(&self, range: Range<usize>, out: &mut Vec<u8>) -> io::Result<()>; // raw bytes
+    fn slice_into(&self, range: Range<usize>, out: &mut String); // into a reused String
 }
 pub trait Snapshot: Text + Send + Sync {}          // owned by worker threads
 pub trait Buffer: Text {
     fn replace(&mut self, range: Range<usize>, text: &str) -> Result<Edit, EditError>;
+    fn put(&mut self, range: Range<usize>, content: &Content) -> Result<Edit, EditError>; // undo
     fn snapshot(&self) -> Box<dyn Snapshot>;       // cheap: ropes share structure
     fn is_fully_indexed(&self) -> bool { true }
+    // many edits in one pass: Replace All, and undoing or redoing it
+    fn replace_sorted(&mut self, items: &[(Range<usize>, &str)]) -> Result<Vec<Edit>, EditError>;
+    fn put_sorted(&mut self, items: &[(Range<usize>, &Content)]) -> Result<Vec<Edit>, EditError>;
 }
 ```
 
@@ -135,9 +150,10 @@ snapshot clones the piece list and shares the mmap.
 Everything above the buffer (cursors, undo, search, rendering) works in byte
 offsets and asks the buffer for line conversions. Nothing else may assume the
 whole text is resident, or that a single line is small: minified JSON or a
-log without newlines can be one line of hundreds of megabytes. M7 adds
-`line_slice(idx, byte_range)` so the view fetches only the visible columns
-of any line over 64 KB.
+log without newlines can be one line of hundreds of megabytes. Since M7 a
+line over 64 KB is never read whole: the view reads the visible window of
+it with `slice_into`, and movement reads a few KB around the cursor
+(`crates/core/src/long_line.rs`).
 
 Other `core` responsibilities:
 
@@ -449,8 +465,8 @@ introduces and points at the code.
 | 4 | Many files | **Done** | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
 | 5 | Highlighting | **Done** | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
 | 6 | File tree | **Done** | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
-| 7 | Huge files | Next | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
-| 8 | Polish | Planned | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
+| 7 | Huge files | **Done** | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
+| 8 | Polish | Next | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
 | 9 | Compare and merge | Planned | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
@@ -527,3 +543,5 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | M7 design approved: SUB for invalid bytes, walking by byte, `Content` undo, `unsafe` mapping in app, pread for bulk reads | §4.1, m7 |
 | 2026-10-16 | Rope-versus-mapped threshold kept at 256 MB after measuring 64–512 MB | §4.1, §9 |
 | 2026-10-16 | Compare and merge (two- and three-way) added as milestone 9, after Polish, held to the editor's budgets | §4.4, §8 |
+| 2026-10-16 | Replace All and its undo and redo apply in one pass (`replace_sorted`, `put_sorted`) | §4.1 |
+| 2026-10-16 | Files that are not UTF-8 and under the threshold are held in memory, not mapped | §4.1 |

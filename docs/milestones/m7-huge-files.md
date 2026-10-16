@@ -1,6 +1,6 @@
 # M7 — Huge files
 
-**Status: in progress on `m7-wip`**
+**Status: done on `m7-wip`, waiting for owner checks**
 
 ## Goal
 
@@ -9,26 +9,63 @@ and save, without the memory cost of loading it.
 
 ## Done when
 
-- [ ] A 4 GB log from `bench/gen.sh` shows its first screen in under 1 s
-      and stays interactive while indexing continues.
-- [ ] Resident memory stays under 60 MB with the 4 GB file open (twice the
-      normal budget, for the index and caches).
-- [ ] `Primary+End` and scrolling to a fraction of the file work before
+Ticked items were verified here by tests, headless renders or timed
+headless runs (release build, warm cache, M5 Pro). **Owner** items need a
+person at the keyboard; each says what to try.
+
+- [x] A 4 GB log from `bench/gen.sh` shows its first screen in under 1 s
+      and stays interactive while indexing continues. First screen in
+      0.02 s; counting goes on in a worker that the main thread only
+      receives chunks from (`crates/app/src/indexer.rs`).
+- [x] Resident memory stays under 60 MB with the 4 GB file open (twice the
+      normal budget, for the index and caches). 34 MB at the first screen,
+      35 MB with every line counted, 36 MB after searching all of it; an
+      empty window is 33 MB at the same size.
+- [x] `Primary+End` and scrolling to a fraction of the file work before
       indexing finishes: the end of the file is reachable immediately, and
       line numbers past the indexed region show as `~` until known. (The
-      scrollbar's drawing is M8; M7 provides the position mapping.)
-- [ ] Go-to-line (Cmd+L on macOS, Ctrl+G elsewhere, added here) works for
-      any line, waiting for indexing to reach it if needed.
-- [ ] Search streams results across the whole file without blocking typing.
-- [ ] Editing anywhere works; undo and redo work; saving writes a correct
-      file, verified by checksum against the same edit made with `sed`.
-- [ ] Files that are not valid UTF-8 open in this backend at any size;
+      scrollbar's drawing is M8; M7 provides the position mapping,
+      `View::scroll_to_fraction`.) View test on a partly indexed buffer;
+      headless render of a find at the end of the 4 GB log shows `~`.
+- [x] Go-to-line (Cmd+L on macOS, Ctrl+G elsewhere, added here) works for
+      any line, waiting for indexing to reach it if needed. If counting
+      stops because the file was cut short, it goes to the last line
+      counted.
+- [x] Search streams results across the whole file without blocking typing.
+      Searching all 4 GB for its last line takes 1.4 s on a worker; the
+      headless render shows "1 of 1" on the last line.
+- [x] Editing anywhere works; undo and redo work; saving writes a correct
+      file, verified by checksum against the same edit made with `sed`
+      (saver tests, including random edits compared byte for byte).
+- [x] Files that are not valid UTF-8 open in this backend at any size;
       invalid bytes display as `�` and are written back unchanged unless
-      edited.
-- [ ] A single line of 100 MB (generated minified JSON) opens and scrolls
-      horizontally without stalling, in both backends.
-- [ ] The 256 MB threshold between backends is measured and confirmed or
-      moved, with the numbers in Results.
+      edited. The bundled font has no `�`, so each invalid byte draws as
+      the missing-glyph box. Files under 256 MB are held in memory rather
+      than mapped (see Results).
+- [x] A single line of 100 MB (generated minified JSON) opens and scrolls
+      horizontally without stalling, in both backends. Opens in 0.06 s
+      (rope, 146 MB) and 0.02 s (mapped, 55 MB); find scrolls to a match
+      100 MB into the line.
+- [x] The 256 MB threshold between backends is measured and confirmed or
+      moved, with the numbers in Results. Kept at 256 MB.
+- [ ] **Owner:** `cargo build --release && ./target/release/nimbus --smoke`
+      twice (cold, warm), for the standing first-frame record.
+- [ ] **Owner:** open `log-4gb.log` (run `bench/gen.sh logs`; 5 GB of disk)
+      in a window. The text shows at once and the status line counts lines.
+      While it counts: type, press `Primary+End` (the end shows, numbers as
+      `~`), and go to line 60,000,000 (Cmd+L / Ctrl+G); the jump happens
+      once counting reaches it.
+- [ ] **Owner:** in the same file, search for `request 65352533 took` and
+      keep typing in the find field while it searches; nothing stalls.
+- [ ] **Owner:** edit a line near the middle, save (the status shows
+      "Saving… N%"), and compare with the same edit made by `sed` on a
+      copy: `shasum` of both files matches.
+- [ ] **Owner, Windows:** open the 1 GB log, edit, save, then save again
+      while a search runs; both saves finish. Close the window during the
+      line count and during a save; it closes without freezing.
+- [ ] **Owner:** open `bench/out/longline-100mb.json` (`bench/gen.sh
+      longline`) and scroll sideways with the trackpad, and with End and
+      Home; nothing stalls.
 
 ## Scope
 
@@ -182,4 +219,105 @@ general-purpose subagent at the effort CLAUDE.md sets for them.
 
 ## Results
 
-_Fill in when done._
+| Metric | Value |
+|---|---|
+| Tests | 305 passing, plus 11 opt-in benchmarks or diagnostics |
+| Release binary | 14.45 MB on macOS (M6: 15.02 MB) |
+| 4 GB log, first screen | 0.02 s, 34 MB RSS (empty window: 33 MB) |
+| 4 GB log, every line counted | 0.26 s in the background, 35 MB |
+| 4 GB log, search to the last line | 1.4 s on a worker, 36 MB |
+| 4 GB log, save | about 0.9 s on a worker (1 GB: 0.15–0.25 s, 0.3 ms on the main thread) |
+| 100 MB single line | rope 0.06 s, 146 MB; mapped 0.02 s, 55 MB |
+| Typing in a mapped buffer | 1.2 µs per key (64 MB, 4,000 pieces) |
+| Replace All, 100,000 matches, with undo and redo | 0.21 s in a debug build |
+
+All timed headless at 1400×700, release build, warm cache.
+
+**Rope versus mapped threshold** (`bench/threshold.sh`, task 14):
+
+| Size | Rope | Mapped |
+|---|---|---|
+| 64 MB | 0.06 s, 105 MB | 0.02 s, 33 MB |
+| 128 MB | 0.11 s, 178 MB | 0.02 s, 33 MB |
+| 256 MB | 0.20 s, 322 MB | 0.02 s, 33 MB |
+| 512 MB | 0.38 s, 612 MB | 0.02 s, 33 MB |
+
+The rope meets the budgets up to 512 MB, but above 256 MB it costs a
+third to two thirds of a gigabyte where the mapped buffer costs nothing
+extra. Below it, the rope keeps undo across saves and cannot be broken by
+another program truncating the file. Kept at 256 MB.
+
+**Design changes**
+
+- **Small files that are not UTF-8 are held in memory, not mapped.** The
+  plan mapped them at any size. The rope attempt has already read such a
+  file, and a mapping exposes it to the crash described under Known
+  limitations. They use the same piece table over in-memory bytes and save
+  at once, like a rope.
+- **Replace All is applied, undone and redone in one pass.** The plan
+  capped Replace All on mapped files. Undoing 100,000 replacements one at
+  a time took 79 s, because each put splices the piece list. `Buffer::
+  put_sorted` puts a whole group back in one rebuild, and `report_sorted`
+  tells the syntax tree about such a batch in an order where the text after
+  the batch is right for every edit.
+- `Text::chunk_at` returns bytes, and lines are walked by byte
+  (`line_span`) rather than number, as approved; `line_slice` from the
+  first sketch was not needed.
+- The line counter reports a failed read, so a cut-short file stops the
+  count with a message instead of leaving it at "Counting lines… N%".
+
+**Concepts**
+
+- *Memory mapping* (`crates/app/src/mapping.rs`): the file appears in
+  memory without being read; pages load when touched. Bulk work (counting,
+  search, save) reads with `pread` instead, so it neither keeps pages nor
+  crashes on a cut-short file.
+- *Piece tables* (`crates/core/src/mapped.rs`): the original file is never
+  changed; the document is a list of pieces of it and of an append-only
+  buffer of typed text.
+- *Sparse indexes* (`crates/core/src/line_index.rs`): one checkpoint per
+  1024 lines or 1 MiB, so 4 GB costs about 1 MB of index, at the price of
+  scanning up to one spacing per lookup.
+- *Why `unsafe`, and `SIGBUS`*: the `SAFETY` comment in
+  `MappedFile::new` explains what another program can do to a mapped file.
+- *Long lines* (`crates/core/src/long_line.rs`): columns are exact within
+  4 KB blocks, so drawing and moving on a 100 MB line read a few KB.
+
+**Surprises**
+
+- One wide highlight range on a long line spanned everything to the next
+  visible line: 450 MB on the 100 MB JSON. Highlighting now takes a list
+  of visible ranges.
+- Helper agents' worktrees were committed once by `git add -A`; they were
+  removed in a follow-up commit and `.claude/worktrees/` is ignored.
+- Counting 4 GB of lines first took 1.06 s and 5.4 GB with the temporary
+  full index; with the sparse index and `pread` it takes 0.26 s and leaves
+  RSS where it started.
+
+**End-of-milestone review** (code-review skill, xhigh) found ten issues;
+seven are fixed: small non-UTF-8 files were mapped; an extra empty regex
+match was reported right after a match ending on a 1 MiB chunk boundary
+(a proptest now covers patterns that can match nothing); a failed
+read left the line count and a waiting go-to-line hanging; Replace All
+could finish a search of gigabytes on the main thread; one match inside a
+character made Replace All fail entirely; Save As to another file waited on
+Windows for readers of the old one; the indexing setup was copied three
+times. Two were left as they are: the first megabyte is read twice at open
+(about 50 µs), and Replace All allocates one replacement string per match
+(bounded by the match cap). The tenth, a dirty mapped file being
+truncated, is below.
+
+**Known limitations**
+
+- **A mapped file with unsaved edits that another program truncates** can
+  crash Nimbus on macOS and Linux the next time a lost page is drawn
+  (`SIGBUS`), and its edits cannot be saved, since the bytes they sit
+  between are gone. Clean documents re-map at once and the watcher warns
+  about dirty ones, but there is a window of up to 100 ms. Windows refuses
+  such a truncation. The fix is to map zero pages over the lost range when
+  the watcher notices, which is new `unsafe` code; not done in M7.
+- Undo history is cleared when a mapped document is saved.
+- Columns on lines over 64 KB are approximate outside ASCII (exact within
+  4 KB blocks).
+- The scrollbar is not drawn yet (M8); `View::scroll_to_fraction` is the
+  mapping it will use.

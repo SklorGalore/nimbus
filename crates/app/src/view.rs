@@ -513,6 +513,36 @@ impl View {
         self.set_anchor(t, layout, tab_width, to);
     }
 
+    /// Scroll so the row holding the byte `fraction` of the way through the
+    /// text is at the top: what dragging a scrollbar does (its drawing is
+    /// M8). Works by byte, so it needs no line numbers and goes anywhere
+    /// in a huge file before its lines are counted. A scrollbar by bytes
+    /// moves unevenly over lines of very different lengths, which is the
+    /// price of not counting them.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the scrollbar that drags with it is M8")
+    )]
+    pub fn scroll_to_fraction(
+        &mut self,
+        fraction: f64,
+        doc: &Document,
+        layout: &Layout,
+        tab_width: usize,
+    ) {
+        let t = &doc.buffer;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a byte offset from a clamped fraction of the length"
+        )]
+        let byte = (fraction.clamp(0.0, 1.0) * f64_of(t.len_bytes())) as usize;
+        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
+        let at = anchor(byte, t, &mut w);
+        self.scroll_px = 0.0;
+        self.set_anchor(t, layout, tab_width, at);
+    }
+
     /// Scroll horizontally by `dx` pixels. Does nothing while wrapping.
     pub fn scroll_x_by(&mut self, dx: f32) {
         self.scroll_x = (self.scroll_x + f64::from(dx)).max(0.0);
@@ -1478,6 +1508,43 @@ mod tests {
         assert_eq!((top(&v, &d).0, v.scroll_px), (1, 0.0));
         v.scroll_by(1e6, &d, &l, 4);
         assert_eq!((top(&v, &d).0, v.scroll_px), (99, 0.0));
+    }
+
+    #[test]
+    fn the_end_and_any_fraction_are_reachable_before_lines_are_counted() {
+        use nimbus_core::line_index::{LineIndex, Scanner, Spacing};
+        use nimbus_core::mapped::Limits;
+        use nimbus_core::{Buffer as _, MappedBuffer, Source, VecSource};
+        let text = "0123456789\n".repeat(10_000);
+        let source: std::sync::Arc<dyn Source> =
+            std::sync::Arc::new(VecSource::from(text.as_str()));
+        // Only the first 100 bytes' lines are counted.
+        let mut scanner = Scanner::new(Spacing::new(2, 5));
+        scanner.feed(&text.as_bytes()[..100]);
+        let mut index = LineIndex::new();
+        index.merge(scanner.take_chunk()).unwrap();
+        let buffer = MappedBuffer::with_index(source, index, Limits::default()).unwrap();
+        let mut d = Document::default();
+        d.buffer = buffer.into();
+        assert!(!d.buffer.is_fully_indexed());
+        let l = layout(10);
+        let mut v = View::default();
+
+        // Primary+End: the cursor goes to the end and the view follows,
+        // without waiting for line numbers.
+        d.click(text.len(), false);
+        v.ensure_cursor_visible(&d, &l, 4);
+        let shown = l.full_lines() * 11;
+        assert!(v.scroll_top + shown >= text.len(), "{}", v.scroll_top);
+        assert_eq!(d.buffer.line_number(v.scroll_top), None, "shown as ~");
+
+        // Halfway: the top row is the line holding the middle byte.
+        v.scroll_to_fraction(0.5, &d, &l, 4);
+        assert_eq!(v.scroll_top, 55_000);
+        v.scroll_to_fraction(2.0, &d, &l, 4);
+        assert_eq!(v.scroll_top, text.len(), "clamped to the last line");
+        v.scroll_to_fraction(0.0, &d, &l, 4);
+        assert_eq!(v.scroll_top, 0);
     }
 
     #[test]
