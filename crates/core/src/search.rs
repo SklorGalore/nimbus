@@ -135,6 +135,10 @@ fn find_all_in_chunks(
     // this point would overlap it, and replacing overlapping ranges would
     // corrupt the text.
     let mut kept_end = 0;
+    // End of the last match found, kept or not, as an offset in the text.
+    // It carries over from chunk to chunk: an empty match right where a
+    // match in the previous chunk ended is not reported, as in one search.
+    let mut last_end = None;
     loop {
         if !keep_going() {
             return false;
@@ -152,7 +156,6 @@ fn find_all_in_chunks(
         let at = start - window_start;
         batch.clear();
         let mut pos = at;
-        let mut last_end = None;
         while pos <= window.len() {
             let Some(m) = re.find_at(&window, pos) else {
                 break;
@@ -165,14 +168,14 @@ fn find_all_in_chunks(
             } else {
                 m.end() + 1
             };
-            if m.start() == m.end() && last_end == Some(m.end()) {
+            let s = window_start + m.start();
+            if m.start() == m.end() && last_end == Some(s) {
                 continue;
             }
-            last_end = Some(m.end());
-            let s = window_start + m.start();
             if s >= end && end < len {
                 break; // starts in the overlap: the next chunk reports it
             }
+            last_end = Some(window_start + m.end());
             if s < kept_end {
                 continue;
             }
@@ -411,6 +414,9 @@ mod tests {
             ),
             pattern in proptest::sample::select(vec![
                 "a", "ab", "^a", "b$", r"\ba", r"a\b", r"\s+", "a+", "b\na", "^$", "é", r"\w+",
+                // Patterns that can match nothing, next to a match that
+                // ended at a chunk boundary.
+                "a*", "b?", r"\s*",
             ]),
             chunk in 1usize..12,
         ) {

@@ -507,7 +507,7 @@ mod tests {
     /// Open `path`, which must open mapped, with `limits` instead of the
     /// default ones and only the first `indexed` bytes' lines counted.
     fn open_mapped(path: &Path, limits: Limits, indexed: usize) -> Document {
-        let mut d = Document::open(path).unwrap();
+        let mut d = Document::open_mapped(path).unwrap();
         assert!(d.buffer.is_mapped(), "{} must open mapped", path.display());
         let source = d.backing_file().unwrap().clone() as Arc<dyn Source>;
         let mut scanner = Scanner::new(nimbus_core::line_index::Spacing::new(2, 5));
@@ -692,7 +692,7 @@ mod tests {
         let dir = TempDir::new("cursor");
         let path = dir.0.join("crlf.txt");
         std::fs::write(&path, b"one\r\ntwo \xff\r\nthree\r\n").unwrap();
-        let mut d = Document::open(&path).unwrap();
+        let mut d = Document::open_mapped(&path).unwrap();
         d.click(6, false);
         d.insert("X").unwrap();
         d.select(2..9);
@@ -716,7 +716,7 @@ mod tests {
         let dir = TempDir::new("empty");
         let path = dir.0.join("bin");
         std::fs::write(&path, b"\xff").unwrap();
-        let mut d = Document::open(&path).unwrap();
+        let mut d = Document::open_mapped(&path).unwrap();
         d.select_all();
         d.delete_back().unwrap();
         assert!(matches!(save(&mut d), SaveStep::Saved));
@@ -741,7 +741,7 @@ mod tests {
         let dir = TempDir::new("busy");
         let path = dir.0.join("f");
         std::fs::write(&path, b"abc\xff").unwrap();
-        let mut d = Document::open(&path).unwrap();
+        let mut d = Document::open_mapped(&path).unwrap();
         let job = d.begin_save(ReplacePolicy::default()).unwrap();
         assert!(d.is_saving());
         assert!(
@@ -765,7 +765,7 @@ mod tests {
         let dir = TempDir::new("failed");
         let path = dir.0.join("f");
         std::fs::write(&path, b"abc\xff").unwrap();
-        let mut d = Document::open(&path).unwrap();
+        let mut d = Document::open_mapped(&path).unwrap();
         d.insert("x").unwrap();
         let job = d.begin_save(ReplacePolicy::default()).unwrap();
         let token = job.token;
@@ -785,7 +785,7 @@ mod tests {
         let dir = TempDir::new("raced");
         let path = dir.0.join("f");
         std::fs::write(&path, b"abc\xff").unwrap();
-        let mut d = Document::open(&path).unwrap();
+        let mut d = Document::open_mapped(&path).unwrap();
         let job = d.begin_save(ReplacePolicy::default()).unwrap();
         let token = job.token;
         let written = job.run(|_, _| {});
@@ -807,7 +807,7 @@ mod tests {
         let dir = TempDir::new("rename");
         let path = dir.0.join("app.log");
         std::fs::write(&path, b"old \xff\n").unwrap();
-        let mut d = Document::open(&path).unwrap();
+        let mut d = Document::open_mapped(&path).unwrap();
         d.insert("new ").unwrap();
         for unmap_first in [false, true] {
             let policy = ReplacePolicy {
@@ -867,6 +867,33 @@ mod tests {
             return Err(std::io::Error::other("the file is mapped"));
         }
         std::fs::rename(from, to)
+    }
+
+    /// Saving under another name does not replace the mapped file, so even
+    /// in the Windows order nothing waits for readers of the old one.
+    #[test]
+    fn save_as_elsewhere_does_not_wait_for_the_old_file() {
+        let dir = TempDir::new("save-as");
+        let path = dir.0.join("a.log");
+        std::fs::write(&path, b"one \xff\ntwo\n").unwrap();
+        let mut d = open_mapped(&path, SMALL, 4);
+        d.insert("x").unwrap();
+        let expected = raw(&d);
+        let search = d.buffer.snapshot();
+        let other = dir.0.join("b.log");
+        d.path = Some(other.clone());
+        let policy = ReplacePolicy {
+            unmap_first: true,
+            wait: Duration::ZERO,
+            ..ReplacePolicy::default()
+        };
+        let job = d.begin_save(policy).unwrap();
+        let token = job.token;
+        let step = d.save_written(token, job.run(|_, _| {}), Instant::now());
+        assert!(matches!(step, SaveStep::Saved), "{step:?}");
+        assert_eq!(std::fs::read(&other).unwrap(), expected);
+        assert_eq!(std::fs::read(&path).unwrap(), b"one \xff\ntwo\n");
+        drop(search);
     }
 
     /// The Windows order, run here: wait for the old file to be released,
@@ -952,7 +979,7 @@ mod tests {
             original.extend_from_slice(b"\xb5s request\n");
         }
         std::fs::write(&path, &original).unwrap();
-        let mut d = Document::open(&path).unwrap();
+        let mut d = Document::open_mapped(&path).unwrap();
         d.replace(0..9, "").unwrap();
         let before = raw(&d);
         let search = d.buffer.snapshot();
@@ -1008,7 +1035,7 @@ mod tests {
 
         let copy = dir.0.join("nimbus.log");
         std::fs::copy(&input, &copy).unwrap();
-        let mut d = Document::open(&copy).unwrap();
+        let mut d = Document::open_mapped(&copy).unwrap();
         assert!(d.buffer.is_mapped() && !d.buffer.is_fully_indexed());
         let mut bar = crate::find::FindBar::default();
         bar.open(true, None);
@@ -1049,7 +1076,7 @@ mod tests {
             return;
         };
         let started = Instant::now();
-        let mut d = Document::open(&path).unwrap();
+        let mut d = Document::open_mapped(&path).unwrap();
         println!(
             "opened {} bytes in {:?}",
             d.buffer.len_bytes(),

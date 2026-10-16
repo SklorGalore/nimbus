@@ -145,7 +145,11 @@ pub fn open(path: &Path) -> Result<Opened, OpenError> {
 
 /// [`open`], with the size from which files are mapped and the forced
 /// backend as parameters, so tests can use tiny limits.
-fn open_with(path: &Path, rope_limit: u64, forced: Option<Backend>) -> Result<Opened, OpenError> {
+pub(crate) fn open_with(
+    path: &Path,
+    rope_limit: u64,
+    forced: Option<Backend>,
+) -> Result<Opened, OpenError> {
     let started = Instant::now();
     let meta = match fs::metadata(path) {
         Ok(m) => m,
@@ -187,7 +191,18 @@ fn open_with(path: &Path, rope_limit: u64, forced: Option<Backend>) -> Result<Op
                 if forced.is_some() {
                     return Err(OpenError::NotUtf8);
                 }
-                // Not UTF-8: the mapped buffer keeps such bytes as they are.
+                // Not UTF-8: a piece table keeps such bytes as they are. A
+                // file this small is held in memory rather than mapped, so
+                // another program cutting it short cannot crash Nimbus.
+                let bytes = fs::read(path).map_err(OpenError::Io)?;
+                if (bytes.len() as u64) < rope_limit {
+                    log::debug!(
+                        "open: {} (not UTF-8) read into memory in {:?}",
+                        path.display(),
+                        started.elapsed()
+                    );
+                    return Ok(open_bytes(bytes));
+                }
             }
             Err(e) => return Err(OpenError::Io(e)),
         }
@@ -225,6 +240,23 @@ fn read_rope(file: &fs::File, limit: u64) -> std::io::Result<Option<Opened>> {
         mapping: None,
         indexing: None,
     }))
+}
+
+/// A piece table over `bytes` held in memory, for a small file that is not
+/// UTF-8. A byte order mark is left out, as in a rope.
+fn open_bytes(mut bytes: Vec<u8>) -> Opened {
+    let bom = bytes.starts_with(BOM.as_bytes());
+    if bom {
+        bytes.drain(..BOM.len());
+    }
+    let line_ending = LineEnding::detect([bytes.get(..LINE_ENDING_SAMPLE).unwrap_or(&bytes)]);
+    Opened {
+        buffer: MappedBuffer::from_bytes(bytes).into(),
+        line_ending,
+        bom,
+        mapping: None,
+        indexing: None,
+    }
 }
 
 /// Map `file` and make a mapped buffer over it. A byte order mark is left
@@ -560,12 +592,17 @@ mod tests {
     }
 
     #[test]
-    fn non_utf8_files_open_mapped_with_their_bytes_intact() {
+    fn non_utf8_files_open_as_bytes_intact_in_memory_or_mapped() {
         let dir = TempDir::new("binary");
         let bin = dir.0.join("bin");
         let bytes = b"ok\n\xff\xfe\x00 caf\xc3\xa9 \xc3\n\x80end";
         fs::write(&bin, bytes).unwrap();
-        let opened = open(&bin).unwrap();
+        // Small: a piece table held in memory, not mapped, so another
+        // program cutting the file short cannot crash Nimbus.
+        let small = open(&bin).unwrap();
+        assert!(small.buffer.is_mapped() && small.mapping.is_none());
+        assert_eq!(raw(&small.buffer), bytes);
+        let opened = open_with(&bin, 0, None).unwrap();
         assert!(opened.buffer.is_mapped());
         assert!(!opened.bom);
         assert_eq!(raw(&opened.buffer), bytes);

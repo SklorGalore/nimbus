@@ -78,6 +78,10 @@ pub enum DiskChange {
     Failed(String),
 }
 
+/// Reads a file for a document: [`io::open`], or in tests another way.
+#[cfg(test)]
+type Opener = fn(&Path) -> Result<io::Opened, OpenError>;
+
 /// An open document.
 #[derive(Debug, Default)]
 pub struct Document {
@@ -85,8 +89,13 @@ pub struct Document {
     /// [`io::Backend`]).
     pub buffer: AnyBuffer,
     /// The file mapping behind a mapped buffer, which knows the file's
-    /// length when it was mapped; `None` for a rope.
+    /// length when it was mapped; `None` for a rope or a piece table held
+    /// in memory.
     mapping: Option<Arc<MappedFile>>,
+    /// How tests opened the file ([`Document::open_mapped`]), so reloads
+    /// open it the same way; `None` for [`io::open`].
+    #[cfg(test)]
+    opener: Option<Opener>,
     /// Where it saves to; `None` for an untitled buffer.
     pub path: Option<PathBuf>,
     /// Inserted by Enter, detected when the file was opened.
@@ -168,6 +177,11 @@ struct Saving {
     /// the document can tell that the file written is still its text.
     version: u64,
     policy: ReplacePolicy,
+    /// Whether the target is the file the document reads, so the old
+    /// mapping must be let go before the rename on Windows. Not after a
+    /// Save As to another file, nor for a document still reading the temp
+    /// file of an earlier save.
+    over_mapped: bool,
     /// Stops the worker if the document goes away first.
     _cancel: CancelOnDrop,
     /// Set once the new file is written and the document reads it, until
@@ -193,8 +207,29 @@ struct Replace {
 }
 
 impl Document {
+    /// Whether this document's lines are still being counted: a go-to-line
+    /// past the counted part waits for them. False once counting is done,
+    /// or stopped because the file could not be read.
+    #[must_use]
+    pub fn counting_lines(&self) -> bool {
+        self.index_token.is_some() && !self.buffer.is_fully_indexed()
+    }
+
+    /// Take on the line count still to run for this document's file,
+    /// stopping any earlier one. Its token is what [`Document::merge_index`]
+    /// accepts chunks for, and dropping the cancel guard (on close, reload
+    /// or another call here) stops its worker.
+    fn adopt_indexing(&mut self, indexing: Option<Indexing>) {
+        self.stop_indexing();
+        self.index_token = indexing.as_ref().map(|i| i.token);
+        self.index_cancel = indexing
+            .as_ref()
+            .map(|i| CancelOnDrop(Arc::clone(&i.cancel)));
+        self.indexing = indexing;
+    }
+
     /// Stop a running line count for this document.
-    fn stop_indexing(&mut self) {
+    pub fn stop_indexing(&mut self) {
         // Dropping the guard stops the worker.
         self.index_cancel = None;
         self.indexing = None;
@@ -246,10 +281,28 @@ impl Document {
     ///
     /// Returns an [`OpenError`] for anything other than a missing file.
     pub fn open(path: &Path) -> Result<Self, OpenError> {
+        Self::open_by(path, io::open)
+    }
+
+    /// Open `path` memory-mapped whatever its size, for tests of mapped
+    /// documents.
+    #[cfg(test)]
+    pub fn open_mapped(path: &Path) -> Result<Self, OpenError> {
+        let opener: Opener = |p| io::open_with(p, 0, None);
+        let mut d = Self::open_by(path, opener)?;
+        d.opener = Some(opener);
+        Ok(d)
+    }
+
+    /// [`Document::open`], reading the file with `open`.
+    fn open_by(
+        path: &Path,
+        open: impl FnOnce(&Path) -> Result<io::Opened, OpenError>,
+    ) -> Result<Self, OpenError> {
         // The stamp is taken before reading: a write landing between the
         // two then looks like a change, never like the version we read.
         let disk = Stamp::of(path);
-        let opened = match io::open(path) {
+        let opened = match open(path) {
             Ok(opened) => opened,
             Err(OpenError::NotFound) => io::Opened {
                 buffer: AnyBuffer::default(),
@@ -260,13 +313,7 @@ impl Document {
             },
             Err(e) => return Err(e),
         };
-        Ok(Self {
-            index_token: opened.indexing.as_ref().map(|i| i.token),
-            index_cancel: opened
-                .indexing
-                .as_ref()
-                .map(|i| CancelOnDrop(Arc::clone(&i.cancel))),
-            indexing: opened.indexing,
+        let mut doc = Self {
             buffer: opened.buffer,
             mapping: opened.mapping,
             path: Some(path.to_path_buf()),
@@ -275,7 +322,9 @@ impl Document {
             disk,
             canonical: Some(io::canonical(path)),
             ..Self::default()
-        })
+        };
+        doc.adopt_indexing(opened.indexing);
+        Ok(doc)
     }
 
     /// The file changed on disk (a watcher said so): work out what to do.
@@ -367,6 +416,9 @@ impl Document {
             )));
         }
         let disk = Stamp::of(&path);
+        #[cfg(test)]
+        let opened = self.opener.unwrap_or(io::open)(&path)?;
+        #[cfg(not(test))]
         let opened = io::open(&path)?;
         // Where the cursor was, to put it back. A rope keeps its line and
         // column. A mapped document keeps the byte offset instead: its file
@@ -378,13 +430,7 @@ impl Document {
             let line = self.buffer.byte_to_line(head);
             (line, head - self.buffer.line_to_byte(line))
         });
-        self.stop_indexing();
-        self.index_token = opened.indexing.as_ref().map(|i| i.token);
-        self.index_cancel = opened
-            .indexing
-            .as_ref()
-            .map(|i| CancelOnDrop(Arc::clone(&i.cancel)));
-        self.indexing = opened.indexing;
+        self.adopt_indexing(opened.indexing);
         self.buffer = opened.buffer;
         self.mapping = opened.mapping;
         self.line_ending = opened.line_ending;
@@ -474,7 +520,7 @@ impl Document {
         let Some(path) = self.path.clone() else {
             return Err(untitled());
         };
-        if self.buffer.is_mapped() {
+        if self.saves_on_worker() {
             // Saving over the mapped file needs the steps in crate::saver;
             // nothing is written here, so the file cannot be damaged.
             return Err(SaveError {
@@ -498,6 +544,14 @@ impl Document {
         // the saved step and the document would look clean.
         self.history.seal();
         self.saved_at = self.history.top_id();
+    }
+
+    /// Whether saving goes through [`Document::begin_save`] on a worker:
+    /// the document reads a memory-mapped file. A piece table held in
+    /// memory (a small file that is not UTF-8) saves at once, like a rope.
+    #[must_use]
+    pub fn saves_on_worker(&self) -> bool {
+        self.mapping.is_some()
     }
 
     /// Whether a save is under way: edits wait until it ends.
@@ -547,16 +601,22 @@ impl Document {
         if self.saving.is_some() {
             return Err(refuse("it is already being saved"));
         }
-        if !self.buffer.is_mapped() {
+        if !self.saves_on_worker() {
             return Err(refuse("only mapped documents save on a worker"));
         }
         // No undo step may stay open to absorb edits made after the save.
         self.history.seal();
+        let over_mapped = self
+            .mapping
+            .as_ref()
+            .is_some_and(|m| m.temp_path().is_none())
+            && self.canonical.as_deref() == Some(io::canonical(&path).as_path());
         let job = SaveJob::new(path, self.buffer.snapshot(), self.bom);
         self.saving = Some(Saving {
             token: job.token,
             version: self.version,
             policy,
+            over_mapped,
             _cancel: CancelOnDrop(job.cancel_flag()),
             replace: None,
         });
@@ -607,6 +667,15 @@ impl Document {
         };
         let Some(saving) = self.saving.as_mut() else {
             return SaveStep::Stale;
+        };
+        let old = match old {
+            Some(old) if !saving.over_mapped => {
+                // The rename does not touch the old file: nothing to wait
+                // for, whoever still reads it.
+                saver::release_later(old);
+                None
+            }
+            old => old,
         };
         saving.replace = Some(Replace {
             old,
@@ -842,11 +911,7 @@ impl Document {
         let mapped = Arc::new(mapped);
         let index = if changed {
             let (index, indexing) = crate::indexer::start(&mapped)?;
-            self.index_token = indexing.as_ref().map(|i| i.token);
-            self.index_cancel = indexing
-                .as_ref()
-                .map(|i| CancelOnDrop(Arc::clone(&i.cancel)));
-            self.indexing = indexing;
+            self.adopt_indexing(indexing);
             index
         } else {
             index
@@ -1628,7 +1693,7 @@ mod tests {
         // Not UTF-8, so it opens mapped although it is tiny.
         let original = b"fn main() {}\n// \xff\n";
         std::fs::write(&path, original).unwrap();
-        let mut d = Document::open(&path).unwrap();
+        let mut d = Document::open_mapped(&path).unwrap();
         assert!(d.buffer.is_mapped());
         assert_eq!(raw(&d), original);
         d.detect_language(&Languages::default());
@@ -1673,7 +1738,7 @@ mod tests {
         let path = dir.0.join("app.log");
         std::fs::write(&path, b"one \xff\ntwo\n").unwrap();
         let langs = Languages::default();
-        let mut d = Document::open(&path).unwrap();
+        let mut d = Document::open_mapped(&path).unwrap();
         assert!(d.buffer.is_mapped());
 
         // A growing log: marked as changed, never reloaded, said once.
@@ -1720,6 +1785,20 @@ mod tests {
             );
             assert!(d.conflict && d.is_dirty());
         }
+    }
+
+    #[test]
+    fn small_files_that_are_not_utf8_stay_in_memory_and_save_at_once() {
+        let dir = TempDir::new("bytes-save");
+        let path = dir.0.join("latin1.txt");
+        std::fs::write(&path, b"caf\xe9\n").unwrap();
+        let mut d = Document::open(&path).unwrap();
+        assert!(d.buffer.is_mapped() && !d.saves_on_worker());
+        d.click(0, false);
+        d.insert("le ").unwrap();
+        d.save().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"le caf\xe9\n");
+        assert!(!d.is_dirty());
     }
 
     #[test]

@@ -83,8 +83,9 @@ impl Indexing {
     /// Index the rest of the file, calling `send` with each chunk of the
     /// index (every [`PUBLISH`] bytes, and at the end). Stops early when
     /// cancelled, when `send` returns `false`, or when a read fails (the
-    /// file was cut short: the index then stays partial).
-    pub fn run(mut self, mut send: impl FnMut(u64, IndexChunk) -> bool) {
+    /// file was cut short): the last chunk then comes with the error, and
+    /// the index stays partial.
+    pub fn run(mut self, mut send: impl FnMut(u64, IndexChunk, Option<String>) -> bool) {
         let len = self.source.len();
         let mut pos = usize::try_from(self.scanner.position()).unwrap_or(len);
         let mut buf = vec![0; BLOCK.min(len.saturating_sub(pos))];
@@ -96,7 +97,7 @@ impl Indexing {
             let n = BLOCK.min(len - pos);
             if let Err(e) = self.source.read_at(pos, &mut buf[..n]) {
                 log::warn!("indexing stopped at byte {pos}: {e}");
-                let _ = send(self.token, self.scanner.take_chunk());
+                let _ = send(self.token, self.scanner.take_chunk(), Some(e.to_string()));
                 return;
             }
             self.scanner.feed(&buf[..n]);
@@ -105,7 +106,9 @@ impl Indexing {
             if pos == len {
                 self.scanner.finish();
             }
-            if (unsent >= PUBLISH || pos == len) && !send(self.token, self.scanner.take_chunk()) {
+            if (unsent >= PUBLISH || pos == len)
+                && !send(self.token, self.scanner.take_chunk(), None)
+            {
                 return;
             }
             if unsent >= PUBLISH {
@@ -115,7 +118,7 @@ impl Indexing {
     }
 
     /// Run [`Indexing::run`] on its own thread.
-    pub fn spawn(self, send: impl FnMut(u64, IndexChunk) -> bool + Send + 'static) {
+    pub fn spawn(self, send: impl FnMut(u64, IndexChunk, Option<String>) -> bool + Send + 'static) {
         let spawned = std::thread::Builder::new()
             .name("nimbus-index".to_owned())
             .spawn(move || self.run(send));
@@ -148,7 +151,8 @@ mod tests {
         assert_eq!(index.indexed(), FIRST_BLOCK as u64);
         let rest = rest.unwrap();
         let mut chunks = 0;
-        rest.run(|_, chunk| {
+        rest.run(|_, chunk, error| {
+            assert_eq!(error, None);
             chunks += 1;
             index.merge(chunk).unwrap();
             true
@@ -165,6 +169,36 @@ mod tests {
             Arc::new(MappedFile::new(std::fs::File::open(dir.join("small.txt")).unwrap()).unwrap());
         let (index, rest) = start(&small).unwrap();
         assert!(index.is_done() && rest.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Windows refuses to truncate a mapped file.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_cut_short_stops_the_count_and_says_why() {
+        let dir = std::env::temp_dir().join(format!("nimbus-index-cut-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("log.txt");
+        std::fs::write(&path, "x\n".repeat(FIRST_BLOCK)).unwrap(); // 8 MiB
+        let source = Arc::new(MappedFile::new(std::fs::File::open(&path).unwrap()).unwrap());
+        let (mut index, rest) = start(&source).unwrap();
+        // Cut short past the first block; the mapping is not touched again.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(FIRST_BLOCK as u64 + 10)
+            .unwrap();
+        let mut errors = Vec::new();
+        rest.unwrap().run(|_, chunk, error| {
+            index.merge(chunk).unwrap();
+            errors.push(error);
+            true
+        });
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].is_some(), "the last chunk says why");
+        assert!(!index.is_done());
+        drop(source);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

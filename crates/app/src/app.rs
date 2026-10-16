@@ -61,8 +61,9 @@ pub enum AppEvent {
     /// The file watcher could not watch everything asked of it.
     WatchWarning(String),
     /// A chunk of a huge file's line index, for the document with that
-    /// indexing token.
-    Index(u64, IndexChunk),
+    /// indexing token, and why counting stopped if a read failed (the
+    /// file was cut short).
+    Index(u64, IndexChunk, Option<String>),
     /// Progress or the end of saving a huge file ([`crate::saver`]).
     Save(SaveEvent),
 }
@@ -795,7 +796,7 @@ impl App {
     fn go_to_line(&mut self, n: usize) {
         let t = &self.tabs[self.active].doc.buffer;
         let line = n.saturating_sub(1);
-        if line >= t.len_lines() && !t.is_fully_indexed() {
+        if line >= t.len_lines() && self.tabs[self.active].doc.counting_lines() {
             self.pending_line = Some(n);
             self.say(
                 format!("Going to line {n} once lines are counted that far"),
@@ -816,8 +817,10 @@ impl App {
         for tab in &mut self.tabs {
             if let Some(job) = tab.doc.indexing.take() {
                 let proxy = self.proxy.clone();
-                job.spawn(move |token, chunk| {
-                    proxy.send_event(AppEvent::Index(token, chunk)).is_ok()
+                job.spawn(move |token, chunk, error| {
+                    proxy
+                        .send_event(AppEvent::Index(token, chunk, error))
+                        .is_ok()
                 });
             }
         }
@@ -825,7 +828,7 @@ impl App {
 
     /// A chunk of line index arrived: merge it, report progress, and finish
     /// a go-to-line that was waiting for it.
-    fn index_arrived(&mut self, token: u64, chunk: IndexChunk) {
+    fn index_arrived(&mut self, token: u64, chunk: IndexChunk, error: Option<String>) {
         let Some(i) = self
             .tabs
             .iter_mut()
@@ -833,11 +836,20 @@ impl App {
         else {
             return; // closed or reloaded meanwhile
         };
-        if !self.tabs[i].doc.merge_index(token, chunk) || i != self.active {
+        let merged = self.tabs[i].doc.merge_index(token, chunk);
+        if error.is_some() {
+            // Nothing more comes: stop waiting for it.
+            self.tabs[i].doc.stop_indexing();
+        }
+        if !merged || i != self.active {
             return;
         }
         let t = &self.tabs[i].doc.buffer;
-        if t.is_fully_indexed() {
+        if let Some(e) = error {
+            #[expect(clippy::cast_precision_loss, reason = "a percentage for display")]
+            let pct = t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64;
+            self.say(format!("Stopped counting lines at {pct:.0}%: {e}"), true);
+        } else if t.is_fully_indexed() {
             let lines = t.len_lines();
             self.say(format!("{lines} lines"), false);
         } else {
@@ -847,7 +859,7 @@ impl App {
         }
         if let Some(n) = self.pending_line {
             let t = &self.tabs[i].doc.buffer;
-            if n <= t.len_lines() || t.is_fully_indexed() {
+            if n <= t.len_lines() || !self.tabs[i].doc.counting_lines() {
                 self.go_to_line(n);
             }
         }
@@ -1089,7 +1101,7 @@ impl App {
             self.say("Already saving; edits wait until it is done", false);
             return Saved::Started;
         }
-        if self.tabs[i].doc.buffer.is_mapped() {
+        if self.tabs[i].doc.saves_on_worker() {
             return self.start_save(i);
         }
         match self.tabs[i].doc.save() {
@@ -1726,10 +1738,16 @@ impl App {
         if self.waits_for_save() {
             return;
         }
-        if !self.find.complete {
+        if !self.find.complete && !self.find.capped {
+            let doc = &self.tabs[self.active].doc;
+            if doc.buffer.is_mapped() {
+                // Finishing the search here could read gigabytes on the
+                // main thread.
+                self.say("Still searching; Replace All once the count is final", true);
+                return;
+            }
             // A background search is still running: finish it here so no
             // match is missed.
-            let doc = &self.tabs[self.active].doc;
             self.find.search_now(doc);
         }
         if self.find.capped {
@@ -1747,6 +1765,12 @@ impl App {
             .matches
             .iter()
             .filter_map(|r| {
+                // A byte-level pattern can match inside a character;
+                // replacing there would be refused, and with it the rest.
+                let t = &self.doc().buffer;
+                if !t.is_char_boundary(r.start) || !t.is_char_boundary(r.end) {
+                    return None;
+                }
                 let rep = self.find.replacement_for(self.doc(), r.clone())?;
                 Some((r.clone(), rep))
             })
@@ -2430,7 +2454,7 @@ pub fn run_headless(
 fn index_now(doc: &mut Document) {
     if let Some(job) = doc.indexing.take() {
         let started = Instant::now();
-        job.run(|token, chunk| doc.merge_index(token, chunk));
+        job.run(|token, chunk, _| doc.merge_index(token, chunk));
         log::info!(
             "indexed {} lines in {:?}",
             doc.buffer.len_lines(),
@@ -2626,7 +2650,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.changed(false);
             }
             AppEvent::Disk(paths) => self.disk_changed(&paths),
-            AppEvent::Index(token, chunk) => self.index_arrived(token, chunk),
+            AppEvent::Index(token, chunk, error) => self.index_arrived(token, chunk, error),
             AppEvent::Save(event) => {
                 self.save_event(event, event_loop);
                 self.changed(false);
