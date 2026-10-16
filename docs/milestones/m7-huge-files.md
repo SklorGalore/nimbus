@@ -223,6 +223,7 @@ general-purpose subagent at the effort CLAUDE.md sets for them.
 |---|---|
 | Tests | 305 passing, plus 11 opt-in benchmarks or diagnostics |
 | Release binary | 14.45 MB on macOS (M6: 15.02 MB) |
+| `--smoke` first frame | 161 ms first run after a rebuild, 142–146 ms warm (M5 Pro) |
 | 4 GB log, first screen | 0.02 s, 34 MB RSS (empty window: 33 MB) |
 | 4 GB log, every line counted | 0.26 s in the background, 35 MB |
 | 4 GB log, search to the last line | 1.4 s on a worker, 36 MB |
