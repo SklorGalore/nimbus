@@ -358,7 +358,7 @@ introduces and points at the code.
 | 1 | Text on screen | **Done** | See a paragraph in a monospace font at correct DPI; cold start under 100 ms | [m1](docs/milestones/m1-text-on-screen.md) |
 | 2 | Editable | **Done** | Open, edit, scroll and save a file | [m2](docs/milestones/m2-editable.md) |
 | 3 | Editing essentials | **Done** | Select, clipboard, undo, find and replace, soft wrap, auto-indent | [m3](docs/milestones/m3-editing-essentials.md) |
-| 4 | Many files | Next | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
+| 4 | Many files | **Built on `m4-wip`, owner checks pending** | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
 | 5 | Highlighting | Planned | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
 | 6 | File tree | Planned | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
 | 7 | Huge files | Planned | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
@@ -414,3 +414,7 @@ memory budget is per file, at most 1.5× file size over an empty window (§1).
 | 2026-10-16 | Find fields are `Document`s; re-search after edits waits for a 150 ms pause | §4.4 |
 | 2026-10-16 | `--headless` off-screen rendering for checks without a visible window | §5 |
 | 2026-10-16 | Word movement uses code-style classes; wrap uses Unicode word bounds | §4.1 |
+| 2026-10-16 | Actions have a `When` context; inapplicable chords type their text | §4.4 |
+| 2026-10-16 | Physical-key fallback only for Alt/Option or non-ASCII layouts | §4.4 |
+| 2026-10-16 | Config settings parsed one by one; overrides beat defaults | §4.4 |
+| 2026-10-16 | Shortcut labels in words on macOS until font fallback (M8) | §4.3 |

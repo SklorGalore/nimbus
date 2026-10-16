@@ -1,6 +1,6 @@
 # M4 — Many files
 
-**Status: next**
+**Status: built on branch `m4-wip` (draft PR #2); owner checks pending** (2026-10-16)
 
 ## Goal
 
@@ -9,26 +9,36 @@ reaches every action, a config file, and native menus.
 
 ## Done when
 
-- [ ] Every operation from M2 and M3 is an `Action`, and the keymap is the
-      only place keys are bound.
-- [ ] `Primary+Shift+P` opens the command palette; typing filters actions by
-      fuzzy match; Enter runs one; each row shows its keybinding.
-- [ ] `Primary+P` opens the file opener over the project root. Results stream
-      in while the walk runs; `.gitignore`d files are excluded; a 100k-file
-      repository shows first results in under 100 ms.
-- [ ] Opening a second file adds a tab. `Primary+1..9`, `Ctrl+Tab` and
-      `Ctrl+Shift+Tab` switch; `Primary+W` closes, prompting if dirty;
-      `Primary+T` or `Primary+N` makes an untitled tab.
-- [ ] Each tab keeps its own cursor, scroll and undo history.
-- [ ] `Primary+O` and `Primary+Shift+S` use native open and save dialogs.
-- [ ] The config file is read at startup; font size, tab width, theme name,
-      soft-wrap default and keybinding overrides take effect. Editing the
-      file and running "Reload config" applies changes. A syntax error shows
-      in the message line with the line number; defaults stay in effect.
-- [ ] macOS and Windows have a native menu bar (File, Edit, View, Go) whose
-      items run the same actions. Linux has none, by design.
-- [ ] Startup stays under 100 ms: the walk, menu build and config parse do
-      not delay the first frame.
+Ticked items were verified here by tests or headless renders. **Owner**
+items need a person at the keyboard; each says what to try.
+
+- [x] Every operation is an `Action` with a stable id, and keys are bound
+      only through the registry plus config overrides. A test checks that
+      the default bindings have no conflicts on each platform.
+- [x] Primary+Shift+P opens the command palette; typing filters by fuzzy
+      match; rows show key bindings (headless render).
+- [x] Primary+P opens the file opener; results stream in while the walk
+      runs; `.gitignore`d files are excluded. First match in about 5 ms on
+      a 62,000-file folder.
+- [ ] **Owner:** use both pickers by keyboard and mouse: arrows, Enter,
+      Escape, clicking a row; clicking outside closes, inside does not.
+- [ ] **Owner:** tabs: open several files (`nimbus a.rs b.rs`, Primary+O,
+      the file opener); switch with Primary+1..9, Ctrl+Tab, Ctrl+Shift+Tab
+      and by clicking; Primary+W closes with a prompt if dirty; Primary+N
+      opens an untitled tab; each tab keeps its cursor, scroll and undo.
+- [ ] **Owner:** Primary+O and Primary+Shift+S show native dialogs; saving
+      an untitled tab asks for a name.
+- [ ] **Owner:** "Open Config File" from the palette creates the file from a
+      commented template; change `font_size` or a key binding, save, run
+      "Reload Config", and see the change (menus too). A typo shows a
+      warning in the message line and the other settings still apply.
+- [ ] **Owner:** macOS menu bar (Nimbus, File, Edit, View) runs the same
+      actions and shows the shortcuts; holding Cmd+W closes one tab, not
+      all of them. Windows builds the same menus (CI compiles them); Linux
+      has none, by design.
+- [ ] **Owner:** startup with several files and a config file stays well
+      under 500 ms (`--smoke`; the screen was locked when this was built,
+      so it is unmeasured).
 
 ## Scope
 
@@ -115,4 +125,52 @@ hover. Overflowing tabs scroll horizontally; there is no wrapping.
 
 ## Results
 
-_Fill in when done._
+| Metric | Value |
+|---|---|
+| Tests | 164 passing, plus 3 opt-in benchmarks or diagnostics |
+| File opener on 62,244 files | first match 4.6 ms; walk and match done in 147 ms |
+| Menus installed | about 90 ms after start (window ready at about 80 ms) |
+| Release binary | 8.7 MB |
+
+**Design changes**
+
+- `main.rs` is startup only; the application moved to `app.rs`, with
+  `action`, `keymap`, `config`, `picker` and `menu` modules beside it.
+- Actions carry a `When` context. A chord bound to an action that does not
+  apply right now types its text instead: Option+C types "ç" unless the
+  find bar is open.
+- Key lookup tries the logical key first, then the physical key, but only
+  when Option/Alt or a non-ASCII layout changed the character. Without that
+  limit, Dvorak's Cmd+, would have closed a tab.
+- Config overrides always win over defaults, regardless of action order;
+  labels and menu shortcuts follow what each action still owns.
+- Each config setting is read separately, so one mistake costs one setting.
+- Menu shortcuts come from the keymap and update on Reload Config. Held
+  menu shortcuts are de-duplicated (macOS sends a menu event per repeat).
+- The tab bar is always shown, and scrolls to keep the active tab visible.
+- A lone untouched untitled tab is replaced when a file is opened.
+- `--picker palette|files[:query]` with `--headless` renders a picker for
+  checks without a window.
+
+**Surprises**
+
+- The bundled font has no ⌘ ⌥ ⌃ ⌫ glyphs, so shortcut labels read
+  `Cmd+Shift+P` on macOS until M8's font fallback (noted in the M8 plan).
+- The screen locked during the work again; `--smoke` now exits once, with
+  one message, instead of repeating it while winit shuts down.
+- Linux CI caught a method that only the native menus use.
+
+**End-of-milestone review** (code-review skill, high) found ten issues, all
+fixed: overrides losing to later defaults; physical-key fallback on
+letter-moving layouts; menus not updated on reload; menu dropped after the
+window it is attached to (Windows); held menu shortcuts repeating actions;
+a continuous redraw during the file walk; one bad config value resetting
+everything; modified Backspace and Delete doing nothing; failed Save As
+changing the tab's path; clicks inside the picker closing it.
+
+**Known limitations**
+
+- Quitting from the Dock or at logout still skips the unsaved prompt; the
+  new menus do not change that (winit has no `applicationShouldTerminate`).
+- Multi-key chord sequences (Ctrl+K Ctrl+C) are not supported.
+- Recently opened files are not remembered.
