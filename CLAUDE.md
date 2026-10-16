@@ -40,6 +40,10 @@ The strict lints live in `[workspace.lints]` in the root `Cargo.toml`, and every
 
 ```sh
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets
+# Platform-specific code (menus, AltGr, dead code on one OS) only shows up
+# per target; check the other two before pushing (targets installed via rustup):
+RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu
+RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc
 ```
 
 The set is `clippy::pedantic` plus `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `dbg_macro`, `print_stdout`, `print_stderr`, `undocumented_unsafe_blocks`, `missing_docs`, and `unsafe_code = "deny"`. Don't weaken the table to get a change through.

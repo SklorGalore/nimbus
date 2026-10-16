@@ -177,6 +177,10 @@ pub struct MenuBar;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 impl MenuBar {
     /// Nothing to update without menus.
+    #[expect(
+        clippy::unused_self,
+        reason = "same signature as the native menu bar's update"
+    )]
     pub fn update(&self, _keymap: &crate::keymap::Keymap) {}
 }
 
