@@ -31,8 +31,8 @@ repeated in each file:
 | 1 | [Text on screen](m1-text-on-screen.md) | Done |
 | 2 | [Editable](m2-editable.md) | Done |
 | 3 | [Editing essentials](m3-editing-essentials.md) | Done |
-| 4 | [Many files](m4-many-files.md) | Built on `m4-wip`, owner checks pending |
-| 5 | [Highlighting](m5-highlighting.md) | Planned |
+| 4 | [Many files](m4-many-files.md) | Done |
+| 5 | [Highlighting](m5-highlighting.md) | Next |
 | 6 | [File tree](m6-file-tree.md) | Planned |
 | 7 | [Huge files](m7-huge-files.md) | Planned |
 | 8 | [Polish](m8-polish.md) | Planned |

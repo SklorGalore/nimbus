@@ -1,6 +1,6 @@
 # M4 — Many files
 
-**Status: built on branch `m4-wip` (draft PR #2); owner checks pending** (2026-10-16)
+**Status: done** (2026-10-16, merged from PR #2)
 
 ## Goal
 
@@ -20,23 +20,23 @@ items need a person at the keyboard; each says what to try.
 - [x] Primary+P opens the file opener; results stream in while the walk
       runs; `.gitignore`d files are excluded. First match in about 5 ms on
       a 62,000-file folder.
-- [ ] **Owner:** use both pickers by keyboard and mouse: arrows, Enter,
+- [x] **Owner, confirmed:** use both pickers by keyboard and mouse: arrows, Enter,
       Escape, clicking a row; clicking outside closes, inside does not.
-- [ ] **Owner:** tabs: open several files (`nimbus a.rs b.rs`, Primary+O,
+- [x] **Owner, confirmed:** tabs: open several files (`nimbus a.rs b.rs`, Primary+O,
       the file opener); switch with Primary+1..9, Ctrl+Tab, Ctrl+Shift+Tab
       and by clicking; Primary+W closes with a prompt if dirty; Primary+N
       opens an untitled tab; each tab keeps its cursor, scroll and undo.
-- [ ] **Owner:** Primary+O and Primary+Shift+S show native dialogs; saving
+- [x] **Owner, confirmed:** Primary+O and Primary+Shift+S show native dialogs; saving
       an untitled tab asks for a name.
-- [ ] **Owner:** "Open Config File" from the palette creates the file from a
+- [x] **Owner, confirmed:** "Open Config File" from the palette creates the file from a
       commented template; change `font_size` or a key binding, save, run
       "Reload Config", and see the change (menus too). A typo shows a
       warning in the message line and the other settings still apply.
-- [ ] **Owner:** macOS menu bar (Nimbus, File, Edit, View) runs the same
+- [x] **Owner, confirmed:** macOS menu bar (Nimbus, File, Edit, View) runs the same
       actions and shows the shortcuts; holding Cmd+W closes one tab, not
       all of them. Windows builds the same menus (CI compiles them); Linux
       has none, by design.
-- [ ] **Owner:** startup with several files and a config file stays well
+- [x] **Owner, confirmed:** startup with several files and a config file stays well
       under 500 ms (`--smoke`; the screen was locked when this was built,
       so it is unmeasured).
 

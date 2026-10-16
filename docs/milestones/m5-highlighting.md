@@ -1,6 +1,6 @@
 # M5 — Highlighting
 
-**Status: planned**
+**Status: next**
 
 ## Goal
 
