@@ -17,6 +17,7 @@ mod languages;
 mod mapping;
 mod menu;
 mod picker;
+mod saver;
 mod sidebar;
 mod state;
 mod theme;

@@ -9,7 +9,8 @@ use std::time::{Instant, SystemTime};
 
 use nimbus_core::movement;
 use nimbus_core::{
-    AnyBuffer, Buffer, Edit, EditError, History, LineEnding, Selection, Selections, Text,
+    AnyBuffer, Buffer, Edit, EditError, History, LineEnding, MappedBuffer, Selection, Selections,
+    Source, Text,
 };
 
 use nimbus_syntax::state::SyntaxState;
@@ -19,7 +20,9 @@ use crate::input::Motion;
 use crate::io::{self, OpenError, SaveError};
 use crate::languages::{Detected, Languages};
 use crate::mapping::MappedFile;
-use nimbus_core::line_index::IndexChunk;
+use crate::saver::{self, ReplacePolicy, SaveJob, SaveStep, Written};
+use nimbus_core::line_index::{IndexChunk, LineIndex};
+use nimbus_core::mapped::Limits;
 
 /// Copy and Cut refuse selections longer than this: 64 MiB. The text is
 /// copied into memory, then again by the system clipboard, and Select All
@@ -127,18 +130,66 @@ pub struct Document {
     /// Which indexing run this document's index chunks come from.
     pub index_token: Option<u64>,
     /// Stops the indexing worker when the document goes away or reloads.
-    index_cancel: Option<IndexCancel>,
+    index_cancel: Option<CancelOnDrop>,
+    /// A save of this mapped document under way ([`crate::saver`]). Edits
+    /// wait while it is set.
+    saving: Option<Saving>,
 }
 
-/// Stops a line-counting worker when dropped: when its document closes,
-/// reloads or goes away.
+/// Stops a worker when dropped: when its document closes, reloads or goes
+/// away.
 #[derive(Debug)]
-struct IndexCancel(Arc<AtomicBool>);
+struct CancelOnDrop(Arc<AtomicBool>);
 
-impl Drop for IndexCancel {
+impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Relaxed);
     }
+}
+
+/// `Document::saved_at` while the document's text is not in its file:
+/// never equal to a history id, so the document stays dirty.
+const NOT_SAVED: u64 = u64::MAX;
+
+/// The error for saving a document that has no file name.
+fn untitled() -> SaveError {
+    SaveError {
+        step: "choosing a path",
+        source: std::io::Error::other("the document has no file name yet"),
+    }
+}
+
+/// A save of a mapped document under way ([`crate::saver`]).
+#[derive(Debug)]
+struct Saving {
+    /// The save's [`SaveJob::token`]: its results carry it.
+    token: u64,
+    /// [`Document::version`] when the save began. Every edit changes it, so
+    /// the document can tell that the file written is still its text.
+    version: u64,
+    policy: ReplacePolicy,
+    /// Stops the worker if the document goes away first.
+    _cancel: CancelOnDrop,
+    /// Set once the new file is written and the document reads it, until
+    /// it has replaced the target.
+    replace: Option<Replace>,
+}
+
+/// A written save waiting to replace its target (see [`crate::saver`]).
+#[derive(Debug)]
+struct Replace {
+    /// The file the document read before the save. Dropped before the
+    /// rename; on Windows only once this is its last reference.
+    old: Option<Arc<MappedFile>>,
+    /// The new file, which the document now reads; it deletes itself when
+    /// dropped until it is renamed into place.
+    new: Arc<MappedFile>,
+    temp: PathBuf,
+    target: PathBuf,
+    /// The new file's size and time, which the rename keeps.
+    meta: std::fs::Metadata,
+    /// Stop waiting for `old` to be released at this time.
+    until: Instant,
 }
 
 impl Document {
@@ -214,7 +265,7 @@ impl Document {
             index_cancel: opened
                 .indexing
                 .as_ref()
-                .map(|i| IndexCancel(Arc::clone(&i.cancel))),
+                .map(|i| CancelOnDrop(Arc::clone(&i.cancel))),
             indexing: opened.indexing,
             buffer: opened.buffer,
             mapping: opened.mapping,
@@ -230,10 +281,16 @@ impl Document {
     /// The file changed on disk (a watcher said so): work out what to do.
     /// Reloads by itself when nothing here is unsaved, except a mapped
     /// document, which reloads by itself only when its file got shorter.
+    ///
+    /// While a save is under way nothing happens: the save replaces the
+    /// file and records it, and the app looks again once it ends.
     pub fn disk_changed(&mut self, languages: &Languages) -> DiskChange {
         let Some(path) = self.path.clone() else {
             return DiskChange::None;
         };
+        if self.saving.is_some() {
+            return DiskChange::None;
+        }
         let now = Stamp::of(&path);
         let Some(stamp) = now else {
             if self.disk.is_none() {
@@ -247,8 +304,12 @@ impl Document {
             return DiskChange::None; // our own save, or no real change
         }
         self.deleted = false;
-        if let Some(mapped_len) = self.mapping.as_ref().map(|m| m.file_len()) {
-            return self.mapped_disk_changed(stamp.len < mapped_len, languages);
+        if let Some(mapping) = &self.mapping {
+            // A document still reading the temp file of a save that could
+            // not replace this file is not reading this file: cutting it
+            // short takes nothing from under the document.
+            let truncated = mapping.temp_path().is_none() && stamp.len < mapping.file_len();
+            return self.mapped_disk_changed(truncated, languages);
         }
         if self.is_dirty() {
             self.conflict = true;
@@ -294,12 +355,17 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// Returns the [`OpenError`] if the file cannot be read; nothing
-    /// changes then.
+    /// Returns the [`OpenError`] if the file cannot be read, or while the
+    /// document is being saved; nothing changes then.
     pub fn reload(&mut self, languages: &Languages) -> Result<(), OpenError> {
         let Some(path) = self.path.clone() else {
             return Ok(());
         };
+        if self.saving.is_some() {
+            return Err(OpenError::Io(std::io::Error::other(
+                "it is being saved; reload once that is done",
+            )));
+        }
         let disk = Stamp::of(&path);
         let opened = io::open(&path)?;
         // Where the cursor was, to put it back. A rope keeps its line and
@@ -317,7 +383,7 @@ impl Document {
         self.index_cancel = opened
             .indexing
             .as_ref()
-            .map(|i| IndexCancel(Arc::clone(&i.cancel)));
+            .map(|i| CancelOnDrop(Arc::clone(&i.cancel)));
         self.indexing = opened.indexing;
         self.buffer = opened.buffer;
         self.mapping = opened.mapping;
@@ -396,42 +462,426 @@ impl Document {
         )
     }
 
-    /// Save to the document's path.
+    /// Save to the document's path, on this thread. Only for a document in
+    /// memory; a mapped one saves on a worker ([`Document::begin_save`]).
     ///
     /// # Errors
     ///
     /// Returns a [`SaveError`] if writing fails, if the document is
-    /// untitled (until M4 adds a save dialog), or if it is mapped. The
+    /// untitled (the app asks for a name first), or if it is mapped. The
     /// document stays dirty.
     pub fn save(&mut self) -> Result<(), SaveError> {
-        let Some(path) = self.path.as_deref() else {
-            return Err(SaveError {
-                step: "choosing a path",
-                source: std::io::Error::other("untitled documents can be saved from M4 on"),
-            });
+        let Some(path) = self.path.clone() else {
+            return Err(untitled());
         };
         if self.buffer.is_mapped() {
-            // Writing a mapped document over its own file needs the mapping
-            // dropped before the rename and the new file mapped after (M7
-            // task 12). Until then nothing is written, so a mapped file can
-            // never be damaged by a save.
+            // Saving over the mapped file needs the steps in crate::saver;
+            // nothing is written here, so the file cannot be damaged.
             return Err(SaveError {
                 step: "saving a memory-mapped file",
-                source: std::io::Error::other(
-                    "saving huge files arrives in the next step; nothing was written",
-                ),
+                source: std::io::Error::other("it saves on a worker; nothing was written"),
             });
         }
-        let written = io::save(path, &self.buffer, self.bom)?;
-        self.disk = Some(Stamp::from(&written));
-        self.canonical = Some(io::canonical(path));
+        let written = io::save(&path, &self.buffer, self.bom)?;
+        self.mark_saved(&written);
+        Ok(())
+    }
+
+    /// Record that the text is now the file at `path`, whose size and time
+    /// are `meta`: the watcher then sees the save as our own.
+    fn mark_saved(&mut self, meta: &std::fs::Metadata) {
+        self.disk = Some(Stamp::from(meta));
+        self.canonical = self.path.as_deref().map(io::canonical);
         self.deleted = false;
         self.conflict = false;
         // Typing after a save must start a new undo step, or it would join
         // the saved step and the document would look clean.
         self.history.seal();
         self.saved_at = self.history.top_id();
-        Ok(())
+    }
+
+    /// Whether a save is under way: edits wait until it ends.
+    #[must_use]
+    pub fn is_saving(&self) -> bool {
+        self.saving.is_some()
+    }
+
+    /// The save under way, by its [`SaveJob::token`].
+    #[must_use]
+    pub fn save_token(&self) -> Option<u64> {
+        self.saving.as_ref().map(|s| s.token)
+    }
+
+    /// Whether a written save is waiting to replace its target (Windows:
+    /// for the old file to be released); see [`Document::poll_replace`].
+    #[must_use]
+    pub fn is_replacing(&self) -> bool {
+        self.saving.as_ref().is_some_and(|s| s.replace.is_some())
+    }
+
+    /// The file a mapped document reads: the one it was opened from or
+    /// saved to, or the temp file of a save that could not replace it.
+    #[cfg(test)]
+    #[must_use]
+    pub fn backing_file(&self) -> Option<&Arc<MappedFile>> {
+        self.mapping.as_ref()
+    }
+
+    /// Start saving a mapped document to its path. Returns the job that
+    /// writes the new file, to run on a worker ([`SaveJob::spawn`]); its
+    /// result goes to [`Document::save_written`]. Edits are refused (by the
+    /// app, which checks [`Document::is_saving`]) until the save ends.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SaveError`] if the document is untitled, not mapped, or
+    /// already being saved.
+    pub fn begin_save(&mut self, policy: ReplacePolicy) -> Result<SaveJob, SaveError> {
+        let Some(path) = self.path.clone() else {
+            return Err(untitled());
+        };
+        let refuse = |why: &str| SaveError {
+            step: "starting the save",
+            source: std::io::Error::other(why),
+        };
+        if self.saving.is_some() {
+            return Err(refuse("it is already being saved"));
+        }
+        if !self.buffer.is_mapped() {
+            return Err(refuse("only mapped documents save on a worker"));
+        }
+        // No undo step may stay open to absorb edits made after the save.
+        self.history.seal();
+        let job = SaveJob::new(path, self.buffer.snapshot(), self.bom);
+        self.saving = Some(Saving {
+            token: job.token,
+            version: self.version,
+            policy,
+            _cancel: CancelOnDrop(job.cancel_flag()),
+            replace: None,
+        });
+        Ok(job)
+    }
+
+    /// The worker of save `token` finished: on success, switch the document
+    /// to the new file and replace the target with it (on Unix at once; on
+    /// Windows once the old file is released, see
+    /// [`Document::poll_replace`]).
+    ///
+    /// Switching clears the undo history. Its steps may hold pieces of the
+    /// old file (`Content::Pieces`, for large deletions), which can only be
+    /// put back into a buffer over that file, and which would keep it
+    /// mapped; the new buffer is over another file. Undo cannot step back
+    /// past a save of a mapped document.
+    pub fn save_written(
+        &mut self,
+        token: u64,
+        result: Result<Written, SaveError>,
+        now: Instant,
+    ) -> SaveStep {
+        if self.save_token() != Some(token) {
+            // Dropping the result deletes its temp file.
+            return SaveStep::Stale;
+        }
+        let mut written = match result {
+            Ok(w) => w,
+            Err(e) => {
+                self.saving = None;
+                return SaveStep::Failed(e);
+            }
+        };
+        let (new, index) = match self.check_written(&mut written) {
+            Ok(mapped) => mapped,
+            Err(e) => {
+                // Nothing changed; dropping the mapping deletes the file.
+                self.saving = None;
+                return SaveStep::Failed(e);
+            }
+        };
+        let old = match self.switch_to(&new, index) {
+            Ok(old) => old,
+            Err(e) => {
+                self.saving = None;
+                return SaveStep::Failed(e);
+            }
+        };
+        let Some(saving) = self.saving.as_mut() else {
+            return SaveStep::Stale;
+        };
+        saving.replace = Some(Replace {
+            old,
+            new,
+            temp: written.temp.clone(),
+            target: written.target.clone(),
+            meta: written.meta.clone(),
+            until: now + saving.policy.wait,
+        });
+        if saving.policy.unmap_first {
+            self.poll_replace(now)
+        } else {
+            self.replace_now()
+        }
+    }
+
+    /// Map the written file, checking it is this document's text.
+    fn check_written(
+        &self,
+        written: &mut Written,
+    ) -> Result<(Arc<MappedFile>, LineIndex), SaveError> {
+        let refuse = |why: &str| SaveError {
+            step: "switching to the new file",
+            source: std::io::Error::other(why.to_owned()),
+        };
+        // The app refuses edits while saving. If one got through anyway, the
+        // file is not the document's text, and switching to it would lose
+        // the edit: keep the document as it is instead.
+        let version = self.saving.as_ref().map(|s| s.version);
+        if !self.buffer.is_mapped()
+            || version != Some(self.version)
+            || written.len != self.buffer.len_bytes()
+        {
+            return Err(refuse("the document changed while it was saved"));
+        }
+        written.map(self.bom)
+    }
+
+    /// Make the document a fresh piece table over `new`, whose finished
+    /// line index is `index`, letting go of everything that refers to the
+    /// old file. Returns the old file's mapping, still to be released.
+    ///
+    /// Relies on `new` holding exactly the document's bytes (checked by
+    /// [`Document::check_written`]), so every offset (cursor, selection,
+    /// search results, scroll position) means the same afterwards.
+    fn switch_to(
+        &mut self,
+        new: &Arc<MappedFile>,
+        index: LineIndex,
+    ) -> Result<Option<Arc<MappedFile>>, SaveError> {
+        let limits = self
+            .buffer
+            .as_mapped()
+            .map_or(Limits::DEFAULT, MappedBuffer::limits);
+        let source: Arc<dyn Source> = Arc::clone(new) as Arc<dyn Source>;
+        let buffer = MappedBuffer::with_index(source, index, limits).map_err(|e| SaveError {
+            step: "switching to the new file",
+            source: std::io::Error::other(e),
+        })?;
+        // From here the document reads the new file. The old buffer, the
+        // undo history and the line counter are the old file's other
+        // holders in this document.
+        self.buffer = buffer.into();
+        self.history = History::default();
+        self.saved_at = NOT_SAVED;
+        self.stop_indexing();
+        let old = self.mapping.replace(Arc::clone(new));
+        // Every line is counted now: the highlighter's line-based state
+        // may change.
+        self.syntax.touch();
+        let p = self.selections.primary();
+        self.selections = Selections::single(Selection {
+            anchor: movement::clamp(&self.buffer, p.anchor),
+            head: movement::clamp(&self.buffer, p.head),
+        });
+        Ok(old)
+    }
+
+    /// Check whether a written save can replace its target yet, and if so,
+    /// do it. On Windows the old file must not be mapped anywhere, which
+    /// the app checks every [`saver::POLL`] while this returns
+    /// [`SaveStep::Waiting`] (stopping a search that reads it), for up to
+    /// [`ReplacePolicy::wait`]; then it gives up, and the document stays on
+    /// the temp file.
+    pub fn poll_replace(&mut self, now: Instant) -> SaveStep {
+        let Some(replace) = self.saving.as_ref().and_then(|s| s.replace.as_ref()) else {
+            return SaveStep::Stale;
+        };
+        // One reference is `replace.old` itself. More means a search (or a
+        // line counter on its way out) still maps the old file.
+        let held = replace
+            .old
+            .as_ref()
+            .is_some_and(|o| Arc::strong_count(o) > 1);
+        if !held {
+            return self.replace_now();
+        }
+        if now < replace.until {
+            return SaveStep::Waiting;
+        }
+        let message = saver::not_replaced(
+            &replace.temp,
+            &replace.target,
+            &"the old file is still in use",
+        );
+        self.saving = None;
+        SaveStep::NotReplaced(message)
+    }
+
+    /// Release the old file and rename the temp file over the target.
+    fn replace_now(&mut self) -> SaveStep {
+        let Some(mut saving) = self.saving.take() else {
+            return SaveStep::Stale;
+        };
+        let Some(mut replace) = saving.replace.take() else {
+            return SaveStep::Stale;
+        };
+        let mut old = replace.old.take();
+        if saving.policy.unmap_first {
+            // Windows: this is the old file's last reference (checked by
+            // `poll_replace`), so dropping it unmaps the file, and the
+            // rename may replace it.
+            old = None;
+        }
+        let renamed = (saving.policy.rename)(&replace.temp, &replace.target);
+        if let Some(old) = old {
+            // Unix: kept until the rename has happened, so the rename only
+            // moved a name. Let it go off this thread: closing the replaced
+            // file for the last time frees its disk space, which takes
+            // about 20 ms per GB on APFS.
+            saver::release_later(old);
+        }
+        match renamed {
+            Ok(()) => {
+                // The temp name is free again; the file is the target now.
+                replace.new.keep_file();
+                self.mark_saved(&replace.meta);
+                SaveStep::Saved
+            }
+            Err(e) if saving.policy.unmap_first => {
+                self.replace_unmapped(replace, saving.policy, &e)
+            }
+            Err(e) => {
+                SaveStep::NotReplaced(saver::not_replaced(&replace.temp, &replace.target, &e))
+            }
+        }
+    }
+
+    /// Windows may refuse to rename the temp file while it is mapped. Let
+    /// go of the mapping, rename, and map the file again through a handle
+    /// kept open throughout (which follows the file through the rename), so
+    /// its bytes stay reachable whatever happens. The document holds no
+    /// text only between the unmapping and the remapping, inside this one
+    /// call on the main thread, where nothing can draw or edit it.
+    fn replace_unmapped(
+        &mut self,
+        replace: Replace,
+        policy: ReplacePolicy,
+        first: &std::io::Error,
+    ) -> SaveStep {
+        let Replace {
+            new,
+            temp,
+            target,
+            meta,
+            ..
+        } = replace;
+        let not_replaced = |e: &dyn std::fmt::Display| {
+            SaveStep::NotReplaced(saver::not_replaced(&temp, &target, e))
+        };
+        // Its holders should be `new`, `self.mapping` and the buffer (edits
+        // were refused, so the history holds none of it). Any other, such
+        // as a search, keeps it mapped whatever we drop here.
+        if Arc::strong_count(&new) > 3 {
+            return not_replaced(first);
+        }
+        let Ok(handle) = new.try_clone_file() else {
+            return not_replaced(first);
+        };
+        let Some(mapped) = self.buffer.as_mapped() else {
+            return not_replaced(first);
+        };
+        let (index, limits) = (mapped.line_index().clone(), mapped.limits());
+        // The temp file must outlive its mapping now.
+        new.keep_file();
+        self.buffer = AnyBuffer::default();
+        self.mapping = None;
+        drop(new); // the last reference: unmapped and closed
+        let renamed = (policy.rename)(&temp, &target);
+        let (at, keep_temp) = match &renamed {
+            Ok(()) => (&target, None),
+            Err(_) => (&temp, Some(temp.clone())),
+        };
+        let changed = match self.remap(handle, index, limits, keep_temp, &meta) {
+            Ok(changed) => changed,
+            Err(e) => return self.lost_backing(at, &e),
+        };
+        match renamed {
+            Ok(()) => {
+                self.mark_saved(&meta);
+                // Another program wrote to the file in between: the
+                // document shows what it holds now, and says so.
+                self.conflict = changed;
+                SaveStep::Saved
+            }
+            Err(e) => not_replaced(&e),
+        }
+    }
+
+    /// Map `file` again as the document's text (see
+    /// [`Document::replace_unmapped`]), deleting it on drop if `temp`.
+    /// Returns whether its size or time is no longer `meta`: another
+    /// program changed it since it was written, so its lines are counted
+    /// afresh instead of trusting `index`.
+    fn remap(
+        &mut self,
+        file: std::fs::File,
+        index: LineIndex,
+        limits: Limits,
+        temp: Option<PathBuf>,
+        meta: &std::fs::Metadata,
+    ) -> std::io::Result<bool> {
+        let mut mapped = MappedFile::new(file)?;
+        if let Some(temp) = temp {
+            mapped = mapped.delete_on_drop(temp);
+        }
+        if self.bom {
+            mapped = mapped.skip_prefix(io::BOM.len());
+        }
+        let changed = mapped
+            .metadata()
+            .map_or(true, |now| Stamp::from(&now) != Stamp::from(meta));
+        let mapped = Arc::new(mapped);
+        let index = if changed {
+            let (index, indexing) = crate::indexer::start(&mapped)?;
+            self.index_token = indexing.as_ref().map(|i| i.token);
+            self.index_cancel = indexing
+                .as_ref()
+                .map(|i| CancelOnDrop(Arc::clone(&i.cancel)));
+            self.indexing = indexing;
+            index
+        } else {
+            index
+        };
+        let source: Arc<dyn Source> = Arc::clone(&mapped) as Arc<dyn Source>;
+        let buffer =
+            MappedBuffer::with_index(source, index, limits).map_err(std::io::Error::other)?;
+        self.buffer = buffer.into();
+        self.mapping = Some(mapped);
+        let p = self.selections.primary();
+        self.selections = Selections::single(Selection {
+            anchor: movement::clamp(&self.buffer, p.anchor),
+            head: movement::clamp(&self.buffer, p.head),
+        });
+        self.syntax.touch();
+        Ok(changed)
+    }
+
+    /// The saved file at `at` could not be mapped again after a moment
+    /// without its mapping (which should never happen: it was mapped just
+    /// before). Its text is safe on disk there, but this document is now
+    /// empty: make it untitled, so no save can write the empty text over
+    /// that file, and say where the text is.
+    fn lost_backing(&mut self, at: &Path, e: &std::io::Error) -> SaveStep {
+        log::error!("could not map {} again: {e}", at.display());
+        self.path = None;
+        self.canonical = None;
+        self.disk = None;
+        self.stop_indexing();
+        self.selections = Selections::default();
+        self.saved_at = self.history.top_id();
+        SaveStep::NotReplaced(format!(
+            "Saved to {} but could not read it back ({e}); open that file to go on",
+            at.display()
+        ))
     }
 
     /// The cursor's byte offset, always a valid position in the text.
@@ -1157,7 +1607,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mapped_document_is_highlighted_simply_and_not_saved_yet() {
+    fn a_mapped_document_is_highlighted_simply_and_saved_on_a_worker() {
         let dir = TempDir::new("mapped-save");
         let path = dir.0.join("odd.rs");
         // Not UTF-8, so it opens mapped although it is tiny.
@@ -1170,11 +1620,24 @@ mod tests {
         assert!(d.syntax.lexical().is_some(), "small, but never parsed");
         assert!(d.syntax.take_job(&d.buffer).is_none());
 
+        // Saving on this thread is refused (crate::saver tests the rest).
         d.insert("x").unwrap();
         let err = d.save().unwrap_err();
-        assert!(err.to_string().contains("next step"), "{err}");
+        assert!(err.to_string().contains("worker"), "{err}");
         assert!(d.is_dirty());
         assert_eq!(std::fs::read(&path).unwrap(), original, "nothing written");
+
+        // While a save runs, changes on disk wait for it and reloading is
+        // refused.
+        let job = d.begin_save(ReplacePolicy::default()).unwrap();
+        append(&path, b"more\n");
+        assert_eq!(d.disk_changed(&Languages::default()), DiskChange::None);
+        assert!(d.reload(&Languages::default()).is_err());
+        let token = job.token;
+        let step = d.save_written(token, job.run(|_, _| {}), Instant::now());
+        assert!(matches!(step, SaveStep::Saved), "{step:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"xfn main() {}\n// \xff\n");
+        assert_eq!(d.disk_changed(&Languages::default()), DiskChange::None);
     }
 
     #[test]

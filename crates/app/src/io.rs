@@ -9,7 +9,8 @@
 //! target, which is flushed to disk and then renamed over the target. A
 //! rename within one directory either fully happens or does not, so a crash
 //! or power cut mid-save leaves the old file or the new file, never half of
-//! each.
+//! each. Mapped documents are saved the same way, but on a worker and with
+//! the document switching to the new file ([`crate::saver`]).
 
 use std::fs;
 use std::io::{Read, Write};
@@ -37,10 +38,10 @@ const LINE_ENDING_SAMPLE: usize = 1024 * 1024;
 
 /// Saving reads the document and writes the file this many bytes at a
 /// time: 4 MiB, so saving a huge document never holds a copy of it.
-const SAVE_CHUNK: usize = 4 * 1024 * 1024;
+pub(crate) const SAVE_CHUNK: usize = 4 * 1024 * 1024;
 
 /// The UTF-8 byte order mark some Windows tools put at the start of a file.
-const BOM: &str = "\u{feff}";
+pub(crate) const BOM: &str = "\u{feff}";
 
 /// Which kind of buffer holds a file's text (DESIGN.md §4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,7 +280,8 @@ impl std::fmt::Display for SaveError {
 
 impl std::error::Error for SaveError {}
 
-fn step(step: &'static str) -> impl FnOnce(std::io::Error) -> SaveError {
+/// Turns an I/O error into a [`SaveError`] at `step`, for `map_err`.
+pub(crate) fn step(step: &'static str) -> impl FnOnce(std::io::Error) -> SaveError {
     move |source| SaveError { step, source }
 }
 
@@ -312,8 +314,8 @@ pub fn canonical(path: &Path) -> std::path::PathBuf {
 ///
 /// This must not be given a mapped buffer whose mapping is `path` itself:
 /// Windows refuses to rename over a mapped file, and elsewhere the
-/// document would go on reading the replaced file's bytes. `Document::save`
-/// refuses that case until saving mapped files lands (M7 task 12).
+/// document would go on reading the replaced file's bytes. Mapped
+/// documents save through [`crate::saver`] instead, which handles both.
 ///
 /// If `path` is a symlink, the file it points to is replaced and the link
 /// is kept. The original file's permissions are kept.
@@ -344,12 +346,18 @@ pub fn save(path: &Path, text: &dyn Text, bom: bool) -> Result<fs::Metadata, Sav
     result
 }
 
-/// Create a new temporary file beside `target`.
+/// Create a new temporary file beside `target`, open for reading and
+/// writing (a mapped document maps the file it was saved to).
 ///
 /// `create_new` refuses to open anything that already exists, including a
 /// symlink someone planted at the predictable name, so a save can never be
 /// redirected into another file. A clash moves on to the next name.
-fn create_temp(target: &Path) -> Result<(PathBuf, fs::File), SaveError> {
+///
+/// # Errors
+///
+/// Returns the error from creating the file, or from the last name tried
+/// if every name was taken.
+pub(crate) fn create_temp(target: &Path) -> Result<(PathBuf, fs::File), SaveError> {
     let name = target
         .file_name()
         .map_or_else(|| "untitled".into(), |n| n.to_string_lossy().into_owned());
@@ -360,7 +368,7 @@ fn create_temp(target: &Path) -> Result<(PathBuf, fs::File), SaveError> {
             std::process::id()
         ));
         let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
+        options.read(true).write(true).create_new(true);
         #[cfg(unix)]
         {
             // Owner-only until the real permissions are copied, so a secret
@@ -383,24 +391,49 @@ fn write_temp(
     text: &dyn Text,
     bom: bool,
 ) -> Result<(), SaveError> {
-    // Copy permissions before writing any content.
-    if let Ok(meta) = fs::metadata(target) {
-        file.set_permissions(meta.permissions())
-            .map_err(step("copying permissions"))?;
-    }
+    copy_permissions(file, target)?;
     if bom {
         file.write_all(BOM.as_bytes())
             .map_err(step("writing the temporary file"))?;
     }
-    write_text(file, text, SAVE_CHUNK)?;
+    write_text(file, text, SAVE_CHUNK, |_| true)?;
     // Make sure the bytes are on disk before the rename makes them visible.
     file.sync_all().map_err(step("flushing to disk"))
+}
+
+/// Give the new `file` the permissions of `target`, if it exists. Done
+/// before any content is written, so the contents of a file only its owner
+/// may read never sit in a file others may read.
+///
+/// # Errors
+///
+/// Returns the error from setting the permissions.
+pub(crate) fn copy_permissions(file: &fs::File, target: &Path) -> Result<(), SaveError> {
+    if let Ok(meta) = fs::metadata(target) {
+        file.set_permissions(meta.permissions())
+            .map_err(step("copying permissions"))?;
+    }
+    Ok(())
 }
 
 /// Write all of `text`'s raw bytes to `out`, copying at most `chunk` bytes
 /// at a time into one reused buffer. Each write is large, so `out` needs
 /// no buffering of its own.
-fn write_text(out: &mut impl Write, text: &dyn Text, chunk: usize) -> Result<(), SaveError> {
+///
+/// `each` sees every piece just before it is written (saving a mapped
+/// document indexes the lines of the new file this way); returning `false`
+/// stops the write with an [`std::io::ErrorKind::Interrupted`] error.
+///
+/// # Errors
+///
+/// Returns a [`SaveError`] for a failed or short read of the document, a
+/// failed write, or a stop asked for by `each`.
+pub(crate) fn write_text(
+    out: &mut impl Write,
+    text: &dyn Text,
+    chunk: usize,
+    mut each: impl FnMut(&[u8]) -> bool,
+) -> Result<(), SaveError> {
     let len = text.len_bytes();
     let chunk = chunk.max(1);
     let mut buf = Vec::with_capacity(len.min(chunk));
@@ -417,6 +450,12 @@ fn write_text(out: &mut impl Write, text: &dyn Text, chunk: usize) -> Result<(),
                 "the document ended early",
             )));
         }
+        if !each(&buf) {
+            return Err(step("writing the temporary file")(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "the save was cancelled",
+            )));
+        }
         out.write_all(&buf)
             .map_err(step("writing the temporary file"))?;
         pos = end;
@@ -426,7 +465,11 @@ fn write_text(out: &mut impl Write, text: &dyn Text, chunk: usize) -> Result<(),
 
 /// Rename, retrying once: on Windows a virus scanner or indexer briefly
 /// holding the target open makes the first attempt fail.
-fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+///
+/// # Errors
+///
+/// Returns the second attempt's error.
+pub(crate) fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     fs::rename(from, to).or_else(|_| {
         std::thread::sleep(std::time::Duration::from_millis(50));
         fs::rename(from, to)
@@ -535,8 +578,8 @@ mod tests {
             b"\xff\xfe\x00 caf\xc3\xa9 \xc3".len()
         );
 
-        // Saved elsewhere (saving over its own mapping is refused by the
-        // document until M7 task 12), the bytes come back unchanged.
+        // Saved elsewhere (saving over its own mapping goes through
+        // `crate::saver`), the bytes come back unchanged.
         let copy = dir.0.join("copy");
         save(&copy, &opened.buffer, opened.bom).unwrap();
         assert_eq!(fs::read(&copy).unwrap(), bytes);
@@ -598,13 +641,31 @@ mod tests {
         let mapped = MappedBuffer::from_bytes(bytes.clone());
         for chunk in [1, 3, 4, 100] {
             let mut out = Vec::new();
-            write_text(&mut out, &mapped, chunk).unwrap();
+            let mut seen = Vec::new();
+            write_text(&mut out, &mapped, chunk, |piece| {
+                assert!(piece.len() <= chunk);
+                seen.extend_from_slice(piece);
+                true
+            })
+            .unwrap();
             assert_eq!(out, bytes, "chunk {chunk}");
+            assert_eq!(seen, bytes, "each piece is shown before it is written");
         }
         let rope = RopeBuffer::from_text("naïve 日本\n");
         let mut out = Vec::new();
-        write_text(&mut out, &rope, 2).unwrap();
+        write_text(&mut out, &rope, 2, |_| true).unwrap();
         assert_eq!(out, "naïve 日本\n".as_bytes());
+
+        // Stopping part way writes nothing more.
+        let mut out = Vec::new();
+        let mut calls = 0;
+        let err = write_text(&mut out, &mapped, 4, |_| {
+            calls += 1;
+            calls < 2
+        })
+        .unwrap_err();
+        assert_eq!(err.source.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(out, b"abc\xff");
     }
 
     #[test]

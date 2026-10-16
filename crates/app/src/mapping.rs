@@ -39,6 +39,8 @@
 
 use std::fs::File;
 use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use memmap2::Mmap;
 use nimbus_core::Source;
@@ -50,7 +52,15 @@ use nimbus_core::Source;
 /// ([`MappedFile::skip_prefix`]), such as a byte order mark, so that the
 /// document starts after them. Offsets given to and returned by its
 /// methods count from there; [`MappedFile::file_len`] is the whole file's.
+///
+/// It can also own a temporary file ([`MappedFile::delete_on_drop`]): a
+/// saved document whose new file could not replace the old one goes on
+/// reading the temporary file it was saved to, which is deleted once
+/// nothing reads it any more.
 pub struct MappedFile {
+    // Fields are dropped in declaration order, and `temp` relies on it: the
+    // file is closed and unmapped before it is deleted, because Windows
+    // refuses to delete a file that is still mapped.
     /// The open file, for [`MappedFile::read_at`]. The mapping does not need
     /// it to stay open, but reading beside the mapping does.
     file: File,
@@ -60,6 +70,29 @@ pub struct MappedFile {
     map: Option<Mmap>,
     /// Bytes at the start of the file that are not part of the document.
     skip: usize,
+    /// A temporary file to delete when this is dropped. Last, so it is
+    /// dropped last.
+    temp: Option<TempPath>,
+}
+
+/// A temporary file, deleted on drop while `armed`. The flag is atomic
+/// because by the time a save decides to keep the file after all (it was
+/// renamed into place), the mapping is shared through an `Arc`.
+#[derive(Debug)]
+struct TempPath {
+    path: PathBuf,
+    armed: AtomicBool,
+}
+
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        if *self.armed.get_mut()
+            && let Err(e) = std::fs::remove_file(&self.path)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            log::warn!("could not delete {}: {e}", self.path.display());
+        }
+    }
 }
 
 impl MappedFile {
@@ -82,8 +115,12 @@ impl MappedFile {
             // process with write access change them while they are mapped.
             // Nimbus never writes through it: the mapping is read-only
             // (`Mmap`, not `MmapMut`) and saving writes a new file and
-            // renames it over the old one, never in place. What another
-            // process can do, and what follows:
+            // renames it over the old one, never in place (`crate::saver`):
+            // on Unix the replaced file lives on, unnamed and unchanged,
+            // until its last mapping is gone, and Windows refuses to
+            // replace a mapped file at all, so a save there first waits
+            // for every mapping of it to go. What another process can do,
+            // and what follows:
             //
             // - Change bytes in place. The document's text changes under
             //   it. Rust's rules say the bytes behind a `&[u8]` never
@@ -111,7 +148,64 @@ impl MappedFile {
             // bytes are simply not in the mapping.
             Some(unsafe { Mmap::map(&file)? })
         };
-        Ok(Self { file, map, skip: 0 })
+        Ok(Self {
+            file,
+            map,
+            skip: 0,
+            temp: None,
+        })
+    }
+
+    /// Delete the file at `path`, which must be the mapped file, when this
+    /// is dropped (after unmapping and closing it), unless
+    /// [`MappedFile::keep_file`] is called first. For a save's temporary
+    /// file, which the document reads until it has replaced the target.
+    #[must_use]
+    pub fn delete_on_drop(mut self, path: PathBuf) -> Self {
+        self.temp = Some(TempPath {
+            path,
+            armed: AtomicBool::new(true),
+        });
+        self
+    }
+
+    /// Do not delete the file on drop after all: it was renamed to the
+    /// target, and its temporary name may soon belong to another file.
+    pub fn keep_file(&self) {
+        if let Some(temp) = &self.temp {
+            temp.armed.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// The temporary file this mapping deletes when dropped, if any. A
+    /// document reading one is not reading the file it is named after.
+    #[must_use]
+    pub fn temp_path(&self) -> Option<&Path> {
+        self.temp
+            .as_ref()
+            .filter(|t| t.armed.load(Ordering::SeqCst))
+            .map(|t| t.path.as_path())
+    }
+
+    /// Another handle to the mapped file. It stays open when this mapping
+    /// is dropped and still names the same file after a rename, so the
+    /// file can be mapped again without looking it up by path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the system's error from duplicating the handle.
+    pub fn try_clone_file(&self) -> io::Result<File> {
+        self.file.try_clone()
+    }
+
+    /// The file's size and times now, read through the open handle: from
+    /// this very file, wherever it has been renamed to.
+    ///
+    /// # Errors
+    ///
+    /// Returns the system's error.
+    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        self.file.metadata()
     }
 
     /// Leave the first `n` bytes of the file out of the document (clamped
@@ -212,6 +306,7 @@ impl std::fmt::Debug for MappedFile {
         f.debug_struct("MappedFile")
             .field("file_len", &self.file_len())
             .field("skip", &self.skip)
+            .field("temp", &self.temp_path())
             .finish_non_exhaustive()
     }
 }
@@ -300,6 +395,25 @@ mod tests {
         assert!(m.read_at(5, &mut buf).is_err());
         let all = f.map().skip_prefix(100);
         assert!(all.bytes().is_empty(), "clamped to the file");
+    }
+
+    #[test]
+    fn a_temporary_file_is_deleted_after_its_mapping_unless_kept() {
+        let f = TempFile::new("temp-delete", b"saved bytes");
+        let m = f.map().delete_on_drop(f.0.clone());
+        assert_eq!(m.temp_path(), Some(f.0.as_path()));
+        assert_eq!(m.metadata().unwrap().len(), 11);
+        let handle = m.try_clone_file().unwrap();
+        drop(m);
+        assert!(!f.0.exists(), "deleted on drop");
+        drop(handle);
+
+        let kept = TempFile::new("temp-keep", b"renamed into place");
+        let m = kept.map().delete_on_drop(kept.0.clone());
+        m.keep_file();
+        assert_eq!(m.temp_path(), None);
+        drop(m);
+        assert!(kept.0.exists(), "kept");
     }
 
     /// On Unix a truncated file makes `read_at` fail cleanly; reading the

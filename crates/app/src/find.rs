@@ -234,6 +234,18 @@ impl FindBar {
         false
     }
 
+    /// Stop a background search, keeping the matches found so far (the
+    /// count then shows as incomplete). Returns whether one was running.
+    /// Saving a huge file on Windows does this, because the search's
+    /// snapshot keeps the old file mapped; the app searches again after.
+    pub fn stop(&mut self) -> bool {
+        if self.complete {
+            return false;
+        }
+        self.generation.bump();
+        true
+    }
+
     /// Search `doc` to the end on this thread, replacing any results so far.
     /// Used before replace all, which must see every match.
     pub fn search_now(&mut self, doc: &Document) {

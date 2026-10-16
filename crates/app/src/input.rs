@@ -133,6 +133,32 @@ pub enum Command<'a> {
     Close,
 }
 
+impl Command<'_> {
+    /// Whether the command changes the document's text when the editor
+    /// has focus. Such commands wait while the document is being saved.
+    /// (Replace and Replace All change it too; they run from the find bar,
+    /// which checks for itself.)
+    #[must_use]
+    pub fn edits_text(self) -> bool {
+        matches!(
+            self,
+            Command::Insert(_)
+                | Command::Newline
+                | Command::Tab
+                | Command::Outdent
+                | Command::DeleteBack
+                | Command::DeleteForward
+                | Command::DeleteWordBack
+                | Command::DeleteWordForward
+                | Command::DeleteToLineStart
+                | Command::Undo
+                | Command::Redo
+                | Command::Cut
+                | Command::Paste
+        )
+    }
+}
+
 /// Whether text from a key press with these modifiers should be typed.
 ///
 /// macOS reports Cmd+S with text "s", so Cmd and Ctrl chords must not type.
