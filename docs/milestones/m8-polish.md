@@ -24,6 +24,8 @@ release builds for all three platforms.
       font through `fontdb`, loaded on a background thread, and drawn when
       ready; the `.notdef` box shows until then.
 - [ ] **Bold and italic** in themes, via bundled variants or synthesis.
+- [ ] Shortcut labels use ⌘ ⌥ ⌃ ⌫ symbols on macOS once fallback fonts
+      provide them (M4 shows `Cmd+Shift+P` because the bundled font lacks them).
 - [ ] **Scrollbar** with a draggable thumb.
 - [ ] **Markdown inline highlighting** (stretch; skip without blocking).
 - [ ] A GPU screenshot smoke test on macOS compares a rendered frame to a

@@ -407,6 +407,33 @@ impl Document {
         self.replace(range, "").map(Some)
     }
 
+    /// Delete the selection, or from the cursor to where `motion` would move
+    /// it (a word or the line start, for Option/Ctrl+Backspace and similar).
+    /// Returns `None` when there is nothing to delete.
+    ///
+    /// # Errors
+    ///
+    /// See [`Document::replace`].
+    pub fn delete_to(&mut self, motion: Motion) -> Result<Option<Edit>, EditError> {
+        let sel = self.selection();
+        let range = if sel.is_empty() {
+            let t = &self.buffer;
+            let target = match motion {
+                Motion::WordLeft => movement::word_left(t, sel.head),
+                Motion::WordRight => movement::word_right(t, sel.head),
+                Motion::LineStart => movement::line_start(t, sel.head),
+                _ => sel.head,
+            };
+            sel.head.min(target)..sel.head.max(target)
+        } else {
+            sel.range()
+        };
+        if range.is_empty() {
+            return Ok(None);
+        }
+        self.replace(range, "").map(Some)
+    }
+
     /// Lines touched by the selection. A selection ending at the very start
     /// of a line does not include that line.
     fn selected_lines(&self) -> Range<usize> {
@@ -690,5 +717,22 @@ mod tests {
         assert!(d.save().is_err());
         assert!(d.is_dirty());
         assert_eq!(d.display_name(), "untitled");
+    }
+
+    #[test]
+    fn delete_word_and_to_line_start() {
+        let mut d = doc("let foo_bar = 1;");
+        d.move_cursor(Motion::DocEnd, false, 4, 10);
+        d.delete_to(Motion::WordLeft).unwrap();
+        assert_eq!(text(&d), "let foo_bar = 1");
+        d.click(11, false);
+        d.delete_to(Motion::WordLeft).unwrap();
+        assert_eq!(text(&d), "let  = 1");
+        d.click(4, false);
+        d.delete_to(Motion::LineStart).unwrap();
+        assert_eq!(text(&d), " = 1");
+        d.click(0, false);
+        d.delete_to(Motion::WordRight).unwrap();
+        assert_eq!(text(&d), " 1");
     }
 }

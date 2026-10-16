@@ -21,6 +21,8 @@ NIMBUS_SCALE=1 cargo run -- --screenshot /tmp/1x.bmp         # debug builds: ren
 bench/gen.sh                                                # 10 MB / 100 MB test files in bench/out (also: logs, longline)
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp   # render with no window (works with the screen locked)
 cargo run -- FILE --wrap --find PATTERN                     # start with soft wrap on and the find bar searching
+cargo run -- FOLDER a.rs b.rs                              # several tabs; a folder sets the file opener's root
+cargo run -- . --headless 1600x900 --picker files:main --screenshot /tmp/p.bmp   # render a picker (palette|files[:query])
 cargo test --release -p nimbus-core -- --ignored --nocapture # opt-in benchmarks (e.g. wrapping a 1 MB line)
 cargo test --workspace
 cargo test -p nimbus-core <test_name>    # single test in one crate
@@ -38,6 +40,10 @@ The strict lints live in `[workspace.lints]` in the root `Cargo.toml`, and every
 
 ```sh
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets
+# Platform-specific code (menus, AltGr, dead code on one OS) only shows up
+# per target; check the other two before pushing (targets installed via rustup):
+RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu
+RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc
 ```
 
 The set is `clippy::pedantic` plus `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `dbg_macro`, `print_stdout`, `print_stderr`, `undocumented_unsafe_blocks`, `missing_docs`, and `unsafe_code = "deny"`. Don't weaken the table to get a change through.
@@ -92,7 +98,7 @@ Dependencies only point downward. Don't add a dependency from `core` onto any ot
 Invariants from DESIGN.md that code above the buffer must respect:
 - Positions are byte offsets into UTF-8. Never assume the whole file is resident; go through the `Buffer` trait (milestone 2), because the mmap-backed piece table (milestone 7) only indexes lazily.
 - Rendering is on demand. The event loop uses `ControlFlow::Wait`; call `request_redraw` on input or background updates. Never introduce a continuous render loop.
-- Every user-visible operation is an `Action` registered with a name so the command palette can reach it (milestone 4).
+- Every user-visible operation is an `Action` in `crates/app/src/action.rs` with a stable id, title and default keys. Add new operations there, never as a hard-coded key in `app.rs`; the palette, menus and config overrides all derive from the registry.
 
 ## Performance budgets (enforced or measured)
 

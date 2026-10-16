@@ -1,10 +1,15 @@
 //! Turning key presses into editor commands.
 //!
-//! winit's `KeyEvent` cannot be built in tests, so [`map_key`] takes its
-//! parts instead. M4 replaces the hard-coded table here with the action
-//! registry and configurable keymap.
+//! winit's `KeyEvent` cannot be built in tests, so [`resolve`] takes its
+//! parts instead. Which key does what lives in the action registry and the
+//! keymap; this module only decides between running an action and typing.
 
-use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
+#[cfg(test)]
+use winit::keyboard::KeyCode;
+use winit::keyboard::{Key, ModifiersState, PhysicalKey};
+
+use crate::action::When;
+use crate::keymap::Keymap;
 
 /// A cursor movement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +57,12 @@ pub enum Command<'a> {
     DeleteBack,
     /// Delete the grapheme after the cursor, or the selection.
     DeleteForward,
+    /// Delete back to the start of the word, or the selection.
+    DeleteWordBack,
+    /// Delete forward to the end of the word, or the selection.
+    DeleteWordForward,
+    /// Delete back to the start of the line, or the selection.
+    DeleteToLineStart,
     /// Undo the last change.
     Undo,
     /// Redo the last undone change.
@@ -82,18 +93,30 @@ pub enum Command<'a> {
     Escape,
     /// Save the document.
     Save,
-    /// Close the window (asking about unsaved changes first).
+    /// Save under a new name, chosen in a dialog.
+    SaveAs,
+    /// Open a file chosen in a dialog.
+    OpenFile,
+    /// Open an untitled tab.
+    NewFile,
+    /// Close the current tab (asking about unsaved changes first).
+    CloseTab,
+    /// Switch to the next tab.
+    NextTab,
+    /// Switch to the previous tab.
+    PrevTab,
+    /// Switch to tab n (0-based); `usize::MAX` is the last tab.
+    GoToTab(usize),
+    /// Open the fuzzy file opener.
+    QuickOpen,
+    /// Open the command palette.
+    Palette,
+    /// Read the config file again.
+    ReloadConfig,
+    /// Open the config file in a tab, creating it if needed.
+    OpenConfig,
+    /// Quit (asking about unsaved changes first).
     Close,
-}
-
-/// The platform's "primary" modifier: Command on macOS, Control elsewhere.
-/// Keybindings are written in terms of it (DESIGN.md §3).
-pub fn primary_held(mods: ModifiersState) -> bool {
-    if cfg!(target_os = "macos") {
-        mods.super_key()
-    } else {
-        mods.control_key()
-    }
 }
 
 /// Whether text from a key press with these modifiers should be typed.
@@ -128,109 +151,45 @@ pub struct KeyPress<'a> {
     pub mods: ModifiersState,
 }
 
-fn named(n: NamedKey, mods: ModifiersState, primary: bool) -> Option<Command<'static>> {
-    use NamedKey as N;
-    let mac = cfg!(target_os = "macos");
-    let shift = mods.shift_key();
-    // Word movement: Option on macOS, Ctrl elsewhere (where Ctrl is primary).
-    let word = if mac {
-        mods.alt_key()
-    } else {
-        mods.control_key()
-    };
-    let mv = |m| Some(Command::Move(m, shift));
-    match n {
-        N::ArrowLeft if primary && mac => mv(Motion::LineStart),
-        N::ArrowRight if primary && mac => mv(Motion::LineEnd),
-        N::ArrowLeft if word => mv(Motion::WordLeft),
-        N::ArrowRight if word => mv(Motion::WordRight),
-        N::ArrowUp if primary => mv(Motion::DocStart),
-        N::ArrowDown if primary => mv(Motion::DocEnd),
-        N::Home if primary || mods.control_key() => mv(Motion::DocStart),
-        N::End if primary || mods.control_key() => mv(Motion::DocEnd),
-        N::ArrowLeft => mv(Motion::Left),
-        N::ArrowRight => mv(Motion::Right),
-        N::ArrowUp => mv(Motion::Up),
-        N::ArrowDown => mv(Motion::Down),
-        N::Home => mv(Motion::LineStart),
-        N::End => mv(Motion::LineEnd),
-        N::PageUp => mv(Motion::PageUp),
-        N::PageDown => mv(Motion::PageDown),
-        N::Backspace => Some(Command::DeleteBack),
-        N::Delete => Some(Command::DeleteForward),
-        N::Enter if primary => Some(Command::ReplaceAll),
-        N::Enter => Some(Command::Newline),
-        N::Tab if shift && !primary => Some(Command::Outdent),
-        N::Tab if !primary && !mods.control_key() => Some(Command::Tab),
-        N::Escape => Some(Command::Escape),
-        // Space and others fall through: their text is typed.
-        _ => None,
-    }
+/// Whether holding the key down should repeat the command. Movement,
+/// typing, deletion and undo repeat; opening things and saving do not.
+fn repeats(cmd: Command<'_>) -> bool {
+    matches!(
+        cmd,
+        Command::Move(..)
+            | Command::Insert(_)
+            | Command::Newline
+            | Command::Tab
+            | Command::Outdent
+            | Command::DeleteBack
+            | Command::DeleteForward
+            | Command::DeleteWordBack
+            | Command::DeleteWordForward
+            | Command::DeleteToLineStart
+            | Command::Undo
+            | Command::Redo
+    )
 }
 
-fn chord(c: &str, mods: ModifiersState) -> Option<Command<'static>> {
-    let mac = cfg!(target_os = "macos");
-    let shift = mods.shift_key();
-    let is = |s: &str| c.eq_ignore_ascii_case(s);
-    Some(match () {
-        () if is("s") => Command::Save,
-        () if is("w") || is("q") => Command::Close,
-        () if is("z") && shift => Command::Redo,
-        () if is("z") => Command::Undo,
-        () if is("y") && !mac => Command::Redo,
-        () if is("a") => Command::SelectAll,
-        () if is("x") => Command::Cut,
-        () if is("c") => Command::Copy,
-        () if is("v") => Command::Paste,
-        // Cmd+H hides the app on macOS, so replace is Cmd+Option+F there.
-        () if is("f") && mac && mods.alt_key() => Command::Replace,
-        () if is("f") => Command::Find,
-        () if is("h") && !mac => Command::Replace,
-        () => return None,
-    })
-}
-
-/// Map one key press to a command, or `None` if it means nothing to the
-/// editor.
-pub fn map_key(k: KeyPress<'_>) -> Option<Command<'_>> {
+/// Turn a key press into a command: the action bound to it in `keymap` if
+/// that action applies now (`find_open` says whether find-bar actions do),
+/// otherwise the text the key types, if any.
+pub fn resolve<'a>(keymap: &Keymap, k: KeyPress<'a>, find_open: bool) -> Option<Command<'a>> {
     if !k.pressed {
         return None;
     }
-    let mac = cfg!(target_os = "macos");
-    // Off macOS, Ctrl+Alt is how AltGr arrives (a German keyboard types @
-    // with it), so it is text input, not a Primary chord.
-    let altgr = !mac && k.mods.control_key() && k.mods.alt_key();
-    let primary = primary_held(k.mods) && !altgr;
-
-    if let Key::Named(n) = k.key
-        && let Some(cmd) = named(*n, k.mods, primary)
-    {
-        return Some(cmd);
-    }
-    // Alt+Z, Alt+C and Alt+R are matched by physical key: on macOS
-    // Option+Z types "Ω", so the logical key is not "z".
-    if k.mods.alt_key() && !primary && !altgr && !k.repeat {
-        let cmd = match k.physical {
-            PhysicalKey::Code(KeyCode::KeyZ) => Some(Command::ToggleWrap),
-            PhysicalKey::Code(KeyCode::KeyC) => Some(Command::ToggleCase(k.text.unwrap_or(""))),
-            PhysicalKey::Code(KeyCode::KeyR) => Some(Command::ToggleRegex(k.text.unwrap_or(""))),
-            _ => None,
+    if let Some(action) = keymap.lookup(k.key, k.physical, k.mods) {
+        let applies = match action.when {
+            When::Always => true,
+            When::FindBar => find_open,
         };
-        if cmd.is_some() {
-            return cmd;
+        if applies {
+            return (!k.repeat || repeats(action.command)).then_some(action.command);
         }
-    }
-    if primary {
-        return match k.key {
-            // Undo and redo repeat while held; the rest fire once.
-            Key::Character(c) => chord(c, k.mods)
-                .filter(|cmd| !k.repeat || matches!(cmd, Command::Undo | Command::Redo)),
-            _ => None,
-        };
     }
     let text = k.text?;
     // Control characters (\r, \x08, \x1b, \x7f) arrive as text on some
-    // platforms for keys already handled above; never type them.
+    // platforms for keys like Enter; never type them.
     (may_insert_text(k.mods) && !text.chars().any(char::is_control))
         .then_some(Command::Insert(text))
 }
@@ -238,6 +197,8 @@ pub fn map_key(k: KeyPress<'_>) -> Option<Command<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use winit::keyboard::NamedKey;
 
     fn primary() -> ModifiersState {
         if cfg!(target_os = "macos") {
@@ -247,10 +208,15 @@ mod tests {
         }
     }
 
-    fn press<'a>(key: &'a Key, text: Option<&'a str>, mods: ModifiersState) -> KeyPress<'a> {
+    fn press<'a>(
+        key: &'a Key,
+        code: KeyCode,
+        text: Option<&'a str>,
+        mods: ModifiersState,
+    ) -> KeyPress<'a> {
         KeyPress {
             key,
-            physical: PhysicalKey::Code(KeyCode::KeyA),
+            physical: PhysicalKey::Code(code),
             text,
             pressed: true,
             repeat: false,
@@ -262,161 +228,112 @@ mod tests {
         Key::Character(s.into())
     }
 
+    fn km() -> Keymap {
+        Keymap::new(&HashMap::new()).0
+    }
+
     #[test]
-    fn primary_chords_never_type() {
+    fn primary_chords_never_type_and_save_does_not_repeat() {
+        let km = km();
         let s = ch("s");
         assert_eq!(
-            map_key(press(&s, Some("s"), primary())),
+            resolve(&km, press(&s, KeyCode::KeyS, Some("s"), primary()), false),
             Some(Command::Save)
         );
-        let r = KeyPress {
+        let held = KeyPress {
             repeat: true,
-            ..press(&s, Some("s"), primary())
+            ..press(&s, KeyCode::KeyS, Some("s"), primary())
         };
-        assert_eq!(map_key(r), None, "save does not repeat");
+        assert_eq!(resolve(&km, held, false), None);
         let z = ch("z");
-        assert_eq!(
-            map_key(press(&z, Some("z"), primary())),
-            Some(Command::Undo)
-        );
-        let zr = KeyPress {
+        let held = KeyPress {
             repeat: true,
-            ..press(&z, Some("z"), primary())
-        };
-        assert_eq!(map_key(zr), Some(Command::Undo), "undo repeats");
-        let shift = primary() | ModifiersState::SHIFT;
-        assert_eq!(
-            map_key(press(&ch("Z"), Some("Z"), shift)),
-            Some(Command::Redo)
-        );
-        for (k, cmd) in [
-            ("a", Command::SelectAll),
-            ("x", Command::Cut),
-            ("c", Command::Copy),
-            ("v", Command::Paste),
-            ("f", Command::Find),
-            ("w", Command::Close),
-        ] {
-            let key = ch(k);
-            assert_eq!(map_key(press(&key, Some(k), primary())), Some(cmd), "{k}");
-        }
-    }
-
-    #[test]
-    fn shift_extends_moves() {
-        let left = Key::Named(NamedKey::ArrowLeft);
-        let none = ModifiersState::empty();
-        assert_eq!(
-            map_key(press(&left, None, none)),
-            Some(Command::Move(Motion::Left, false))
-        );
-        assert_eq!(
-            map_key(press(&left, None, ModifiersState::SHIFT)),
-            Some(Command::Move(Motion::Left, true))
-        );
-    }
-
-    #[test]
-    fn word_movement_modifier_matches_the_platform() {
-        let right = Key::Named(NamedKey::ArrowRight);
-        let word = if cfg!(target_os = "macos") {
-            ModifiersState::ALT
-        } else {
-            ModifiersState::CONTROL
+            ..press(&z, KeyCode::KeyZ, Some("z"), primary())
         };
         assert_eq!(
-            map_key(press(&right, None, word)),
-            Some(Command::Move(Motion::WordRight, false))
+            resolve(&km, held, false),
+            Some(Command::Undo),
+            "undo repeats"
         );
-    }
-
-    #[test]
-    fn find_bar_toggles_and_replace_all() {
-        let c = ch("ç");
-        let k = KeyPress {
-            physical: PhysicalKey::Code(KeyCode::KeyC),
-            ..press(&c, Some("ç"), ModifiersState::ALT)
-        };
-        assert_eq!(map_key(k), Some(Command::ToggleCase("ç")));
-        let enter = Key::Named(NamedKey::Enter);
+        let unbound = ch("j");
         assert_eq!(
-            map_key(press(&enter, Some("\r"), primary())),
-            Some(Command::ReplaceAll)
+            resolve(
+                &km,
+                press(&unbound, KeyCode::KeyJ, Some("j"), primary()),
+                false
+            ),
+            None
         );
     }
 
     #[test]
-    fn alt_z_toggles_wrap_by_physical_key() {
-        let omega = ch("Ω");
-        let k = KeyPress {
-            physical: PhysicalKey::Code(KeyCode::KeyZ),
-            ..press(&omega, Some("Ω"), ModifiersState::ALT)
-        };
-        assert_eq!(map_key(k), Some(Command::ToggleWrap));
-    }
-
-    #[test]
-    fn plain_typing_space_tab_and_escape() {
+    fn plain_keys_type_and_named_keys_act() {
+        let km = km();
         let none = ModifiersState::empty();
         let a = ch("a");
         assert_eq!(
-            map_key(press(&a, Some("a"), none)),
+            resolve(&km, press(&a, KeyCode::KeyA, Some("a"), none), false),
             Some(Command::Insert("a"))
         );
         let space = Key::Named(NamedKey::Space);
         assert_eq!(
-            map_key(press(&space, Some(" "), none)),
+            resolve(&km, press(&space, KeyCode::Space, Some(" "), none), false),
             Some(Command::Insert(" "))
         );
-        let tab = Key::Named(NamedKey::Tab);
-        assert_eq!(map_key(press(&tab, Some("\t"), none)), Some(Command::Tab));
+        let enter = Key::Named(NamedKey::Enter);
         assert_eq!(
-            map_key(press(&tab, Some("\t"), ModifiersState::SHIFT)),
-            Some(Command::Outdent)
+            resolve(&km, press(&enter, KeyCode::Enter, Some("\r"), none), false),
+            Some(Command::Newline)
         );
         let esc = Key::Named(NamedKey::Escape);
         assert_eq!(
-            map_key(press(&esc, Some("\x1b"), none)),
+            resolve(&km, press(&esc, KeyCode::Escape, Some("\x1b"), none), false),
             Some(Command::Escape)
+        );
+        let left = Key::Named(NamedKey::ArrowLeft);
+        assert_eq!(
+            resolve(
+                &km,
+                press(&left, KeyCode::ArrowLeft, None, ModifiersState::SHIFT),
+                false
+            ),
+            Some(Command::Move(Motion::Left, true))
         );
         let release = KeyPress {
             pressed: false,
-            ..press(&a, Some("a"), none)
+            ..press(&a, KeyCode::KeyA, Some("a"), none)
         };
-        assert_eq!(map_key(release), None);
+        assert_eq!(resolve(&km, release, false), None);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn option_composes_characters_and_replace_is_cmd_option_f() {
-        let aring = ch("å");
-        assert_eq!(
-            map_key(press(&aring, Some("å"), ModifiersState::ALT)),
-            Some(Command::Insert("å"))
-        );
-        let f = ch("f");
-        let m = ModifiersState::SUPER | ModifiersState::ALT;
-        assert_eq!(map_key(press(&f, Some("f"), m)), Some(Command::Replace));
+    fn find_bar_keys_type_when_the_bar_is_closed() {
+        let km = km();
+        let c = ch("ç");
+        let k = press(&c, KeyCode::KeyC, Some("ç"), ModifiersState::ALT);
+        assert_eq!(resolve(&km, k, true), Some(Command::ToggleCase("")));
+        if cfg!(target_os = "macos") {
+            assert_eq!(resolve(&km, k, false), Some(Command::Insert("ç")));
+        }
+    }
+
+    #[test]
+    fn alt_z_toggles_wrap_by_physical_key() {
+        let km = km();
+        let omega = ch("Ω");
+        let k = press(&omega, KeyCode::KeyZ, Some("Ω"), ModifiersState::ALT);
+        assert_eq!(resolve(&km, k, false), Some(Command::ToggleWrap));
     }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn altgr_types_and_ctrl_y_redoes_off_macos() {
-        let altgr = ModifiersState::CONTROL | ModifiersState::ALT;
+    fn altgr_types_off_macos() {
+        let km = km();
         let at = ch("@");
+        let altgr = ModifiersState::CONTROL | ModifiersState::ALT;
         assert_eq!(
-            map_key(press(&at, Some("@"), altgr)),
+            resolve(&km, press(&at, KeyCode::KeyQ, Some("@"), altgr), false),
             Some(Command::Insert("@"))
-        );
-        let y = ch("y");
-        assert_eq!(
-            map_key(press(&y, Some("y"), ModifiersState::CONTROL)),
-            Some(Command::Redo)
-        );
-        let h = ch("h");
-        assert_eq!(
-            map_key(press(&h, Some("h"), ModifiersState::CONTROL)),
-            Some(Command::Replace)
         );
     }
 }
