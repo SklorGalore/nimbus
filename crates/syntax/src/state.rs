@@ -244,6 +244,48 @@ impl SyntaxState {
         self.language
     }
 
+    /// The bracket next to `pos` and its partner, by the syntax tree: a
+    /// bracket inside a string or comment is not a bracket node, so it is
+    /// never paired. `None` when there is no up-to-date tree to ask (the
+    /// caller then counts brackets instead); `Some(None)` when the tree
+    /// says there is no pair.
+    #[must_use]
+    pub fn matching_bracket(&self, text: &dyn Text, pos: usize) -> Option<Option<(usize, usize)>> {
+        let Phase::Ready {
+            tree, dirty: false, ..
+        } = &self.phase
+        else {
+            return None;
+        };
+        let root = tree.root_node();
+        let found = nimbus_core::brackets::candidates(text, pos)
+            .into_iter()
+            .flatten()
+            .find_map(|at| {
+                let node = root.descendant_for_byte_range(at, at + 1)?;
+                if node.is_named() || node.start_byte() != at || node.end_byte() != at + 1 {
+                    return None;
+                }
+                let (other, opens) = nimbus_core::brackets::partner(text.byte_at(at)?)?;
+                let other = char::from(other).to_string();
+                // The partner is a sibling: the pair of a list, call,
+                // block or the like are both children of that node.
+                let mut sib = node;
+                loop {
+                    sib = if opens {
+                        sib.next_sibling()?
+                    } else {
+                        sib.prev_sibling()?
+                    };
+                    if !sib.is_named() && sib.kind() == other {
+                        let (a, b) = (at, sib.start_byte());
+                        return Some((a.min(b), a.max(b)));
+                    }
+                }
+            });
+        Some(found)
+    }
+
     /// A word for the current phase, for the debug overlay: `off`,
     /// `simple` (line-by-line rules), `waiting`, `parsing`, `ready`, or
     /// `stale` (a tree that a reparse will bring up to date).
@@ -538,6 +580,26 @@ mod tests {
     ) {
         let edit = buf.replace(range, text).unwrap();
         state.edit(buf, &edit);
+    }
+
+    #[test]
+    fn brackets_pair_by_the_tree_ignoring_ones_in_strings() {
+        // The ")" inside the string must not pair with the "(" at 1.
+        let src = "f(\")\", g[0]);\n";
+        let buf = RopeBuffer::from_text(src);
+        let mut state = SyntaxState::new(Some(LanguageId::Rust), buf.len_bytes());
+        assert_eq!(state.matching_bracket(&buf, 1), None, "no tree yet");
+        state.parse_now(&buf);
+        let close = src.rfind(')').unwrap();
+        assert_eq!(state.matching_bracket(&buf, 1), Some(Some((1, close))));
+        assert_eq!(
+            state.matching_bracket(&buf, close + 1),
+            Some(Some((1, close)))
+        );
+        // The bracket in the string is not one.
+        assert_eq!(state.matching_bracket(&buf, 3), Some(None));
+        // Counting alone would have been fooled by it.
+        assert_eq!(nimbus_core::brackets::matching(&buf, 1, 100), Some((1, 3)));
     }
 
     #[test]

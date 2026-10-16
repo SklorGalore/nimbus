@@ -286,6 +286,23 @@ const WHOLE_LINES_LIMIT: usize = 64 * 1024;
 /// Visible ranges closer than this are highlighted as one.
 const MERGE_GAP: usize = 4096;
 
+/// How far each way bracket matching counts when there is no syntax tree.
+const BRACKET_LIMIT: usize = 64 * 1024;
+
+/// The bracket next to the primary cursor and its partner: from the syntax
+/// tree when it is up to date, otherwise by counting within
+/// [`BRACKET_LIMIT`] bytes. Only for a bare cursor.
+fn bracket_pair(doc: &Document) -> Option<(usize, usize)> {
+    let sel = doc.selection();
+    if !sel.is_empty() {
+        return None;
+    }
+    let t = &doc.buffer;
+    doc.syntax
+        .matching_bracket(t, sel.head)
+        .unwrap_or_else(|| nimbus_core::brackets::matching(t, sel.head, BRACKET_LIMIT))
+}
+
 /// Whether a cursor is on the line `span` (its number then stands out).
 /// `next` walks forward through the sorted `selections` from line to line,
 /// so the whole screen costs one pass.
@@ -754,6 +771,7 @@ impl View {
         let lh = layout.metrics.line_height;
         let cursor = doc.cursor();
         let selections = doc.selections.as_slice();
+        let brackets = bracket_pair(doc);
         self.cache.next_frame();
         self.cursor_at = None;
 
@@ -796,6 +814,7 @@ impl View {
             wrapping,
             sels: selections,
             next_sel: first_sel,
+            brackets,
             cursor,
             number: &mut self.number,
             spliced: &mut self.spliced,
@@ -873,6 +892,8 @@ struct Painter<'a, 'g> {
     sels: &'a [Selection],
     /// The first selection that may reach the row being drawn.
     next_sel: usize,
+    /// The bracket at the cursor and its partner, to box.
+    brackets: Option<(usize, usize)>,
     /// The primary cursor: the input method's composition and the
     /// candidate window go there.
     cursor: usize,
@@ -929,6 +950,15 @@ impl Painter<'_, '_> {
             }
             if let Some((x0, x1)) = self.selected(row, &sel) {
                 self.rect(x0, x1, row.top, self.deco.ui.selection);
+            }
+        }
+        if let Some((a, b)) = self.brackets {
+            for at in [a, b] {
+                if row.owns(at) && at < row.end() {
+                    let x0 = row.x_of(at, cell, tab);
+                    let x1 = row.x_of(at + 1, cell, tab);
+                    self.rect(x0, x1, row.top, self.deco.ui.bracket);
+                }
             }
         }
         let next = self.matches(row, next_match);

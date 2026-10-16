@@ -5,6 +5,7 @@
 //! (DESIGN.md §4.1).
 
 pub mod any;
+pub mod brackets;
 pub mod buffer;
 pub mod column;
 pub mod line_ending;

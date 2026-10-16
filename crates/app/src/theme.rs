@@ -67,6 +67,8 @@ ui_colors! {
     preedit,
     /// Selected text's background.
     selection,
+    /// Behind the bracket at the cursor and its partner.
+    bracket,
     /// Search matches.
     find_match,
     /// The current search match.
