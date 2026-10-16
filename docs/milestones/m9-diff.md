@@ -31,7 +31,7 @@ views, plus the diff's own:
 | Opening a compare or merge of two 10 MB files | first frame at once (text shown, "comparing…"); full diff on a worker in under 300 ms |
 | Two 100 MB files | full diff on a worker in under 3 s; the view is usable meanwhile |
 | Memory | about 8 bytes per line per side for the diff, plus the documents; no per-line arrays for alignment or colours |
-| Files past the diff limit (mapped files from M7) | compared by streaming, or refused with a message-line note; decided by measurement in task 2 |
+| Files past the diff limit (mapped files from M7) | still compared, in layers (below); refused only for binary files |
 
 ## Done when
 
@@ -112,10 +112,35 @@ changed identically on both take either, and the rest are conflicts.
 - *Only what is visible.* Word-level marks are computed for the changed
   lines on screen and cached by version, like highlight spans; very long
   lines skip them.
-- *Large files.* Tokens cost 4 bytes per line per side and the interner
-  holds one entry per distinct line. The size limit for diffing, and
-  whether mapped files (M7) stream through the tokenizer instead, is
-  decided in task 2 from measurements.
+- *Large files, in layers.* A full diff costs 4 bytes per line per side
+  for tokens, plus one interner entry (16 to 24 bytes) per distinct line;
+  a 4 GB log with unique timestamps would need about 1 GB for the
+  interner alone. So the work is layered, each layer exact or labelled:
+  1. **Trim the common start and end.** Compare the two files byte by
+     byte from both ends (straight from the mapping, at memory or disk
+     speed, no extra memory) and diff only the middle. This alone covers
+     the usual huge-file cases exactly: a log that grew, a big file with a
+     few edits, a file changed on disk (M6).
+  2. **Full diff of the middle** when it is under the diff limit, as for
+     any file.
+  3. **Anchored block diff** when the middle is over it: lines that occur
+     exactly once in each file and match, in order, become anchors, and
+     each gap between anchors is diffed on its own, streaming, with memory
+     bounded by the largest gap. The result is always a correct edit, but
+     may not be the smallest one, so the diff bar says "large file:
+     changes may not be minimal". A gap still over the limit is shown as
+     one changed block.
+  4. **Long lines are split for diffing** at every size: a line over a
+     few kilobytes is cut into pieces at content-chosen points (a rolling
+     hash, so the cut points survive insertions), which gives real diffs
+     of minified JSON and similar one-line files.
+  5. **Refused only** for binary files (a NUL byte in the first block) and
+     when the anchored diff finds no anchors at all, with a message-line
+     note.
+
+  Three-way merge uses the same layers on each of its two diffs; trimming
+  usually makes merging even very large files cheap. The diff limit itself
+  (where layer 3 takes over) is set from measurements in task 2.
 
 **Views** (`crates/app/src/diff_view.rs`, `merge_view.rs`). A compare or
 merge is a tab kind holding two or three documents, or snapshots for the
@@ -150,6 +175,10 @@ building, checked by the keymap conflict test.
 2. Measure `imara-diff` and `similar` on the bench files (time, memory,
    binary size); pick one; set the diff size limit; record both in
    DESIGN.md.
+2a. The large-file layers: common start and end trimming, the anchored
+    block diff, and long-line splitting, each with a property test that
+    the hunks turn the old text into the new; plus the 1 GB and 4 GB log
+    bench files (`bench/gen.sh logs`) for the budgets.
 3. Local re-diff after edits, with an oracle test: after random edits, the
    locally updated hunks describe the same change as a full re-diff.
 4. Three-way merge on top of two diffs, with property tests (a side
@@ -182,7 +211,7 @@ building, checked by the keymap conflict test.
 | A huge single hunk (a whole file rewritten) makes the local re-diff region the whole file | It is sent to a worker past a budget, as an over-budget reparse is; the shifted old hunks stay on screen |
 | Word-level marks are slow on very long changed lines | Skip them past a length limit |
 | Three columns are too narrow on a laptop screen | The merge view can hide the two sides and show the result with inline conflict blocks |
-| Mapped files (M7) are too big to tokenize fully | A size limit with a message-line note; streaming tokenization if measurement shows it is cheap enough |
+| Files with few unique lines (generated data, repeated records) give the anchored diff no anchors | Fall back to one changed block per gap, labelled; trimming still finds the unchanged start and end |
 
 ## Results
 

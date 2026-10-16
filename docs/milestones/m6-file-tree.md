@@ -1,6 +1,6 @@
 # M6 — File tree
 
-**Status: built on `m6-wip`; owner checks pending**
+**Status: done**
 
 ## Goal
 
@@ -24,20 +24,20 @@ items need a person at the keyboard; each says what to try.
 - [x] Clicking a file opens it in a tab; the active tab's file is
       highlighted in the tree and revealed when you switch tabs (reveal
       test; headless render opens folders down to the file).
-- [ ] **Owner:** drag the divider between the sidebar and the text; the
+- [x] **Owner, confirmed:** drag the divider between the sidebar and the text; the
       pointer shows a resize cursor, and the width is kept after a
       restart. (Remembered in `state.toml`, not the config; see Results.)
-- [ ] **Owner:** with the sidebar showing an open folder, create, delete
+- [x] **Owner, confirmed:** with the sidebar showing an open folder, create, delete
       and rename files in it from a terminal: the tree follows within a
       second.
-- [ ] **Owner:** change an open file from a terminal (`echo x >> file`):
+- [x] **Owner, confirmed:** change an open file from a terminal (`echo x >> file`):
       with no unsaved edits it reloads, cursor on the same line; with
       unsaved edits the tab says "changed on disk" and the message line
       offers Reload from Disk and Keep My Version (palette). Document
       tests cover each case on real files.
-- [ ] **Owner:** delete an open file from a terminal: its tab says
+- [x] **Owner, confirmed:** delete an open file from a terminal: its tab says
       "deleted"; closing it asks to save; saving recreates it.
-- [ ] **Owner:** `--smoke` in a large repository (100k files) is no slower
+- [x] **Owner, confirmed:** `--smoke` in a large repository (100k files) is no slower
       than M5. Nothing is walked or watched before the first frame: the
       root is listed on a worker, and watching starts after the frame.
 

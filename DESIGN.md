@@ -448,8 +448,8 @@ introduces and points at the code.
 | 3 | Editing essentials | **Done** | Select, clipboard, undo, find and replace, soft wrap, auto-indent | [m3](docs/milestones/m3-editing-essentials.md) |
 | 4 | Many files | **Done** | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
 | 5 | Highlighting | **Done** | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
-| 6 | File tree | **Built on `m6-wip`, owner checks pending** | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
-| 7 | Huge files | Planned | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
+| 6 | File tree | **Done** | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
+| 7 | Huge files | Next | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
 | 8 | Polish | Planned | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
 | 9 | Compare and merge | Planned | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
 
@@ -524,4 +524,5 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Window state in `state.toml`; the config file is never written | §4.4 |
 | 2026-10-16 | Reloading a file changed on disk clears its undo history | §4.4 |
 | 2026-10-16 | The file watcher runs on its own thread; the main thread never calls `notify` | §4.4 |
+| 2026-10-16 | M9 diffs large files in layers: trim common ends, full diff, anchored block diff; long lines split | §8 (m9) |
 | 2026-10-16 | Compare and merge (two- and three-way) added as milestone 9, after Polish, held to the editor's budgets | §4.4, §8 |
