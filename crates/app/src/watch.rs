@@ -310,11 +310,19 @@ mod tests {
         // Give the OS watch a moment to start (FSEvents is asynchronous).
         std::thread::sleep(Duration::from_millis(200));
         std::fs::write(dir.join("new.txt"), "x").unwrap();
-        let batch = rx.recv_timeout(Duration::from_secs(5)).expect("an event");
-        assert!(
-            batch.iter().any(|c| c.path.ends_with("new.txt")),
-            "{batch:?}"
-        );
+        // Other events may come first (FSEvents can report the folder's
+        // own creation late); wait for the one about the new file.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = Vec::new();
+        let found = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(batch) if batch.iter().any(|c| c.path.ends_with("new.txt")) => break true,
+                Ok(batch) => seen.extend(batch),
+                Err(_) => break false,
+            }
+        };
+        assert!(found, "no event for new.txt; saw {seen:?}");
         watch.sync(&HashSet::new());
         let deadline = Instant::now() + Duration::from_secs(5);
         while !watch.watched().is_empty() && Instant::now() < deadline {
