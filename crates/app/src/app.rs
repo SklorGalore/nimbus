@@ -2413,6 +2413,15 @@ pub fn run_headless(
         index_now(&mut doc);
     }
     let find = headless_find(options.find.as_deref(), &mut doc);
+    if !options.cursors.is_empty() {
+        let t = &doc.buffer;
+        let sels = options
+            .cursors
+            .iter()
+            .map(|&p| nimbus_core::Selection::cursor(nimbus_core::movement::clamp(t, p)))
+            .collect();
+        doc.selections = nimbus_core::Selections::from_vec(sels, options.cursors.len() - 1);
+    }
     let (sidebar, layout) = headless_sidebar(
         &root,
         layout_for(&gpu, to_f32(scale), &doc, &find),

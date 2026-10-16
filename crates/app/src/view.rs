@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 
 use nimbus_core::wrap::{self, RowPos, RowStart, WrapCache, WrapView};
-use nimbus_core::{LineEnding, Text, column, long_line};
+use nimbus_core::{LineEnding, Selection, Text, column, long_line};
 use nimbus_render::{ColorRun, Gpu, Metrics};
 use nimbus_syntax::highlight::{Highlighter, Span};
 
@@ -285,6 +285,16 @@ const WHOLE_LINES_LIMIT: usize = 64 * 1024;
 
 /// Visible ranges closer than this are highlighted as one.
 const MERGE_GAP: usize = 4096;
+
+/// Whether a cursor is on the line `span` (its number then stands out).
+/// `next` walks forward through the sorted `selections` from line to line,
+/// so the whole screen costs one pass.
+fn has_cursor(selections: &[Selection], next: &mut usize, span: nimbus_core::LineSpan) -> bool {
+    while selections.get(*next).is_some_and(|s| s.head < span.start) {
+        *next += 1;
+    }
+    selections.get(*next).is_some_and(|s| s.head <= span.end)
+}
 
 /// Selections up to this many bytes show their length in characters in
 /// the status bar; longer ones in bytes, which needs no reading.
@@ -574,15 +584,23 @@ impl View {
         out.clear();
         let t = &doc.buffer;
         let sel = doc.selection();
-        if !sel.is_empty() {
-            let range = sel.range();
-            // Counting characters reads the selection; past a size where
+        let count = doc.selections.count();
+        if count > 1 {
+            let _ = write!(out, "{count} cursors   ");
+        }
+        let selected = doc.selected_len();
+        if selected > 0 {
+            // Counting characters reads the selections; past a size where
             // that costs, bytes say as much.
-            if range.len() <= STATUS_COUNT_LIMIT {
-                let n = t.slice(range).chars().count();
+            if selected <= STATUS_COUNT_LIMIT {
+                let n: usize = doc
+                    .selections
+                    .iter()
+                    .map(|s| t.slice(s.range()).chars().count())
+                    .sum();
                 let _ = write!(out, "{n} selected   ");
             } else {
-                let _ = write!(out, "{} selected   ", human_bytes(range.len()));
+                let _ = write!(out, "{} selected   ", human_bytes(selected));
             }
         }
         let head = sel.head;
@@ -735,7 +753,7 @@ impl View {
         let t = &doc.buffer;
         let lh = layout.metrics.line_height;
         let cursor = doc.cursor();
-        let cursor_line = t.line_span(cursor).start;
+        let selections = doc.selections.as_slice();
         self.cache.next_frame();
         self.cursor_at = None;
 
@@ -755,6 +773,10 @@ impl View {
         let mut w = wrapper(&mut self.cache, wrapping, layout, tab_width);
         let mut at = anchor(self.scroll_top, t, &mut w);
         let mut next_match = deco.matches.partition_point(|m| m.end <= at.start);
+        // Selections and cursor heads are sorted, so each is found by
+        // walking forward with the rows, as matches are.
+        let first_sel = selections.partition_point(|s| s.range().end < at.start);
+        let mut next_head = selections.partition_point(|s| s.head < at.start);
         // Counted once for the top line, then by one per line while known.
         let mut number = t.line_number(at.start);
         let spans: &[Span] = if deco.captures.is_empty() {
@@ -772,7 +794,8 @@ impl View {
             tab_width,
             deco,
             wrapping,
-            sel: doc.selection().range(),
+            sels: selections,
+            next_sel: first_sel,
             cursor,
             number: &mut self.number,
             spliced: &mut self.spliced,
@@ -783,10 +806,12 @@ impl View {
             let span = t.line_span(at.start);
             let line_start = span.start;
             let has_break = span.next.is_some();
+            // The line number stands out on every line with a cursor.
+            let has_cursor = has_cursor(selections, &mut next_head, span);
             if long_line::is_long(span) {
                 let geom = (scroll_col, width_cols, scroll_x);
                 let row = long_row(t, span, &mut self.long_text, layout, geom, top, tab_width);
-                painter.gutter(number, line_start == cursor_line, top);
+                painter.gutter(number, has_cursor, top);
                 next_match = painter.row(&row, next_match, scroll_col);
                 top += lh;
             } else {
@@ -813,7 +838,7 @@ impl View {
                         left: layout.text_left - shift,
                     };
                     if r == 0 {
-                        painter.gutter(number, line_start == cursor_line, top);
+                        painter.gutter(number, has_cursor, top);
                     }
                     let first = if wrapping { start_col } else { scroll_col };
                     next_match = painter.row(&row, next_match, first);
@@ -844,7 +869,12 @@ struct Painter<'a, 'g> {
     deco: &'a Decorations<'a>,
     /// Soft wrap on: rows never scroll sideways.
     wrapping: bool,
-    sel: Range<usize>,
+    /// Every selection, sorted.
+    sels: &'a [Selection],
+    /// The first selection that may reach the row being drawn.
+    next_sel: usize,
+    /// The primary cursor: the input method's composition and the
+    /// candidate window go there.
     cursor: usize,
     number: &'a mut String,
     spliced: &'a mut String,
@@ -885,8 +915,21 @@ impl Painter<'_, '_> {
             self.layout.metrics.line_height,
         );
         let tab = self.tab_width;
-        if let Some((x0, x1)) = self.selected(row) {
-            self.rect(x0, x1, row.top, self.deco.ui.selection);
+        while self
+            .sels
+            .get(self.next_sel)
+            .is_some_and(|s| s.range().end < row.seg_start)
+        {
+            self.next_sel += 1;
+        }
+        for i in self.next_sel..self.sels.len() {
+            let sel = self.sels[i].range();
+            if sel.start > row.end() {
+                break;
+            }
+            if let Some((x0, x1)) = self.selected(row, &sel) {
+                self.rect(x0, x1, row.top, self.deco.ui.selection);
+            }
         }
         let next = self.matches(row, next_match);
         #[expect(
@@ -912,13 +955,24 @@ impl Painter<'_, '_> {
                 (first, width),
             );
         }
-        if row.owns(self.cursor) {
-            let x = row.x_of(self.cursor, cell, tab);
+        for i in self.next_sel..self.sels.len() {
+            let head = self.sels[i].head;
+            if self.sels[i].range().start > row.end() {
+                break;
+            }
+            if !row.owns(head) {
+                continue;
+            }
+            let x = row.x_of(head, cell, tab);
             // Keep a cursor in hanging spaces at the wrap edge visible.
             let max_x = self.layout.text_left + f(self.layout.wrap_cols) * cell;
             let x = if self.wrapping { x.min(max_x) } else { x };
-            self.cursor_at = Some([x, row.top]);
-            if self.deco.cursor_visible && preedit.is_none() && x >= self.layout.text_left {
+            let primary = head == self.cursor;
+            if primary {
+                self.cursor_at = Some([x, row.top]);
+            }
+            let composing = primary && preedit.is_some();
+            if self.deco.cursor_visible && !composing && x >= self.layout.text_left {
                 let w = (2.0 * self.layout.scale).round().max(1.0);
                 self.gpu
                     .push_rect([x, row.top], [w, lh], self.deco.ui.cursor);
@@ -937,8 +991,7 @@ impl Painter<'_, '_> {
 
     /// Screen span of the selection on this row. A selection continuing
     /// past the end of a line adds one cell, showing the line break.
-    fn selected(&self, row: &RowGeom<'_>) -> Option<(f32, f32)> {
-        let sel = &self.sel;
+    fn selected(&self, row: &RowGeom<'_>, sel: &Range<usize>) -> Option<(f32, f32)> {
         let (start, end) = (row.seg_start, row.end());
         let outside = sel.is_empty()
             || sel.end <= start
@@ -1604,6 +1657,12 @@ mod tests {
         assert_eq!(
             v.status_info(&d, 4),
             "5 selected   Ln 2, Col 14   CRLF   UTF-8"
+        );
+        d.selections =
+            nimbus_core::Selections::from_vec(vec![Selection::cursor(0), Selection::cursor(12)], 0);
+        assert_eq!(
+            v.status_info(&d, 4),
+            "2 cursors   Ln 1, Col 1   CRLF   UTF-8"
         );
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(3 * 1024 * 1024 + 400 * 1024), "3.4 MB");
