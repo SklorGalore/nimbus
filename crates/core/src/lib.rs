@@ -7,6 +7,7 @@
 pub mod buffer;
 pub mod column;
 pub mod line_ending;
+pub mod line_index;
 pub mod long_line;
 pub mod movement;
 pub mod rope;

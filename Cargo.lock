@@ -1710,6 +1710,7 @@ dependencies = [
 name = "nimbus-core"
 version = "0.1.0"
 dependencies = [
+ "memchr",
  "proptest",
  "regex",
  "ropey",
