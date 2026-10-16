@@ -20,7 +20,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
 
-use nimbus_core::Text;
+use nimbus_core::{Buffer, Text};
 use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
@@ -303,6 +303,8 @@ pub struct App {
     resize_cursor: bool,
     /// Watching has started (after the first frame).
     watching: bool,
+    /// A go-to-line waiting for a huge file's lines to be counted.
+    pending_line: Option<usize>,
     /// Open files that changed on disk too soon after their last reload,
     /// to look at again at `recheck_at`.
     recheck: Vec<PathBuf>,
@@ -427,6 +429,7 @@ impl App {
             ui_state,
             resize_cursor: false,
             watching: false,
+            pending_line: None,
             recheck: Vec::new(),
             recheck_at: None,
         }
@@ -548,6 +551,7 @@ impl App {
             }
             Command::GoToTab(i) => self.switch_to(i.min(self.tabs.len() - 1)),
             Command::QuickOpen => self.open_picker(Kind::Files),
+            Command::GoToLine => self.open_picker(Kind::Line),
             Command::Palette => self.open_picker(Kind::Palette),
             Command::ReloadConfig => self.reload_config(),
             Command::ToggleTheme => {
@@ -709,6 +713,28 @@ impl App {
         }
         self.reveal_active();
         self.changed(false);
+    }
+
+    /// Move the cursor to the start of line `n` (counting from 1). Past the
+    /// last line it goes to the last line; in a huge file whose lines are
+    /// still being counted, the jump waits until counting reaches it.
+    fn go_to_line(&mut self, n: usize) {
+        let t = &self.tabs[self.active].doc.buffer;
+        let line = n.saturating_sub(1);
+        if line >= t.len_lines() && !t.is_fully_indexed() {
+            self.pending_line = Some(n);
+            self.say(
+                format!("Going to line {n} once lines are counted that far"),
+                false,
+            );
+            return;
+        }
+        self.pending_line = None;
+        let pos = t.line_to_byte(line.min(t.len_lines().saturating_sub(1)));
+        let doc = self.doc_mut();
+        doc.click(pos, false);
+        doc.preferred_column = None;
+        self.changed(true);
     }
 
     /// Start folder listings for the sidebar on worker threads.
@@ -1121,6 +1147,10 @@ impl App {
         self.picker = Some(match kind {
             Kind::Palette => Picker::palette(notify),
             Kind::Files => Picker::files(&self.root, notify),
+            Kind::Line => {
+                let t = &self.doc().buffer;
+                Picker::go_to_line(notify, t.is_fully_indexed().then(|| t.len_lines()))
+            }
         });
         self.find.focused = false;
         self.tick_picker();
@@ -1158,6 +1188,7 @@ impl App {
                 match chosen {
                     Some(Item::Action(a)) => self.run(a.command, event_loop),
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
+                    Some(Item::Line(n)) => self.go_to_line(n),
                     None => {}
                 }
             }
@@ -1271,6 +1302,7 @@ impl App {
             | Command::ToggleWrap
             | Command::ToggleTheme
             | Command::ToggleSidebar
+            | Command::GoToLine
             | Command::FocusSidebar
             | Command::ToggleIgnored
             | Command::ReloadFromDisk
@@ -1601,6 +1633,7 @@ impl App {
                 match chosen {
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
                     Some(Item::Action(a)) => self.pending_action = Some(a.command),
+                    Some(Item::Line(n)) => self.go_to_line(n),
                     None => {}
                 }
             }
@@ -1974,10 +2007,10 @@ pub fn run_headless(
         // "palette" or "files", optionally followed by ":query".
         let (kind, query) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
         let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
-        let mut p = if kind == "files" {
-            Picker::files(&root, notify)
-        } else {
-            Picker::palette(notify)
+        let mut p = match kind {
+            "files" => Picker::files(&root, notify),
+            "line" => Picker::go_to_line(notify, Some(doc.buffer.len_lines())),
+            _ => Picker::palette(notify),
         };
         let _ = p.input.insert(query);
         // Let the walk and matcher finish, up to two seconds.
@@ -2053,12 +2086,18 @@ fn draw_picker_overlay(
         (Kind::Palette, false) => "commands",
         (Kind::Files, true) => "file",
         (Kind::Files, false) => "files",
+        (Kind::Line, _) => "",
     };
     let more = if p.loading() { "…" } else { "" };
-    let status = format!("{n} {noun}{more}");
+    let status = if p.kind == Kind::Line {
+        String::new()
+    } else {
+        format!("{n} {noun}{more}")
+    };
     let placeholder = match p.kind {
         Kind::Palette => "Type a command",
         Kind::Files => "Type a file name",
+        Kind::Line => "Type a line number",
     };
     let pv = PickerView {
         input: &p.input,

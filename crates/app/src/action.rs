@@ -377,6 +377,12 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::all(&["Alt+Z"]),
     ),
     act(
+        "edit.goToLine",
+        "Go to Line…",
+        Command::GoToLine,
+        mac_other(&["Primary+L"], &["Primary+G"]),
+    ),
+    act(
         "view.toggleSidebar",
         "Toggle Sidebar",
         Command::ToggleSidebar,

@@ -85,6 +85,8 @@ pub enum Command<'a> {
     ToggleTheme,
     /// Show or hide the sidebar.
     ToggleSidebar,
+    /// Ask for a line number and move the cursor there.
+    GoToLine,
     /// Show the sidebar and move the keyboard into it.
     FocusSidebar,
     /// Show or hide `.gitignore`d files in the sidebar.
