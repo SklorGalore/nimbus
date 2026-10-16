@@ -22,6 +22,7 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/nimbus"
 cp assets/icon/nimbus.icns "$app/Contents/Resources/nimbus.icns"
+cp LICENSE "$app/Contents/Resources/LICENSE"
 cp crates/render/assets/HackNerdFont-LICENSE.md "$app/Contents/Resources/"
 
 cat > "$app/Contents/Info.plist" <<PLIST

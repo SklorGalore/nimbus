@@ -2,6 +2,7 @@
 name = "nimbus-render"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 bytemuck = { version = "1.25.2", features = ["derive"] }

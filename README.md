@@ -27,6 +27,12 @@ cargo build --release
 
 Linux needs `libwayland-dev` and `libxkbcommon-dev`.
 
+## Licence
+
+Nimbus is under the MIT licence (`LICENSE`). The bundled font, Hack Nerd
+Font Mono, has its own licence (`crates/render/assets/HackNerdFont-LICENSE.md`);
+both come with every release.
+
 ## Making a release
 
 Set the version in `Cargo.toml` (`[workspace.package]`), commit, then push

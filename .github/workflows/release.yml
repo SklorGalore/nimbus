@@ -98,6 +98,7 @@ jobs:
           cp target/release/nimbus "dist/$name/"
           cp assets/icon/nimbus-1024.png "dist/$name/nimbus.png"
           cp assets/linux/nimbus.desktop "dist/$name/"
+          cp LICENSE "dist/$name/"
           cp crates/render/assets/HackNerdFont-LICENSE.md "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           gh release upload "$GITHUB_REF_NAME" "dist/$name.tar.gz" --clobber
@@ -112,6 +113,7 @@ jobs:
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
           Copy-Item target/release/nimbus.exe "dist/$name/"
           Copy-Item assets/icon/nimbus.ico "dist/$name/"
+          Copy-Item LICENSE "dist/$name/"
           Copy-Item crates/render/assets/HackNerdFont-LICENSE.md "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
           gh release upload $env:GITHUB_REF_NAME "dist/$name.zip" --clobber
