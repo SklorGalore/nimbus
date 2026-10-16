@@ -285,6 +285,24 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::all(&["Primary+A"]),
     ),
     act(
+        "selection.addNextOccurrence",
+        "Add Next Occurrence",
+        Command::AddNextOccurrence,
+        Keys::all(&["Primary+D"]),
+    ),
+    act(
+        "selection.addCursorAbove",
+        "Add Cursor Above",
+        Command::AddCursorAbove,
+        Keys::all(&["Primary+Alt+Up"]),
+    ),
+    act(
+        "selection.addCursorBelow",
+        "Add Cursor Below",
+        Command::AddCursorBelow,
+        Keys::all(&["Primary+Alt+Down"]),
+    ),
+    act(
         "edit.newline",
         "Insert Line Break",
         Command::Newline,

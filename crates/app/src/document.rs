@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
 
+use nimbus_core::search::{self, Literal};
 use nimbus_core::{
     AnyBuffer, Bias, Buffer, Edit, EditError, History, LineEnding, MappedBuffer, Selection,
     Selections, Source, Text, report_sorted,
@@ -79,6 +80,32 @@ pub enum DiskChange {
     Failed(String),
 }
 
+/// Most bytes [`Document::add_next_occurrence`] reads per press.
+pub const NEXT_BUDGET: usize = 32 * 1024 * 1024;
+
+/// Longest selection [`Document::add_next_occurrence`] looks for.
+const MAX_NEEDLE: usize = 64 * 1024;
+
+/// What [`Document::add_next_occurrence`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Occurrence {
+    /// The cursor was on a word, which is now selected.
+    SelectedWord,
+    /// The next occurrence was added as a cursor.
+    Added,
+    /// Every occurrence is already selected.
+    AllSelected,
+    /// The selection's text occurs nowhere else.
+    NotFound,
+    /// The cursor is not on a word.
+    NoWord,
+    /// The selection is too long to look for.
+    TooLong,
+    /// None within [`NEXT_BUDGET`] bytes; pressing again goes on from
+    /// there.
+    GaveUp,
+}
+
 /// Lines touched by the byte range `r`. A range ending at the very start of
 /// a line does not include that line.
 fn lines_of(t: &dyn Text, r: Range<usize>) -> Range<usize> {
@@ -121,6 +148,10 @@ pub struct Document {
     /// selection order; empty until the first vertical move, and cleared
     /// when anything else moves or merges cursors.
     goals: Vec<Option<usize>>,
+    /// Where [`Document::add_next_occurrence`] gave up last time, for the
+    /// next press to go on from: the text's version, the primary it was
+    /// looking from, and the offset reached.
+    next_resume: Option<(u64, Selection, usize)>,
     /// The file had a UTF-8 byte order mark, written back on save.
     pub bom: bool,
     /// Increments on every change to the text. Background work (search,
@@ -1221,6 +1252,161 @@ impl Document {
         self.preferred_column = None;
     }
 
+    /// Primary+D. With an empty primary, select the word under it. With a
+    /// selection, add the next place its text occurs, after the primary
+    /// and wrapping around, skipping places already selected, as a new
+    /// primary. On a huge file each press reads at most [`NEXT_BUDGET`]
+    /// bytes, so it never stalls; a later press goes on from there.
+    pub fn add_next_occurrence(&mut self) -> Occurrence {
+        let p = self.selection();
+        let t = &self.buffer;
+        if p.is_empty() {
+            let word = movement::word_at(t, p.head);
+            let is_word = !word.is_empty()
+                && t.slice(word.clone())
+                    .chars()
+                    .any(|c| c.is_alphanumeric() || c == '_');
+            if !is_word {
+                return Occurrence::NoWord;
+            }
+            self.selections.replace_primary(Selection {
+                anchor: word.start,
+                head: word.end,
+            });
+            self.history.seal();
+            return Occurrence::SelectedWord;
+        }
+        let r = p.range();
+        if r.len() > MAX_NEEDLE {
+            return Occurrence::TooLong;
+        }
+        let mut needle = Vec::with_capacity(r.len());
+        if t.read_into(r.clone(), &mut needle).is_err() {
+            return Occurrence::NotFound;
+        }
+        // From the primary to the end, then from the start back to it; or
+        // on from where the last press gave up.
+        let len = t.len_bytes();
+        let resume = self
+            .next_resume
+            .take()
+            .filter(|&(v, sel, _)| v == self.version && sel == p)
+            .map(|(_, _, at)| at);
+        let ranges = match resume {
+            Some(at) if at >= r.end => [at..len, 0..r.end],
+            Some(at) => [at..r.end, 0..0],
+            None => [r.end..len, 0..r.end],
+        };
+        let mut budget = NEXT_BUDGET;
+        for range in ranges {
+            let mut from = range.start;
+            loop {
+                match search::find_literal(t, &needle, from..range.end, budget) {
+                    Literal::Found(m) => {
+                        let taken = self.selections.iter().any(|s| {
+                            let sr = s.range();
+                            sr.start < m.end && m.start < sr.end
+                        });
+                        if taken {
+                            budget = budget.saturating_sub(m.end - from);
+                            from = m.start + 1;
+                            continue;
+                        }
+                        let sel = if p.head < p.anchor {
+                            Selection {
+                                anchor: m.end,
+                                head: m.start,
+                            }
+                        } else {
+                            Selection {
+                                anchor: m.start,
+                                head: m.end,
+                            }
+                        };
+                        self.selections.push_primary(sel);
+                        self.goals.clear();
+                        self.history.seal();
+                        return Occurrence::Added;
+                    }
+                    Literal::NotFound => {
+                        budget = budget.saturating_sub(range.end - from);
+                        break;
+                    }
+                    Literal::GaveUp(at) => {
+                        self.next_resume = Some((self.version, p, at));
+                        return Occurrence::GaveUp;
+                    }
+                }
+            }
+        }
+        if self.selections.count() > 1 {
+            Occurrence::AllSelected
+        } else {
+            Occurrence::NotFound
+        }
+    }
+
+    /// Alt+click: add a cursor at `pos`, or remove the cursor already there
+    /// (unless it is the only one).
+    pub fn click_add(&mut self, pos: usize) {
+        let pos = movement::clamp(&self.buffer, pos);
+        let existing = self.selections.iter().position(|s| s.head == pos);
+        match existing {
+            Some(i) if self.selections.count() > 1 => {
+                self.selections.remove(i);
+            }
+            Some(_) => {}
+            None => self.selections.push_primary(Selection::cursor(pos)),
+        }
+        self.goals.clear();
+        self.preferred_column = None;
+        self.history.seal();
+    }
+
+    /// Alt+drag: the selection being dragged out (the primary, added by
+    /// [`Document::click_add`]) runs from `anchor` to `head`; the others stay.
+    pub fn drag_added(&mut self, anchor: usize, head: usize) {
+        let t = &self.buffer;
+        self.selections.replace_primary(Selection {
+            anchor: movement::clamp(t, anchor),
+            head: movement::clamp(t, head),
+        });
+        self.goals.clear();
+    }
+
+    /// Primary+Alt+Up or Down: add a cursor on the line above the topmost
+    /// cursor (`lines` -1) or below the bottommost (1), at the column the
+    /// primary aims for, as the new primary. So pressing it again keeps
+    /// going. Does nothing at the first or last line.
+    pub fn add_cursor_vertical(&mut self, lines: isize, tab_width: usize) {
+        let all = self.selections.as_slice();
+        let edge = if lines < 0 { all.first() } else { all.last() };
+        let Some(&from) = edge else { return };
+        let t = &self.buffer;
+        let goal = self
+            .preferred_column
+            .unwrap_or_else(|| movement::column_of(t, self.selections.primary().head, tab_width));
+        let v = movement::vertical(t, from.head, Some(goal), lines, tab_width);
+        if v.pos == from.head || t.line_span(v.pos).start == t.line_span(from.head).start {
+            return;
+        }
+        self.selections.push_primary(Selection::cursor(v.pos));
+        self.goals.clear();
+        self.preferred_column = Some(v.preferred_col);
+        self.history.seal();
+    }
+
+    /// Escape with several cursors: keep only the primary. Returns whether
+    /// there were several.
+    pub fn collapse_cursors(&mut self) -> bool {
+        if self.selections.count() < 2 {
+            return false;
+        }
+        self.selections.collapse_to_primary();
+        self.goals.clear();
+        true
+    }
+
     /// Select the whole document.
     pub fn select_all(&mut self) {
         self.select(0..self.buffer.len_bytes());
@@ -2082,6 +2268,62 @@ mod tests {
         assert_eq!(heads(&d), [4, 6, 13]);
         d.move_cursor(Motion::Right, false, 4, 10);
         assert_eq!(heads(&d), [4, 6, 13]);
+    }
+
+    fn ranges(d: &Document) -> Vec<Range<usize>> {
+        d.selections.iter().map(Selection::range).collect()
+    }
+
+    #[test]
+    fn primary_d_selects_the_word_then_adds_each_next_occurrence() {
+        // Cursor inside the second "foo"; occurrences at 0, 8 and 16.
+        let mut d = doc("foo bar foo baz foo");
+        d.click(9, false);
+        assert_eq!(d.add_next_occurrence(), Occurrence::SelectedWord);
+        assert_eq!((d.selections.count(), d.selection().range()), (1, 8..11));
+        // The next one after it, then wrapping round to the first.
+        assert_eq!(d.add_next_occurrence(), Occurrence::Added);
+        assert_eq!(ranges(&d), [8..11, 16..19]);
+        assert_eq!(d.selection().range(), 16..19, "the newest is primary");
+        assert_eq!(d.add_next_occurrence(), Occurrence::Added);
+        assert_eq!(ranges(&d), [0..3, 8..11, 16..19]);
+        assert_eq!(d.add_next_occurrence(), Occurrence::AllSelected);
+        // Typing replaces all three.
+        d.insert("x").unwrap();
+        assert_eq!(text(&d), "x bar x baz x");
+        // Escape keeps the primary.
+        assert!(d.collapse_cursors());
+        assert_eq!(heads(&d), [1]);
+        assert!(!d.collapse_cursors());
+
+        let mut d = doc("a  b");
+        d.click(2, false);
+        assert_eq!(d.add_next_occurrence(), Occurrence::NoWord);
+        d.select(0..1);
+        assert_eq!(d.add_next_occurrence(), Occurrence::NotFound);
+    }
+
+    #[test]
+    fn alt_click_adds_and_removes_cursors_and_cursors_go_above_and_below() {
+        let mut d = doc("one\ntwo\nthree");
+        d.click(1, false);
+        d.click_add(5);
+        assert_eq!(heads(&d), [1, 5]);
+        d.click_add(1);
+        assert_eq!(heads(&d), [5], "clicking a cursor removes it");
+        d.click_add(5);
+        assert_eq!(heads(&d), [5], "but never the last one");
+        d.drag_added(5, 7);
+        assert_eq!((d.selections.count(), d.selection().range()), (1, 5..7));
+
+        d.click(5, false);
+        d.add_cursor_vertical(1, 4);
+        d.add_cursor_vertical(-1, 4);
+        assert_eq!(heads(&d), [1, 5, 9]);
+        d.add_cursor_vertical(-1, 4);
+        assert_eq!(heads(&d), [1, 5, 9], "nothing above the first line");
+        d.add_cursor_vertical(1, 4);
+        assert_eq!(heads(&d), [1, 5, 9], "nor below the last");
     }
 
     #[test]

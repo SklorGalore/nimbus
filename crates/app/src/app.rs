@@ -27,7 +27,7 @@ use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
 use crate::config::{self, Config};
 use crate::debug::Debug;
-use crate::document::{DiskChange, Document, MAX_COPY_BYTES};
+use crate::document::{DiskChange, Document, MAX_COPY_BYTES, Occurrence};
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::input::{self, Command, Motion};
 use crate::io;
@@ -365,6 +365,9 @@ struct Clicks {
     /// extends from it in whole units.
     anchor: std::ops::Range<usize>,
     dragging: bool,
+    /// The press held Alt: it added a cursor, and dragging extends that
+    /// one instead of replacing every selection.
+    adding: bool,
 }
 
 const MULTI_CLICK: Duration = Duration::from_millis(500);
@@ -697,11 +700,24 @@ impl App {
                 self.doc_mut().select_all();
                 Ok(())
             }
+            Command::AddNextOccurrence => {
+                self.add_next_occurrence();
+                Ok(())
+            }
+            Command::AddCursorAbove | Command::AddCursorBelow => {
+                let lines = if cmd == Command::AddCursorAbove {
+                    -1
+                } else {
+                    1
+                };
+                self.doc_mut().add_cursor_vertical(lines, tab_width);
+                Ok(())
+            }
             Command::Copy | Command::Cut | Command::Paste => self.clipboard_command(cmd),
             Command::Escape => {
                 if self.find.open {
                     self.find.close();
-                } else {
+                } else if !self.doc_mut().collapse_cursors() {
                     let head = self.doc().selection().head;
                     self.doc_mut().click(head, false);
                 }
@@ -1770,6 +1786,18 @@ impl App {
         }
     }
 
+    /// Primary+D, saying when there is nothing more to add.
+    fn add_next_occurrence(&mut self) {
+        let note = match self.doc_mut().add_next_occurrence() {
+            Occurrence::SelectedWord | Occurrence::Added | Occurrence::NoWord => return,
+            Occurrence::AllSelected => "Every occurrence is selected",
+            Occurrence::NotFound => "No other occurrence",
+            Occurrence::TooLong => "The selection is too long to look for",
+            Occurrence::GaveUp => "None in the next 32 MB; press again to look further",
+        };
+        self.say(note, false);
+    }
+
     /// Copy, cut or paste in the editor. Cut and paste are their own undo
     /// steps.
     fn clipboard_command(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
@@ -1890,7 +1918,13 @@ impl App {
         let pos = tab.view.hit(x, y, &tab.doc, &layout, tab_width);
         let count = self.clicks.press(now, (x, y), layout.metrics.cell_width);
         let doc = &mut tab.doc;
+        self.clicks.adding = count == 1 && self.modifiers.alt_key();
         match count {
+            1 if self.clicks.adding => {
+                // Alt+click: add a cursor, or remove the one there.
+                doc.click_add(pos);
+                self.clicks.anchor = pos..pos;
+            }
             1 => {
                 doc.click(pos, self.modifiers.shift_key());
                 // Dragging extends from the selection's anchor: the old one
@@ -1972,10 +2006,16 @@ impl App {
             _ => nimbus_core::movement::line_range(t, pos),
         };
         let anchor = self.clicks.anchor.clone();
-        if unit.start < anchor.start {
-            tab.doc.select_span(anchor.end, unit.start);
+        let (from, to) = if unit.start < anchor.start {
+            (anchor.end, unit.start)
         } else {
-            tab.doc.select_span(anchor.start, unit.end.max(anchor.end));
+            (anchor.start, unit.end.max(anchor.end))
+        };
+        if self.clicks.adding {
+            // Alt+drag: the added selection grows; the others stay.
+            tab.doc.drag_added(from, to);
+        } else {
+            tab.doc.select_span(from, to);
         }
         self.changed(true);
     }

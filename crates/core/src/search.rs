@@ -192,6 +192,60 @@ fn find_all_in_chunks(
     }
 }
 
+/// What [`find_literal`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Literal {
+    /// The first match, on character boundaries.
+    Found(Range<usize>),
+    /// No match in the range.
+    NotFound,
+    /// The byte budget ran out before the end of the range; searching
+    /// stopped before this offset.
+    GaveUp(usize),
+}
+
+/// Find the first occurrence of exactly `needle` in `range` of `text`,
+/// reading at most about `budget` bytes. Matches must start and end on
+/// character boundaries (a needle of whole characters can only fail that
+/// next to bytes that are not UTF-8).
+///
+/// Reads `range` in [`CHUNK`]-sized windows that overlap by one byte less
+/// than the needle, so a match across a window edge is still seen, and so
+/// a 4 GB file is never read whole: for adding the next occurrence of a
+/// selection as a cursor, which happens on a key press.
+pub fn find_literal(text: &dyn Text, needle: &[u8], range: Range<usize>, budget: usize) -> Literal {
+    let end = range.end.min(text.len_bytes());
+    if needle.is_empty() {
+        return Literal::NotFound;
+    }
+    let finder = memchr::memmem::Finder::new(needle);
+    let mut window = Vec::new();
+    let mut start = range.start;
+    let mut read = 0usize;
+    while start + needle.len() <= end {
+        if read >= budget {
+            return Literal::GaveUp(start);
+        }
+        let stop = (start + CHUNK + needle.len() - 1).min(end);
+        window.clear();
+        if text.read_into(start..stop, &mut window).is_err() {
+            return Literal::NotFound;
+        }
+        read += window.len();
+        for at in finder.find_iter(&window) {
+            let (s, e) = (start + at, start + at + needle.len());
+            if text.is_char_boundary(s) && text.is_char_boundary(e) {
+                return Literal::Found(s..e);
+            }
+        }
+        if stop == end {
+            break;
+        }
+        start = stop + 1 - needle.len();
+    }
+    Literal::NotFound
+}
+
 /// Index of the first match at or after `pos`, wrapping to the first match.
 #[must_use]
 pub fn next_match(matches: &[Range<usize>], pos: usize) -> Option<usize> {
@@ -259,6 +313,43 @@ mod tests {
             ..Query::default()
         };
         assert_eq!(all("foo\r\nbar\nfoooo", &q), vec![0..3, 9..14]);
+    }
+
+    #[test]
+    fn literal_search_crosses_windows_and_respects_its_budget() {
+        // A needle straddling the first window edge.
+        let mut text = "x".repeat(CHUNK - 2);
+        text.push_str("needle");
+        text.push_str(&"y".repeat(CHUNK));
+        text.push_str("needle");
+        let t = RopeBuffer::from_text(&text);
+        let at = CHUNK - 2;
+        assert_eq!(
+            find_literal(&t, b"needle", 0..t.len_bytes(), usize::MAX),
+            Literal::Found(at..at + 6)
+        );
+        // From after it: the second one, two windows on.
+        let second = text.len() - 6;
+        assert_eq!(
+            find_literal(&t, b"needle", at + 1..t.len_bytes(), usize::MAX),
+            Literal::Found(second..second + 6)
+        );
+        // With a budget of one window it gives up before the second.
+        assert!(matches!(
+            find_literal(&t, b"needle", at + 1..t.len_bytes(), CHUNK),
+            Literal::GaveUp(_)
+        ));
+        // Within a range that ends inside the match: not found.
+        assert_eq!(
+            find_literal(&t, b"needle", 0..at + 5, usize::MAX),
+            Literal::NotFound
+        );
+        // Not in the middle of a character.
+        let t = RopeBuffer::from_text("é e");
+        assert_eq!(
+            find_literal(&t, "e".as_bytes(), 0..4, usize::MAX),
+            Literal::Found(3..4)
+        );
     }
 
     #[test]
