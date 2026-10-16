@@ -19,7 +19,7 @@
 use std::cell::RefCell;
 use std::ops::Range;
 
-use nimbus_core::{Edit, Text};
+use nimbus_core::{Edit, Text, long_line};
 
 use crate::LanguageId;
 use crate::highlight::Span;
@@ -659,6 +659,17 @@ fn lex_line(
     state
 }
 
+/// The state after line `l`, given the state before it. A long line is not
+/// read: the state is assumed to pass through it unchanged (an unclosed
+/// comment inside a megabyte-long line is lost, by design).
+fn carry(r: &Rules, text: &dyn Text, l: usize, state: LexState) -> LexState {
+    let start = text.line_to_byte(l);
+    if long_line::is_long(text.line_span(start)) {
+        return state;
+    }
+    lex_line(r, &text.line(l), state, &mut |_, _| {})
+}
+
 /// Line-by-line highlighting state for one large document.
 #[derive(Debug)]
 pub struct Lexical {
@@ -705,14 +716,13 @@ impl Lexical {
         let k = (line / CHECKPOINT_LINES).min(cps.len().saturating_sub(1));
         let base = k * CHECKPOINT_LINES;
         let target = text.line_to_byte(line);
-        let mut noop = |_: Range<usize>, _: u32| {};
         if target - text.line_to_byte(base) <= LOOKBACK_BYTES {
             let mut state = cps.get(k).copied().unwrap_or_default();
             for l in base..line {
                 if l.is_multiple_of(CHECKPOINT_LINES) && l / CHECKPOINT_LINES == cps.len() {
                     cps.push(state);
                 }
-                state = lex_line(r, &text.line(l), state, &mut noop);
+                state = carry(r, text, l, state);
             }
             if line.is_multiple_of(CHECKPOINT_LINES) && line / CHECKPOINT_LINES == cps.len() {
                 cps.push(state);
@@ -735,7 +745,7 @@ impl Lexical {
                 ),
             };
             for l in from..line {
-                state = lex_line(r, &text.line(l), state, &mut noop);
+                state = carry(r, text, l, state);
             }
             *near = Some((line, state));
             state
@@ -753,8 +763,30 @@ impl Lexical {
         let last = text.byte_to_line(range.end - 1).min(text.len_lines() - 1);
         let mut state = self.state_at(text, first);
         for l in first..=last {
-            let line = text.line(l);
             let start = text.line_to_byte(l);
+            let span = text.line_span(start);
+            if long_line::is_long(span) {
+                // Only the part in `range` is read, lexed from its own
+                // start; the state is assumed to pass through the line.
+                let (a, b) = (range.start.max(span.start), range.end.min(span.end));
+                if a < b {
+                    let from = if a == span.start {
+                        state
+                    } else {
+                        LexState::Normal
+                    };
+                    let part = text.slice(a..b);
+                    lex_line(r, &part, from, &mut |sp, capture| {
+                        out.push(Span {
+                            start: a + sp.start,
+                            end: a + sp.end,
+                            capture,
+                        });
+                    });
+                }
+                continue;
+            }
+            let line = text.line(l);
             state = lex_line(r, &line, state, &mut |span, capture| {
                 let (s, e) = (
                     (start + span.start).max(range.start),

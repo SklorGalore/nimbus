@@ -16,11 +16,6 @@ use nimbus_core::{Buffer, LineEnding, RopeBuffer, Text};
 /// arrives in M7 (DESIGN.md §4.1).
 pub const MAX_ROPE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Lines longer than this are refused until M7 adds column-windowed access
-/// to long lines (DESIGN.md §4.1). Each frame finds and shapes the visible
-/// part of every line, and finding it is linear in the line's length.
-pub const MAX_LINE_BYTES: usize = 1024 * 1024;
-
 /// The UTF-8 byte order mark some Windows tools put at the start of a file.
 const BOM: &str = "\u{feff}";
 
@@ -48,11 +43,6 @@ pub enum OpenError {
         /// File size in bytes.
         bytes: u64,
     },
-    /// A line is longer than [`MAX_LINE_BYTES`].
-    LineTooLong {
-        /// Length of the longest line in bytes.
-        bytes: usize,
-    },
     /// The file is not valid UTF-8, so it may be binary or use another
     /// encoding. M7 opens these in a byte-preserving buffer.
     NotUtf8,
@@ -73,12 +63,6 @@ impl std::fmt::Display for OpenError {
                 "file is {} MB; files over {} MB need the huge-file mode planned for M7",
                 bytes / (1024 * 1024),
                 MAX_ROPE_BYTES / (1024 * 1024)
-            ),
-            OpenError::LineTooLong { bytes } => write!(
-                f,
-                "a line is {} KB long; lines over {} KB need the long-line support planned for M7",
-                bytes / 1024,
-                MAX_LINE_BYTES / 1024
             ),
             OpenError::NotUtf8 => write!(f, "file is not valid UTF-8 (binary or another encoding)"),
             OpenError::IsDirectory => write!(f, "path is a directory"),
@@ -129,10 +113,6 @@ pub fn open(path: &Path) -> Result<Opened, OpenError> {
         });
     }
 
-    let longest = longest_line(buffer.chunks());
-    if longest > MAX_LINE_BYTES {
-        return Err(OpenError::LineTooLong { bytes: longest });
-    }
     let bom = buffer.slice(0..BOM.len()) == BOM;
     if bom {
         buffer
@@ -145,22 +125,6 @@ pub fn open(path: &Path) -> Result<Opened, OpenError> {
         line_ending,
         bom,
     })
-}
-
-/// Length in bytes of the longest line in the text formed by `chunks`.
-fn longest_line<'a>(chunks: impl IntoIterator<Item = &'a str>) -> usize {
-    let (mut longest, mut current) = (0, 0);
-    for chunk in chunks {
-        for &b in chunk.as_bytes() {
-            if b == b'\n' {
-                longest = longest.max(current);
-                current = 0;
-            } else {
-                current += 1;
-            }
-        }
-    }
-    longest.max(current)
 }
 
 /// Why a save failed. The buffer stays dirty so nothing is lost.
@@ -379,16 +343,16 @@ mod tests {
     }
 
     #[test]
-    fn refuses_non_utf8_directories_and_long_lines() {
+    fn refuses_non_utf8_and_directories_but_opens_long_lines() {
         let dir = TempDir::new("refuse");
         let bin = dir.0.join("bin");
         fs::write(&bin, [0xff, 0xfe, 0x00]).unwrap();
         assert!(matches!(open(&bin), Err(OpenError::NotUtf8)));
         assert!(matches!(open(&dir.0), Err(OpenError::IsDirectory)));
+        // Long lines are read in windows (M7), so a 2 MB line opens.
         let long = dir.0.join("min.json");
-        fs::write(&long, "x".repeat(MAX_LINE_BYTES + 1)).unwrap();
-        assert!(matches!(open(&long), Err(OpenError::LineTooLong { .. })));
-        assert_eq!(longest_line(["ab\nabcd", "ef\n", "g"]), 6);
+        fs::write(&long, "x".repeat(2 * 1024 * 1024)).unwrap();
+        assert_eq!(open(&long).unwrap().buffer.len_bytes(), 2 * 1024 * 1024);
     }
 
     #[test]

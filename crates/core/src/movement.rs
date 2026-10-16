@@ -11,13 +11,16 @@ use std::ops::Range;
 
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
-use crate::Text;
-use crate::column;
+use crate::long_line;
 use crate::wrap::{self, RowPos, WrapView};
+use crate::{LineSpan, Text};
 
-/// Byte offset where the content of line `l` ends, before its line ending.
-fn content_end(t: &dyn Text, l: usize) -> usize {
-    t.line_to_byte(l) + t.line(l).len()
+/// The last character boundary at or before `b`.
+fn floor_boundary(t: &dyn Text, mut b: usize) -> usize {
+    while b > 0 && !t.is_char_boundary(b) {
+        b -= 1;
+    }
+    b
 }
 
 /// Snap any offset into the text, onto a char boundary, and out of the
@@ -25,63 +28,63 @@ fn content_end(t: &dyn Text, l: usize) -> usize {
 #[must_use]
 pub fn clamp(t: &dyn Text, pos: usize) -> usize {
     let pos = pos.min(t.len_bytes());
-    let l = t.byte_to_line(pos);
-    let start = t.line_to_byte(l);
-    let line = t.line(l);
-    start + line.floor_char_boundary((pos - start).min(line.len()))
+    let span = t.line_span(pos);
+    floor_boundary(t, pos.min(span.end)).max(span.start)
 }
 
 /// The next cursor stop to the right of `pos`.
 #[must_use]
 pub fn next_grapheme(t: &dyn Text, pos: usize) -> usize {
-    let l = t.byte_to_line(pos);
-    let start = t.line_to_byte(l);
-    let line = t.line(l);
-    let off = pos.saturating_sub(start);
-    if off >= line.len() {
+    let span = t.line_span(pos);
+    if pos >= span.end {
         // At the end of the content: step over the whole line ending. On
         // the last line this is the end of the text.
-        return t.line_to_byte(l + 1);
+        return span.next.unwrap_or(t.len_bytes());
     }
+    let (line, base) = long_line::around(t, span, pos);
+    let off = pos - base;
     // GraphemeCursor panics off a char boundary, so floor first.
     let mut c = GraphemeCursor::new(line.floor_char_boundary(off), line.len(), true);
     match c.next_boundary(&line, 0) {
-        Ok(Some(b)) => start + b,
-        Ok(None) | Err(_) => start + line.len(),
+        Ok(Some(b)) => base + b,
+        Ok(None) | Err(_) => base + line.len(),
     }
 }
 
 /// The next cursor stop to the left of `pos`.
 #[must_use]
 pub fn prev_grapheme(t: &dyn Text, pos: usize) -> usize {
-    let l = t.byte_to_line(pos);
-    let start = t.line_to_byte(l);
-    if pos <= start {
-        return if l == 0 { 0 } else { content_end(t, l - 1) };
+    let span = t.line_span(pos);
+    if pos <= span.start {
+        return if span.start == 0 {
+            0
+        } else {
+            t.line_span(span.start - 1).end
+        };
     }
-    let line = t.line(l);
-    let off = pos - start;
-    if off > line.len() {
+    if pos > span.end {
         // Between the \r and \n of a line ending.
-        return start + line.len();
+        return span.end;
     }
+    let (line, base) = long_line::around(t, span, pos);
+    let off = pos - base;
     let mut c = GraphemeCursor::new(line.floor_char_boundary(off), line.len(), true);
     match c.prev_boundary(&line, 0) {
-        Ok(Some(b)) => start + b,
-        Ok(None) | Err(_) => start,
+        Ok(Some(b)) => base + b,
+        Ok(None) | Err(_) => base,
     }
 }
 
 /// Start of the line containing `pos`.
 #[must_use]
 pub fn line_start(t: &dyn Text, pos: usize) -> usize {
-    t.line_to_byte(t.byte_to_line(pos))
+    t.line_span(pos).start
 }
 
 /// End of the content of the line containing `pos`, before its line ending.
 #[must_use]
 pub fn line_end(t: &dyn Text, pos: usize) -> usize {
-    content_end(t, t.byte_to_line(pos))
+    t.line_span(pos).end
 }
 
 /// Character classes for word movement. Code-editor style: `.`, `(` and
@@ -125,51 +128,48 @@ fn segments(line: &str) -> impl Iterator<Item = (usize, usize, Class)> + '_ {
 /// the start of a line, moves to the end of the previous line.
 #[must_use]
 pub fn word_left(t: &dyn Text, pos: usize) -> usize {
-    let l = t.byte_to_line(pos);
-    let start = t.line_to_byte(l);
-    if pos <= start {
+    let span = t.line_span(pos);
+    if pos <= span.start {
         return prev_grapheme(t, pos);
     }
-    let line = t.line(l);
-    let off = (pos - start).min(line.len());
+    let (line, base) = long_line::around(t, span, pos);
+    let off = (pos - base).min(line.len());
     segments(&line)
         .take_while(|&(i, _, _)| i < off)
         .filter(|&(_, _, c)| c != Class::Space)
         .last()
-        .map_or(start, |(i, _, _)| start + i)
+        .map_or(base, |(i, _, _)| base + i)
 }
 
 /// End of the next word, as Alt+Right (macOS) or Ctrl+Right does. At the
 /// end of a line, moves to the start of the next line.
 #[must_use]
 pub fn word_right(t: &dyn Text, pos: usize) -> usize {
-    let l = t.byte_to_line(pos);
-    let start = t.line_to_byte(l);
-    let line = t.line(l);
-    let off = pos.saturating_sub(start);
-    if off >= line.len() {
+    let span = t.line_span(pos);
+    if pos >= span.end {
         return next_grapheme(t, pos);
     }
+    let (line, base) = long_line::around(t, span, pos);
+    let off = pos.saturating_sub(base);
     segments(&line)
         .find(|&(_, end, c)| end > off && c != Class::Space)
-        .map_or(start + line.len(), |(_, end, _)| start + end)
+        .map_or(base + line.len(), |(_, end, _)| base + end)
 }
 
 /// The word, run of spaces, or run of punctuation under `pos`, for a
 /// double-click. At the end of a line it is the run before the position.
 #[must_use]
 pub fn word_at(t: &dyn Text, pos: usize) -> Range<usize> {
-    let l = t.byte_to_line(pos);
-    let start = t.line_to_byte(l);
-    let line = t.line(l);
-    let off = pos.saturating_sub(start).min(line.len());
+    let span = t.line_span(pos);
+    let (line, base) = long_line::around(t, span, pos);
+    let off = pos.saturating_sub(base).min(line.len());
     let mut before = None;
     for (i, end, _) in segments(&line) {
         if i <= off && off < end {
-            return start + i..start + end;
+            return base + i..base + end;
         }
         if end == off {
-            before = Some(start + i..start + end);
+            before = Some(base + i..base + end);
         }
     }
     before.unwrap_or(pos..pos)
@@ -179,26 +179,26 @@ pub fn word_at(t: &dyn Text, pos: usize) -> Range<usize> {
 /// triple-click.
 #[must_use]
 pub fn line_range(t: &dyn Text, pos: usize) -> Range<usize> {
-    let l = t.byte_to_line(pos);
-    t.line_to_byte(l)..t.line_to_byte(l + 1)
+    let span = t.line_span(pos);
+    span.start..span.next.unwrap_or(t.len_bytes())
 }
 
 /// Home: the first non-blank character of the line, or column 0 if the
 /// cursor is already there (so pressing Home twice toggles).
 #[must_use]
 pub fn smart_home(t: &dyn Text, pos: usize) -> usize {
-    let start = line_start(t, pos);
-    let line = t.line(t.byte_to_line(pos));
-    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-    let first = start + indent;
-    if pos == first { start } else { first }
+    let span = t.line_span(pos);
+    // Indentation is short; only the start of a long line is read.
+    let head = t.slice(span.start..span.end.min(span.start + long_line::NEAR));
+    let indent = head.len() - head.trim_start_matches([' ', '\t']).len();
+    let first = span.start + indent;
+    if pos == first { span.start } else { first }
 }
 
-/// Display column of `pos` on its line.
+/// Display column of `pos` on its line (block-approximate on a long line).
 #[must_use]
 pub fn column_of(t: &dyn Text, pos: usize, tab_width: usize) -> usize {
-    let l = t.byte_to_line(pos);
-    column::col_at(&t.line(l), pos - t.line_to_byte(l), tab_width)
+    long_line::col_at(t, t.line_span(pos), pos, tab_width)
 }
 
 /// The result of a vertical move.
@@ -208,6 +208,21 @@ pub struct Vertical {
     pub pos: usize,
     /// The column to keep aiming for on the next vertical move.
     pub preferred_col: usize,
+}
+
+/// The line `lines` lines from `span` (negative is up), or `None` past the
+/// first or last line.
+fn step_lines(t: &dyn Text, mut span: LineSpan, lines: isize) -> Option<LineSpan> {
+    for _ in 0..lines.unsigned_abs() {
+        span = if lines > 0 {
+            t.line_span(span.next?)
+        } else if span.start == 0 {
+            return None;
+        } else {
+            t.line_span(span.start - 1)
+        };
+    }
+    Some(span)
 }
 
 /// Move `lines` lines up (negative) or down (positive).
@@ -224,20 +239,26 @@ pub fn vertical(
     lines: isize,
     tab_width: usize,
 ) -> Vertical {
-    let l = t.byte_to_line(pos);
     let col = preferred.unwrap_or_else(|| column_of(t, pos, tab_width));
-    let last = t.len_lines().saturating_sub(1);
-    let target = l.saturating_add_signed(lines).min(last);
-    if target == l && lines != 0 {
-        let pos = if lines < 0 { 0 } else { t.len_bytes() };
-        return Vertical {
-            pos,
-            preferred_col: column_of(t, pos, tab_width),
-        };
-    }
-    let line = t.line(target);
+    let span = t.line_span(pos);
+    // Past the first or last line: a partial move (Page Down near the end)
+    // lands on that line; from the first or last line itself, go to the
+    // start or end of the text.
+    let target = if let Some(target) = step_lines(t, span, lines) {
+        target
+    } else {
+        let reached = if lines < 0 { 0 } else { t.len_bytes() };
+        let end_span = t.line_span(reached);
+        if end_span.start == span.start {
+            return Vertical {
+                pos: reached,
+                preferred_col: column_of(t, reached, tab_width),
+            };
+        }
+        end_span
+    };
     Vertical {
-        pos: t.line_to_byte(target) + column::byte_at_col(&line, col, tab_width),
+        pos: long_line::byte_at_col(t, target, col, tab_width),
         preferred_col: col,
     }
 }
@@ -257,9 +278,15 @@ pub fn vertical_rows(
 ) -> Vertical {
     let tab = w.tab_width();
     let span = t.line_span(pos);
-    let line = t.slice(span.start..span.end);
-    let off = (pos - span.start).min(line.len());
-    let (row, vcol) = {
+    // A long line is never wrapped: one row, with block-approximate columns.
+    let (row, vcol) = if long_line::is_long(span) {
+        (
+            0,
+            preferred.unwrap_or_else(|| long_line::col_at(t, span, pos, tab)),
+        )
+    } else {
+        let line = t.slice(span.start..span.end);
+        let off = (pos - span.start).min(line.len());
         let rs = w.rows(&line);
         let row = wrap::row_of(rs, off);
         (
@@ -275,15 +302,24 @@ pub fn vertical_rows(
     if moved == 0 && rows != 0 {
         let end = if rows < 0 { 0 } else { t.len_bytes() };
         let espan = t.line_span(end);
-        let eline = t.slice(espan.start..espan.end);
-        let eoff = end - espan.start;
-        let col = wrap::visual_col(&eline, w.rows(&eline), eoff, tab);
+        let col = if long_line::is_long(espan) {
+            long_line::col_at(t, espan, end, tab)
+        } else {
+            let eline = t.slice(espan.start..espan.end);
+            wrap::visual_col(&eline, w.rows(&eline), end - espan.start, tab)
+        };
         return Vertical {
             pos: end,
             preferred_col: col,
         };
     }
     let tspan = t.line_span(to.start);
+    if long_line::is_long(tspan) {
+        return Vertical {
+            pos: long_line::byte_at_col(t, tspan, vcol, tab),
+            preferred_col: vcol,
+        };
+    }
     let target = t.slice(tspan.start..tspan.end);
     let rs = w.rows(&target);
     Vertical {
@@ -532,5 +568,30 @@ mod tests {
         let v = vertical(&t, 1, None, 10, 4);
         assert_eq!(v.pos, 9);
         assert_eq!(vertical(&t, v.pos, Some(v.preferred_col), 10, 4).pos, 11);
+    }
+
+    #[test]
+    fn movement_on_a_long_line_reads_only_around_the_cursor() {
+        let long = "word ".repeat(40_000); // 200 KB, one line
+        let text = format!("top\n    {long}\nend");
+        let t = RopeBuffer::from_text(&text);
+        let start = 4; // the long line
+        let mid = start + 100_002;
+        assert_eq!(next_grapheme(&t, mid), mid + 1);
+        assert_eq!(prev_grapheme(&t, mid), mid - 1);
+        // Words start 8 bytes in and repeat every 5: mid is on the "d".
+        assert_eq!((mid - 8) % 5, 3);
+        assert_eq!(word_right(&t, mid), mid + 1, "to the end of the word");
+        assert_eq!(word_left(&t, mid), mid - 3, "to the start of the word");
+        assert_eq!(smart_home(&t, mid), start + 4, "after the indent");
+        // Columns are exact for ASCII; up and down keep them.
+        assert_eq!(column_of(&t, mid, 4), mid - start);
+        let up = vertical(&t, mid, None, -1, 4);
+        assert_eq!(up.pos, 3, "the short line above ends first");
+        let down = vertical(&t, up.pos, Some(up.preferred_col), 1, 4);
+        assert_eq!(down.pos, mid);
+        let end = t.line_span(mid).end;
+        assert_eq!(next_grapheme(&t, end), end + 1, "over the line break");
+        assert_eq!(line_end(&t, mid), end);
     }
 }

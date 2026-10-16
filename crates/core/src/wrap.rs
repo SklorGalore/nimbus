@@ -272,7 +272,8 @@ impl<'a> WrapView<'a> {
     /// Row starts for the line `span` of `t`. Reads the line's text only
     /// when wrapping: unwrapped, every line is one row.
     pub fn rows_at(&mut self, t: &dyn Text, span: LineSpan) -> &[RowStart] {
-        if self.width.is_none() {
+        // Long lines are never wrapped (or read whole).
+        if self.width.is_none() || crate::long_line::is_long(span) {
             return ONE_ROW;
         }
         let text = t.slice(span.start..span.end);
@@ -282,7 +283,7 @@ impl<'a> WrapView<'a> {
     /// Number of rows the line `span` of `t` takes; like
     /// [`WrapView::row_count`], without reading the text when unwrapped.
     pub fn row_count_at(&mut self, t: &dyn Text, span: LineSpan) -> usize {
-        if self.width.is_none() {
+        if self.width.is_none() || crate::long_line::is_long(span) {
             return 1;
         }
         let text = t.slice(span.start..span.end);

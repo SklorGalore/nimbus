@@ -37,7 +37,9 @@ pub struct Highlighter {
     captures: Vec<(usize, usize, usize, u32)>,
     paint: Vec<u32>,
     spans: Vec<Span>,
-    key: Option<(u64, Range<usize>)>,
+    /// What `spans` was computed for: the state's revision and the ranges.
+    key_rev: Option<u64>,
+    key_ranges: Vec<Range<usize>>,
 }
 
 impl std::fmt::Debug for Highlighter {
@@ -67,34 +69,53 @@ impl Highlighter {
             captures: Vec::new(),
             paint: Vec::new(),
             spans: Vec::new(),
-            key: None,
+            key_rev: None,
+            key_ranges: Vec::new(),
         }
     }
 
-    /// Spans within `range` of `text`, sorted and not overlapping. Bytes in
-    /// no span have no capture. Empty while there is no tree yet.
+    /// Spans within `ranges` of `text`, sorted and not overlapping. The
+    /// ranges must be sorted and not overlap; bytes in no span have no
+    /// capture. Empty while there is no tree yet.
     ///
-    /// The cost grows with the length of `range`, so pass the visible
-    /// lines, not the file.
-    pub fn spans(&mut self, state: &SyntaxState, text: &dyn Text, range: Range<usize>) -> &[Span] {
-        let key = (state.rev(), range.clone());
-        if self.key.as_ref() == Some(&key) {
+    /// The cost grows with the length of the ranges, so pass the visible
+    /// parts of the lines on screen, not the file.
+    pub fn spans(
+        &mut self,
+        state: &SyntaxState,
+        text: &dyn Text,
+        ranges: &[Range<usize>],
+    ) -> &[Span] {
+        if self.key_rev == Some(state.rev()) && self.key_ranges == ranges {
             return &self.spans;
         }
         self.spans.clear();
-        self.key = Some(key);
-        let range = range.start.min(text.len_bytes())..range.end.min(text.len_bytes());
-        if range.is_empty() {
-            return &self.spans;
+        self.key_rev = Some(state.rev());
+        self.key_ranges.clear();
+        self.key_ranges.extend_from_slice(ranges);
+        let len = text.len_bytes();
+        for range in ranges {
+            let range = range.start.min(len)..range.end.min(len);
+            if range.is_empty() {
+                continue;
+            }
+            if let Some(lexical) = state.lexical() {
+                lexical.spans(text, range, &mut self.spans);
+            } else if let Some((tree, grammar)) = state.tree() {
+                self.tree_spans(tree, grammar, text, range);
+            }
         }
-        if let Some(lexical) = state.lexical() {
-            lexical.spans(text, range, &mut self.spans);
-            return &self.spans;
-        }
-        let Some((tree, grammar)) = state.tree() else {
-            return &self.spans;
-        };
+        &self.spans
+    }
 
+    /// Append the spans of one range from a syntax tree.
+    fn tree_spans(
+        &mut self,
+        tree: &tree_sitter::Tree,
+        grammar: &crate::registry::Grammar,
+        text: &dyn Text,
+        range: Range<usize>,
+    ) {
         self.captures.clear();
         self.cursor.set_byte_range(range.clone());
         let mut matches = self.cursor.captures(
@@ -140,7 +161,6 @@ impl Highlighter {
                 run_start = i;
             }
         }
-        &self.spans
     }
 }
 
@@ -157,7 +177,7 @@ mod tests {
         state.parse_now(&buf);
         let grammar = state.tree().unwrap().1;
         let mut h = Highlighter::new();
-        h.spans(&state, &buf, 0..src.len())
+        h.spans(&state, &buf, std::slice::from_ref(&(0..src.len())))
             .iter()
             .map(|s| {
                 let name = grammar.highlights.capture_names()[s.capture as usize];
@@ -196,7 +216,7 @@ mod tests {
         state.parse_now(&buf);
         let mut h = Highlighter::new();
         let range = 12..20;
-        let spans = h.spans(&state, &buf, range.clone()).to_vec();
+        let spans = h.spans(&state, &buf, std::slice::from_ref(&range)).to_vec();
         assert_ne!(spans.len(), 0);
         for w in spans.windows(2) {
             assert!(w[0].end <= w[1].start, "{spans:?}");
@@ -207,7 +227,7 @@ mod tests {
                 .all(|s| s.start >= range.start && s.end <= range.end)
         );
         // Same key: the cached result.
-        assert_eq!(h.spans(&state, &buf, range).to_vec(), spans);
+        assert_eq!(h.spans(&state, &buf, &[range]).to_vec(), spans);
     }
 
     #[cfg(feature = "typescript")]

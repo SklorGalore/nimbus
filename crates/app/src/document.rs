@@ -197,7 +197,7 @@ impl Document {
         self.version += 1;
         let line = line.min(self.buffer.len_lines().saturating_sub(1));
         let start = self.buffer.line_to_byte(line);
-        let len = self.buffer.line(line).len();
+        let len = self.buffer.line_span(start).end - start;
         self.set_selection(Selection::cursor(movement::clamp(
             &self.buffer,
             start + col.min(len),
@@ -405,11 +405,14 @@ impl Document {
     /// See [`Document::replace`].
     pub fn insert_newline(&mut self) -> Result<Edit, EditError> {
         let sel = self.selection().range();
-        let line = self.buffer.line(self.buffer.byte_to_line(sel.start));
         let line_start = movement::line_start(&self.buffer, sel.start);
-        let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
-        // Only the indentation before the cursor carries over.
-        let indent = &line[..indent_len.min(sel.start - line_start)];
+        // Only the indentation before the cursor carries over, so only the
+        // line up to the cursor (and at most a few KB of it) is read.
+        let head = self
+            .buffer
+            .slice(line_start..sel.start.min(line_start + nimbus_core::long_line::NEAR));
+        let indent_len = head.len() - head.trim_start_matches([' ', '\t']).len();
+        let indent = &head[..indent_len];
         let text = format!("{}{indent}", self.line_ending.as_str());
         self.insert(&text)
     }
@@ -418,7 +421,14 @@ impl Document {
     #[must_use]
     pub fn selected_text(&self) -> Option<String> {
         let range = self.selection().range();
-        (!range.is_empty()).then(|| self.buffer.slice(range).into_owned())
+        if range.is_empty() {
+            return None;
+        }
+        // The raw bytes, not the display string: bytes that are not UTF-8
+        // become `�` here rather than the display stand-in.
+        let mut bytes = Vec::with_capacity(range.len());
+        self.buffer.read_into(range, &mut bytes).ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// Put the cursor at `pos` (snapped to a valid position), as a click
@@ -649,7 +659,10 @@ impl Document {
         let ranges: Vec<(Range<usize>, String)> = lines
             .clone()
             .filter_map(|l| {
-                let text = self.buffer.line(l);
+                let s = self.buffer.line_to_byte(l);
+                // Only the start of the line matters.
+                let end = self.buffer.line_span(s).end.min(s + tab_width + 1);
+                let text = self.buffer.slice(s..end);
                 let n = if text.starts_with('\t') {
                     1
                 } else {
@@ -658,7 +671,6 @@ impl Document {
                         .take_while(|b| *b == b' ')
                         .count()
                 };
-                let s = self.buffer.line_to_byte(l);
                 (n > 0).then(|| (s..s + n, String::new()))
             })
             .collect();
