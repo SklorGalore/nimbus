@@ -1,6 +1,10 @@
 //! Property tests for undo and redo (M3 task 3): random edit sessions on a
-//! [`RopeBuffer`] with a [`History`] recording every edit, checked against a
-//! plain `String` oracle.
+//! buffer with a [`History`] recording every edit, checked against a plain
+//! `String` oracle. Every property runs on [`RopeBuffer`] and on
+//! [`MappedBuffer`] (M7 task 7). The mapped buffer gets tiny [`Limits`], so
+//! removals over 4 bytes are recorded as pieces ([`Content::Pieces`]) and
+//! undo and redo put those pieces back; groups go through
+//! [`Buffer::replace_sorted`], which the mapped buffer does in one pass.
 //!
 //! Coalescing makes the exact number of undo steps depend on timing, kinds
 //! and positions, so most properties check *states* rather than counts: an
@@ -16,10 +20,14 @@
 //! drawn often), so the 500 ms coalescing window is crossed both ways.
 
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nimbus_core::undo::COALESCE_WINDOW;
-use nimbus_core::{Buffer, Edit, EditError, History, RopeBuffer, Selection, Selections, Text};
+use nimbus_core::{
+    Buffer, Content, Edit, EditError, History, Limits, MappedBuffer, RopeBuffer, Selection,
+    Selections, Text, VecSource,
+};
 use proptest::prelude::*;
 use proptest::sample::Index;
 use proptest::test_runner::Config;
@@ -64,6 +72,68 @@ const TYPED: &[&str] = &[
 /// edit's selections an undo or redo handed back. History never interprets
 /// selections, so the tags need not be valid offsets.
 const TAG_BASE: usize = 1_000_000;
+
+/// Limits for the mapped backend that make every path run on small texts.
+const TINY: Limits = Limits {
+    copy_limit: 4,
+    segment: 16,
+    max_piece: 6,
+};
+
+/// A buffer implementation under test.
+trait Backend: Buffer + Sized {
+    /// A buffer holding `text`.
+    fn build(text: &str) -> Self;
+
+    /// Removals longer than this are recorded as [`Content::Pieces`];
+    /// `None` if they never are.
+    fn copy_limit() -> Option<usize> {
+        None
+    }
+}
+
+impl Backend for RopeBuffer {
+    fn build(text: &str) -> Self {
+        RopeBuffer::from_text(text)
+    }
+}
+
+impl Backend for MappedBuffer {
+    fn build(text: &str) -> Self {
+        MappedBuffer::with_limits(Arc::new(VecSource::from(text)), TINY)
+    }
+
+    fn copy_limit() -> Option<usize> {
+        Some(TINY.copy_limit)
+    }
+}
+
+/// The bytes of `content`, read from the buffer's storage for pieces.
+#[expect(clippy::unwrap_used, reason = "test helper")]
+fn bytes_of(content: &Content) -> Vec<u8> {
+    let mut out = Vec::new();
+    content.read_into(&mut out).unwrap();
+    out
+}
+
+/// `got` records the same change as `want` (whose content is bytes), with
+/// the removed text held as pieces exactly when over the copy limit.
+fn same_edit<B: Backend>(got: &Edit, want: &Edit, what: &str) {
+    assert_eq!(got.start, want.start, "{what}: start");
+    assert_eq!(got.inserted, want.inserted, "{what}: inserted");
+    assert_eq!(
+        bytes_of(&got.removed),
+        bytes_of(&want.removed),
+        "{what}: removed"
+    );
+    let over = B::copy_limit().is_some_and(|limit| want.removed.len() > limit);
+    assert_eq!(
+        matches!(got.removed, Content::Pieces(_)),
+        over,
+        "{what}: removal of {} bytes held as pieces",
+        want.removed.len()
+    );
+}
 
 fn config(cases: u32) -> Config {
     Config {
@@ -145,11 +215,20 @@ fn any_op() -> BoxedStrategy<Op> {
 }
 
 /// A callback for undo and redo that applies each reported edit to `mirror`
-/// and checks it against the buffer's length after the edit.
+/// and checks it against the buffer after the edit. Inserted text held as
+/// pieces is read from the buffer's storage; either way it must be what
+/// the buffer now holds at the edit's new range.
 #[expect(clippy::unwrap_used, reason = "test helper")]
 fn replay_into(mirror: &mut String) -> impl FnMut(&dyn Text, &Edit) + '_ {
     |after, edit| {
-        let inserted = std::str::from_utf8(edit.inserted.as_bytes().unwrap()).unwrap();
+        let bytes = bytes_of(&edit.inserted);
+        let inserted = std::str::from_utf8(&bytes).unwrap();
+        assert_eq!(after.slice(edit.new_range()), inserted, "reported insert");
+        assert_eq!(
+            bytes_of(&edit.removed).len(),
+            edit.removed.len(),
+            "removed length"
+        );
         mirror.replace_range(edit.old_range(), inserted);
         assert_eq!(mirror.len(), after.len_bytes());
     }
@@ -274,8 +353,8 @@ enum Outcome {
     },
 }
 
-struct Session {
-    buf: RopeBuffer,
+struct Session<B: Backend> {
+    buf: B,
     text: String,
     hist: History,
     model: Model,
@@ -284,10 +363,10 @@ struct Session {
     tag: usize,
 }
 
-impl Session {
+impl<B: Backend> Session<B> {
     fn new(initial: &str) -> Self {
         Self {
-            buf: RopeBuffer::from_text(initial),
+            buf: B::build(initial),
             text: initial.to_owned(),
             hist: History::new(),
             model: Model::default(),
@@ -319,22 +398,22 @@ impl Session {
     }
 
     /// Apply a replacement to buffer and oracle; the buffer's record must
-    /// match the oracle's.
+    /// match the oracle's. Returns the buffer's record, which is what the
+    /// history keeps (for a mapped buffer, possibly with pieces in it).
+    #[expect(clippy::unwrap_used, reason = "test helper")]
     fn replace(&mut self, range: Range<usize>, text: &str) -> Edit {
         let expected = Edit {
             start: range.start,
             removed: self.text[range.clone()].into(),
             inserted: text.into(),
         };
+        let what = format!("replace({range:?}, {text:?}) on {:?}", self.text);
         let got = self.buf.replace(range.clone(), text);
-        assert_eq!(
-            got,
-            Ok(expected.clone()),
-            "replace({range:?}, {text:?}) on {:?}",
-            self.text
-        );
+        assert!(got.is_ok(), "{what}: {got:?}");
+        let got = got.unwrap();
+        same_edit::<B>(&got, &expected, &what);
         self.text.replace_range(range, text);
-        expected
+        got
     }
 
     /// Apply one edit and record it with `History::record`.
@@ -417,8 +496,10 @@ impl Session {
         outcome
     }
 
-    /// Replace 1 to 4 non-overlapping ranges, last first so earlier offsets
-    /// stay valid, and record them in that application order.
+    /// Replace 1 to 4 non-overlapping ranges with `replace_sorted`, which
+    /// applies them last first so earlier offsets stay valid, and record
+    /// them in that application order.
+    #[expect(clippy::unwrap_used, reason = "test helper")]
     fn group(&mut self, bounds: &[usize], parts: &[(Index, Index, String)]) -> Outcome {
         let mut ends: Vec<usize> = parts
             .iter()
@@ -427,9 +508,30 @@ impl Session {
         ends.sort_unstable();
         let before_text = self.text.clone();
         let before = self.sel(self.cursor);
-        let mut edits = Vec::new();
-        for (i, (_, _, t)) in parts.iter().enumerate().rev() {
-            edits.push(self.replace(ends[2 * i]..ends[2 * i + 1], t));
+        let items: Vec<(Range<usize>, &str)> = parts
+            .iter()
+            .enumerate()
+            .map(|(i, (_, _, t))| (ends[2 * i]..ends[2 * i + 1], t.as_str()))
+            .collect();
+        let got = self.buf.replace_sorted(&items);
+        assert!(
+            got.is_ok(),
+            "replace_sorted({items:?}) on {before_text:?}: {got:?}"
+        );
+        let edits = got.unwrap();
+        assert_eq!(edits.len(), items.len(), "one edit per item");
+        for ((range, t), got) in items.iter().rev().zip(&edits) {
+            let expected = Edit {
+                start: range.start,
+                removed: self.text[range.clone()].into(),
+                inserted: (*t).into(),
+            };
+            same_edit::<B>(
+                got,
+                &expected,
+                &format!("group item {range:?} on {before_text:?}"),
+            );
+            self.text.replace_range(range.clone(), t);
         }
         // Applied last, so its offsets hold in the final text.
         let Some(lowest) = edits.last().cloned() else {
@@ -496,8 +598,8 @@ fn latest_match(states: &[String], below: usize, text: &str) -> Option<usize> {
 /// Properties 1 and 2: after any edit sequence, undoing until `None`
 /// restores the starting text through earlier states in reverse order, and
 /// redoing until `None` walks the same states forwards to the final text.
-fn undo_all_then_redo_all(initial: &str, ops: &[(Op, u64)]) {
-    let mut s = Session::new(initial);
+fn undo_all_then_redo_all<B: Backend>(initial: &str, ops: &[(Op, u64)]) {
+    let mut s = Session::<B>::new(initial);
     // The text after every recorded edit; undo can only land on these.
     let mut states = vec![initial.to_owned()];
     for (op, d) in ops {
@@ -551,8 +653,8 @@ fn undo_all_then_redo_all(initial: &str, ops: &[(Op, u64)]) {
 /// recorded since the session began, minus branches abandoned by editing
 /// after an undo. Undo must move to an earlier entry of `line`; redo must
 /// return to exactly where its undo started; a new edit forgets the redo.
-fn interleaved(initial: &str, ops: &[(Op, u64)]) {
-    let mut s = Session::new(initial);
+fn interleaved<B: Backend>(initial: &str, ops: &[(Op, u64)]) {
+    let mut s = Session::<B>::new(initial);
     let mut line = vec![initial.to_owned()];
     let mut pos = 0;
     let mut redo_to: Vec<usize> = Vec::new();
@@ -633,8 +735,8 @@ fn interleaved(initial: &str, ops: &[(Op, u64)]) {
 /// edit and restores the text from before it; every redo returns the
 /// selections after the group's last edit; and undo-all takes exactly as
 /// many steps as the model has groups.
-fn grouping_matches_model(initial: &str, ops: &[(Op, u64)]) {
-    let mut s = Session::new(initial);
+fn grouping_matches_model<B: Backend>(initial: &str, ops: &[(Op, u64)]) {
+    let mut s = Session::<B>::new(initial);
     for (i, (op, d)) in ops.iter().enumerate() {
         let top = s.hist.top_id();
         match s.step(op, *d) {
@@ -673,8 +775,8 @@ fn grouping_matches_model(initial: &str, ops: &[(Op, u64)]) {
 /// Property 5: after `seal()` the saved `top_id` is left by any further
 /// edit, and undoing exactly the steps made since brings it back, along
 /// with the saved text.
-fn top_id_tracks_save_point(initial: &str, prefix: &[(Op, u64)], after: &[(Op, u64)]) {
-    let mut s = Session::new(initial);
+fn top_id_tracks_save_point<B: Backend>(initial: &str, prefix: &[(Op, u64)], after: &[(Op, u64)]) {
+    let mut s = Session::<B>::new(initial);
     for (op, d) in prefix {
         s.step(op, *d);
     }
@@ -724,7 +826,8 @@ proptest! {
         initial in text(12),
         ops in steps(edit_op(), 40),
     ) {
-        undo_all_then_redo_all(&initial, &ops);
+        undo_all_then_redo_all::<RopeBuffer>(&initial, &ops);
+        undo_all_then_redo_all::<MappedBuffer>(&initial, &ops);
     }
 
     #[test]
@@ -732,7 +835,8 @@ proptest! {
         initial in text(12),
         ops in steps(any_op(), 40),
     ) {
-        interleaved(&initial, &ops);
+        interleaved::<RopeBuffer>(&initial, &ops);
+        interleaved::<MappedBuffer>(&initial, &ops);
     }
 
     #[test]
@@ -740,7 +844,8 @@ proptest! {
         initial in text(12),
         ops in steps(any_op(), 40),
     ) {
-        grouping_matches_model(&initial, &ops);
+        grouping_matches_model::<RopeBuffer>(&initial, &ops);
+        grouping_matches_model::<MappedBuffer>(&initial, &ops);
     }
 
     #[test]
@@ -749,6 +854,7 @@ proptest! {
         prefix in steps(any_op(), 20),
         after in steps(edit_op(), 20),
     ) {
-        top_id_tracks_save_point(&initial, &prefix, &after);
+        top_id_tracks_save_point::<RopeBuffer>(&initial, &prefix, &after);
+        top_id_tracks_save_point::<MappedBuffer>(&initial, &prefix, &after);
     }
 }

@@ -1,9 +1,11 @@
 //! The text buffer interface every layer above `core` talks to.
 //!
-//! Two implementations exist or will: [`crate::rope::RopeBuffer`] for normal
-//! files (M2) and a memory-mapped piece table for huge files (M7). Both work
-//! in **byte offsets into UTF-8**, so cursors, undo, search and rendering
-//! never need to know which one they are using (DESIGN.md §4.1).
+//! Two implementations exist: [`crate::rope::RopeBuffer`] for normal files
+//! (M2) and [`crate::mapped::MappedBuffer`], a piece table over a
+//! memory-mapped file, for huge files (M7). [`crate::any::AnyBuffer`] holds
+//! either. All work in **byte offsets into UTF-8**, so cursors, undo, search
+//! and rendering never need to know which one they are using (DESIGN.md
+//! §4.1).
 //!
 //! Lines end at `\n` only. A `\r` directly before a `\n` belongs to the line
 //! ending, so [`Text::line`] never returns it; a lone `\r` is ordinary text.
@@ -18,6 +20,8 @@
 
 use std::borrow::Cow;
 use std::ops::Range;
+
+use crate::mapped::PieceRun;
 
 /// Stands in for each invalid byte in strings from [`Text::line`] and
 /// [`Text::slice`]: one byte for one byte, so offsets stay the same. The
@@ -145,6 +149,13 @@ pub enum Content {
     /// The bytes themselves. Always valid UTF-8 from typing and from an
     /// in-memory buffer; may hold invalid bytes from a mapped file.
     Bytes(Vec<u8>),
+    /// A run of a mapped document's pieces, standing for text that is still
+    /// in that document's storage: its original file and its add buffer.
+    /// Deleting 1 GB from a mapped file records this instead of copying the
+    /// gigabyte, and undo puts the same pieces back. Only a
+    /// [`crate::mapped::MappedBuffer`] sharing that storage can put it back;
+    /// other buffers refuse it with [`EditError::Unsupported`].
+    Pieces(PieceRun),
 }
 
 impl Content {
@@ -153,6 +164,7 @@ impl Content {
     pub fn len(&self) -> usize {
         match self {
             Self::Bytes(b) => b.len(),
+            Self::Pieces(run) => run.len(),
         }
     }
 
@@ -162,11 +174,14 @@ impl Content {
         self.len() == 0
     }
 
-    /// The bytes, when they are held directly.
+    /// The bytes, when they are held directly. `None` for
+    /// [`Content::Pieces`], whose bytes would have to be read (see
+    /// [`Content::read_into`]).
     #[must_use]
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Self::Bytes(b) => Some(b),
+            Self::Pieces(_) => None,
         }
     }
 
@@ -175,6 +190,25 @@ impl Content {
     pub fn has_newline(&self) -> bool {
         match self {
             Self::Bytes(b) => b.contains(&b'\n'),
+            Self::Pieces(run) => run.newlines() > 0,
+        }
+    }
+
+    /// Append the bytes to `out`, reading them from the mapped document's
+    /// storage for [`Content::Pieces`]. That can be a lot of bytes: a
+    /// `Pieces` run exists because the text was too long to copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from reading the file behind a mapped document;
+    /// bytes held directly never fail.
+    pub fn read_into(&self, out: &mut Vec<u8>) -> std::io::Result<()> {
+        match self {
+            Self::Bytes(b) => {
+                out.extend_from_slice(b);
+                Ok(())
+            }
+            Self::Pieces(run) => run.read_into(out),
         }
     }
 }
@@ -229,7 +263,7 @@ impl Edit {
     }
 }
 
-/// Why an edit was refused. Both are bugs in the caller, but returning them
+/// Why an edit was refused. Each is a bug in the caller, but returning them
 /// beats crashing with unsaved work in the buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditError {
@@ -245,9 +279,16 @@ pub enum EditError {
         /// The offending offset.
         offset: usize,
     },
-    /// The content cannot be put into this kind of buffer (bytes that are
-    /// not UTF-8 into an in-memory buffer).
+    /// The content cannot be put into this kind of buffer: bytes that are
+    /// not UTF-8 into an in-memory buffer, or [`Content::Pieces`] into any
+    /// buffer other than the mapped one whose storage they refer to.
     Unsupported,
+    /// In [`Buffer::replace_sorted`], item `index` starts before the item
+    /// in front of it ends: the items are out of order or overlap.
+    Unsorted {
+        /// The offending item's position in the list.
+        index: usize,
+    },
 }
 
 impl std::fmt::Display for EditError {
@@ -260,6 +301,12 @@ impl std::fmt::Display for EditError {
                 write!(f, "edit offset {offset} is inside a character")
             }
             EditError::Unsupported => write!(f, "this buffer cannot hold that text"),
+            EditError::Unsorted { index } => {
+                write!(
+                    f,
+                    "edit {index} overlaps or comes before the one ahead of it"
+                )
+            }
         }
     }
 }
@@ -307,10 +354,71 @@ pub trait Buffer: Text {
     fn is_fully_indexed(&self) -> bool {
         true
     }
+
+    /// Apply many replacements at once, such as Replace All. Each item pairs
+    /// a range with its new text. Ranges refer to the text **before any of
+    /// them** is applied, must be in order and must not overlap (an
+    /// insertion may touch its neighbours: `2..2` after `0..2` is fine).
+    ///
+    /// The returned edits are in the order they were applied, which is from
+    /// the last item to the first: applying from the end leaves the earlier
+    /// offsets valid, so every edit's `start` is its item's `range.start`.
+    /// [`crate::History::record_group`] takes them as they are.
+    ///
+    /// All items are checked before any is applied, so on error the buffer
+    /// is unchanged. The default applies them one by one with
+    /// [`Buffer::replace`]; a mapped buffer overrides it to rebuild its piece
+    /// list once instead of once per item.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EditError::Unsorted`] for items out of order or
+    /// overlapping, and the [`Buffer::replace`] errors for a bad range.
+    fn replace_sorted(&mut self, items: &[(Range<usize>, &str)]) -> Result<Vec<Edit>, EditError> {
+        check_sorted(self, items)?;
+        let mut edits: Vec<Edit> = Vec::with_capacity(items.len());
+        for (range, text) in items.iter().rev() {
+            match self.replace(range.clone(), text) {
+                Ok(edit) => edits.push(edit),
+                Err(e) => {
+                    // Unreachable after the checks above, but if a backend
+                    // disagrees, put back what was done so the buffer is
+                    // as it was, as promised.
+                    for done in edits.iter().rev() {
+                        if self.put(done.new_range(), &done.removed).is_err() {
+                            break;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(edits)
+    }
+}
+
+/// Check that `items` suit [`Buffer::replace_sorted`]: every range valid for
+/// `text`, and each starting at or after the end of the one before.
+pub(crate) fn check_sorted<T: Text + ?Sized>(
+    text: &T,
+    items: &[(Range<usize>, &str)],
+) -> Result<(), EditError> {
+    let mut prev_end = 0;
+    for (index, (range, _)) in items.iter().enumerate() {
+        check_range(text, range)?;
+        if range.start < prev_end {
+            return Err(EditError::Unsorted { index });
+        }
+        prev_end = range.end;
+    }
+    Ok(())
 }
 
 /// Check that `range` is a valid edit range for `text`.
-pub(crate) fn check_range(text: &dyn Text, range: &Range<usize>) -> Result<(), EditError> {
+pub(crate) fn check_range<T: Text + ?Sized>(
+    text: &T,
+    range: &Range<usize>,
+) -> Result<(), EditError> {
     let len = text.len_bytes();
     if range.start > range.end || range.end > len {
         return Err(EditError::OutOfBounds {
