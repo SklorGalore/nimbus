@@ -44,7 +44,8 @@ release builds for all three platforms.
 - [ ] Manual QA checklist run on Linux (Wayland and X11) and Windows,
       results recorded.
 - [ ] A tag push builds release artifacts in GitHub Actions: a macOS `.app`
-      in a zip, a Linux tarball, a Windows zip.
+      in a zip, a Linux tarball, a Windows zip. Workflow, bundle script
+      (tested locally) and icon are in; **owner**: push a tag to run it.
 
 ## Scope
 
