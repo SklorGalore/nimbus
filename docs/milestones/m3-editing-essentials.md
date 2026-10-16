@@ -1,6 +1,6 @@
 # M3 — Editing essentials
 
-**Status: next**
+**Status: built on branch `m3-wip` (draft PR #1); owner checks pending** (2026-10-16)
 
 ## Goal
 
@@ -9,30 +9,39 @@ clipboard, undo, find and replace, soft wrap and indentation helpers.
 
 ## Done when
 
-- [ ] Shift plus any movement extends the selection; selections render as
-      rects behind the text.
-- [ ] Mouse drag selects; double-click selects a word; triple-click selects
-      a line; dragging after a double-click extends by words.
-- [ ] `Primary+A` selects all.
-- [ ] Word movement: `Alt+Left/Right` on macOS, `Ctrl+Left/Right` elsewhere,
-      stopping at word boundaries from `unicode-segmentation`.
-- [ ] `Primary+X/C/V` cut, copy and paste through the system clipboard.
-      Pasting CRLF text into an LF file converts it.
-- [ ] `Primary+Z` undoes and `Primary+Shift+Z` (and `Ctrl+Y` on Windows and
-      Linux) redoes. Typing a word undoes as one step; cursor position and
-      selection are restored on undo.
-- [ ] Find bar: incremental search as you type, match count, next and
-      previous with Enter and Shift+Enter, regex and case toggles, Escape to
-      close. All visible matches are highlighted.
-- [ ] Replace: replace one, replace all (as one undo step).
-- [ ] Search in a 100 MB file does not freeze typing; results stream in.
-- [ ] Soft wrap toggles (`Alt+Z`); wrapped lines break at word boundaries
-      and the cursor moves by visual row with up and down.
-- [ ] Enter copies the current line's leading whitespace. Tab with a
-      multi-line selection indents those lines; Shift+Tab dedents.
-- [ ] Home toggles between the first non-blank character and column 0.
-- [ ] A minimal message line at the bottom of the window shows transient
-      messages (save errors, "no matches").
+Ticked items were verified here: by unit or property tests, or by headless
+renders (`--headless`, since the screen was locked overnight). **Owner**
+items need a person at the keyboard; each lists what to try.
+
+- [x] Shift plus any movement extends the selection; selections render behind
+      the text, including the line break as one extra cell.
+- [ ] **Owner:** mouse drag selects; double-click selects a word, triple-click
+      a line, and dragging after them extends by words or lines; Shift+click
+      extends the selection. Logic is unit-tested; needs real clicks.
+- [x] Primary+A selects all.
+- [x] Word movement (Option+arrows on macOS, Ctrl+arrows elsewhere) stops at
+      code-style word boundaries: `.` and `(` split words.
+- [ ] **Owner:** Primary+X/C/V with the system clipboard; pasting CRLF text
+      into an LF file converts it (conversion is unit-tested).
+- [x] Undo restores text and cursor; a typed word is one step; redo works;
+      Ctrl+Y redoes off macOS. Two property suites cover undo.
+- [x] Find bar: incremental search, match count, Enter/Shift+Enter, regex
+      and case toggles (Option+R, Option+C), Escape, all visible matches
+      highlighted, the current one brighter (headless render).
+- [ ] **Owner:** use the find bar by keyboard: Primary+F, type, Enter and
+      Shift+Enter, Tab to the replace field (Cmd+Option+F opens it), Enter
+      to replace one, Primary+Enter to replace all, then undo it in one step.
+- [x] Search in a 100 MB file runs on a background thread and streams
+      results; typing stays at one display refresh per key.
+- [x] Soft wrap toggles with Option+Z; rows break at word boundaries, and up
+      and down move by visual row (headless render plus tests).
+- [ ] **Owner:** Option+Z in a real window, then resize the window with wrap
+      on: the top line should stay put and text should rewrap.
+- [x] Enter keeps the indentation; Tab and Shift+Tab indent and outdent
+      selected lines as one step; Shift+Tab on one line keeps the cursor.
+- [x] Home toggles between the first non-blank character and column 0.
+- [x] A message line shows short notes ("Saved", "Replaced 3 matches",
+      "Soft wrap on") and hides itself after 4 s.
 
 ## Scope
 
@@ -108,4 +117,69 @@ startup.
 
 ## Results
 
-_Fill in when done._
+| Metric | Value |
+|---|---|
+| Tests | 148 passing, plus 1 opt-in benchmark |
+| Wrapping a 1 MB line (cache miss / hit) | about 20 ms / 0.2 ms |
+| Background search of the 100 MB file | 157k matches before the first frame |
+| Typing in the find field on the 100 MB file | one display refresh per key |
+| CI on the branch | green on macOS, Linux and Windows (first push) |
+
+**Design changes** (logged in `DESIGN.md`):
+
+- Wrap lives in `nimbus_core::wrap`, not the renderer, because cursor
+  movement by visual row needs it. The renderer was unchanged: it already
+  shapes a slice of a line with tab stops measured from the line start.
+- The view works in visual rows everywhere; with wrap off each line is one
+  row, so one code path serves both modes. The scroll anchor stores the
+  byte where the top row starts, so a resize keeps the same text at the top.
+- A cursor exactly at a row break shows at the start of the next row. Home
+  and End stay logical-line based.
+- The renderer draws in clipped layers (text area, then overlays), so the
+  find bar and message line cover the text beneath them.
+- Find fields are small `Document`s, reusing movement, selection, undo and
+  the clipboard.
+- Re-searching after edits waits for a 150 ms pause; stale highlights are
+  hidden meanwhile.
+- `--headless WxH --screenshot FILE` renders without a window into an
+  off-screen texture, so rendering can be checked with the screen locked.
+  This brings forward the core of M8's screenshot test.
+- `--smoke` and `--screenshot` give up after 10 s without a first frame,
+  instead of hanging when the screen is locked.
+- `--find PATTERN` and `--wrap` exist for testing until the config file and
+  command palette arrive in M4.
+
+**Surprises**
+
+- With the screen locked, macOS reports windows as hidden, so on-screen
+  captures hang. That led to `--headless` and the 10 s limit.
+- The Unicode word rules treat `bar.baz` as one word, which suits prose but
+  not code, so word movement uses code-style character classes. Soft wrap
+  still uses the Unicode rules plus a rule against breaking before closing
+  punctuation.
+
+**End-of-milestone review** (code-review skill, high) found ten issues, all
+fixed:
+
+- Overlapping matches across search chunks, which made replace-all delete
+  text, and chunks cut mid-line near the end of a file.
+- Option+C and Option+R could no longer type ç and ®.
+- Shift+click then drag used the wrong anchor.
+- Incremental search on large files jumped to the top of the file.
+- Replace-one on large files needed two presses.
+- Shift+Tab on one line moved the cursor to the line start.
+- Regex replacements were computed without surrounding context.
+- A match ending in a line break highlighted the next line's first cell.
+- The document was re-searched on every keystroke while the find bar was
+  open.
+
+**Known limitations**
+
+- Typing inside a wrapped line near 1 MB costs about 20 ms per keystroke,
+  two or three refreshes. The fix, if needed, is lazy prefix wrapping.
+- Option+Z on macOS toggles wrap, so it no longer types Ω. M4's keymap makes
+  this rebindable.
+- A second stacked combining mark still hangs one cell right; CJK and emoji
+  draw as boxes until M8 font fallback.
+- Typing latency, IME and the click/drag behaviours were not measured or
+  exercised this milestone, because the screen was locked overnight.

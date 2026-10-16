@@ -284,14 +284,35 @@ impl FindBar {
         self.current.and_then(|i| self.matches.get(i).cloned())
     }
 
-    /// The replacement for the text `matched`: capture groups like `$1`
-    /// expand in regex mode; the replacement is literal otherwise.
+    /// The replacement for the match at `range` in `doc`: capture groups
+    /// like `$1` expand in regex mode; the replacement is literal otherwise.
+    ///
+    /// The regex runs again on the match *with the text around it*, so
+    /// assertions such as `\b`, `\B`, `^` and `$` see what they saw during
+    /// the search. Run on the bare match they could fail and leave the
+    /// match unreplaced.
     #[must_use]
-    pub fn replacement_for(&self, matched: &str) -> String {
+    pub fn replacement_for(&self, doc: &Document, range: Range<usize>) -> String {
+        const CONTEXT: usize = 256;
         let rep = field_text(&self.replace);
-        match (&self.compiled, self.regex) {
-            (Some(re), true) => re.replace(matched, rep.as_str()).into_owned(),
-            _ => rep,
+        let (Some(re), true) = (&self.compiled, self.regex) else {
+            return rep;
+        };
+        let mut ctx_start = range.start.saturating_sub(CONTEXT);
+        while !doc.buffer.is_char_boundary(ctx_start) {
+            ctx_start -= 1;
+        }
+        let ctx_end = (range.end + CONTEXT).min(doc.buffer.len_bytes());
+        let window = doc.buffer.slice(ctx_start..ctx_end);
+        let at = range.start - ctx_start;
+        match re.captures_at(&window, at) {
+            Some(caps) if caps.get(0).map(|m| m.range()) == Some(at..at + range.len()) => {
+                let mut out = String::new();
+                caps.expand(&rep, &mut out);
+                out
+            }
+            // The text changed under the match; leave it as it is.
+            _ => doc.buffer.slice(range).into_owned(),
         }
     }
 
@@ -354,9 +375,20 @@ mod tests {
         bar.regex = true;
         let _ = bar.replace.insert("$2=$1");
         bar.search(&doc, |_| true);
-        assert_eq!(bar.replacement_for("key=value"), "value=key");
+        assert_eq!(bar.replacement_for(&doc, 0..9), "value=key");
         bar.regex = false;
-        assert_eq!(bar.replacement_for("key=value"), "$2=$1", "literal mode");
+        assert_eq!(bar.replacement_for(&doc, 0..9), "$2=$1", "literal mode");
+    }
+
+    #[test]
+    fn regex_replacement_sees_the_surrounding_text() {
+        let doc = Document::from_text("foobaz");
+        let mut bar = bar_with(r"foo\B");
+        bar.regex = true;
+        let _ = bar.replace.insert("bar");
+        bar.search(&doc, |_| true);
+        assert_eq!(bar.matches, vec![0..3]);
+        assert_eq!(bar.replacement_for(&doc, 0..3), "bar");
     }
 
     #[test]

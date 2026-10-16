@@ -108,6 +108,11 @@ pub fn find_all(
     let len = text.len_bytes();
     let mut start = 0;
     let mut batch = Vec::new();
+    // End of the last match kept. A match that ran past a chunk boundary
+    // ends inside the next chunk; anything found there that starts before
+    // this point would overlap it, and replacing overlapping ranges would
+    // corrupt the text.
+    let mut kept_end = 0;
     while start < len || (start == 0 && len == 0) {
         if !keep_going() {
             return false;
@@ -121,10 +126,14 @@ pub fn find_all(
             if s >= end && end < len {
                 break; // starts in the overlap: the next chunk reports it
             }
+            if s < kept_end {
+                continue;
+            }
             if m.start() == m.end() && s == len && len > 0 && !batch.is_empty() {
                 continue;
             }
-            batch.push(s..start + m.end());
+            kept_end = start + m.end();
+            batch.push(s..kept_end);
         }
         if !found(&batch) {
             return false;
@@ -145,17 +154,12 @@ fn chunk_end(text: &dyn Text, start: usize) -> usize {
     if target >= len {
         return len;
     }
+    // Chunks end at a line start, so patterns anchored with ^ or \b never
+    // see a false start. The last line just makes the last chunk a little
+    // longer. Lines are at most 1 MB (`MAX_LINE_BYTES` in the app), so a
+    // chunk is at most about twice `CHUNK`.
     let line = text.byte_to_line(target);
-    let next = text.line_to_byte(line + 1);
-    // A single line longer than a chunk: cut at a character boundary.
-    if next >= len || next <= start {
-        let mut cut = target;
-        while !text.is_char_boundary(cut) {
-            cut += 1;
-        }
-        return cut.min(len);
-    }
-    next
+    text.line_to_byte(line + 1).min(len)
 }
 
 /// Index of the first match at or after `pos`, wrapping to the first match.
@@ -265,6 +269,33 @@ mod tests {
         };
         let re = q.compile().unwrap().unwrap();
         assert_eq!(all(&text, &q).len(), re.find_iter(&text).count());
+    }
+
+    #[test]
+    fn matches_never_overlap_across_chunk_boundaries() {
+        // Every line is "foo" then an indented "bar"; `\s+` matches the
+        // line break plus indentation, which straddles chunk boundaries.
+        let text = "foo\n    bar\n".repeat(CHUNK / 6);
+        let q = Query {
+            pattern: r"\s+".into(),
+            regex: true,
+            ..Query::default()
+        };
+        let found = all(&text, &q);
+        for pair in found.windows(2) {
+            assert!(pair[0].end <= pair[1].start, "{pair:?} overlap");
+        }
+        let re = q.compile().unwrap().unwrap();
+        assert_eq!(found.len(), re.find_iter(&text).count());
+    }
+
+    #[test]
+    fn chunks_end_at_line_starts() {
+        let text = "x".repeat(10) + "\n" + &"y".repeat(CHUNK) + "\nzz";
+        let t = RopeBuffer::from_text(&text);
+        let end = chunk_end(&t, 0);
+        assert_eq!(end, text.len() - 2, "the line after the 1 MB target");
+        assert_eq!(chunk_end(&t, end), text.len());
     }
 
     #[test]

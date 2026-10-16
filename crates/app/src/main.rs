@@ -51,6 +51,9 @@ struct Message {
     until: Instant,
 }
 
+/// Pause in typing after which the find bar searches the edited text again.
+const RESEARCH_DELAY: Duration = Duration::from_millis(150);
+
 /// How long `--smoke` and `--screenshot` wait for a first frame.
 const UNATTENDED_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -360,6 +363,9 @@ struct App {
     find_pending_jump: bool,
     message: Option<Message>,
     proxy: EventLoopProxy<AppEvent>,
+    /// Search again at this time: edits happened while the find bar was
+    /// open.
+    research_at: Option<Instant>,
 }
 
 /// Multi-click detection and drag state. winit reports presses, not
@@ -425,6 +431,7 @@ impl App {
             find_pending_jump: false,
             message: None,
             proxy,
+            research_at: None,
         }
     }
 
@@ -534,7 +541,15 @@ impl App {
                 self.open_find(cmd == Command::Replace);
                 Ok(())
             }
-            Command::ToggleCase | Command::ToggleRegex | Command::ReplaceAll => {
+            Command::ToggleCase(text) | Command::ToggleRegex(text) if !self.find.open => {
+                // Option+C and Option+R type characters on macOS.
+                if text.is_empty() {
+                    Ok(())
+                } else {
+                    self.doc.insert(text).map(drop)
+                }
+            }
+            Command::ToggleCase(_) | Command::ToggleRegex(_) | Command::ReplaceAll => {
                 if self.find.open {
                     self.run_find(cmd);
                 }
@@ -562,9 +577,10 @@ impl App {
             // A bug, not a user error; the document is unchanged.
             log::error!("edit refused: {e}");
         }
-        // Edits invalidate search results; search again, without jumping.
+        // Edits invalidate search results. Search again once typing pauses,
+        // not on every keystroke; until then stale highlights are hidden.
         if self.find.open && self.doc.version != self.find.version {
-            self.search(false);
+            self.research_at = Some(Instant::now() + RESEARCH_DELAY);
         }
         // Saving changes only the title, so it must not pull the view back
         // to the cursor.
@@ -635,11 +651,11 @@ impl App {
                 self.jump_to_match(from, backwards);
             }
             Command::ReplaceAll => self.replace_all(),
-            Command::ToggleCase => {
+            Command::ToggleCase(_) => {
                 self.find.case_sensitive = !self.find.case_sensitive;
                 self.search(true);
             }
-            Command::ToggleRegex => {
+            Command::ToggleRegex(_) => {
                 self.find.regex = !self.find.regex;
                 self.search(true);
             }
@@ -669,13 +685,16 @@ impl App {
         let sel = self.doc.selection().range();
         let is_match = self.find.current.and_then(|i| self.find.matches.get(i)) == Some(&sel);
         if is_match && !sel.is_empty() {
-            let matched = self.doc.buffer.slice(sel.clone()).into_owned();
-            let replacement = self.find.replacement_for(&matched);
+            let replacement = self.find.replacement_for(&self.doc, sel.clone());
             if let Err(e) = self.doc.replace(sel, &replacement) {
                 log::error!("replace refused: {e}");
             }
             self.doc.history.seal();
-            self.search(false);
+            // Search the changed text, then go to the next match after the
+            // replacement; on large files that waits for the results.
+            self.find_origin = self.doc.cursor();
+            self.search(true);
+            return;
         }
         let from = self.doc.cursor();
         self.jump_to_match(from, false);
@@ -692,10 +711,7 @@ impl App {
             .find
             .matches
             .iter()
-            .map(|r| {
-                let matched = self.doc.buffer.slice(r.clone());
-                (r.clone(), self.find.replacement_for(&matched))
-            })
+            .map(|r| (r.clone(), self.find.replacement_for(&self.doc, r.clone())))
             .collect();
         match self.doc.replace_many(&items) {
             Ok(n) => {
@@ -784,11 +800,10 @@ impl App {
         match count {
             1 => {
                 self.doc.click(pos, self.modifiers.shift_key());
-                let head = self.doc.cursor();
-                self.clicks.anchor = self.doc.selection().anchor..head;
-                if !self.modifiers.shift_key() {
-                    self.clicks.anchor = head..head;
-                }
+                // Dragging extends from the selection's anchor: the old one
+                // after a Shift+click, the clicked point otherwise.
+                let anchor = self.doc.selection().anchor;
+                self.clicks.anchor = anchor..anchor;
             }
             2 => {
                 let word = nimbus_core::movement::word_at(t, pos);
@@ -1079,7 +1094,12 @@ fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
         &Decorations {
             cursor_visible: scene.cursor_visible && !find.focused,
             preedit: scene.preedit,
-            matches: if find.open { &find.matches } else { &[] },
+            // Hide highlights from before an edit until the search reruns.
+            matches: if find.open && find.version == scene.doc.version {
+                &find.matches
+            } else {
+                &[]
+            },
             current,
         },
     );
@@ -1192,9 +1212,14 @@ impl ApplicationHandler<AppEvent> for App {
                 if !self.find.receive(batch) {
                     return;
                 }
-                if self.find_pending_jump && !self.find.matches.is_empty() {
+                // Jump once a match at or after the origin has arrived, or
+                // when the search is complete (then it wraps to the first).
+                let origin = self.find_origin;
+                let reached = self.find.matches.last().is_some_and(|m| m.start >= origin);
+                let done = self.find.complete && !self.find.matches.is_empty();
+                if self.find_pending_jump && (reached || done) {
                     self.find_pending_jump = false;
-                    self.jump_to_match(self.find_origin, false);
+                    self.jump_to_match(origin, false);
                 }
                 self.changed(false);
             }
@@ -1282,6 +1307,13 @@ impl ApplicationHandler<AppEvent> for App {
         let now = Instant::now();
         let blink_changed = self.blink.tick(now);
         let retry_due = self.hidden_retry.is_some_and(|(at, _)| now >= at);
+        if self.research_at.is_some_and(|t| now >= t) {
+            self.research_at = None;
+            if self.find.open {
+                self.search(false);
+                self.changed(false);
+            }
+        }
         let message_expired = self.message.as_ref().is_some_and(|m| now >= m.until);
         if message_expired {
             self.message = None;
@@ -1315,6 +1347,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.blink.next,
             self.hidden_retry.map(|(at, _)| at),
             self.message.as_ref().map(|m| m.until),
+            self.research_at,
             (unattended && self.frames == 0).then_some(deadline),
         ]
         .into_iter()

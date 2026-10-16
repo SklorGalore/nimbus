@@ -70,10 +70,12 @@ pub enum Command<'a> {
     Replace,
     /// Toggle soft wrap.
     ToggleWrap,
-    /// Find bar: toggle case-sensitive matching.
-    ToggleCase,
-    /// Find bar: toggle regular-expression matching.
-    ToggleRegex,
+    /// Find bar: toggle case-sensitive matching. Carries the text the key
+    /// would type (Option+C is "ç" on macOS), typed instead when the find
+    /// bar is closed.
+    ToggleCase(&'a str),
+    /// Find bar: toggle regular-expression matching; carries text likewise.
+    ToggleRegex(&'a str),
     /// Find bar: replace every match.
     ReplaceAll,
     /// Close the find bar, or collapse the selection.
@@ -210,8 +212,8 @@ pub fn map_key(k: KeyPress<'_>) -> Option<Command<'_>> {
     if k.mods.alt_key() && !primary && !altgr && !k.repeat {
         let cmd = match k.physical {
             PhysicalKey::Code(KeyCode::KeyZ) => Some(Command::ToggleWrap),
-            PhysicalKey::Code(KeyCode::KeyC) => Some(Command::ToggleCase),
-            PhysicalKey::Code(KeyCode::KeyR) => Some(Command::ToggleRegex),
+            PhysicalKey::Code(KeyCode::KeyC) => Some(Command::ToggleCase(k.text.unwrap_or(""))),
+            PhysicalKey::Code(KeyCode::KeyR) => Some(Command::ToggleRegex(k.text.unwrap_or(""))),
             _ => None,
         };
         if cmd.is_some() {
@@ -335,7 +337,7 @@ mod tests {
             physical: PhysicalKey::Code(KeyCode::KeyC),
             ..press(&c, Some("ç"), ModifiersState::ALT)
         };
-        assert_eq!(map_key(k), Some(Command::ToggleCase));
+        assert_eq!(map_key(k), Some(Command::ToggleCase("ç")));
         let enter = Key::Named(NamedKey::Enter);
         assert_eq!(
             map_key(press(&enter, Some("\r"), primary())),

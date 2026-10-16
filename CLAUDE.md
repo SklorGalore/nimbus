@@ -19,11 +19,16 @@ cargo run -- --screenshot /tmp/frame.bmp                    # save the first fra
 NIMBUS_SCALE=1 cargo run -- --screenshot /tmp/1x.bmp         # debug builds: render at another scale factor
 ./target/release/nimbus FILE --bench-typing 300            # type 300 chars through the edit path; prints latency percentiles
 bench/gen.sh                                                # 10 MB / 100 MB test files in bench/out (also: logs, longline)
+cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp   # render with no window (works with the screen locked)
+cargo run -- FILE --wrap --find PATTERN                     # start with soft wrap on and the find bar searching
+cargo test --release -p nimbus-core -- --ignored --nocapture # opt-in benchmarks (e.g. wrapping a 1 MB line)
 cargo test --workspace
 cargo test -p nimbus-core <test_name>    # single test in one crate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets   # strict lints from Cargo.toml; CI fails on any warning
 ```
+
+On-screen `--smoke` and `--screenshot` need an unlocked screen with the window visible; they give up after 10 s otherwise. Prefer `--headless` for unattended rendering checks. Don't launch windowed test runs while the owner may be using the machine without saying so: windows appear on their screen and their input skews measurements.
 
 Logging uses `env_logger`, defaulting to `nimbus=info`; override with `RUST_LOG`. wgpu reads `WGPU_BACKEND` and related env vars because the instance is built with `new_without_display_handle_from_env`.
 

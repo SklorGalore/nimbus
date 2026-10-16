@@ -613,10 +613,18 @@ impl Painter<'_, '_> {
             if m.start > end || (!row.last_row && m.start >= end) {
                 break;
             }
+            if m.end <= start && m.start < start {
+                // Ended with the previous line's break: nothing on this row.
+                next += 1;
+                continue;
+            }
             let x0 = row.x_of(m.start.max(start), cell, self.tab_width);
-            let x1 = row
-                .x_of(m.end.min(end), cell, self.tab_width)
-                .max(x0 + cell);
+            // A match including the line break shows one cell for it, as a
+            // selection does.
+            let past_end = row.last_row && row.has_break && m.end > end;
+            let x1 =
+                row.x_of(m.end.min(end), cell, self.tab_width) + if past_end { cell } else { 0.0 };
+            let x1 = x1.max(x0 + cell);
             let color = if self.deco.current.as_ref() == Some(m) {
                 CURRENT_MATCH_COLOR
             } else {

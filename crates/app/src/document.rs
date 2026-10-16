@@ -471,9 +471,21 @@ impl Document {
         if ranges.is_empty() {
             return Ok(());
         }
+        let before = self.selection();
         self.replace_many(&ranges)?;
         if lines.len() > 1 {
             self.select_lines(lines);
+        } else if let Some((removed, _)) = ranges.first() {
+            // One line: keep the cursor (or selection) where it was in the
+            // text, shifted left by the indentation removed before it.
+            let shift = |p: usize| {
+                if p >= removed.end {
+                    p - removed.len()
+                } else {
+                    p.min(removed.start)
+                }
+            };
+            self.select_span(shift(before.anchor), shift(before.head));
         }
         Ok(())
     }

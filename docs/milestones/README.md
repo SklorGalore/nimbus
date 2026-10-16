@@ -30,7 +30,7 @@ repeated in each file:
 | 0 | [Scaffold](m0-scaffold.md) | Done |
 | 1 | [Text on screen](m1-text-on-screen.md) | Done |
 | 2 | [Editable](m2-editable.md) | Done |
-| 3 | [Editing essentials](m3-editing-essentials.md) | Next |
+| 3 | [Editing essentials](m3-editing-essentials.md) | Built on `m3-wip`, owner checks pending |
 | 4 | [Many files](m4-many-files.md) | Planned |
 | 5 | [Highlighting](m5-highlighting.md) | Planned |
 | 6 | [File tree](m6-file-tree.md) | Planned |
