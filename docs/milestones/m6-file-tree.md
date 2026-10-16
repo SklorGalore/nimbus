@@ -143,6 +143,15 @@ also prepares for split views later.
   stamp is now taken before reading, and from the file handle on save.
 - On macOS, adding a watch restarts the event stream, so watching waits
   until after the first frame.
+- **A freeze closing the app on Windows** (owner testing). Every call into
+  `notify` that changes the watched folders could block the caller. On
+  macOS it waits for its event loop to go idle, which never happens while
+  a build writes under a watched folder (macOS watches are recursive
+  underneath). On Windows each watch waits for an acknowledgement from
+  `notify`'s thread, which can itself wait indefinitely when a watch is
+  removed, as happens when a tab closes. The OS watcher now lives on its
+  own thread; the main thread only sends it the folders to watch, in one
+  batch, and never waits for it, at exit included.
 - A file edit script truncated `app.rs` once during the work; it was
   restored from the last commit and the edits redone. Nothing committed
   was affected.

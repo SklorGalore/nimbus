@@ -56,6 +56,8 @@ pub enum AppEvent {
     Listing(ListRequest, Result<Vec<Entry>, String>),
     /// Files or folders changed on disk.
     Disk(Vec<Change>),
+    /// The file watcher could not watch everything asked of it.
+    WatchWarning(String),
 }
 
 /// List a folder for the sidebar on its own thread.
@@ -352,6 +354,7 @@ impl App {
         let (theme, theme_warnings) = Theme::load(&config.theme);
         let ui_state = State::load();
         let disk_proxy = proxy.clone();
+        let warn_proxy = proxy.clone();
         let sidebar = Sidebar::new(
             io::canonical(&root),
             ui_state.sidebar_visible,
@@ -413,9 +416,14 @@ impl App {
             pending_action: None,
             last_menu: None,
             sidebar,
-            watch: Watch::new(move |paths| {
-                let _ = disk_proxy.send_event(AppEvent::Disk(paths));
-            }),
+            watch: Watch::new(
+                move |changes| {
+                    let _ = disk_proxy.send_event(AppEvent::Disk(changes));
+                },
+                move |warning| {
+                    let _ = warn_proxy.send_event(AppEvent::WatchWarning(warning));
+                },
+            ),
             ui_state,
             resize_cursor: false,
             watching: false,
@@ -760,9 +768,7 @@ impl App {
                 wanted.insert(parent.to_path_buf());
             }
         }
-        if let Some(warning) = self.watch.sync(&wanted) {
-            self.say(warning, true);
-        }
+        self.watch.sync(&wanted);
     }
 
     /// Paths changed on disk: list affected sidebar folders again, and
@@ -2157,6 +2163,10 @@ impl ApplicationHandler<AppEvent> for App {
                 self.changed(false);
             }
             AppEvent::Disk(paths) => self.disk_changed(&paths),
+            AppEvent::WatchWarning(warning) => {
+                self.say(warning, true);
+                self.changed(false);
+            }
             AppEvent::Search(batch) => {
                 if !self.find.receive(batch) {
                     return;

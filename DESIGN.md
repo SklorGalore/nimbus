@@ -325,7 +325,10 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
   the sidebar and the folders of open files, each non-recursively. A
   recursive watch would register every folder of a large repository up front
   on Linux (startup time, and the system's watch limit). Events are
-  debounced for 100 ms. Watching starts after the first frame.
+  debounced for 100 ms. Watching starts after the first frame. The OS
+  watcher lives on its own thread, which the main thread only sends the
+  set of folders to watch: changing watches can block inside `notify` on
+  macOS and Windows, and must never block the window.
 - **External changes**: an open file that changed on disk reloads if it has
   no unsaved edits, keeping the cursor's line and column; the reload clears
   undo. With unsaved edits, the tab says "changed on disk" and the message
@@ -520,4 +523,5 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Watch sidebar folders and open files' folders, non-recursively | §4.4 |
 | 2026-10-16 | Window state in `state.toml`; the config file is never written | §4.4 |
 | 2026-10-16 | Reloading a file changed on disk clears its undo history | §4.4 |
+| 2026-10-16 | The file watcher runs on its own thread; the main thread never calls `notify` | §4.4 |
 | 2026-10-16 | Compare and merge (two- and three-way) added as milestone 9, after Polish, held to the editor's budgets | §4.4, §8 |
