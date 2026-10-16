@@ -545,3 +545,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Compare and merge (two- and three-way) added as milestone 9, after Polish, held to the editor's budgets | §4.4, §8 |
 | 2026-10-16 | Replace All and its undo and redo apply in one pass (`replace_sorted`, `put_sorted`) | §4.1 |
 | 2026-10-16 | Files that are not UTF-8 and under the threshold are held in memory, not mapped | §4.1 |
+| 2026-10-16 | Truncation of a dirty mapped file (SIGBUS on macOS and Linux; blocked writers on Windows) accepted as a documented limitation | §4.1, m7 |

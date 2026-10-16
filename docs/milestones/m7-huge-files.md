@@ -316,13 +316,18 @@ truncated, is below.
 
 **Known limitations**
 
-- **A mapped file with unsaved edits that another program truncates** can
-  crash Nimbus on macOS and Linux the next time a lost page is drawn
+- **macOS and Linux: a mapped file with unsaved edits that another
+  program truncates** can crash Nimbus the next time a lost page is drawn
   (`SIGBUS`), and its edits cannot be saved, since the bytes they sit
-  between are gone. Clean documents re-map at once and the watcher warns
-  about dirty ones, but there is a window of up to 100 ms. Windows refuses
-  such a truncation. The fix is to map zero pages over the lost range when
-  the watcher notices, which is new `unsafe` code; not done in M7.
+  between are gone. Only files of 256 MB and more are mapped; clean
+  documents re-map at once and the watcher warns about dirty ones, but
+  there is a window of up to 100 ms. Accepted by the owner as a limitation
+  (2026-10-16). A possible fix, if it ever bites: map zero pages over the
+  lost range when the watcher notices (new `unsafe` code).
+- **Windows** cannot crash this way: it refuses to truncate a mapped file,
+  and very likely to rename another file over it, so while Nimbus has a
+  huge file open, another program trying either gets an error. Appending
+  works. Closing the tab or reloading releases the file. Accepted as is.
 - Undo history is cleared when a mapped document is saved.
 - Columns on lines over 64 KB are approximate outside ASCII (exact within
   4 KB blocks).
