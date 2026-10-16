@@ -51,6 +51,9 @@ struct Message {
     until: Instant,
 }
 
+/// How long `--smoke` and `--screenshot` wait for a first frame.
+const UNATTENDED_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// How long a message stays on screen.
 const MESSAGE_TIME: Duration = Duration::from_secs(4);
 
@@ -80,6 +83,11 @@ struct Options {
     bench_typing: usize,
     /// Open with the find bar searching for this pattern.
     find: Option<String>,
+    /// Start with soft wrap on (config arrives in M4).
+    wrap: bool,
+    /// Render without a window at this size in physical pixels (with
+    /// `--screenshot`), for checks while the screen is locked.
+    headless: Option<(u32, u32)>,
 }
 
 /// Write a line to stdout. Command-line output such as `--version` and the
@@ -128,6 +136,8 @@ fn parse_options() -> Options {
     let mut file = None;
     let mut bench_typing = 0;
     let mut find = None;
+    let mut wrap = false;
+    let mut headless = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -148,6 +158,19 @@ fn parse_options() -> Options {
                         std::process::exit(2);
                     });
             }
+            Some("--wrap") => wrap = true,
+            Some("--headless") => {
+                let size = args.next().and_then(|a| {
+                    let a = a.into_string().ok()?;
+                    let (w, h) = a.split_once('x')?;
+                    Some((w.parse().ok()?, h.parse().ok()?))
+                });
+                let Some(size) = size else {
+                    print_err("nimbus: --headless needs a size like 1600x1000");
+                    std::process::exit(2);
+                };
+                headless = Some(size);
+            }
             Some("--find") => {
                 let Some(pattern) = args.next().and_then(|p| p.into_string().ok()) else {
                     print_err("nimbus: --find needs a pattern");
@@ -161,7 +184,7 @@ fn parse_options() -> Options {
             }
             Some("--help" | "-h") => {
                 print_out(
-                    "usage: nimbus [FILE] [--find PATTERN] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
+                    "usage: nimbus [FILE] [--find PATTERN] [--wrap] [--headless WxH] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
                 );
                 std::process::exit(0);
             }
@@ -182,6 +205,8 @@ fn parse_options() -> Options {
         file,
         bench_typing,
         find,
+        wrap,
+        headless,
     }
 }
 
@@ -406,18 +431,14 @@ impl App {
     /// Geometry for the current window, if it exists.
     fn layout(&self) -> Option<Layout> {
         let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
-        let (w, h) = gpu.size();
         let scale = to_f32(effective_scale(window.scale_factor()));
-        let bar_rows = match (self.find.open, self.find.replace_mode) {
-            (false, _) => 0,
-            (true, false) => 1,
-            (true, true) => 2,
-        };
-        let message_rows = usize::from(self.message.is_some());
-        Some(
-            Layout::new(gpu.metrics(), w, h, scale, self.doc.buffer.len_lines())
-                .with_bars(bar_rows, message_rows),
-        )
+        Some(layout_for(
+            gpu,
+            scale,
+            &self.doc,
+            &self.find,
+            self.message.is_some(),
+        ))
     }
 
     /// Show a short message at the bottom of the window.
@@ -463,7 +484,13 @@ impl App {
         let page = self.layout().map_or(1, |l| l.full_lines());
         let result = match cmd {
             Command::Move(motion, extend) => {
-                self.doc.move_cursor(motion, extend, TAB_WIDTH, page);
+                match self.layout() {
+                    Some(layout) if self.view.wrap => {
+                        let mut w = self.view.wrap_view(&layout, TAB_WIDTH);
+                        self.doc.move_cursor_wrapped(motion, extend, &mut w, page);
+                    }
+                    _ => self.doc.move_cursor(motion, extend, TAB_WIDTH, page),
+                }
                 if matches!(motion, Motion::PageUp | Motion::PageDown) {
                     // Scroll by the same amount so the cursor keeps its row.
                     if let Some(layout) = self.layout() {
@@ -474,8 +501,7 @@ impl App {
                             reason = "page is a few hundred lines"
                         )]
                         let dy = dir * page as f32 * lh;
-                        self.view
-                            .scroll_by(dy, &layout, self.doc.buffer.len_lines());
+                        self.view.scroll_by(dy, &self.doc, &layout, TAB_WIDTH);
                     }
                 }
                 Ok(())
@@ -494,25 +520,7 @@ impl App {
                 self.doc.select_all();
                 Ok(())
             }
-            Command::Copy | Command::Cut => {
-                if let Some(text) = self.doc.selected_text() {
-                    self.clipboard_set(text);
-                    if cmd == Command::Cut {
-                        self.doc.history.seal();
-                        let r = self.doc.delete_back().map(drop);
-                        self.doc.history.seal();
-                        r
-                    } else {
-                        Ok(())
-                    }
-                } else {
-                    Ok(())
-                }
-            }
-            Command::Paste => match self.clipboard_get() {
-                Some(text) => self.doc.paste(&text).map(drop),
-                None => Ok(()),
-            },
+            Command::Copy | Command::Cut | Command::Paste => self.clipboard_command(cmd),
             Command::Escape => {
                 if self.find.open {
                     self.find.close();
@@ -532,8 +540,13 @@ impl App {
                 }
                 Ok(())
             }
-            // Arrives later in M3.
-            Command::ToggleWrap => Ok(()),
+            Command::ToggleWrap => {
+                let on = !self.view.wrap;
+                self.view.set_wrap(on);
+                self.doc.preferred_column = None;
+                self.say(if on { "Soft wrap on" } else { "Soft wrap off" }, false);
+                Ok(())
+            }
             Command::DeleteBack => self.doc.delete_back().map(drop),
             Command::DeleteForward => self.doc.delete_forward().map(drop),
             Command::Save => {
@@ -699,6 +712,28 @@ impl App {
         }
     }
 
+    /// Copy, cut or paste in the editor. Cut and paste are their own undo
+    /// steps.
+    fn clipboard_command(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
+        if cmd == Command::Paste {
+            return match self.clipboard_get() {
+                Some(text) => self.doc.paste(&text).map(drop),
+                None => Ok(()),
+            };
+        }
+        let Some(text) = self.doc.selected_text() else {
+            return Ok(());
+        };
+        self.clipboard_set(text);
+        if cmd != Command::Cut {
+            return Ok(());
+        }
+        self.doc.history.seal();
+        let result = self.doc.delete_back().map(drop);
+        self.doc.history.seal();
+        result
+    }
+
     /// The system clipboard, connected on first use rather than at startup.
     fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
         if self.clipboard.is_none() {
@@ -849,33 +884,18 @@ impl App {
 
     /// Queue the whole frame: editor text, then the overlays.
     fn paint(&mut self, gpu: &mut Gpu, layout: &Layout) {
-        let current = self
-            .find
-            .current
-            .and_then(|i| self.find.matches.get(i))
-            .cloned();
-        self.view.draw(
+        paint_scene(
             gpu,
-            &self.doc,
             layout,
-            TAB_WIDTH,
-            Decorations {
-                cursor_visible: self.blink.visible && !self.find.focused,
+            &mut Scene {
+                doc: &self.doc,
+                view: &mut self.view,
+                find: &self.find,
+                message: self.message.as_ref(),
+                cursor_visible: self.blink.visible,
                 preedit: self.preedit.as_ref(),
-                matches: if self.find.open {
-                    &self.find.matches
-                } else {
-                    &[]
-                },
-                current,
             },
         );
-        if self.find.open {
-            view::draw_find_bar(gpu, &self.find, layout, self.blink.visible);
-        }
-        if let Some(m) = &self.message {
-            view::draw_message(gpu, &m.text, layout, m.is_error);
-        }
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
@@ -932,9 +952,12 @@ impl App {
 
         // Tell the IME where the cursor is, so its candidate window appears
         // next to it. Physical pixels, relative to the window.
-        let r = self
-            .view
-            .cursor_rect(&self.doc, &layout, TAB_WIDTH, self.preedit.as_ref());
+        let r = self.view.cursor_rect(
+            &layout,
+            self.preedit
+                .as_ref()
+                .map_or(0, |p| nimbus_core::column::line_width(&p.text, TAB_WIDTH)),
+        );
         #[expect(
             clippy::cast_possible_truncation,
             reason = "on-screen pixel coordinates fit in i32"
@@ -1017,6 +1040,109 @@ impl App {
             }
         }
     }
+}
+
+/// Geometry for the window `gpu` draws to, with room for the find bar and
+/// message line when they are shown.
+fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar, message: bool) -> Layout {
+    let (w, h) = gpu.size();
+    let bar_rows = match (find.open, find.replace_mode) {
+        (false, _) => 0,
+        (true, false) => 1,
+        (true, true) => 2,
+    };
+    Layout::new(gpu.metrics(), w, h, scale, doc.buffer.len_lines())
+        .with_bars(bar_rows, usize::from(message))
+}
+
+/// Everything one frame shows.
+struct Scene<'a> {
+    doc: &'a Document,
+    view: &'a mut View,
+    find: &'a FindBar,
+    message: Option<&'a Message>,
+    /// Blink phase: the cursor is in its visible half.
+    cursor_visible: bool,
+    preedit: Option<&'a Preedit>,
+}
+
+/// Queue a whole frame: editor text, then the find bar and message line.
+/// Shared by the window and headless rendering.
+fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
+    let find = scene.find;
+    let current = find.current.and_then(|i| find.matches.get(i)).cloned();
+    scene.view.draw(
+        gpu,
+        scene.doc,
+        layout,
+        TAB_WIDTH,
+        &Decorations {
+            cursor_visible: scene.cursor_visible && !find.focused,
+            preedit: scene.preedit,
+            matches: if find.open { &find.matches } else { &[] },
+            current,
+        },
+    );
+    if find.open {
+        view::draw_find_bar(gpu, find, layout, scene.cursor_visible);
+    }
+    if let Some(m) = scene.message {
+        view::draw_message(gpu, &m.text, layout, m.is_error);
+    }
+}
+
+/// `--headless WxH --screenshot FILE`: render the first frame into an
+/// off-screen texture, with no window, and save it. Works with the screen
+/// locked or no display attached. Returns the process exit code.
+fn run_headless(
+    options: &Options,
+    mut doc: Document,
+    size: (u32, u32),
+    context: GpuContext,
+) -> i32 {
+    let Some(path) = &options.screenshot else {
+        print_err("nimbus: --headless needs --screenshot FILE.bmp");
+        return 2;
+    };
+    let font = match Font::bundled() {
+        Ok(f) => f,
+        Err(e) => {
+            print_err(&format!("nimbus: {e}"));
+            return 1;
+        }
+    };
+    // No window to ask: default to a Retina scale, or NIMBUS_SCALE.
+    let scale = effective_scale(2.0);
+    let mut gpu = Gpu::headless(context, font, font_px(scale), size.0, size.1);
+    gpu.set_tab_width(TAB_WIDTH);
+    let mut view = View::default();
+    view.set_wrap(options.wrap);
+    let mut find = FindBar::default();
+    if let Some(pattern) = &options.find {
+        find.open(false, None);
+        let _ = find.find.insert(pattern);
+        find.search_now(&doc);
+        if let Some(range) = find.select_from(0, false) {
+            doc.select(range);
+        }
+    }
+    let layout = layout_for(&gpu, to_f32(scale), &doc, &find, false);
+    view.ensure_cursor_visible(&doc, &layout, TAB_WIDTH);
+    let mut scene = Scene {
+        doc: &doc,
+        view: &mut view,
+        find: &find,
+        message: None,
+        cursor_visible: true,
+        preedit: None,
+    };
+    paint_scene(&mut gpu, &layout, &mut scene);
+    gpu.request_capture();
+    if let Err(e) = gpu.render() {
+        print_err(&format!("nimbus: {e}"));
+        return 1;
+    }
+    i32::from(!save_screenshot(path, gpu.take_capture().as_ref()))
 }
 
 /// Apply a text-editing command to a one-line field (the find bar). Returns
@@ -1142,6 +1268,9 @@ impl ApplicationHandler<AppEvent> for App {
         window.request_redraw();
         self.window = Some(window);
         self.update_title();
+        if self.options.wrap {
+            self.view.set_wrap(true);
+        }
         if let Some(pattern) = self.options.find.clone() {
             self.open_find(false);
             let _ = self.find.find.insert(&pattern);
@@ -1168,12 +1297,25 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // --smoke and --screenshot must not wait forever: a locked screen or
+        // a hidden window never lets the first frame be drawn.
+        let unattended = self.options.smoke || self.options.screenshot.is_some();
+        let deadline = self.started + UNATTENDED_TIMEOUT;
+        if unattended && self.frames == 0 && Instant::now() >= deadline {
+            print_err(
+                "nimbus: no frame could be drawn in 10 s (window hidden or screen locked?); try --headless",
+            );
+            self.exit_code = 1;
+            event_loop.exit();
+            return;
+        }
         // Sleep until the next blink or hidden-window retry, or indefinitely
         // when neither is pending.
         let next = [
             self.blink.next,
             self.hidden_retry.map(|(at, _)| at),
             self.message.as_ref().map(|m| m.until),
+            (unattended && self.frames == 0).then_some(deadline),
         ]
         .into_iter()
         .flatten()
@@ -1244,8 +1386,7 @@ impl ApplicationHandler<AppEvent> for App {
                             (x * cell * lines_per_notch, y * lh * lines_per_notch)
                         }
                     };
-                    self.view
-                        .scroll_by(-dy, &layout, self.doc.buffer.len_lines());
+                    self.view.scroll_by(-dy, &self.doc, &layout, TAB_WIDTH);
                     self.view.scroll_x_by(-dx);
                     self.changed(false);
                 }
@@ -1328,6 +1469,21 @@ fn main() {
         },
     };
     log::debug!("startup: document loaded at {:?}", started.elapsed());
+
+    if let Some(size) = options.headless {
+        let code = match gpu_init.join() {
+            Ok(Ok(context)) => run_headless(&options, doc, size, context),
+            Ok(Err(e)) => {
+                print_err(&format!("nimbus: {e}"));
+                1
+            }
+            Err(_) => {
+                print_err("nimbus: GPU setup thread did not complete");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
 
     let mut builder = EventLoop::<AppEvent>::with_user_event();
     #[cfg(target_os = "macos")]

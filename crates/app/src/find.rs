@@ -234,6 +234,18 @@ impl FindBar {
         self.matches.clear();
         self.current = None;
         self.version = doc.version;
+        // Compile here too: this may run before any asynchronous search
+        // (headless rendering) or after the query changed.
+        match self.query().compile() {
+            Ok(re) => {
+                self.compiled = re;
+                self.error = None;
+            }
+            Err(e) => {
+                self.compiled = None;
+                self.error = Some(e.0);
+            }
+        }
         if let Some(re) = self.compiled.clone() {
             let mut all = Vec::new();
             search::find_all(
@@ -345,6 +357,15 @@ mod tests {
         assert_eq!(bar.replacement_for("key=value"), "value=key");
         bar.regex = false;
         assert_eq!(bar.replacement_for("key=value"), "$2=$1", "literal mode");
+    }
+
+    #[test]
+    fn search_now_works_without_a_previous_search() {
+        let doc = Document::from_text("a wrap b wrap");
+        let mut bar = bar_with("wrap");
+        bar.search_now(&doc);
+        assert_eq!(bar.matches, vec![2..6, 9..13]);
+        assert!(bar.complete);
     }
 
     #[test]

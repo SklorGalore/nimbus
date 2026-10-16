@@ -28,8 +28,16 @@ pub fn grapheme_cols(g: &str, col: usize, tab_width: usize) -> usize {
 /// Display column of byte offset `byte` within line content `line`.
 #[must_use]
 pub fn col_at(line: &str, byte: usize, tab_width: usize) -> usize {
-    let mut col = 0;
-    for (i, g) in line.grapheme_indices(true) {
+    col_at_from(line, byte, 0, tab_width)
+}
+
+/// Display column of byte offset `byte` within `seg`, a piece of a line
+/// that starts at column `start_col` of that line. Tab stops are measured
+/// from the start of the whole line. Returns an absolute column.
+#[must_use]
+pub fn col_at_from(seg: &str, byte: usize, start_col: usize, tab_width: usize) -> usize {
+    let mut col = start_col;
+    for (i, g) in seg.grapheme_indices(true) {
         if i >= byte {
             break;
         }
@@ -50,18 +58,25 @@ pub fn line_width(line: &str, tab_width: usize) -> usize {
 /// past the end of the line map to its end.
 #[must_use]
 pub fn byte_at_half_col(line: &str, half: usize, tab_width: usize) -> usize {
-    let mut col = 0;
-    for (i, g) in line.grapheme_indices(true) {
-        let w = grapheme_cols(g, col, tab_width);
-        if half < 2 * col + w {
+    byte_at_half_col_from(line, half, 0, tab_width)
+}
+
+/// Like [`byte_at_half_col`] for `seg`, a piece of a line starting at
+/// column `start_col`; `half` is measured from the start of `seg`.
+#[must_use]
+pub fn byte_at_half_col_from(seg: &str, half: usize, start_col: usize, tab_width: usize) -> usize {
+    let mut rel = 0;
+    for (i, g) in seg.grapheme_indices(true) {
+        let w = grapheme_cols(g, start_col + rel, tab_width);
+        if half < 2 * rel + w {
             return i;
         }
-        if half < 2 * (col + w) {
+        if half < 2 * (rel + w) {
             return i + g.len();
         }
-        col += w;
+        rel += w;
     }
-    line.len()
+    seg.len()
 }
 
 /// Byte offset of the grapheme boundary nearest to column `col`, ties going

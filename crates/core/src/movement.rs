@@ -13,6 +13,7 @@ use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 use crate::Text;
 use crate::column;
+use crate::wrap::{self, RowPos, WrapView};
 
 /// Byte offset where the content of line `l` ends, before its line ending.
 fn content_end(t: &dyn Text, l: usize) -> usize {
@@ -241,6 +242,51 @@ pub fn vertical(
     }
 }
 
+/// Move `rows` visual rows up (negative) or down, for when soft wrap is on.
+///
+/// `preferred` is the sticky column *within the row*, kept across shorter
+/// rows. As with [`vertical`], moving past the first or last row goes to the
+/// start or end of the text. With wrap off (`w` not wrapping) this behaves
+/// exactly like [`vertical`].
+pub fn vertical_rows(
+    t: &dyn Text,
+    w: &mut WrapView<'_>,
+    pos: usize,
+    preferred: Option<usize>,
+    rows: isize,
+) -> Vertical {
+    let tab = w.tab_width();
+    let l = t.byte_to_line(pos);
+    let line = t.line(l);
+    let off = (pos - t.line_to_byte(l)).min(line.len());
+    let (row, vcol) = {
+        let rs = w.rows(&line);
+        let row = wrap::row_of(rs, off);
+        (
+            row,
+            preferred.unwrap_or_else(|| wrap::visual_col(&line, rs, off, tab)),
+        )
+    };
+    let (to, moved) = wrap::step_rows(t, w, RowPos { line: l, row }, rows);
+    if moved == 0 && rows != 0 {
+        let end = if rows < 0 { 0 } else { t.len_bytes() };
+        let el = t.byte_to_line(end);
+        let eline = t.line(el);
+        let eoff = end - t.line_to_byte(el);
+        let col = wrap::visual_col(&eline, w.rows(&eline), eoff, tab);
+        return Vertical {
+            pos: end,
+            preferred_col: col,
+        };
+    }
+    let target = t.line(to.line);
+    let rs = w.rows(&target);
+    Vertical {
+        pos: t.line_to_byte(to.line) + wrap::byte_at_row_col(&target, rs, to.row, vcol, tab),
+        preferred_col: vcol,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,6 +465,60 @@ mod tests {
         assert_eq!(smart_home(&t, 6), 3);
         assert_eq!(smart_home(&t, 3), 0);
         assert_eq!(smart_home(&t, 0), 3);
+    }
+
+    fn rows_move(text: &str, pos: usize, preferred: Option<usize>, n: isize) -> Vertical {
+        let t = RopeBuffer::from_text(text);
+        let mut cache = wrap::WrapCache::default();
+        let mut w = WrapView::new(&mut cache, Some(8), 4);
+        vertical_rows(&t, &mut w, pos, preferred, n)
+    }
+
+    #[test]
+    fn vertical_rows_moves_within_wrapped_lines() {
+        // Width 8: "hello world" wraps after "hello ".
+        assert_eq!(
+            rows_move("hello world", 2, None, 1),
+            Vertical {
+                pos: 8,
+                preferred_col: 2
+            }
+        );
+        assert_eq!(rows_move("hello world", 8, Some(2), -1).pos, 2);
+        assert_eq!(
+            rows_move("hello world", 11, None, -1).pos,
+            5,
+            "before the hanging space"
+        );
+        let two = "hello world\nab";
+        assert_eq!(rows_move(two, 4, None, 1).pos, 10);
+        assert_eq!(rows_move(two, 10, Some(4), 1).pos, 14);
+        assert_eq!(rows_move(two, 14, Some(4), -1).pos, 10);
+    }
+
+    #[test]
+    fn vertical_rows_pages_and_reaches_the_end() {
+        let text = "hello world\nhello world\nhello world";
+        assert_eq!(rows_move(text, 2, None, 3).pos, 20);
+        assert_eq!(rows_move(text, 20, Some(2), 3).pos, 32);
+        assert_eq!(rows_move(text, 32, Some(2), 3).pos, 35);
+    }
+
+    #[test]
+    fn vertical_rows_without_wrap_matches_vertical() {
+        let text = "abcdef\nab\nabcdef\n日本\n\tx";
+        let t = RopeBuffer::from_text(text);
+        let mut cache = wrap::WrapCache::default();
+        for pos in [0, 3, 5, 9, 12, 16, 20, 23] {
+            for n in [-2, -1, 1, 2] {
+                let mut w = WrapView::new(&mut cache, None, 4);
+                assert_eq!(
+                    vertical_rows(&t, &mut w, pos, None, n),
+                    vertical(&t, pos, None, n, 4),
+                    "pos {pos} n {n}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod rope;
 pub mod search;
 pub mod selection;
 pub mod undo;
+pub mod wrap;
 
 pub use buffer::{Buffer, Edit, EditError, Snapshot, Text};
 pub use line_ending::LineEnding;

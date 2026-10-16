@@ -345,6 +345,30 @@ impl Document {
         self.preferred_column = preferred;
     }
 
+    /// Like [`Document::move_cursor`] with soft wrap on: Up, Down and the
+    /// Page keys move by visual row; `preferred_column` is then a column
+    /// within the row. Other motions are the same as unwrapped.
+    pub fn move_cursor_wrapped(
+        &mut self,
+        motion: Motion,
+        extend: bool,
+        w: &mut nimbus_core::wrap::WrapView<'_>,
+        page_lines: usize,
+    ) {
+        let rows = match motion {
+            Motion::Up => -1,
+            Motion::Down => 1,
+            Motion::PageUp => -isize::try_from(page_lines.max(1)).unwrap_or(isize::MAX),
+            Motion::PageDown => isize::try_from(page_lines.max(1)).unwrap_or(isize::MAX),
+            _ => return self.move_cursor(motion, extend, w.tab_width(), page_lines),
+        };
+        let sel = self.selection();
+        self.history.seal();
+        let v = movement::vertical_rows(&self.buffer, w, sel.head, self.preferred_column, rows);
+        self.set_selection(sel.moved_to(v.pos, extend));
+        self.preferred_column = Some(v.preferred_col);
+    }
+
     /// Backspace: delete the selection, or the grapheme before the cursor.
     /// At the start of a line this joins it to the previous one, removing a
     /// `\r\n` as one unit. Returns `None` when there is nothing to delete.

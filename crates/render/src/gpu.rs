@@ -29,7 +29,8 @@ pub const BACKGROUND: wgpu::Color = wgpu::Color {
 /// `Surface` is the window's drawable area, configured with a size and pixel
 /// format.
 pub struct Gpu {
-    surface: wgpu::Surface<'static>,
+    /// Where frames go: a window's surface, or an off-screen texture.
+    target: Target,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -43,6 +44,34 @@ pub struct Gpu {
     /// The swapchain reported Suboptimal; reconfigure after presenting.
     /// Reconfiguring while a frame is acquired is an error in wgpu.
     reconfigure: bool,
+}
+
+/// The render target. Headless rendering (no window) draws into a texture,
+/// which works with the screen locked and on machines with no display.
+enum Target {
+    Surface(wgpu::Surface<'static>),
+    Offscreen(wgpu::Texture),
+}
+
+/// Format of off-screen frames: the same 8-bit format windows use on macOS,
+/// so headless captures match on-screen ones.
+const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+
+fn offscreen_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen frame"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: OFFSCREEN_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
 }
 
 /// What happened when [`Gpu::render`] was asked to draw.
@@ -302,6 +331,58 @@ impl Gpu {
             config.format
         );
 
+        Ok(Self::assemble(
+            Target::Surface(surface),
+            device,
+            queue,
+            config,
+            (font, font_size_px),
+        ))
+    }
+
+    /// Render without a window, into an off-screen `width × height` texture.
+    /// Every frame can be captured with [`Gpu::request_capture`]. Used for
+    /// headless screenshots, which work with the screen locked.
+    #[must_use]
+    pub fn headless(
+        context: GpuContext,
+        font: Font,
+        font_size_px: f32,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let GpuContext { device, queue, .. } = context;
+        device.on_uncaptured_error(Arc::new(|e| log::error!("wgpu: {e}")));
+        let (width, height) = clamp_to_device(&device, width.max(1), height.max(1));
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            format: OFFSCREEN_FORMAT,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::AutoVsync,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: Vec::new(),
+            // Unused off-screen; only a window surface has a colour space.
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let texture = offscreen_texture(&device, width, height);
+        Self::assemble(
+            Target::Offscreen(texture),
+            device,
+            queue,
+            config,
+            (font, font_size_px),
+        )
+    }
+
+    fn assemble(
+        target: Target,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        config: wgpu::SurfaceConfiguration,
+        (font, font_size_px): (Font, f32),
+    ) -> Self {
         let atlas = Atlas::new(&device);
         let globals = Globals::new(&device);
         globals.set_viewport(&queue, config.width, config.height);
@@ -312,8 +393,8 @@ impl Gpu {
         };
         let text = TextRenderer::new(font, font_size_px, DEFAULT_TAB_WIDTH);
 
-        Ok(Self {
-            surface,
+        Self {
+            target,
             device,
             queue,
             config,
@@ -324,7 +405,7 @@ impl Gpu {
             capture_requested: false,
             captured: None,
             reconfigure: false,
-        })
+        }
     }
 
     /// Reconfigure the surface after the window changed size or scale factor.
@@ -339,10 +420,49 @@ impl Gpu {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.configure();
         self.pipelines
             .globals
             .set_viewport(&self.queue, width, height);
+    }
+
+    /// Draw the queued frame into `texture`, capturing it if requested.
+    fn render_to(&mut self, texture: &wgpu::Texture) {
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame"),
+            });
+        self.frame.record(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            (&view, [self.config.width, self.config.height]),
+            &mut self.pipelines,
+            &self.atlas,
+        );
+        let readback = if self.capture_requested {
+            self.capture_requested = false;
+            Some(self.record_readback(&mut encoder, texture))
+        } else {
+            None
+        };
+        self.queue.submit(std::iter::once(encoder.finish()));
+        if let Some((buffer, padded_row)) = readback {
+            self.captured = self.finish_readback(&buffer, padded_row);
+        }
+    }
+
+    /// Apply `self.config` to the target: reconfigure the window surface,
+    /// or recreate the off-screen texture at the new size.
+    fn configure(&mut self) {
+        match &mut self.target {
+            Target::Surface(surface) => surface.configure(&self.device, &self.config),
+            Target::Offscreen(texture) => {
+                *texture = offscreen_texture(&self.device, self.config.width, self.config.height);
+            }
+        }
     }
 
     /// Record a copy of `texture` into a new mappable buffer. Rows in the
@@ -536,7 +656,15 @@ impl Gpu {
         use wgpu::CurrentSurfaceTexture as T;
 
         let acquire_started = std::time::Instant::now();
-        let frame = match self.surface.get_current_texture() {
+        let surface = match &self.target {
+            Target::Surface(surface) => surface,
+            Target::Offscreen(texture) => {
+                let texture = texture.clone();
+                self.render_to(&texture);
+                return Ok(FrameStatus::Presented);
+            }
+        };
+        let frame = match surface.get_current_texture() {
             T::Success(frame) => frame,
             T::Suboptimal(frame) => {
                 // Still usable this frame; reconfigure once it is presented.
@@ -546,7 +674,7 @@ impl Gpu {
             T::Outdated => {
                 // Swapchain no longer matches the surface (e.g. a resize
                 // race). No frame is held, so reconfiguring now is safe.
-                self.surface.configure(&self.device, &self.config);
+                self.configure();
                 return Ok(FrameStatus::Retry);
             }
             T::Timeout => return Ok(FrameStatus::Retry),
@@ -556,35 +684,10 @@ impl Gpu {
         };
 
         log::trace!("frame acquired in {:?}", acquire_started.elapsed());
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame"),
-            });
-        self.frame.record(
-            &self.device,
-            &self.queue,
-            &mut encoder,
-            (&view, [self.config.width, self.config.height]),
-            &mut self.pipelines,
-            &self.atlas,
-        );
-        let readback = if self.capture_requested {
-            self.capture_requested = false;
-            Some(self.record_readback(&mut encoder, &frame.texture))
-        } else {
-            None
-        };
-        self.queue.submit(std::iter::once(encoder.finish()));
-        if let Some((buffer, padded_row)) = readback {
-            self.captured = self.finish_readback(&buffer, padded_row);
-        }
+        self.render_to(&frame.texture);
         self.queue.present(frame);
         if std::mem::take(&mut self.reconfigure) {
-            self.surface.configure(&self.device, &self.config);
+            self.configure();
         }
         log::trace!(
             "frame presented {:?} after acquire began",
