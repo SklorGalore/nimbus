@@ -1670,28 +1670,34 @@ impl MappedBuffer {
         })))
     }
 
-    /// Replace `range` (already checked) with `insert`.
-    fn apply(&mut self, range: Range<usize>, insert: Insert<'_>) -> Edit {
-        let removed = self.removed(range.clone());
-        self.inserted.clear();
-        let inserted = match insert {
-            Insert::Bytes(bytes) => {
-                self.append(bytes);
-                Content::Bytes(bytes.to_vec())
-            }
+    /// Add the pieces of `insert` to the end of `self.inserted`.
+    fn add(&mut self, insert: Insert<'_>) {
+        match insert {
+            Insert::Bytes(bytes) => self.append(bytes),
             Insert::Run(run) => {
+                let from = self.inserted.len();
                 self.inserted.extend_from_slice(&run.0.pieces);
                 // Pieces that reached past the frontier when the run was
                 // made may be indexed by now; count them (invariant 2).
                 let state = &self.state;
                 let f = state.original_indexed();
-                for p in &mut self.inserted {
+                for p in self.inserted.get_mut(from..).unwrap_or_default() {
                     if p.store == Store::Original && p.newlines.is_none() && p.start + p.len <= f {
                         p.newlines = state.count_original(p.start, p.start + p.len);
                     }
                 }
-                Content::Pieces(run.clone())
             }
+        }
+    }
+
+    /// Replace `range` (already checked) with `insert`.
+    fn apply(&mut self, range: Range<usize>, insert: Insert<'_>) -> Edit {
+        let removed = self.removed(range.clone());
+        self.inserted.clear();
+        self.add(insert);
+        let inserted = match insert {
+            Insert::Bytes(bytes) => Content::Bytes(bytes.to_vec()),
+            Insert::Run(run) => Content::Pieces(run.clone()),
         };
         if !range.is_empty() || !self.inserted.is_empty() {
             self.splice(range.clone());
@@ -1846,25 +1852,76 @@ impl Buffer for MappedBuffer {
         self.state.frontier.entry >= self.state.table.len()
     }
 
-    /// Builds the new piece list in one pass over the old one, instead of
-    /// one splice per item, so replacing 100,000 matches is linear in the
-    /// number of pieces rather than quadratic.
+    /// Builds the new piece list once for all items: see
+    /// [`MappedBuffer::rebuild`].
     fn replace_sorted(&mut self, items: &[(Range<usize>, &str)]) -> Result<Vec<Edit>, EditError> {
-        check_sorted(&self.state, items)?;
+        check_sorted(&self.state, items.iter().map(|(r, _)| r), true)?;
+        let inserts: Vec<(Range<usize>, Insert<'_>)> = items
+            .iter()
+            .map(|(r, t)| (r.clone(), Insert::Bytes(t.as_bytes())))
+            .collect();
+        let removed = self.rebuild(&inserts);
+        // Applied from the last item to the first, so each edit's start is
+        // its item's start.
+        Ok(items
+            .iter()
+            .zip(removed)
+            .rev()
+            .map(|((range, text), removed)| Edit {
+                start: range.start,
+                removed,
+                inserted: Content::from(*text),
+            })
+            .collect())
+    }
+
+    /// One pass, like [`MappedBuffer::replace_sorted`]: undoing a Replace
+    /// All of 100,000 matches one put at a time took over a minute.
+    fn put_sorted(&mut self, items: &[(Range<usize>, &Content)]) -> Result<Vec<Edit>, EditError> {
+        check_sorted(&self.state, items.iter().map(|(r, _)| r), false)?;
+        let mut inserts = Vec::with_capacity(items.len());
+        for (range, content) in items {
+            let insert = match content {
+                Content::Bytes(bytes) => Insert::Bytes(bytes),
+                Content::Pieces(run) if self.state.owns(run) => Insert::Run(run),
+                Content::Pieces(_) => return Err(EditError::Unsupported),
+            };
+            inserts.push((range.clone(), insert));
+        }
+        let removed = self.rebuild(&inserts);
+        Ok(items
+            .iter()
+            .zip(removed)
+            .rev()
+            .map(|((range, content), removed)| Edit {
+                start: range.start,
+                removed,
+                inserted: (*content).clone(),
+            })
+            .collect())
+    }
+}
+
+impl MappedBuffer {
+    /// Apply sorted, checked items by building the new piece list in one
+    /// pass over the old one, instead of one splice per item, so the cost
+    /// is linear in the number of pieces rather than quadratic. Returns what
+    /// each item removed, in item order.
+    fn rebuild(&mut self, items: &[(Range<usize>, Insert<'_>)]) -> Vec<Content> {
         if items.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         // What each item removes, recorded before anything changes.
         let removed: Vec<Content> = items
             .iter()
             .map(|(range, _)| self.removed(range.clone()))
             .collect();
-        // Store every new text; `ends[i]` is where item i's pieces end in
+        // Store every insert; `ends[i]` is where item i's pieces end in
         // `self.inserted`.
         self.inserted.clear();
         let mut ends = Vec::with_capacity(items.len());
-        for (_, text) in items {
-            self.append(text.as_bytes());
+        for (_, insert) in items {
+            self.add(*insert);
             ends.push(self.inserted.len());
         }
 
@@ -1891,19 +1948,7 @@ impl Buffer for MappedBuffer {
         fix_prefix(&mut entries, 0);
         self.state.table = Arc::new(entries);
         self.state.refresh(0);
-
-        // Applied from the last item to the first, so each edit's start is
-        // its item's start.
-        Ok(items
-            .iter()
-            .zip(removed)
-            .rev()
-            .map(|((range, text), removed)| Edit {
-                start: range.start,
-                removed,
-                inserted: Content::from(*text),
-            })
-            .collect())
+        removed
     }
 }
 
@@ -2597,6 +2642,63 @@ mod tests {
         assert_eq!(b.len_lines(), 6);
         assert_eq!(b.piece_count(), 1);
         check_invariants(&b);
+    }
+
+    #[test]
+    fn grouped_undo_and_redo_in_one_pass_match_a_rope() {
+        // Random sorted replacements, recorded as one group and undone and
+        // redone with `put_sorted`, against a rope doing the same one edit
+        // at a time. A small generator keeps the cases reproducible.
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            usize::try_from(seed % (n as u64)).unwrap()
+        };
+        let words = ["", "x", "yy\n", "zzzzzzz", "\r\n", "é"];
+        for case in 0..300 {
+            let initial: String = (0..next(40)).map(|_| words[next(words.len())]).collect();
+            let limits = if case % 2 == 0 {
+                TINY
+            } else {
+                Limits::default()
+            };
+            let mut mapped =
+                MappedBuffer::with_limits(Arc::new(VecSource::from(&*initial)), limits);
+            let mut rope = RopeBuffer::from_text(&initial);
+            // Sorted, non-overlapping ranges on character boundaries.
+            let mut cuts: Vec<usize> = (0..next(8))
+                .map(|_| next(initial.len() + 1))
+                .filter(|&c| initial.is_char_boundary(c))
+                .collect();
+            cuts.sort_unstable();
+            let items: Vec<(Range<usize>, &str)> = cuts
+                .chunks(2)
+                .map(|c| (c[0]..*c.last().unwrap(), words[next(words.len())]))
+                .collect();
+            let mut hm = History::new();
+            let mut hr = History::new();
+            let sel = Selections::default();
+            hm.record_group(mapped.replace_sorted(&items).unwrap(), &sel, &sel);
+            hr.record_group(rope.replace_sorted(&items).unwrap(), &sel, &sel);
+            for step in 0..4 {
+                if step % 2 == 0 {
+                    hm.undo(&mut mapped, &mut |_, _| {}).unwrap();
+                    hr.undo(&mut rope, &mut |_, _| {}).unwrap();
+                } else {
+                    hm.redo(&mut mapped, &mut |_, _| {}).unwrap();
+                    hr.redo(&mut rope, &mut |_, _| {}).unwrap();
+                }
+                assert_eq!(
+                    text(&mapped),
+                    text(&rope),
+                    "case {case} step {step}: {items:?}"
+                );
+                check_invariants(&mapped);
+            }
+            assert_eq!(text(&mapped), text(&rope.clone()));
+        }
     }
 
     #[test]

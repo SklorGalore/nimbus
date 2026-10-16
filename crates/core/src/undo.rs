@@ -11,7 +11,9 @@
 
 use std::time::{Duration, Instant};
 
-use crate::buffer::{Buffer, Edit, EditError, Text};
+use std::ops::Range;
+
+use crate::buffer::{Buffer, Content, Edit, EditError, Text, report_sorted};
 use crate::selection::Selections;
 
 /// Pause after which typing starts a new undo step.
@@ -49,6 +51,18 @@ fn kind(edit: &Edit) -> Kind {
     } else {
         Kind::Other
     }
+}
+
+/// Whether a group's edits were applied from the end of the text to the
+/// start without overlapping, as Replace All applies them. Such a group can
+/// be undone or redone with one [`Buffer::put_sorted`] instead of one put
+/// per edit, which for a mapped buffer is the difference between linear and
+/// quadratic time.
+fn descending(edits: &[Edit]) -> bool {
+    edits.len() > 1
+        && edits
+            .windows(2)
+            .all(|w| matches!(w, [prev, next] if next.old_range().end <= prev.start))
 }
 
 /// Whether `next` continues `prev` without a gap.
@@ -165,6 +179,13 @@ impl History {
     /// Reverse the newest group in `buffer`. Returns the selections to
     /// restore, or `None` if there was nothing to undo.
     ///
+    /// `on_edit` is called with each edit made and the text after it, for
+    /// the syntax tree. A group of disjoint edits made from the end of the
+    /// text back to the start (Replace All, typing with several cursors) is
+    /// put back in one [`Buffer::put_sorted`]; its edits are then reported
+    /// as [`report_sorted`] describes, all with the text after the whole
+    /// group, which matches the text after each edit up to its new end.
+    ///
     /// # Errors
     ///
     /// Returns an [`EditError`] if the buffer no longer matches the history,
@@ -179,6 +200,34 @@ impl History {
         let Some(group) = self.undo.pop() else {
             return Ok(None);
         };
+        if descending(&group.edits) {
+            // Each edit's place in the text as it is now: shifted by every
+            // edit before it in the text, which were applied after it.
+            let mut shift = 0isize;
+            let items: Vec<(Range<usize>, &Content)> = group
+                .edits
+                .iter()
+                .rev()
+                .map(|e| {
+                    let r = e.new_range();
+                    let start = r.start.saturating_add_signed(shift);
+                    shift += e.growth();
+                    (start..start + r.len(), &e.removed)
+                })
+                .collect();
+            return match buffer.put_sorted(&items) {
+                Ok(mut applied) => {
+                    report_sorted(&mut applied, |edit| on_edit(&*buffer, edit));
+                    let restore = group.before.clone();
+                    self.redo.push(group);
+                    Ok(Some(restore))
+                }
+                Err(e) => {
+                    self.undo.push(group);
+                    Err(e)
+                }
+            };
+        }
         for edit in group.edits.iter().rev() {
             match buffer.put(edit.new_range(), &edit.removed) {
                 Ok(applied) => on_edit(&*buffer, &applied),
@@ -208,6 +257,27 @@ impl History {
         let Some(group) = self.redo.pop() else {
             return Ok(None);
         };
+        if descending(&group.edits) {
+            // Every edit's old range is in the text before the group.
+            let items: Vec<(Range<usize>, &Content)> = group
+                .edits
+                .iter()
+                .rev()
+                .map(|e| (e.old_range(), &e.inserted))
+                .collect();
+            return match buffer.put_sorted(&items) {
+                Ok(mut applied) => {
+                    report_sorted(&mut applied, |edit| on_edit(&*buffer, edit));
+                    let restore = group.after.clone();
+                    self.undo.push(group);
+                    Ok(Some(restore))
+                }
+                Err(e) => {
+                    self.redo.push(group);
+                    Err(e)
+                }
+            };
+        }
         for edit in &group.edits {
             match buffer.put(edit.old_range(), &edit.inserted) {
                 Ok(applied) => on_edit(&*buffer, &applied),

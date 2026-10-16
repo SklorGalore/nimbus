@@ -234,8 +234,9 @@ fn replay_into(mirror: &mut String) -> impl FnMut(&dyn Text, &Edit) + '_ {
             edit.removed.len(),
             "removed length"
         );
+        // Not checked against `after`'s length: a group undone in one
+        // batch reports every edit with the text after the whole group.
         mirror.replace_range(edit.old_range(), inserted);
-        assert_eq!(mirror.len(), after.len_bytes());
     }
 }
 

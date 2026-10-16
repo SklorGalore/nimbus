@@ -20,7 +20,9 @@ pub mod undo;
 pub mod wrap;
 
 pub use any::AnyBuffer;
-pub use buffer::{Buffer, Content, Edit, EditError, LineSpan, SUBSTITUTE, Snapshot, Text};
+pub use buffer::{
+    Buffer, Content, Edit, EditError, LineSpan, SUBSTITUTE, Snapshot, Text, report_sorted,
+};
 pub use line_ending::LineEnding;
 pub use mapped::{Limits, MappedBuffer, MappedSnapshot, PieceRun};
 pub use rope::RopeBuffer;

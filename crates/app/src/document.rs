@@ -939,18 +939,33 @@ impl Document {
     pub fn replace_many(&mut self, items: &[(Range<usize>, String)]) -> Result<usize, EditError> {
         let before = self.selections.clone();
         let mut edits = Vec::with_capacity(items.len());
-        // Apply from the end so earlier offsets stay valid; record in
-        // application order, which is what undo reverses.
         let mut result = Ok(());
-        for (range, text) in items.iter().rev() {
-            match self.buffer.replace(range.clone(), text) {
-                Ok(edit) => {
-                    self.syntax.edit(&self.buffer, &edit);
-                    edits.push(edit);
-                }
-                Err(e) => {
-                    result = Err(e);
-                    break;
+        if self.buffer.is_mapped() {
+            // A mapped buffer rebuilds its pieces once for all items; one at
+            // a time would cost a rebuild per item (100,000 matches took
+            // over a minute). All or nothing.
+            let refs: Vec<(Range<usize>, &str)> =
+                items.iter().map(|(r, t)| (r.clone(), t.as_str())).collect();
+            match self.buffer.replace_sorted(&refs) {
+                Ok(done) => edits = done,
+                Err(e) => result = Err(e),
+            }
+            let (syntax, buffer) = (&mut self.syntax, &self.buffer);
+            nimbus_core::report_sorted(&mut edits, |edit| syntax.edit(buffer, edit));
+        } else {
+            // Apply from the end so earlier offsets stay valid; record in
+            // application order, which is what undo reverses. Each edit is
+            // shown to the syntax tree against the text it applies to.
+            for (range, text) in items.iter().rev() {
+                match self.buffer.replace(range.clone(), text) {
+                    Ok(edit) => {
+                        self.syntax.edit(&self.buffer, &edit);
+                        edits.push(edit);
+                    }
+                    Err(e) => {
+                        result = Err(e);
+                        break;
+                    }
                 }
             }
         }
@@ -1705,5 +1720,26 @@ mod tests {
             );
             assert!(d.conflict && d.is_dirty());
         }
+    }
+
+    #[test]
+    fn replace_many_on_a_mapped_document_is_one_pass_and_undoes() {
+        let text = "ab\n".repeat(100_000);
+        let mut d = Document {
+            buffer: nimbus_core::MappedBuffer::from_bytes(text.clone().into_bytes()).into(),
+            ..Document::default()
+        };
+        let items: Vec<(Range<usize>, String)> = (0..100_000)
+            .map(|i| (3 * i..3 * i + 1, "X".to_owned()))
+            .collect();
+        let started = Instant::now();
+        assert_eq!(d.replace_many(&items).unwrap(), 100_000);
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        assert_eq!(d.buffer.slice(0..6), "Xb\nXb\n");
+        d.undo().unwrap();
+        assert_eq!(d.buffer.slice(0..d.buffer.len_bytes()), text);
+        d.redo().unwrap();
+        assert_eq!(d.buffer.slice(0..6), "Xb\nXb\n");
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
     }
 }

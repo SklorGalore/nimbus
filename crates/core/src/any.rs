@@ -175,6 +175,10 @@ impl Buffer for AnyBuffer {
     fn replace_sorted(&mut self, items: &[(Range<usize>, &str)]) -> Result<Vec<Edit>, EditError> {
         each!(self, b => b.replace_sorted(items))
     }
+
+    fn put_sorted(&mut self, items: &[(Range<usize>, &Content)]) -> Result<Vec<Edit>, EditError> {
+        each!(self, b => b.put_sorted(items))
+    }
 }
 
 #[cfg(test)]

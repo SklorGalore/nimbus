@@ -276,6 +276,14 @@ impl Edit {
     pub fn new_range(&self) -> Range<usize> {
         self.start..self.start + self.inserted.len()
     }
+
+    /// How many bytes longer the text is after the edit (negative if
+    /// shorter). Lengths fit in `isize`: no allocation can be larger.
+    #[must_use]
+    pub fn growth(&self) -> isize {
+        let signed = |n: usize| isize::try_from(n).unwrap_or(isize::MAX);
+        signed(self.inserted.len()) - signed(self.removed.len())
+    }
 }
 
 /// Why an edit was refused. Each is a bug in the caller, but returning them
@@ -391,7 +399,7 @@ pub trait Buffer: Text {
     /// Returns [`EditError::Unsorted`] for items out of order or
     /// overlapping, and the [`Buffer::replace`] errors for a bad range.
     fn replace_sorted(&mut self, items: &[(Range<usize>, &str)]) -> Result<Vec<Edit>, EditError> {
-        check_sorted(self, items)?;
+        check_sorted(self, items.iter().map(|(r, _)| r), true)?;
         let mut edits: Vec<Edit> = Vec::with_capacity(items.len());
         for (range, text) in items.iter().rev() {
             match self.replace(range.clone(), text) {
@@ -411,17 +419,78 @@ pub trait Buffer: Text {
         }
         Ok(edits)
     }
+
+    /// [`Buffer::replace_sorted`] for [`Buffer::put`]: many contents put at
+    /// once, for undoing and redoing a Replace All. The rules for `items`
+    /// and the order of the returned edits are the same; as with
+    /// [`Buffer::put`], only the bounds are checked, not character
+    /// boundaries. On error the buffer is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EditError::Unsorted`] for items out of order or
+    /// overlapping, and the [`Buffer::put`] errors.
+    fn put_sorted(&mut self, items: &[(Range<usize>, &Content)]) -> Result<Vec<Edit>, EditError> {
+        check_sorted(self, items.iter().map(|(r, _)| r), false)?;
+        let mut edits: Vec<Edit> = Vec::with_capacity(items.len());
+        for (range, content) in items.iter().rev() {
+            match self.put(range.clone(), content) {
+                Ok(edit) => edits.push(edit),
+                Err(e) => {
+                    // A content this buffer cannot hold: put back what was
+                    // done so the buffer is as it was.
+                    for done in edits.iter().rev() {
+                        if self.put(done.new_range(), &done.removed).is_err() {
+                            break;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(edits)
+    }
 }
 
-/// Check that `items` suit [`Buffer::replace_sorted`]: every range valid for
-/// `text`, and each starting at or after the end of the one before.
-pub(crate) fn check_sorted<T: Text + ?Sized>(
+/// Call `f` with each edit of a [`Buffer::replace_sorted`] or
+/// [`Buffer::put_sorted`] result in text order, first to last, with each
+/// start moved to where it is once the edits before it are in place.
+///
+/// The result lists edits last first, each start in the text before any
+/// of them. Told in that order to something that reads the text, such as
+/// the syntax tree, each edit would be read against a text that already
+/// holds the edits after it. Told first to last instead, everything up to
+/// an edit's new end is already final, so the text after the whole batch
+/// serves for each one. The starts are moved back afterwards.
+pub fn report_sorted(edits: &mut [Edit], mut f: impl FnMut(&Edit)) {
+    let mut shift = 0isize;
+    for edit in edits.iter_mut().rev() {
+        let start = edit.start;
+        edit.start = start.saturating_add_signed(shift);
+        f(edit);
+        edit.start = start;
+        shift += edit.growth();
+    }
+}
+
+/// Check that `ranges` suit [`Buffer::replace_sorted`]: every range inside
+/// `text` (and on character boundaries if `boundaries`), and each starting
+/// at or after the end of the one before.
+pub(crate) fn check_sorted<'a, T: Text + ?Sized>(
     text: &T,
-    items: &[(Range<usize>, &str)],
+    ranges: impl IntoIterator<Item = &'a Range<usize>>,
+    boundaries: bool,
 ) -> Result<(), EditError> {
     let mut prev_end = 0;
-    for (index, (range, _)) in items.iter().enumerate() {
-        check_range(text, range)?;
+    for (index, range) in ranges.into_iter().enumerate() {
+        if boundaries {
+            check_range(text, range)?;
+        } else if range.start > range.end || range.end > text.len_bytes() {
+            return Err(EditError::OutOfBounds {
+                range: range.clone(),
+                len: text.len_bytes(),
+            });
+        }
         if range.start < prev_end {
             return Err(EditError::Unsorted { index });
         }
