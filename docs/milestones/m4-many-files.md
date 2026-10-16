@@ -1,6 +1,6 @@
 # M4 — Many files
 
-**Status: planned**
+**Status: next**
 
 ## Goal
 

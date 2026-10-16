@@ -10,6 +10,7 @@
 
 mod bmp;
 mod document;
+mod find;
 mod input;
 mod io;
 mod view;
@@ -23,7 +24,7 @@ use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
@@ -32,8 +33,32 @@ use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_core::Text;
 
 use crate::document::Document;
+use crate::find::{Field, FindBar, SearchBatch};
 use crate::input::{Command, Motion};
-use crate::view::{Layout, Preedit, View};
+use crate::view::{Decorations, Layout, Preedit, View};
+
+/// Events sent to the event loop from other threads.
+#[derive(Debug)]
+enum AppEvent {
+    /// Results from a background search.
+    Search(SearchBatch),
+}
+
+/// A short note at the bottom of the window that disappears by itself.
+struct Message {
+    text: String,
+    is_error: bool,
+    until: Instant,
+}
+
+/// Pause in typing after which the find bar searches the edited text again.
+const RESEARCH_DELAY: Duration = Duration::from_millis(150);
+
+/// How long `--smoke` and `--screenshot` wait for a first frame.
+const UNATTENDED_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a message stays on screen.
+const MESSAGE_TIME: Duration = Duration::from_secs(4);
 
 /// Editor font size in logical points. Multiplied by the window's scale
 /// factor to get the pixel size glyphs are rasterized at. Comes from config
@@ -59,6 +84,13 @@ struct Options {
     /// path, then print keystroke-to-present latency and exit. Measures
     /// typing cost without needing a person at the keyboard.
     bench_typing: usize,
+    /// Open with the find bar searching for this pattern.
+    find: Option<String>,
+    /// Start with soft wrap on (config arrives in M4).
+    wrap: bool,
+    /// Render without a window at this size in physical pixels (with
+    /// `--screenshot`), for checks while the screen is locked.
+    headless: Option<(u32, u32)>,
 }
 
 /// Write a line to stdout. Command-line output such as `--version` and the
@@ -106,6 +138,9 @@ fn parse_options() -> Options {
     let mut screenshot = None;
     let mut file = None;
     let mut bench_typing = 0;
+    let mut find = None;
+    let mut wrap = false;
+    let mut headless = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -126,13 +161,33 @@ fn parse_options() -> Options {
                         std::process::exit(2);
                     });
             }
+            Some("--wrap") => wrap = true,
+            Some("--headless") => {
+                let size = args.next().and_then(|a| {
+                    let a = a.into_string().ok()?;
+                    let (w, h) = a.split_once('x')?;
+                    Some((w.parse().ok()?, h.parse().ok()?))
+                });
+                let Some(size) = size else {
+                    print_err("nimbus: --headless needs a size like 1600x1000");
+                    std::process::exit(2);
+                };
+                headless = Some(size);
+            }
+            Some("--find") => {
+                let Some(pattern) = args.next().and_then(|p| p.into_string().ok()) else {
+                    print_err("nimbus: --find needs a pattern");
+                    std::process::exit(2);
+                };
+                find = Some(pattern);
+            }
             Some("--version" | "-V") => {
                 print_out(&format!("nimbus {}", nimbus_core::VERSION));
                 std::process::exit(0);
             }
             Some("--help" | "-h") => {
                 print_out(
-                    "usage: nimbus [FILE] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
+                    "usage: nimbus [FILE] [--find PATTERN] [--wrap] [--headless WxH] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
                 );
                 std::process::exit(0);
             }
@@ -152,6 +207,9 @@ fn parse_options() -> Options {
         screenshot,
         file,
         bench_typing,
+        find,
+        wrap,
+        headless,
     }
 }
 
@@ -294,6 +352,50 @@ struct App {
     /// without ever sending the matching "visible again" event, so waiting
     /// for that event alone could leave the window blank.
     hidden_retry: Option<(Instant, Duration)>,
+    /// Connected on first copy or paste, not at startup.
+    clipboard: Option<arboard::Clipboard>,
+    clicks: Clicks,
+    find: FindBar,
+    /// Where the editor's selection started when the query last changed:
+    /// incremental search shows the first match from here.
+    find_origin: usize,
+    /// Jump to the first match once background results arrive.
+    find_pending_jump: bool,
+    message: Option<Message>,
+    proxy: EventLoopProxy<AppEvent>,
+    /// Search again at this time: edits happened while the find bar was
+    /// open.
+    research_at: Option<Instant>,
+}
+
+/// Multi-click detection and drag state. winit reports presses, not
+/// double-clicks, so the count is worked out from timing and distance.
+#[derive(Default)]
+struct Clicks {
+    count: u8,
+    last: Option<(Instant, (f32, f32))>,
+    /// What the initial click selected (a point, word or line); dragging
+    /// extends from it in whole units.
+    anchor: std::ops::Range<usize>,
+    dragging: bool,
+}
+
+const MULTI_CLICK: Duration = Duration::from_millis(500);
+
+impl Clicks {
+    /// Register a press and return the click count: 1, 2 or 3 (and back
+    /// to 1 after a triple-click).
+    fn press(&mut self, now: Instant, at: (f32, f32), slop: f32) -> u8 {
+        let near = |p: (f32, f32)| (p.0 - at.0).abs() <= slop && (p.1 - at.1).abs() <= slop;
+        self.count = match self.last {
+            Some((t, p)) if now.duration_since(t) < MULTI_CLICK && near(p) && self.count < 3 => {
+                self.count + 1
+            }
+            _ => 1,
+        };
+        self.last = Some((now, at));
+        self.count
+    }
 }
 
 impl App {
@@ -302,6 +404,7 @@ impl App {
         started: Instant,
         gpu_init: JoinHandle<Result<GpuContext, GpuError>>,
         doc: Document,
+        proxy: EventLoopProxy<AppEvent>,
     ) -> Self {
         Self {
             options,
@@ -321,33 +424,51 @@ impl App {
             ime_area: None,
             title_dirty: None,
             hidden_retry: None,
+            clipboard: None,
+            clicks: Clicks::default(),
+            find: FindBar::default(),
+            find_origin: 0,
+            find_pending_jump: false,
+            message: None,
+            proxy,
+            research_at: None,
         }
     }
 
     /// Geometry for the current window, if it exists.
     fn layout(&self) -> Option<Layout> {
         let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
-        let (w, h) = gpu.size();
         let scale = to_f32(effective_scale(window.scale_factor()));
-        Some(Layout::new(
-            gpu.metrics(),
-            w,
-            h,
+        Some(layout_for(
+            gpu,
             scale,
-            self.doc.buffer.len_lines(),
+            &self.doc,
+            &self.find,
+            self.message.is_some(),
         ))
+    }
+
+    /// Show a short message at the bottom of the window.
+    fn say(&mut self, text: impl Into<String>, is_error: bool) {
+        self.message = Some(Message {
+            text: text.into(),
+            is_error,
+            until: Instant::now() + MESSAGE_TIME,
+        });
+        self.changed(false);
     }
 
     fn update_title(&mut self) {
         let Some(window) = &self.window else { return };
         // Only the dirty marker changes while editing, so rebuild the title
         // only when it flips, not on every keystroke.
-        if self.title_dirty == Some(self.doc.dirty) {
+        let is_dirty = self.doc.is_dirty();
+        if self.title_dirty == Some(is_dirty) {
             return;
         }
-        let dirty = if self.doc.dirty { "● " } else { "" };
+        let dirty = if is_dirty { "● " } else { "" };
         window.set_title(&format!("{dirty}{} — Nimbus", self.doc.display_name()));
-        self.title_dirty = Some(self.doc.dirty);
+        self.title_dirty = Some(is_dirty);
     }
 
     /// Something changed what is on screen.
@@ -363,10 +484,20 @@ impl App {
     }
 
     fn run(&mut self, cmd: Command<'_>, event_loop: &ActiveEventLoop) {
+        if self.find.focused && self.run_find(cmd) {
+            self.changed(false);
+            return;
+        }
         let page = self.layout().map_or(1, |l| l.full_lines());
         let result = match cmd {
-            Command::Move(motion) => {
-                self.doc.move_cursor(motion, TAB_WIDTH, page);
+            Command::Move(motion, extend) => {
+                match self.layout() {
+                    Some(layout) if self.view.wrap => {
+                        let mut w = self.view.wrap_view(&layout, TAB_WIDTH);
+                        self.doc.move_cursor_wrapped(motion, extend, &mut w, page);
+                    }
+                    _ => self.doc.move_cursor(motion, extend, TAB_WIDTH, page),
+                }
                 if matches!(motion, Motion::PageUp | Motion::PageDown) {
                     // Scroll by the same amount so the cursor keeps its row.
                     if let Some(layout) = self.layout() {
@@ -377,15 +508,60 @@ impl App {
                             reason = "page is a few hundred lines"
                         )]
                         let dy = dir * page as f32 * lh;
-                        self.view
-                            .scroll_by(dy, &layout, self.doc.buffer.len_lines());
+                        self.view.scroll_by(dy, &self.doc, &layout, TAB_WIDTH);
                     }
                 }
                 Ok(())
             }
             Command::Insert(text) => self.doc.insert(text).map(drop),
             Command::Newline => self.doc.insert_newline().map(drop),
-            Command::Tab => self.doc.insert("\t").map(drop),
+            Command::Tab => match self.doc.indent_lines() {
+                Ok(true) => Ok(()),
+                Ok(false) => self.doc.insert("\t").map(drop),
+                Err(e) => Err(e),
+            },
+            Command::Outdent => self.doc.outdent_lines(TAB_WIDTH),
+            Command::Undo => self.doc.undo().map(drop),
+            Command::Redo => self.doc.redo().map(drop),
+            Command::SelectAll => {
+                self.doc.select_all();
+                Ok(())
+            }
+            Command::Copy | Command::Cut | Command::Paste => self.clipboard_command(cmd),
+            Command::Escape => {
+                if self.find.open {
+                    self.find.close();
+                } else {
+                    let head = self.doc.selection().head;
+                    self.doc.click(head, false);
+                }
+                Ok(())
+            }
+            Command::Find | Command::Replace => {
+                self.open_find(cmd == Command::Replace);
+                Ok(())
+            }
+            Command::ToggleCase(text) | Command::ToggleRegex(text) if !self.find.open => {
+                // Option+C and Option+R type characters on macOS.
+                if text.is_empty() {
+                    Ok(())
+                } else {
+                    self.doc.insert(text).map(drop)
+                }
+            }
+            Command::ToggleCase(_) | Command::ToggleRegex(_) | Command::ReplaceAll => {
+                if self.find.open {
+                    self.run_find(cmd);
+                }
+                Ok(())
+            }
+            Command::ToggleWrap => {
+                let on = !self.view.wrap;
+                self.view.set_wrap(on);
+                self.doc.preferred_column = None;
+                self.say(if on { "Soft wrap on" } else { "Soft wrap off" }, false);
+                Ok(())
+            }
             Command::DeleteBack => self.doc.delete_back().map(drop),
             Command::DeleteForward => self.doc.delete_forward().map(drop),
             Command::Save => {
@@ -401,16 +577,278 @@ impl App {
             // A bug, not a user error; the document is unchanged.
             log::error!("edit refused: {e}");
         }
+        // Edits invalidate search results. Search again once typing pauses,
+        // not on every keystroke; until then stale highlights are hidden.
+        if self.find.open && self.doc.version != self.find.version {
+            self.research_at = Some(Instant::now() + RESEARCH_DELAY);
+        }
         // Saving changes only the title, so it must not pull the view back
         // to the cursor.
-        self.changed(!matches!(cmd, Command::Save));
+        self.changed(!matches!(
+            cmd,
+            Command::Save | Command::Find | Command::Replace
+        ));
+    }
+
+    fn open_find(&mut self, replace_mode: bool) {
+        let selection = self.doc.selected_text();
+        self.find.open(replace_mode, selection);
+        self.find_origin = self.doc.selection().range().start;
+        self.search(true);
+    }
+
+    /// Search the document for the current query. With `jump`, select the
+    /// first match from where the search started, as incremental search does.
+    fn search(&mut self, jump: bool) {
+        let proxy = self.proxy.clone();
+        let complete = self.find.search(&self.doc, move |b| {
+            proxy.send_event(AppEvent::Search(b)).is_ok()
+        });
+        self.find_pending_jump = jump && !complete;
+        if jump && complete {
+            self.jump_to_match(self.find_origin, false);
+        }
+    }
+
+    /// Select the match at or after `from` (or before, `backwards`).
+    fn jump_to_match(&mut self, from: usize, backwards: bool) {
+        if let Some(range) = self.find.select_from(from, backwards) {
+            self.doc.select(range);
+            if let Some(layout) = self.layout() {
+                self.view
+                    .ensure_cursor_visible(&self.doc, &layout, TAB_WIDTH);
+            }
+        }
+    }
+
+    /// Handle a command while the find bar has focus. Returns `false` for
+    /// commands the editor should handle instead (save, close, undo of the
+    /// document is not among them: undo applies to the focused field).
+    fn run_find(&mut self, cmd: Command<'_>) -> bool {
+        let backwards = self.modifiers.shift_key();
+        match cmd {
+            Command::Escape => self.find.close(),
+            Command::Find | Command::Replace => {
+                self.find.replace_mode = cmd == Command::Replace;
+                self.find.focus = Field::Find;
+            }
+            Command::Tab | Command::Outdent if self.find.replace_mode => {
+                self.find.focus = match self.find.focus {
+                    Field::Find => Field::Replace,
+                    Field::Replace => Field::Find,
+                };
+                self.find.field_mut().select_all();
+            }
+            Command::Tab | Command::Outdent => {}
+            Command::Newline if self.find.focus == Field::Replace => self.replace_one(),
+            Command::Newline => {
+                let sel = self.doc.selection().range();
+                let from = if backwards {
+                    sel.start
+                } else {
+                    sel.end.max(sel.start + 1)
+                };
+                self.jump_to_match(from, backwards);
+            }
+            Command::ReplaceAll => self.replace_all(),
+            Command::ToggleCase(_) => {
+                self.find.case_sensitive = !self.find.case_sensitive;
+                self.search(true);
+            }
+            Command::ToggleRegex(_) => {
+                self.find.regex = !self.find.regex;
+                self.search(true);
+            }
+            Command::Save | Command::Close | Command::ToggleWrap => return false,
+            _ => {
+                let paste = (cmd == Command::Paste)
+                    .then(|| self.clipboard_get())
+                    .flatten();
+                let field = self.find.field_mut();
+                let before = field.version;
+                let copied = edit_field(field, cmd, paste.as_deref());
+                let changed = field.version != before;
+                if let Some(text) = copied {
+                    self.clipboard_set(text);
+                }
+                if changed && self.find.focus == Field::Find {
+                    self.search(true);
+                }
+            }
+        }
+        true
+    }
+
+    /// Replace the current match (if the editor's selection is one) and go
+    /// to the next.
+    fn replace_one(&mut self) {
+        let sel = self.doc.selection().range();
+        let is_match = self.find.current.and_then(|i| self.find.matches.get(i)) == Some(&sel);
+        if is_match && !sel.is_empty() {
+            let replacement = self.find.replacement_for(&self.doc, sel.clone());
+            if let Err(e) = self.doc.replace(sel, &replacement) {
+                log::error!("replace refused: {e}");
+            }
+            self.doc.history.seal();
+            // Search the changed text, then go to the next match after the
+            // replacement; on large files that waits for the results.
+            self.find_origin = self.doc.cursor();
+            self.search(true);
+            return;
+        }
+        let from = self.doc.cursor();
+        self.jump_to_match(from, false);
+    }
+
+    /// Replace every match as one undo step.
+    fn replace_all(&mut self) {
+        if !self.find.complete {
+            // A background search is still running: finish it here so no
+            // match is missed.
+            self.find.search_now(&self.doc);
+        }
+        let items: Vec<(std::ops::Range<usize>, String)> = self
+            .find
+            .matches
+            .iter()
+            .map(|r| (r.clone(), self.find.replacement_for(&self.doc, r.clone())))
+            .collect();
+        match self.doc.replace_many(&items) {
+            Ok(n) => {
+                self.search(false);
+                self.say(
+                    format!("Replaced {n} match{}", if n == 1 { "" } else { "es" }),
+                    false,
+                );
+            }
+            Err(e) => {
+                log::error!("replace all refused: {e}");
+                self.say("Replace all failed; nothing was lost", true);
+            }
+        }
+    }
+
+    /// Copy, cut or paste in the editor. Cut and paste are their own undo
+    /// steps.
+    fn clipboard_command(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
+        if cmd == Command::Paste {
+            return match self.clipboard_get() {
+                Some(text) => self.doc.paste(&text).map(drop),
+                None => Ok(()),
+            };
+        }
+        let Some(text) = self.doc.selected_text() else {
+            return Ok(());
+        };
+        self.clipboard_set(text);
+        if cmd != Command::Cut {
+            return Ok(());
+        }
+        self.doc.history.seal();
+        let result = self.doc.delete_back().map(drop);
+        self.doc.history.seal();
+        result
+    }
+
+    /// The system clipboard, connected on first use rather than at startup.
+    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(c) => self.clipboard = Some(c),
+                Err(e) => log::warn!("clipboard unavailable: {e}"),
+            }
+        }
+        self.clipboard.as_mut()
+    }
+
+    fn clipboard_set(&mut self, text: String) {
+        if let Some(c) = self.clipboard()
+            && let Err(e) = c.set_text(text)
+        {
+            log::warn!("could not copy: {e}");
+        }
+    }
+
+    fn clipboard_get(&mut self) -> Option<String> {
+        match self.clipboard()?.get_text() {
+            Ok(t) => Some(t),
+            Err(e) => {
+                log::debug!("nothing to paste: {e}");
+                None
+            }
+        }
+    }
+
+    /// A left-button press: place the cursor, or select a word or line on a
+    /// double- or triple-click, and start dragging.
+    fn mouse_down(&mut self, now: Instant) {
+        let Some(layout) = self.layout() else { return };
+        let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        if self.find.open && y < layout.top {
+            // A click in the bar focuses the field on that row.
+            let row_h = layout.metrics.line_height + layout.margin;
+            let second = self.find.replace_mode && y >= layout.margin + row_h;
+            self.find.focused = true;
+            self.find.focus = if second { Field::Replace } else { Field::Find };
+            self.changed(false);
+            return;
+        }
+        self.find.focused = false;
+        let pos = self.view.hit(x, y, &self.doc, &layout, TAB_WIDTH);
+        let count = self.clicks.press(now, (x, y), layout.metrics.cell_width);
+        let t = &self.doc.buffer;
+        match count {
+            1 => {
+                self.doc.click(pos, self.modifiers.shift_key());
+                // Dragging extends from the selection's anchor: the old one
+                // after a Shift+click, the clicked point otherwise.
+                let anchor = self.doc.selection().anchor;
+                self.clicks.anchor = anchor..anchor;
+            }
+            2 => {
+                let word = nimbus_core::movement::word_at(t, pos);
+                self.clicks.anchor = word.clone();
+                self.doc.select(word);
+            }
+            _ => {
+                let line = nimbus_core::movement::line_range(t, pos);
+                self.clicks.anchor = line.clone();
+                self.doc.select(line);
+            }
+        }
+        self.clicks.dragging = true;
+        self.blink.reset(now);
+        self.changed(false);
+    }
+
+    /// The mouse moved with the button held: extend the selection by the
+    /// unit of the click that started it (character, word or line).
+    fn mouse_drag(&mut self) {
+        let Some(layout) = self.layout() else { return };
+        let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        let pos = self.view.hit(x, y, &self.doc, &layout, TAB_WIDTH);
+        let t = &self.doc.buffer;
+        let unit = match self.clicks.count {
+            1 => pos..pos,
+            2 => nimbus_core::movement::word_at(t, pos),
+            _ => nimbus_core::movement::line_range(t, pos),
+        };
+        let anchor = self.clicks.anchor.clone();
+        if unit.start < anchor.start {
+            self.doc.select_span(anchor.end, unit.start);
+        } else {
+            self.doc.select_span(anchor.start, unit.end.max(anchor.end));
+        }
+        self.changed(true);
     }
 
     fn save(&mut self) -> bool {
         match self.doc.save() {
             Ok(()) => {
-                log::info!("saved {}", self.doc.display_name());
+                let name = self.doc.display_name();
+                log::info!("saved {name}");
                 self.update_title();
+                self.say(format!("Saved {name}"), false);
                 true
             }
             Err(e) => {
@@ -431,7 +869,7 @@ impl App {
 
     /// Close the window, first offering to save unsaved changes.
     fn close(&mut self, event_loop: &ActiveEventLoop) {
-        if self.doc.dirty && !self.options.smoke && self.options.screenshot.is_none() {
+        if self.doc.is_dirty() && !self.options.smoke && self.options.screenshot.is_none() {
             let name = self.doc.display_name();
             let mut dialog = MessageDialog::new()
                 .set_level(MessageLevel::Warning)
@@ -459,19 +897,32 @@ impl App {
         event_loop.exit();
     }
 
+    /// Queue the whole frame: editor text, then the overlays.
+    fn paint(&mut self, gpu: &mut Gpu, layout: &Layout) {
+        paint_scene(
+            gpu,
+            layout,
+            &mut Scene {
+                doc: &self.doc,
+                view: &mut self.view,
+                find: &self.find,
+                message: self.message.as_ref(),
+                cursor_visible: self.blink.visible,
+                preedit: self.preedit.as_ref(),
+            },
+        );
+    }
+
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let Some(layout) = self.layout() else { return };
+        // Painting reads the whole app; take the GPU out while it does.
+        if let Some(mut gpu) = self.gpu.take() {
+            self.paint(&mut gpu, &layout);
+            self.gpu = Some(gpu);
+        }
         let (Some(window), Some(gpu)) = (self.window.clone(), self.gpu.as_mut()) else {
             return;
         };
-        self.view.draw(
-            gpu,
-            &self.doc,
-            &layout,
-            TAB_WIDTH,
-            self.blink.visible,
-            self.preedit.as_ref(),
-        );
         if self.frames == 0 && self.options.screenshot.is_some() && !gpu.request_capture() {
             print_err("nimbus: this surface cannot be captured");
             self.exit_code = 1;
@@ -516,9 +967,12 @@ impl App {
 
         // Tell the IME where the cursor is, so its candidate window appears
         // next to it. Physical pixels, relative to the window.
-        let r = self
-            .view
-            .cursor_rect(&self.doc, &layout, TAB_WIDTH, self.preedit.as_ref());
+        let r = self.view.cursor_rect(
+            &layout,
+            self.preedit
+                .as_ref()
+                .map_or(0, |p| nimbus_core::column::line_width(&p.text, TAB_WIDTH)),
+        );
         #[expect(
             clippy::cast_possible_truncation,
             reason = "on-screen pixel coordinates fit in i32"
@@ -592,6 +1046,7 @@ impl App {
             Ime::Commit(text) => {
                 self.preedit = None;
                 self.latency.input(now);
+                // Routed like typing: into the find bar if it has focus.
                 self.run(Command::Insert(&text), event_loop);
             }
             Ime::Disabled => {
@@ -602,7 +1057,175 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+/// Geometry for the window `gpu` draws to, with room for the find bar and
+/// message line when they are shown.
+fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar, message: bool) -> Layout {
+    let (w, h) = gpu.size();
+    let bar_rows = match (find.open, find.replace_mode) {
+        (false, _) => 0,
+        (true, false) => 1,
+        (true, true) => 2,
+    };
+    Layout::new(gpu.metrics(), w, h, scale, doc.buffer.len_lines())
+        .with_bars(bar_rows, usize::from(message))
+}
+
+/// Everything one frame shows.
+struct Scene<'a> {
+    doc: &'a Document,
+    view: &'a mut View,
+    find: &'a FindBar,
+    message: Option<&'a Message>,
+    /// Blink phase: the cursor is in its visible half.
+    cursor_visible: bool,
+    preedit: Option<&'a Preedit>,
+}
+
+/// Queue a whole frame: editor text, then the find bar and message line.
+/// Shared by the window and headless rendering.
+fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
+    let find = scene.find;
+    let current = find.current.and_then(|i| find.matches.get(i)).cloned();
+    scene.view.draw(
+        gpu,
+        scene.doc,
+        layout,
+        TAB_WIDTH,
+        &Decorations {
+            cursor_visible: scene.cursor_visible && !find.focused,
+            preedit: scene.preedit,
+            // Hide highlights from before an edit until the search reruns.
+            matches: if find.open && find.version == scene.doc.version {
+                &find.matches
+            } else {
+                &[]
+            },
+            current,
+        },
+    );
+    if find.open {
+        view::draw_find_bar(gpu, find, layout, scene.cursor_visible);
+    }
+    if let Some(m) = scene.message {
+        view::draw_message(gpu, &m.text, layout, m.is_error);
+    }
+}
+
+/// `--headless WxH --screenshot FILE`: render the first frame into an
+/// off-screen texture, with no window, and save it. Works with the screen
+/// locked or no display attached. Returns the process exit code.
+fn run_headless(
+    options: &Options,
+    mut doc: Document,
+    size: (u32, u32),
+    context: GpuContext,
+) -> i32 {
+    let Some(path) = &options.screenshot else {
+        print_err("nimbus: --headless needs --screenshot FILE.bmp");
+        return 2;
+    };
+    let font = match Font::bundled() {
+        Ok(f) => f,
+        Err(e) => {
+            print_err(&format!("nimbus: {e}"));
+            return 1;
+        }
+    };
+    // No window to ask: default to a Retina scale, or NIMBUS_SCALE.
+    let scale = effective_scale(2.0);
+    let mut gpu = Gpu::headless(context, font, font_px(scale), size.0, size.1);
+    gpu.set_tab_width(TAB_WIDTH);
+    let mut view = View::default();
+    view.set_wrap(options.wrap);
+    let mut find = FindBar::default();
+    if let Some(pattern) = &options.find {
+        find.open(false, None);
+        let _ = find.find.insert(pattern);
+        find.search_now(&doc);
+        if let Some(range) = find.select_from(0, false) {
+            doc.select(range);
+        }
+    }
+    let layout = layout_for(&gpu, to_f32(scale), &doc, &find, false);
+    view.ensure_cursor_visible(&doc, &layout, TAB_WIDTH);
+    let mut scene = Scene {
+        doc: &doc,
+        view: &mut view,
+        find: &find,
+        message: None,
+        cursor_visible: true,
+        preedit: None,
+    };
+    paint_scene(&mut gpu, &layout, &mut scene);
+    gpu.request_capture();
+    if let Err(e) = gpu.render() {
+        print_err(&format!("nimbus: {e}"));
+        return 1;
+    }
+    i32::from(!save_screenshot(path, gpu.take_capture().as_ref()))
+}
+
+/// Apply a text-editing command to a one-line field (the find bar). Returns
+/// text to put on the clipboard for Copy and Cut. Line breaks are not typed
+/// into fields; pasted ones are kept, so a multi-line literal can be found.
+fn edit_field(field: &mut Document, cmd: Command<'_>, paste: Option<&str>) -> Option<String> {
+    let result = match cmd {
+        Command::Move(motion, extend) => {
+            field.move_cursor(motion, extend, TAB_WIDTH, 1);
+            Ok(())
+        }
+        Command::Insert(text) => field.insert(text).map(drop),
+        Command::DeleteBack => field.delete_back().map(drop),
+        Command::DeleteForward => field.delete_forward().map(drop),
+        Command::Undo => field.undo().map(drop),
+        Command::Redo => field.redo().map(drop),
+        Command::SelectAll => {
+            field.select_all();
+            Ok(())
+        }
+        Command::Copy => return field.selected_text(),
+        Command::Cut => {
+            let text = field.selected_text();
+            if text.is_some()
+                && let Err(e) = field.delete_back()
+            {
+                log::error!("cut refused: {e}");
+            }
+            return text;
+        }
+        Command::Paste => match paste {
+            Some(text) => field.insert(text).map(drop),
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    };
+    if let Err(e) = result {
+        log::error!("field edit refused: {e}");
+    }
+    None
+}
+
+impl ApplicationHandler<AppEvent> for App {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
+        match event {
+            AppEvent::Search(batch) => {
+                if !self.find.receive(batch) {
+                    return;
+                }
+                // Jump once a match at or after the origin has arrived, or
+                // when the search is complete (then it wraps to the first).
+                let origin = self.find_origin;
+                let reached = self.find.matches.last().is_some_and(|m| m.start >= origin);
+                let done = self.find.complete && !self.find.matches.is_empty();
+                if self.find_pending_jump && (reached || done) {
+                    self.find_pending_jump = false;
+                    self.jump_to_match(origin, false);
+                }
+                self.changed(false);
+            }
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -670,12 +1293,34 @@ impl ApplicationHandler for App {
         window.request_redraw();
         self.window = Some(window);
         self.update_title();
+        if self.options.wrap {
+            self.view.set_wrap(true);
+        }
+        if let Some(pattern) = self.options.find.clone() {
+            self.open_find(false);
+            let _ = self.find.find.insert(&pattern);
+            self.search(true);
+        }
     }
 
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
         let now = Instant::now();
         let blink_changed = self.blink.tick(now);
         let retry_due = self.hidden_retry.is_some_and(|(at, _)| now >= at);
+        if self.research_at.is_some_and(|t| now >= t) {
+            self.research_at = None;
+            if self.find.open {
+                self.search(false);
+                self.changed(false);
+            }
+        }
+        let message_expired = self.message.as_ref().is_some_and(|m| now >= m.until);
+        if message_expired {
+            self.message = None;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
         if (blink_changed || retry_due)
             && let Some(window) = &self.window
         {
@@ -684,12 +1329,30 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // --smoke and --screenshot must not wait forever: a locked screen or
+        // a hidden window never lets the first frame be drawn.
+        let unattended = self.options.smoke || self.options.screenshot.is_some();
+        let deadline = self.started + UNATTENDED_TIMEOUT;
+        if unattended && self.frames == 0 && Instant::now() >= deadline {
+            print_err(
+                "nimbus: no frame could be drawn in 10 s (window hidden or screen locked?); try --headless",
+            );
+            self.exit_code = 1;
+            event_loop.exit();
+            return;
+        }
         // Sleep until the next blink or hidden-window retry, or indefinitely
         // when neither is pending.
-        let next = [self.blink.next, self.hidden_retry.map(|(at, _)| at)]
-            .into_iter()
-            .flatten()
-            .min();
+        let next = [
+            self.blink.next,
+            self.hidden_retry.map(|(at, _)| at),
+            self.message.as_ref().map(|m| m.until),
+            self.research_at,
+            (unattended && self.frames == 0).then_some(deadline),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
@@ -707,13 +1370,14 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
 
             WindowEvent::KeyboardInput { event, .. } => {
-                let cmd = input::map_key(
-                    &event.logical_key,
-                    event.text.as_deref(),
-                    event.state == ElementState::Pressed,
-                    event.repeat,
-                    self.modifiers,
-                );
+                let cmd = input::map_key(input::KeyPress {
+                    key: &event.logical_key,
+                    physical: event.physical_key,
+                    text: event.text.as_deref(),
+                    pressed: event.state == ElementState::Pressed,
+                    repeat: event.repeat,
+                    mods: self.modifiers,
+                });
                 if let Some(cmd) = cmd {
                     self.blink.reset(now);
                     self.latency.input(now);
@@ -723,19 +1387,22 @@ impl ApplicationHandler for App {
 
             WindowEvent::Ime(ime) => self.ime(ime, event_loop),
 
-            WindowEvent::CursorMoved { position, .. } => self.mouse = position,
+            WindowEvent::CursorMoved { position, .. } => {
+                self.mouse = position;
+                if self.clicks.dragging {
+                    self.mouse_drag();
+                }
+            }
 
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button: MouseButton::Left,
                 ..
             } => {
-                if let Some(layout) = self.layout() {
-                    let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
-                    let pos = self.view.hit(x, y, &self.doc, &layout, TAB_WIDTH);
-                    self.doc.click(pos);
-                    self.blink.reset(now);
-                    self.changed(false);
+                if state == ElementState::Pressed {
+                    self.mouse_down(now);
+                } else {
+                    self.clicks.dragging = false;
                 }
             }
 
@@ -752,8 +1419,7 @@ impl ApplicationHandler for App {
                             (x * cell * lines_per_notch, y * lh * lines_per_notch)
                         }
                     };
-                    self.view
-                        .scroll_by(-dy, &layout, self.doc.buffer.len_lines());
+                    self.view.scroll_by(-dy, &self.doc, &layout, TAB_WIDTH);
                     self.view.scroll_x_by(-dx);
                     self.changed(false);
                 }
@@ -837,7 +1503,22 @@ fn main() {
     };
     log::debug!("startup: document loaded at {:?}", started.elapsed());
 
-    let mut builder = EventLoop::builder();
+    if let Some(size) = options.headless {
+        let code = match gpu_init.join() {
+            Ok(Ok(context)) => run_headless(&options, doc, size, context),
+            Ok(Err(e)) => {
+                print_err(&format!("nimbus: {e}"));
+                1
+            }
+            Err(_) => {
+                print_err("nimbus: GPU setup thread did not complete");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
+
+    let mut builder = EventLoop::<AppEvent>::with_user_event();
     #[cfg(target_os = "macos")]
     {
         // winit's default macOS menu binds Cmd+Q to quit the app directly,
@@ -856,7 +1537,8 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Wait);
     log::debug!("startup: event loop ready at {:?}", started.elapsed());
 
-    let mut app = App::new(options, started, gpu_init, doc);
+    let proxy = event_loop.create_proxy();
+    let mut app = App::new(options, started, gpu_init, doc, proxy);
     if let Err(e) = event_loop.run_app(&mut app) {
         print_err(&format!("nimbus: event loop error: {e}"));
         std::process::exit(1);

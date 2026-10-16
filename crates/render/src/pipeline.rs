@@ -14,6 +14,7 @@
 //! against; the *bind group* is a value of that type.
 
 use std::marker::PhantomData;
+use std::ops::Range;
 
 use crate::atlas::Atlas;
 
@@ -261,14 +262,21 @@ impl RectPipeline {
         }
     }
 
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, globals: &Globals) {
-        if self.instances.len == 0 {
+    /// Draw the instances in `range` (indices into this frame's upload).
+    pub(crate) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        globals: &Globals,
+        range: Range<u32>,
+    ) {
+        let range = range.start.min(self.instances.len)..range.end.min(self.instances.len);
+        if range.is_empty() {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &globals.bind_group, &[]);
         pass.set_vertex_buffer(0, self.instances.slice());
-        pass.draw(0..4, 0..self.instances.len);
+        pass.draw(0..4, range);
     }
 }
 
@@ -304,15 +312,23 @@ impl GlyphPipeline {
         }
     }
 
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, globals: &Globals, atlas: &Atlas) {
-        if self.instances.len == 0 {
+    /// Draw the instances in `range` (indices into this frame's upload).
+    pub(crate) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        globals: &Globals,
+        atlas: &Atlas,
+        range: Range<u32>,
+    ) {
+        let range = range.start.min(self.instances.len)..range.end.min(self.instances.len);
+        if range.is_empty() {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &globals.bind_group, &[]);
         pass.set_bind_group(1, atlas.bind_group(), &[]);
         pass.set_vertex_buffer(0, self.instances.slice());
-        pass.draw(0..4, 0..self.instances.len);
+        pass.draw(0..4, range);
     }
 }
 

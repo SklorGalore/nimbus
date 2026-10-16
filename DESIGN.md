@@ -357,8 +357,8 @@ introduces and points at the code.
 | 0 | Scaffold | **Done** | Run an empty window on all three OSes; CI builds all three | [m0](docs/milestones/m0-scaffold.md) |
 | 1 | Text on screen | **Done** | See a paragraph in a monospace font at correct DPI; cold start under 100 ms | [m1](docs/milestones/m1-text-on-screen.md) |
 | 2 | Editable | **Done** | Open, edit, scroll and save a file | [m2](docs/milestones/m2-editable.md) |
-| 3 | Editing essentials | Next | Select, clipboard, undo, find and replace, soft wrap, auto-indent | [m3](docs/milestones/m3-editing-essentials.md) |
-| 4 | Many files | Planned | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
+| 3 | Editing essentials | **Done** | Select, clipboard, undo, find and replace, soft wrap, auto-indent | [m3](docs/milestones/m3-editing-essentials.md) |
+| 4 | Many files | Next | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
 | 5 | Highlighting | Planned | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
 | 6 | File tree | Planned | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
 | 7 | Huge files | Planned | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
@@ -409,3 +409,8 @@ memory budget is per file, at most 1.5× file size over an empty window (§1).
 | 2026-10-16 | winit's default macOS menu disabled so Cmd+Q reaches the unsaved prompt | §4.4 |
 | 2026-10-16 | Byte order mark kept out of the text, written back on save | §4.1 |
 | 2026-10-16 | Memory budget: a file adds at most 1.5× its size; totals reported, not budgeted | §1 |
+| 2026-10-16 | Soft wrap lives in `nimbus_core::wrap`; the view works in visual rows in both modes | §4.3 |
+| 2026-10-16 | Renderer draws in clipped layers; overlays cover the text area | §4.3 |
+| 2026-10-16 | Find fields are `Document`s; re-search after edits waits for a 150 ms pause | §4.4 |
+| 2026-10-16 | `--headless` off-screen rendering for checks without a visible window | §5 |
+| 2026-10-16 | Word movement uses code-style classes; wrap uses Unicode word bounds | §4.1 |
