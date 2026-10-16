@@ -17,7 +17,7 @@ and add a line to the decision log (§10).
 | Fast startup | First frame in < 500 ms, total time from the top of `main` | `nimbus --smoke` prints `first-frame-ms` | M1: 116–132 ms warm, of which about 3 ms is ours |
 | Typing latency | Keystroke to pixels in < 1 frame (≤ 8 ms at 120 Hz) | Frame timer in debug overlay | — |
 | Huge files | Open a 4 GB log, scroll and search it, under 1 s to interactive | Bench file from `bench/gen.sh` | — |
-| Low footprint | Opening a file adds at most 1.5× its size over an empty window (rope backend); mapped files (M7) add roughly nothing. Total reported, not budgeted. Single binary < 35 MB | `vmmap` physical footprint after settling; CI size job | M2: 45 MB empty, 58 MB with a 10 MB file (1.3×); 7.5 MB binary |
+| Low footprint | Opening a file adds at most 1.5× its size over an empty window (rope backend); mapped files (M7) add roughly nothing. Syntax highlighting is not counted (§4.2). Total reported, not budgeted. Single binary < 35 MB | `vmmap` physical footprint after settling; CI size job | M2: 45 MB empty, 58 MB with a 10 MB file (1.3×); 7.5 MB binary |
 | Modeless editing | Type to insert; Cmd/Ctrl shortcuts; mouse works | — | — |
 
 Content we care about, in order: source code, prose and notes (Markdown),
@@ -192,13 +192,30 @@ Rules that protect the performance goals:
   time, so neither parsing nor queries copy the document.
 - Highlighting is computed only for the lines that can be on screen, and
   cached until the tree or the range changes.
-- Above 16 MB, or for any `MappedBuffer`, highlighting is off.
+- Above 16 MB the file is not parsed. It gets simple line-by-line
+  highlighting instead (below), for any backend, including `MappedBuffer`.
 - `nimbus-syntax` starts no threads: `SyntaxState` hands out `Job`s and the
   app runs them, so tests and headless rendering parse in place.
 
 Memory: a tree keeps about 28 bytes per byte of Rust source (2.7 million
-nodes of about 108 bytes for 10 MB, one node per 3.9 bytes). That is far
-outside the per-file budget in §1, which was set for text storage; see §9.
+nodes of about 108 bytes for 10 MB, one node per 3.9 bytes), so a file at
+the 16 MB limit can hold about 450 MB. Highlighting memory is not counted
+in the per-file budget in §1, which is for text storage (owner decision).
+
+**Simple highlighting for large files** (`crates/syntax/src/lexical.rs`).
+Each language has a small table of rules: line and block comments, string
+delimiters, keywords, and literals like `true` and `null`; Markdown has
+headings and fenced code blocks. Lines are coloured one at a time, carrying
+only whether the previous line ended inside a block comment, a multi-line
+string or a code fence. That state is saved every 256 lines as lines are
+scanned, and an edit drops the saved states after it. To reach a line far
+from any saved state (a jump into the middle of a huge file), scanning
+starts at most 256 KB above it and assumes plain code there, so colours can
+be wrong only where a single comment or string is longer than that. The
+result of that guess is kept while the view stays near it. Memory stays
+near zero at any size. On a 100 MB file: a jump to the middle 3 ms, a
+keystroke with 60 lines on screen 21 µs. Types, functions and the like stay
+plain; only tree-sitter tells those apart.
 
 Markdown needs a second, inline grammar injected into each paragraph. M5
 ships block-level Markdown highlighting; inline emphasis and code spans are
@@ -406,20 +423,15 @@ which is contained inside `render`.
    and memory and may move it.
 2. **Dependency updates.** Add Dependabot for cargo and GitHub Actions, or
    update by hand at each milestone? The Node 20 deprecation was a hand fix.
-3. **Syntax tree memory.** A tree costs about 28× its file's size (§4.2), so
-   a highlighted file breaks the 1.5× budget in §1 at any size. A typical
-   200 KB source file costs about 6 MB; a 16 MB file, the highlighting
-   limit, about 450 MB. Options for the owner: count highlighting outside
-   the per-file budget and keep the 16 MB limit; or lower the limit (4 MB is
-   about 110 MB of tree); or, later, parse only a window around the view
-   for large files, at the cost of wrong colours where context is missing.
 
 Resolved at approval: the two-backend buffer (§4.1), bidi out of scope (§2),
 the nine starter languages (§4.2), binary name `nimbus`. Resolved at the start
 of M1: the bundled font is Hack Nerd Font Mono Regular (§4.3). Resolved after
 M1: the startup budget is under 500 ms total (§1). Resolved after M2: the
 memory budget is per file, at most 1.5× file size over an empty window (§1). Resolved after M5: the
-binary budget is under 35 MB (§1).
+binary budget is under 35 MB (§1); highlighting memory is not counted in
+the per-file budget, and files over 16 MB get simple line-by-line
+highlighting instead of a syntax tree (§4.2).
 
 ## 10. Decision log
 
@@ -464,3 +476,5 @@ binary budget is under 35 MB (§1).
 | 2026-10-16 | Main-thread reparse budget 2 ms, then a worker; syntax crate starts no threads | §4.2 |
 | 2026-10-16 | Themes are TOML, built in or in the config directory, hex colours | §4.4 |
 | 2026-10-16 | Binary budget raised from 15 MB to 35 MB: grammars put Linux at 19 MB | §1, §5 |
+| 2026-10-16 | Highlighting memory not counted in the per-file budget | §1, §4.2 |
+| 2026-10-16 | Files over 16 MB get simple line-by-line highlighting, any backend | §4.2 |

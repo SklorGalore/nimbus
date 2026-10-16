@@ -34,7 +34,9 @@ and save, without the memory cost of loading it.
 handling, go-to-line, save for mapped files, `unsafe` for the mapping.
 
 **Deferred**: following a growing log like `tail -f` (a post-M8 idea),
-highlighting for mapped files (off by design).
+tree-sitter highlighting for mapped files (they get the simple
+line-by-line highlighting every file over 16 MB gets; M7 checks it works
+on `MappedBuffer` through `Text::chunk_at` and `Text::line`).
 
 ## Design
 

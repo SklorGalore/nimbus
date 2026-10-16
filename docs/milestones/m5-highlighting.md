@@ -1,6 +1,6 @@
 # M5 — Highlighting
 
-**Status: done** (syntax tree memory still an open question, DESIGN.md §9 q3)
+**Status: done**
 
 ## Goal
 
@@ -28,9 +28,9 @@ Ticked items were verified here by tests, benchmarks or headless renders.
 - [x] **Owner, confirmed:** open `bench/out/src-10mb.rs`: the text shows at once,
       uncoloured, and colours appear about half a second later (the
       first parse of 10 MB takes 450 ms on a worker; 5 MB takes 220 ms).
-- [x] Files over 16 MB open uncoloured with a message-line note
-      ("Over 16 MB: shown without syntax colours"); state test, and the
-      note is laid out before the frame that shows it.
+- [x] Files over 16 MB open uncoloured with a message-line note. Changed
+      after the milestone: they now get simple line-by-line colours
+      (comments, strings, keywords, numbers), and the note says so.
 - [x] **Owner, confirmed:** startup with a Rust file is unchanged from M4
       (`--smoke`). Grammars load on the parse worker, never before the
       first frame, and only the opened language's.
@@ -136,13 +136,12 @@ without; their unlinked archives are 430 KB, 9 KB and 31 KB.
 build at 18.97 MB, over the old 15 MB, and dropping TypeScript, Bash and
 Python would only have reached about 15.7 MB.
 
-**Open: syntax tree memory.** A tree-sitter tree holds
-about 108 bytes per node and Rust has a node every 3.9 bytes, so a tree is
-about 28× its file. That breaks the 1.5× per-file budget (DESIGN.md §1) for
-any highlighted file: 200 KB of source costs about 6 MB, a 5 MB file about
-140 MB, and a file at the 16 MB limit about 450 MB. Options are in
-DESIGN.md §9, question 3. Until the owner chooses, the limit stays at
-16 MB as planned.
+**Syntax tree memory: not counted.** A tree-sitter tree holds about 108
+bytes per node and Rust has a node every 3.9 bytes, so a tree is about 28×
+its file: 200 KB of source costs about 6 MB, a file at the 16 MB limit
+about 450 MB. The owner decided highlighting memory is outside the per-file
+budget, and that files over 16 MB get simple line-by-line highlighting
+instead of no colours (added after the milestone; DESIGN.md §4.2).
 
 **Design changes**
 

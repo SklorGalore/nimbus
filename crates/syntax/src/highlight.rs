@@ -83,13 +83,17 @@ impl Highlighter {
         }
         self.spans.clear();
         self.key = Some(key);
-        let Some((tree, grammar)) = state.tree() else {
-            return &self.spans;
-        };
         let range = range.start.min(text.len_bytes())..range.end.min(text.len_bytes());
         if range.is_empty() {
             return &self.spans;
         }
+        if let Some(lexical) = state.lexical() {
+            lexical.spans(text, range, &mut self.spans);
+            return &self.spans;
+        }
+        let Some((tree, grammar)) = state.tree() else {
+            return &self.spans;
+        };
 
         self.captures.clear();
         self.cursor.set_byte_range(range.clone());

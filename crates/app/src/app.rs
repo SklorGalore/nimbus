@@ -1232,10 +1232,10 @@ impl App {
         if let Some(job) = tab.doc.syntax.take_job(&tab.doc.buffer) {
             spawn_syntax(&self.proxy, job);
         }
-        if tab.doc.syntax.off_reason() == Some(Off::TooLarge) && !tab.noted_size {
+        if tab.doc.syntax.lexical().is_some() && !tab.noted_size {
             tab.noted_size = true;
             let mb = MAX_HIGHLIGHT_BYTES / (1024 * 1024);
-            self.say(format!("Over {mb} MB: shown without syntax colours"), false);
+            self.say(format!("Over {mb} MB: simpler syntax colours"), false);
         }
     }
 
@@ -1458,11 +1458,9 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     let current = find.current.and_then(|i| find.matches.get(i)).cloned();
     let ui = scene.theme.ui;
     let syntax = &scene.doc.syntax;
-    let captures = match (syntax.language(), syntax.tree()) {
-        (Some(language), Some((_, grammar))) => scene
-            .theme
-            .capture_colors(language, grammar.highlights.capture_names()),
-        _ => &[],
+    let captures = match syntax.capture_names() {
+        Some((key, names)) => scene.theme.capture_colors(key, names),
+        None => &[],
     };
     scene.view.draw(
         gpu,

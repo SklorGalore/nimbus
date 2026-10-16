@@ -104,7 +104,7 @@ pub struct Theme {
     pub ui: Ui,
     syntax: HashMap<String, Color>,
     /// Colour per capture index, per language, built on first use.
-    resolved: [Option<Vec<Option<Color>>>; LanguageId::ALL.len()],
+    resolved: [Option<Vec<Option<Color>>>; LanguageId::ALL.len() + 1],
 }
 
 impl Default for Theme {
@@ -265,11 +265,14 @@ impl Theme {
         lookup(&self.syntax, capture)
     }
 
-    /// Colours by capture index for `language`'s query, whose capture
-    /// names are `names`. Worked out once per language, so each frame
-    /// only indexes an array.
-    pub fn capture_colors(&mut self, language: LanguageId, names: &[&str]) -> &[Option<Color>] {
-        let slot = &mut self.resolved[language.index()];
+    /// Colours by capture index for a list of capture names, cached under
+    /// `key` (from `SyntaxState::capture_names`: one per grammar, plus one
+    /// for the simple rules large files use). Worked out once per key, so
+    /// each frame only indexes an array.
+    pub fn capture_colors(&mut self, key: usize, names: &[&str]) -> &[Option<Color>] {
+        let Some(slot) = self.resolved.get_mut(key) else {
+            return &[];
+        };
         if slot.as_ref().is_none_or(|v| v.len() != names.len()) {
             *slot = Some(names.iter().map(|n| lookup(&self.syntax, n)).collect());
         }
@@ -351,7 +354,7 @@ mod tests {
         let mut t = t;
         let names = ["variable", "function.method", "function.macro"];
         assert_eq!(
-            t.capture_colors(LanguageId::Rust, &names),
+            t.capture_colors(LanguageId::Rust.index(), &names),
             &[None, green, red]
         );
     }
