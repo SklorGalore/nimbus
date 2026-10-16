@@ -42,9 +42,11 @@ Ticked items were verified here by tests, benchmarks or headless renders.
       `themes/mine.toml` next to your config, change a colour or two
       (delete the rest; they come from `base`), set `theme = "mine"`, run
       Reload Config.
-- [x] Release binary under 15 MB: 14.80 MB on macOS (CI checks Linux
-      against 15 MiB). `cargo bloat` is not installed; sizes were measured
-      by building without each grammar instead (Results).
+- [ ] Release binary under 15 MB: **fails on Linux**. macOS 14.80 MB, but
+      the CI check (Linux, 15 MiB) measured 18.97 MB; Linux was already
+      13.34 MB at M4 (wgpu's Vulkan and GL backends, Wayland and X11).
+      Owner decision needed (Results). `cargo bloat` is not installed;
+      sizes were measured by building without each grammar instead.
 
 ## Scope
 
@@ -123,12 +125,18 @@ per-frame cost is an array lookup.
 | First parse, Rust | 1 MB 60 ms, 5 MB 220 ms, 10 MB 450 ms (worker) |
 | Query compile (first use of a language) | Rust 16 ms, TypeScript 13 ms, others under 6 ms |
 | Syntax tree memory | about 28× the file: 10 MB of Rust keeps 276 MB |
-| Release binary | 14.80 MB (M4: 8.7 MB) |
+| Release binary | macOS 14.80 MB (M4: 8.7 MB); Linux 18.97 MB (M4: 13.34 MB), over the 15 MiB check |
 
 Binary cost per grammar, from builds without each one: TypeScript 1.42 MB,
 Bash 1.37 MB, Python 0.46 MB, Markdown 0.38 MB, YAML 0.18 MB; tree-sitter
 itself plus Rust about 1.8 MB. JavaScript, JSON and TOML were not built
 without; their unlinked archives are 430 KB, 9 KB and 31 KB.
+
+**Owner decision needed: binary size.** Dropping TypeScript, Bash and
+Python saves about 3.3 MB, which would leave Linux at about 15.7 MB, still
+at or over the limit. The options: raise the budget (to 20 MB, say); trim
+Linux's baseline first (for example wgpu's GL backend, if Vulkan alone is
+acceptable), then measure; or ship fewer grammars.
 
 **Owner decision needed: syntax tree memory.** A tree-sitter tree holds
 about 108 bytes per node and Rust has a node every 3.9 bytes, so a tree is
