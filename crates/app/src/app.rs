@@ -20,6 +20,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
 
+use nimbus_core::line_index::IndexChunk;
 use nimbus_core::{Buffer, Text};
 use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
@@ -58,6 +59,9 @@ pub enum AppEvent {
     Disk(Vec<Change>),
     /// The file watcher could not watch everything asked of it.
     WatchWarning(String),
+    /// A chunk of a huge file's line index, for the document with that
+    /// indexing token.
+    Index(u64, IndexChunk),
 }
 
 /// List a folder for the sidebar on its own thread.
@@ -735,6 +739,49 @@ impl App {
         doc.click(pos, false);
         doc.preferred_column = None;
         self.changed(true);
+    }
+
+    /// Start line counting for any mapped document that has not started.
+    fn start_indexing(&mut self) {
+        for tab in &mut self.tabs {
+            if let Some(job) = tab.doc.indexing.take() {
+                let proxy = self.proxy.clone();
+                job.spawn(move |token, chunk| {
+                    proxy.send_event(AppEvent::Index(token, chunk)).is_ok()
+                });
+            }
+        }
+    }
+
+    /// A chunk of line index arrived: merge it, report progress, and finish
+    /// a go-to-line that was waiting for it.
+    fn index_arrived(&mut self, token: u64, chunk: IndexChunk) {
+        let Some(i) = self
+            .tabs
+            .iter_mut()
+            .position(|t| t.doc.index_token == Some(token))
+        else {
+            return; // closed or reloaded meanwhile
+        };
+        if !self.tabs[i].doc.merge_index(token, chunk) || i != self.active {
+            return;
+        }
+        let t = &self.tabs[i].doc.buffer;
+        if t.is_fully_indexed() {
+            let lines = t.len_lines();
+            self.say(format!("{lines} lines"), false);
+        } else {
+            #[expect(clippy::cast_precision_loss, reason = "a percentage for display")]
+            let pct = t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64;
+            self.say(format!("Counting lines… {pct:.0}%"), false);
+        }
+        if let Some(n) = self.pending_line {
+            let t = &self.tabs[i].doc.buffer;
+            if n <= t.len_lines() || t.is_fully_indexed() {
+                self.go_to_line(n);
+            }
+        }
+        self.changed(false);
     }
 
     /// Start folder listings for the sidebar on worker threads.
@@ -1885,6 +1932,21 @@ impl App {
     }
 }
 
+/// The number of lines, or while a huge file is still being counted, an
+/// estimate from the part counted so far (a little high), so the gutter is
+/// wide enough from the start instead of widening as counting goes on.
+fn line_estimate(t: &dyn Text) -> usize {
+    let (counted, len) = (t.indexed_bytes(), t.len_bytes());
+    let lines = t.len_lines();
+    if counted >= len || counted == 0 {
+        return lines;
+    }
+    let before = t.line_number(counted).unwrap_or(lines);
+    let estimate =
+        u128::from(before as u64) * u128::from(len as u64) * 11 / (u128::from(counted as u64) * 10);
+    usize::try_from(estimate).unwrap_or(usize::MAX).max(lines)
+}
+
 /// Geometry for the window `gpu` draws to, with room for the find bar and
 /// message line when they are shown.
 pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar, message: bool) -> Layout {
@@ -1894,7 +1956,7 @@ pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar, message
         (true, false) => 1,
         (true, true) => 2,
     };
-    Layout::new(gpu.metrics(), w, h, scale, doc.buffer.len_lines())
+    Layout::new(gpu.metrics(), w, h, scale, line_estimate(&doc.buffer))
         .with_chrome(true, bar_rows, message)
 }
 
@@ -1990,6 +2052,9 @@ pub fn run_headless(
     gpu.set_tab_width(config.tab_width);
     let mut view = View::default();
     view.set_wrap(options.wrap || config.soft_wrap);
+    if options.wait_index {
+        index_now(&mut doc);
+    }
     let find = headless_find(options.find.as_deref(), &mut doc);
     let (sidebar, layout) = headless_sidebar(
         &root,
@@ -2058,6 +2123,19 @@ pub fn run_headless(
         return 1;
     }
     i32::from(!save_screenshot(path, gpu.take_capture().as_ref()))
+}
+
+/// `--wait-index`: count all of a huge file's lines on this thread.
+fn index_now(doc: &mut Document) {
+    if let Some(job) = doc.indexing.take() {
+        let started = Instant::now();
+        job.run(|token, chunk| doc.merge_index(token, chunk));
+        log::info!(
+            "indexed {} lines in {:?}",
+            doc.buffer.len_lines(),
+            started.elapsed()
+        );
+    }
 }
 
 /// `--find PATTERN`: the find bar searching, with the first match selected.
@@ -2247,6 +2325,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.changed(false);
             }
             AppEvent::Disk(paths) => self.disk_changed(&paths),
+            AppEvent::Index(token, chunk) => self.index_arrived(token, chunk),
             AppEvent::WatchWarning(warning) => {
                 self.say(warning, true);
                 self.changed(false);
@@ -2385,6 +2464,11 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.frames > 0 {
+            // Huge files count their lines in the background, started
+            // after the first frame so the disk is not shared with it.
+            self.start_indexing();
+        }
         if self.frames > 0 && !self.watching {
             // Starting watches can take milliseconds (macOS restarts its
             // event stream for each folder), so not before the first frame.

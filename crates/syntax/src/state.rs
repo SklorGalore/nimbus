@@ -274,6 +274,13 @@ impl SyntaxState {
         Some((self.language?.index(), grammar.highlights.capture_names()))
     }
 
+    /// Note that the highlighting may have changed without an edit (a huge
+    /// file's line numbers were counted further), so cached colours are
+    /// worked out again.
+    pub fn touch(&mut self) {
+        self.rev += 1;
+    }
+
     /// Changes whenever the highlighting may have changed.
     #[must_use]
     pub fn rev(&self) -> u64 {

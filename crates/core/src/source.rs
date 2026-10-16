@@ -32,6 +32,26 @@ pub trait Source: Send + Sync {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Fill `buf` with the bytes starting at `offset`, for work that reads
+    /// a lot of the file (search, saving, copying a large selection). A
+    /// memory-mapped source overrides this with an ordinary file read, so
+    /// sweeping a huge file does not pull it all into memory through the
+    /// mapping, and a file cut short by another program gives an error
+    /// rather than a crash. The default copies from [`Source::bytes`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `UnexpectedEof` for bytes past the end, and the file
+    /// system's error for a file read.
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> std::io::Result<()> {
+        let src = offset
+            .checked_add(buf.len())
+            .and_then(|end| self.bytes().get(offset..end))
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof))?;
+        buf.copy_from_slice(src);
+        Ok(())
+    }
 }
 
 /// Original bytes held in an ordinary `Vec`: for tests, and for any
@@ -92,5 +112,15 @@ mod tests {
         assert!(!s.is_empty());
         assert!(VecSource::default().is_empty());
         assert_eq!(format!("{s:?}"), "VecSource { len: 6 }");
+    }
+
+    #[test]
+    fn read_at_copies_or_refuses_past_the_end() {
+        let s = VecSource::from("abcdef");
+        let mut buf = [0; 3];
+        s.read_at(2, &mut buf).unwrap();
+        assert_eq!(&buf, b"cde");
+        assert!(s.read_at(4, &mut buf).is_err());
+        assert!(s.read_at(usize::MAX, &mut buf).is_err());
     }
 }

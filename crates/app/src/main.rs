@@ -9,6 +9,7 @@ mod bmp;
 mod config;
 mod document;
 mod find;
+mod indexer;
 mod input;
 mod io;
 mod keymap;
@@ -66,6 +67,9 @@ pub struct Options {
     /// Open every file in this backend, whatever its size (`--backend
     /// rope|mapped`), for measuring one against the other.
     pub backend: Option<io::Backend>,
+    /// With `--headless`: count all of a huge file's lines before drawing,
+    /// instead of drawing with only the first part counted.
+    pub wait_index: bool,
 }
 
 /// Write a line to stdout. Command-line output such as `--version` and the
@@ -117,6 +121,7 @@ fn parse_options() -> Options {
     let mut headless = None;
     let mut picker = None;
     let mut theme = None;
+    let mut wait_index = false;
     let mut backend = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -139,6 +144,7 @@ fn parse_options() -> Options {
                     });
             }
             Some("--wrap") => wrap = true,
+            Some("--wait-index") => wait_index = true,
             Some("--picker") => picker = args.next().and_then(|p| p.into_string().ok()),
             Some("--theme") => theme = args.next().and_then(|t| t.into_string().ok()),
             Some("--backend") => {
@@ -176,7 +182,7 @@ fn parse_options() -> Options {
             }
             Some("--help" | "-h") => {
                 print_out(
-                    "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--headless WxH] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
+                    "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--headless WxH [--wait-index]] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
                 );
                 std::process::exit(0);
             }
@@ -198,6 +204,7 @@ fn parse_options() -> Options {
         picker,
         theme,
         backend,
+        wait_index,
     }
 }
 

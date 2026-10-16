@@ -4,6 +4,7 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
 
 use nimbus_core::movement;
@@ -13,10 +14,12 @@ use nimbus_core::{
 
 use nimbus_syntax::state::SyntaxState;
 
+use crate::indexer::Indexing;
 use crate::input::Motion;
 use crate::io::{self, OpenError, SaveError};
 use crate::languages::{Detected, Languages};
 use crate::mapping::MappedFile;
+use nimbus_core::line_index::IndexChunk;
 
 /// Copy and Cut refuse selections longer than this: 64 MiB. The text is
 /// copied into memory, then again by the system clipboard, and Select All
@@ -118,9 +121,57 @@ pub struct Document {
     /// whenever the top of the history differs, so undoing back to the saved
     /// point makes it clean again.
     saved_at: u64,
+    /// The rest of a mapped file's line counting, until the app starts it
+    /// on a worker.
+    pub indexing: Option<Indexing>,
+    /// Which indexing run this document's index chunks come from.
+    pub index_token: Option<u64>,
+    /// Stops the indexing worker when the document goes away or reloads.
+    index_cancel: Option<IndexCancel>,
+}
+
+/// Stops a line-counting worker when dropped: when its document closes,
+/// reloads or goes away.
+#[derive(Debug)]
+struct IndexCancel(Arc<AtomicBool>);
+
+impl Drop for IndexCancel {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Document {
+    /// Stop a running line count for this document.
+    fn stop_indexing(&mut self) {
+        // Dropping the guard stops the worker.
+        self.index_cancel = None;
+        self.indexing = None;
+        self.index_token = None;
+    }
+
+    /// Add a chunk of the line index from the worker. Returns `false` if it
+    /// does not belong here (another run, or out of order).
+    pub fn merge_index(&mut self, token: u64, chunk: IndexChunk) -> bool {
+        if self.index_token != Some(token) {
+            return false;
+        }
+        let Some(mapped) = self.buffer.as_mapped_mut() else {
+            return false;
+        };
+        match mapped.merge_index(chunk) {
+            Ok(()) => {
+                // Line numbers changed under the highlighter's checkpoints.
+                self.syntax.touch();
+                true
+            }
+            Err(e) => {
+                log::warn!("line index chunk refused: {e}");
+                false
+            }
+        }
+    }
+
     /// An empty untitled document.
     #[must_use]
     pub fn untitled() -> Self {
@@ -154,10 +205,17 @@ impl Document {
                 line_ending: LineEnding::default(),
                 bom: false,
                 mapping: None,
+                indexing: None,
             },
             Err(e) => return Err(e),
         };
         Ok(Self {
+            index_token: opened.indexing.as_ref().map(|i| i.token),
+            index_cancel: opened
+                .indexing
+                .as_ref()
+                .map(|i| IndexCancel(Arc::clone(&i.cancel))),
+            indexing: opened.indexing,
             buffer: opened.buffer,
             mapping: opened.mapping,
             path: Some(path.to_path_buf()),
@@ -254,6 +312,13 @@ impl Document {
             let line = self.buffer.byte_to_line(head);
             (line, head - self.buffer.line_to_byte(line))
         });
+        self.stop_indexing();
+        self.index_token = opened.indexing.as_ref().map(|i| i.token);
+        self.index_cancel = opened
+            .indexing
+            .as_ref()
+            .map(|i| IndexCancel(Arc::clone(&i.cancel)));
+        self.indexing = opened.indexing;
         self.buffer = opened.buffer;
         self.mapping = opened.mapping;
         self.line_ending = opened.line_ending;

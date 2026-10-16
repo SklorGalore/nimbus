@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use nimbus_core::mapped::Limits;
 use nimbus_core::{AnyBuffer, Buffer, LineEnding, MappedBuffer, RopeBuffer, Source, Text};
 
 use crate::mapping::MappedFile;
@@ -87,6 +88,9 @@ pub struct Opened {
     /// without going through the mapping, and the length to compare the
     /// file on disk with. `None` for a rope.
     pub mapping: Option<Arc<MappedFile>>,
+    /// The rest of a mapped file's line counting, for a worker; `None` when
+    /// it was all done at open (or for a rope).
+    pub indexing: Option<crate::indexer::Indexing>,
 }
 
 /// Why a file could not be opened.
@@ -214,6 +218,7 @@ fn read_rope(file: &fs::File, limit: u64) -> std::io::Result<Option<Opened>> {
         line_ending,
         bom,
         mapping: None,
+        indexing: None,
     }))
 }
 
@@ -232,9 +237,13 @@ fn open_mapped(file: fs::File) -> Result<Opened, OpenError> {
     mapped.read_at(0, &mut sample).map_err(OpenError::Io)?;
     let line_ending = LineEnding::detect([&sample]);
     drop(sample);
-    let source: Arc<dyn Source> = mapped.clone();
     let started = Instant::now();
-    let buffer = MappedBuffer::new(source);
+    // Count lines in the first few MB now, so the first screen has line
+    // numbers; a worker counts the rest.
+    let (index, indexing) = crate::indexer::start(&mapped).map_err(OpenError::Io)?;
+    let source: Arc<dyn Source> = mapped.clone();
+    let buffer = MappedBuffer::with_index(source, index, Limits::default())
+        .map_err(|e| OpenError::Io(std::io::Error::other(e)))?;
     log::debug!(
         "open: piece table over {} bytes made in {:?}",
         mapped.len(),
@@ -245,6 +254,7 @@ fn open_mapped(file: fs::File) -> Result<Opened, OpenError> {
         line_ending,
         bom,
         mapping: Some(mapped),
+        indexing,
     })
 }
 

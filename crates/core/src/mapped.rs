@@ -304,6 +304,35 @@ fn piece_bytes<'a>(
         .unwrap_or_default()
 }
 
+/// Append bytes `from..to` of `piece` to `out`. Original bytes are read
+/// with [`Source::read_at`] (a file read for a mapped file), the add
+/// buffer's straight from memory.
+fn append_piece(
+    source: &dyn Source,
+    sealed: &[Arc<Vec<u8>>],
+    open: &[u8],
+    piece: &Piece,
+    (from, to): (usize, usize),
+    out: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    let to = to.min(piece.len);
+    if from >= to {
+        return Ok(());
+    }
+    if piece.store == Store::Original {
+        let old = out.len();
+        out.resize(old + (to - from), 0);
+        let read = source.read_at(piece.start + from, &mut out[old..]);
+        if read.is_err() {
+            out.truncate(old);
+        }
+        return read;
+    }
+    let bytes = piece_bytes(source, sealed, open, piece);
+    out.extend_from_slice(bytes.get(from..to).unwrap_or_default());
+    Ok(())
+}
+
 /// Count the `\n` bytes in `bytes`.
 #[expect(
     clippy::naive_bytecount,
@@ -1156,8 +1185,27 @@ impl Text for MappedSnapshot {
     fn read_into(&self, range: Range<usize>, out: &mut Vec<u8>) -> std::io::Result<()> {
         let end = range.end.min(self.len());
         let start = range.start.min(end);
+        if start == end {
+            return Ok(());
+        }
         out.reserve(end - start);
-        self.read_raw(start..end, out);
+        // Bulk reads go through the file, not the mapping (see
+        // `Source::read_at`); text on screen still reads the mapping.
+        for e in self.table.iter().skip(self.find(start)) {
+            if e.at >= end {
+                break;
+            }
+            let from = start.saturating_sub(e.at);
+            let to = end - e.at;
+            append_piece(
+                &*self.source,
+                &self.sealed,
+                &self.open,
+                &e.piece,
+                (from, to),
+                out,
+            )?;
+        }
         Ok(())
     }
 
@@ -1289,7 +1337,7 @@ impl PieceRun {
         out.reserve(run.len);
         for piece in &run.pieces {
             // Invariant 7: no piece names the open segment, so it is empty.
-            out.extend_from_slice(piece_bytes(&*run.source, &run.sealed, &[], piece));
+            append_piece(&*run.source, &run.sealed, &[], piece, (0, piece.len), out)?;
         }
         Ok(())
     }

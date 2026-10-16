@@ -198,6 +198,12 @@ impl Source for MappedFile {
     fn bytes(&self) -> &[u8] {
         self.whole().get(self.skip..).unwrap_or_default()
     }
+
+    /// A file read, not a copy from the mapping: see
+    /// [`MappedFile::read_at`].
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> io::Result<()> {
+        MappedFile::read_at(self, offset, buf)
+    }
 }
 
 /// Prints the lengths only: the bytes may be gigabytes.

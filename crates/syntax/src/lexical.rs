@@ -19,7 +19,7 @@
 use std::cell::RefCell;
 use std::ops::Range;
 
-use nimbus_core::{Edit, Text, long_line};
+use nimbus_core::{Edit, LineSpan, Text, long_line};
 
 use crate::LanguageId;
 use crate::highlight::Span;
@@ -659,15 +659,14 @@ fn lex_line(
     state
 }
 
-/// The state after line `l`, given the state before it. A long line is not
-/// read: the state is assumed to pass through it unchanged (an unclosed
-/// comment inside a megabyte-long line is lost, by design).
-fn carry(r: &Rules, text: &dyn Text, l: usize, state: LexState) -> LexState {
-    let start = text.line_to_byte(l);
-    if long_line::is_long(text.line_span(start)) {
+/// The state after the line `span`, given the state before it. A long
+/// line is not read: the state is assumed to pass through it unchanged (an
+/// unclosed comment inside a megabyte-long line is lost, by design).
+fn carry(r: &Rules, text: &dyn Text, span: LineSpan, state: LexState) -> LexState {
+    if long_line::is_long(span) {
         return state;
     }
-    lex_line(r, &text.line(l), state, &mut |_, _| {})
+    lex_line(r, &text.slice(span.start..span.end), state, &mut |_, _| {})
 }
 
 /// Line-by-line highlighting state for one large document.
@@ -698,72 +697,87 @@ impl Lexical {
     /// Record an edit just applied to `text` (the text after it): states
     /// after its first line may have changed.
     pub fn edit(&self, text: &dyn Text, edit: &Edit) {
-        let line = text.byte_to_line(edit.start);
         // The checkpoint at a line depends only on the lines before it.
-        self.checkpoints
-            .borrow_mut()
-            .truncate(line / CHECKPOINT_LINES + 1);
+        // Checkpoints exist only where line numbers are known, so an edit
+        // beyond that cannot reach one.
+        if let Some(line) = text.line_number(edit.start) {
+            self.checkpoints
+                .borrow_mut()
+                .truncate(line / CHECKPOINT_LINES + 1);
+        }
         let mut near = self.near.borrow_mut();
-        if near.is_some_and(|(l, _)| l > line) {
+        if near.is_some_and(|(at, _)| at > edit.start) {
             *near = None;
         }
     }
 
-    /// The state line `line` starts in.
-    fn state_at(&self, text: &dyn Text, line: usize) -> LexState {
+    /// The state the line starting at byte `start` starts in. Where line
+    /// numbers are known, checkpoints every [`CHECKPOINT_LINES`] lines make
+    /// it exact; elsewhere (far from a checkpoint, or past where a huge
+    /// file's lines are counted) scanning starts at most
+    /// [`LOOKBACK_BYTES`] up, assuming plain code there.
+    fn state_at(&self, text: &dyn Text, start: usize) -> LexState {
         let r = self.rules;
-        let mut cps = self.checkpoints.borrow_mut();
-        let k = (line / CHECKPOINT_LINES).min(cps.len().saturating_sub(1));
-        let base = k * CHECKPOINT_LINES;
-        let target = text.line_to_byte(line);
-        if target - text.line_to_byte(base) <= LOOKBACK_BYTES {
-            let mut state = cps.get(k).copied().unwrap_or_default();
-            for l in base..line {
-                if l.is_multiple_of(CHECKPOINT_LINES) && l / CHECKPOINT_LINES == cps.len() {
+        if let Some(line) = text.line_number(start) {
+            let mut cps = self.checkpoints.borrow_mut();
+            let k = (line / CHECKPOINT_LINES).min(cps.len().saturating_sub(1));
+            let base = k * CHECKPOINT_LINES;
+            let base_byte = text.line_to_byte(base);
+            if start - base_byte <= LOOKBACK_BYTES {
+                let mut state = cps.get(k).copied().unwrap_or_default();
+                let (mut l, mut b) = (base, base_byte);
+                while b < start {
+                    if l.is_multiple_of(CHECKPOINT_LINES) && l / CHECKPOINT_LINES == cps.len() {
+                        cps.push(state);
+                    }
+                    let span = text.line_span(b);
+                    state = carry(r, text, span, state);
+                    l += 1;
+                    let Some(next) = span.next else {
+                        break;
+                    };
+                    b = next;
+                }
+                if line.is_multiple_of(CHECKPOINT_LINES) && line / CHECKPOINT_LINES == cps.len() {
                     cps.push(state);
                 }
-                state = carry(r, text, l, state);
+                return state;
             }
-            if line.is_multiple_of(CHECKPOINT_LINES) && line / CHECKPOINT_LINES == cps.len() {
-                cps.push(state);
-            }
-            state
-        } else {
-            // Too far to scan from the last checkpoint. Continue from the
-            // last guess if it is above and near; otherwise start the
-            // lookback distance up, assuming plain code there.
-            let mut near = self.near.borrow_mut();
-            let (from, mut state) = match *near {
-                Some((l, state))
-                    if l <= line && target - text.line_to_byte(l) <= LOOKBACK_BYTES =>
-                {
-                    (l, state)
-                }
-                _ => (
-                    text.byte_to_line(target - LOOKBACK_BYTES) + 1,
-                    LexState::Normal,
-                ),
-            };
-            for l in from..line {
-                state = carry(r, text, l, state);
-            }
-            *near = Some((line, state));
-            state
         }
+        // Too far to scan from a checkpoint, or no line numbers here.
+        // Continue from the last guess if it is above and near; otherwise
+        // start the lookback distance up, assuming plain code there.
+        let mut near = self.near.borrow_mut();
+        let (mut b, mut state) = match *near {
+            Some((at, state)) if at <= start && start - at <= LOOKBACK_BYTES => (at, state),
+            _ if start <= LOOKBACK_BYTES => (0, LexState::Normal),
+            _ => {
+                let from = text.line_span(start - LOOKBACK_BYTES).next.unwrap_or(start);
+                (from.min(start), LexState::Normal)
+            }
+        };
+        while b < start {
+            let span = text.line_span(b);
+            state = carry(r, text, span, state);
+            let Some(next) = span.next else {
+                break;
+            };
+            b = next;
+        }
+        *near = Some((start, state));
+        state
     }
 
     /// Append spans within `range` of `text` to `out`, sorted and not
     /// overlapping.
     pub fn spans(&self, text: &dyn Text, range: Range<usize>, out: &mut Vec<Span>) {
-        if range.is_empty() || text.len_lines() == 0 {
+        if range.is_empty() {
             return;
         }
         let r = self.rules;
-        let first = text.byte_to_line(range.start);
-        let last = text.byte_to_line(range.end - 1).min(text.len_lines() - 1);
-        let mut state = self.state_at(text, first);
-        for l in first..=last {
-            let start = text.line_to_byte(l);
+        let mut start = text.line_span(range.start).start;
+        let mut state = self.state_at(text, start);
+        loop {
             let span = text.line_span(start);
             if long_line::is_long(span) {
                 // Only the part in `range` is read, lexed from its own
@@ -784,22 +798,26 @@ impl Lexical {
                         });
                     });
                 }
-                continue;
+            } else {
+                let line = text.slice(span.start..span.end);
+                state = lex_line(r, &line, state, &mut |sp, capture| {
+                    let (s, e) = (
+                        (span.start + sp.start).max(range.start),
+                        (span.start + sp.end).min(range.end),
+                    );
+                    if s < e {
+                        out.push(Span {
+                            start: s,
+                            end: e,
+                            capture,
+                        });
+                    }
+                });
             }
-            let line = text.line(l);
-            state = lex_line(r, &line, state, &mut |span, capture| {
-                let (s, e) = (
-                    (start + span.start).max(range.start),
-                    (start + span.end).min(range.end),
-                );
-                if s < e {
-                    out.push(Span {
-                        start: s,
-                        end: e,
-                        capture,
-                    });
-                }
-            });
+            match span.next {
+                Some(next) if next < range.end => start = next,
+                _ => break,
+            }
         }
     }
 }
@@ -807,6 +825,13 @@ impl Lexical {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Lexical {
+        /// The state line number `line` starts in.
+        fn state_at_line(&self, text: &dyn Text, line: usize) -> LexState {
+            self.state_at(text, text.line_to_byte(line))
+        }
+    }
     use nimbus_core::{Buffer, RopeBuffer};
 
     /// `(text, capture name)` for each span of `src`.
@@ -938,7 +963,11 @@ mod tests {
         let buf = RopeBuffer::from_text(&src);
         let lex = Lexical::new(builtin(LanguageId::Rust));
         let line = buf.len_lines() - 2;
-        assert_eq!(lex.state_at(&buf, line), LexState::Normal, "approximate");
+        assert_eq!(
+            lex.state_at_line(&buf, line),
+            LexState::Normal,
+            "approximate"
+        );
         assert_eq!(
             lex.checkpoints.borrow().len(),
             1,
@@ -946,9 +975,9 @@ mod tests {
         );
         // Scanning down from the top (as scrolling does) is exact.
         for l in (0..=line).step_by(CHECKPOINT_LINES / 2) {
-            lex.state_at(&buf, l);
+            lex.state_at_line(&buf, l);
         }
-        assert_eq!(lex.state_at(&buf, line), LexState::Comment(1));
+        assert_eq!(lex.state_at_line(&buf, line), LexState::Comment(1));
     }
 
     #[test]
@@ -957,15 +986,21 @@ mod tests {
         let mut buf = RopeBuffer::from_text(&src);
         let lex = Lexical::new(builtin(LanguageId::Rust));
         let top = buf.len_lines() - 100;
-        lex.state_at(&buf, top);
-        assert_eq!(*lex.near.borrow(), Some((top, LexState::Normal)));
+        lex.state_at_line(&buf, top);
+        assert_eq!(
+            *lex.near.borrow(),
+            Some((buf.line_to_byte(top), LexState::Normal))
+        );
         // Typing on screen keeps it; an edit above it (or above the
         // checkpoints) drops it.
         let at = buf.line_to_byte(top + 10);
         let edit = buf.replace(at..at, "/*").unwrap();
         lex.edit(&buf, &edit);
-        assert_eq!(*lex.near.borrow(), Some((top, LexState::Normal)));
-        assert_eq!(lex.state_at(&buf, top + 11), LexState::Comment(1));
+        assert_eq!(
+            *lex.near.borrow(),
+            Some((buf.line_to_byte(top), LexState::Normal))
+        );
+        assert_eq!(lex.state_at_line(&buf, top + 11), LexState::Comment(1));
         let at = buf.line_to_byte(top - 5);
         let edit = buf.replace(at..at, "x").unwrap();
         lex.edit(&buf, &edit);
