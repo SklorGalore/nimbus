@@ -3,11 +3,12 @@
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use nimbus_core::movement;
 use nimbus_core::{
-    Buffer, Edit, EditError, History, LineEnding, RopeBuffer, Selection, Selections, Text,
+    AnyBuffer, Buffer, Edit, EditError, History, LineEnding, Selection, Selections, Text,
 };
 
 use nimbus_syntax::state::SyntaxState;
@@ -15,6 +16,12 @@ use nimbus_syntax::state::SyntaxState;
 use crate::input::Motion;
 use crate::io::{self, OpenError, SaveError};
 use crate::languages::{Detected, Languages};
+use crate::mapping::MappedFile;
+
+/// Copy and Cut refuse selections longer than this: 64 MiB. The text is
+/// copied into memory, then again by the system clipboard, and Select All
+/// in a 4 GB file must not try.
+pub const MAX_COPY_BYTES: usize = 64 * 1024 * 1024;
 
 /// What identifies a version of a file on disk without reading it: its
 /// size and modification time.
@@ -46,6 +53,19 @@ pub enum DiskChange {
     Reloaded,
     /// Changed on disk, and there are unsaved edits here.
     Conflict,
+    /// Changed on disk, but a mapped document does not reload by itself
+    /// (a 4 GB log being appended to would reload every second). It is
+    /// marked [`Document::conflict`] so the tab says so.
+    NotReloaded,
+    /// A mapped document's file got shorter than its mapping. Reading the
+    /// lost part through the mapping crashes Nimbus (`SIGBUS`, see
+    /// `crate::mapping`), so a document without unsaved edits is reloaded
+    /// (`reloaded`); one with edits is marked as a conflict and must be
+    /// reloaded by the user.
+    Truncated {
+        /// Whether it was reloaded.
+        reloaded: bool,
+    },
     /// Deleted on disk.
     Deleted,
     /// Changed on disk, but reading it failed.
@@ -55,8 +75,12 @@ pub enum DiskChange {
 /// An open document.
 #[derive(Debug, Default)]
 pub struct Document {
-    /// The text.
-    pub buffer: RopeBuffer,
+    /// The text: a rope, or a piece table over a mapped file (see
+    /// [`io::Backend`]).
+    pub buffer: AnyBuffer,
+    /// The file mapping behind a mapped buffer, which knows the file's
+    /// length when it was mapped; `None` for a rope.
+    mapping: Option<Arc<MappedFile>>,
     /// Where it saves to; `None` for an untitled buffer.
     pub path: Option<PathBuf>,
     /// Inserted by Enter, detected when the file was opened.
@@ -108,7 +132,7 @@ impl Document {
     #[must_use]
     pub fn from_text(text: &str) -> Self {
         Self {
-            buffer: RopeBuffer::from_text(text),
+            buffer: nimbus_core::RopeBuffer::from_text(text).into(),
             ..Self::default()
         }
     }
@@ -123,16 +147,22 @@ impl Document {
         // The stamp is taken before reading: a write landing between the
         // two then looks like a change, never like the version we read.
         let disk = Stamp::of(path);
-        let (buffer, line_ending, bom) = match io::open(path) {
-            Ok(opened) => (opened.buffer, opened.line_ending, opened.bom),
-            Err(OpenError::NotFound) => (RopeBuffer::default(), LineEnding::default(), false),
+        let opened = match io::open(path) {
+            Ok(opened) => opened,
+            Err(OpenError::NotFound) => io::Opened {
+                buffer: AnyBuffer::default(),
+                line_ending: LineEnding::default(),
+                bom: false,
+                mapping: None,
+            },
             Err(e) => return Err(e),
         };
         Ok(Self {
-            buffer,
+            buffer: opened.buffer,
+            mapping: opened.mapping,
             path: Some(path.to_path_buf()),
-            line_ending,
-            bom,
+            line_ending: opened.line_ending,
+            bom: opened.bom,
             disk,
             canonical: Some(io::canonical(path)),
             ..Self::default()
@@ -140,7 +170,8 @@ impl Document {
     }
 
     /// The file changed on disk (a watcher said so): work out what to do.
-    /// Reloads by itself when nothing here is unsaved.
+    /// Reloads by itself when nothing here is unsaved, except a mapped
+    /// document, which reloads by itself only when its file got shorter.
     pub fn disk_changed(&mut self, languages: &Languages) -> DiskChange {
         let Some(path) = self.path.clone() else {
             return DiskChange::None;
@@ -158,6 +189,9 @@ impl Document {
             return DiskChange::None; // our own save, or no real change
         }
         self.deleted = false;
+        if let Some(mapped_len) = self.mapping.as_ref().map(|m| m.file_len()) {
+            return self.mapped_disk_changed(stamp.len < mapped_len, languages);
+        }
         if self.is_dirty() {
             self.conflict = true;
             return DiskChange::Conflict;
@@ -168,9 +202,37 @@ impl Document {
         }
     }
 
+    /// [`Document::disk_changed`] for a mapped document, whose file is
+    /// `truncated` if it is now shorter than its mapping.
+    fn mapped_disk_changed(&mut self, truncated: bool, languages: &Languages) -> DiskChange {
+        if truncated {
+            // Part of the mapping is gone. Re-mapping is the safe response,
+            // and loses nothing when there are no unsaved edits.
+            if !self.is_dirty() {
+                match self.reload(languages) {
+                    Ok(()) => return DiskChange::Truncated { reloaded: true },
+                    Err(e) => log::warn!("could not reload a truncated file: {e}"),
+                }
+            }
+            self.conflict = true;
+            return DiskChange::Truncated { reloaded: false };
+        }
+        if self.conflict {
+            // Already said, and a growing log changes every second.
+            return DiskChange::None;
+        }
+        self.conflict = true;
+        if self.is_dirty() {
+            DiskChange::Conflict
+        } else {
+            DiskChange::NotReloaded
+        }
+    }
+
     /// Replace the text with the file on disk, discarding unsaved edits
     /// and the undo history. The cursor stays on the same line and column
-    /// where they still exist.
+    /// where they still exist (in a mapped document, at the same byte
+    /// offset). The new text may open in the other backend.
     ///
     /// # Errors
     ///
@@ -182,10 +244,18 @@ impl Document {
         };
         let disk = Stamp::of(&path);
         let opened = io::open(&path)?;
-        let head = self.cursor();
-        let line = self.buffer.byte_to_line(head);
-        let col = head - self.buffer.line_to_byte(line);
+        // Where the cursor was, to put it back. A rope keeps its line and
+        // column. A mapped document keeps the byte offset instead: its file
+        // may have been cut short, and working out the line could read the
+        // old mapping where the bytes are gone, which crashes.
+        let head = self.selections.primary().head;
+        let place = (!self.buffer.is_mapped()).then(|| {
+            let head = self.cursor();
+            let line = self.buffer.byte_to_line(head);
+            (line, head - self.buffer.line_to_byte(line))
+        });
         self.buffer = opened.buffer;
+        self.mapping = opened.mapping;
         self.line_ending = opened.line_ending;
         self.bom = opened.bom;
         self.disk = disk;
@@ -195,13 +265,16 @@ impl Document {
         self.deleted = false;
         self.conflict = false;
         self.version += 1;
-        let line = line.min(self.buffer.len_lines().saturating_sub(1));
-        let start = self.buffer.line_to_byte(line);
-        let len = self.buffer.line_span(start).end - start;
-        self.set_selection(Selection::cursor(movement::clamp(
-            &self.buffer,
-            start + col.min(len),
-        )));
+        let pos = match place {
+            Some((line, col)) => {
+                let line = line.min(self.buffer.len_lines().saturating_sub(1));
+                let start = self.buffer.line_to_byte(line);
+                let len = self.buffer.line_span(start).end - start;
+                start + col.min(len)
+            }
+            None => head.min(self.buffer.len_bytes()),
+        };
+        self.set_selection(Selection::cursor(movement::clamp(&self.buffer, pos)));
         self.preferred_column = None;
         // The text is new, so the tree is too, even in the same language.
         self.language = None;
@@ -232,6 +305,11 @@ impl Document {
         }
         self.language = key;
         match detected {
+            // A mapped file is not in memory for tree-sitter to parse, so
+            // it gets the simple rules at any size, even when small.
+            Some(Detected::Builtin(id)) if self.buffer.is_mapped() => {
+                self.syntax.reset_lexical(id);
+            }
             Some(Detected::Builtin(id)) => self.syntax.reset(Some(id), self.buffer.len_bytes()),
             Some(Detected::Simple(_, rules)) => self.syntax.reset_simple(rules),
             None => self.syntax.reset(None, self.buffer.len_bytes()),
@@ -257,8 +335,9 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// Returns a [`SaveError`] if writing fails, or if the document is
-    /// untitled (until M4 adds a save dialog). The document stays dirty.
+    /// Returns a [`SaveError`] if writing fails, if the document is
+    /// untitled (until M4 adds a save dialog), or if it is mapped. The
+    /// document stays dirty.
     pub fn save(&mut self) -> Result<(), SaveError> {
         let Some(path) = self.path.as_deref() else {
             return Err(SaveError {
@@ -266,6 +345,18 @@ impl Document {
                 source: std::io::Error::other("untitled documents can be saved from M4 on"),
             });
         };
+        if self.buffer.is_mapped() {
+            // Writing a mapped document over its own file needs the mapping
+            // dropped before the rename and the new file mapped after (M7
+            // task 12). Until then nothing is written, so a mapped file can
+            // never be damaged by a save.
+            return Err(SaveError {
+                step: "saving a memory-mapped file",
+                source: std::io::Error::other(
+                    "saving huge files arrives in the next step; nothing was written",
+                ),
+            });
+        }
         let written = io::save(path, &self.buffer, self.bom)?;
         self.disk = Some(Stamp::from(&written));
         self.canonical = Some(io::canonical(path));
@@ -417,11 +508,12 @@ impl Document {
         self.insert(&text)
     }
 
-    /// The selected text, or `None` if the selection is empty.
+    /// The selected text, or `None` if the selection is empty or longer
+    /// than [`MAX_COPY_BYTES`].
     #[must_use]
     pub fn selected_text(&self) -> Option<String> {
         let range = self.selection().range();
-        if range.is_empty() {
+        if range.is_empty() || range.len() > MAX_COPY_BYTES {
             return None;
         }
         // The raw bytes, not the display string: bytes that are not UTF-8
@@ -963,5 +1055,127 @@ mod tests {
         d.save().unwrap();
         assert!(!d.deleted && path.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A fresh directory for one test, removed on drop (after the
+    /// documents declared later, which may hold mappings of its files).
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("nimbus-doc-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn raw(d: &Document) -> Vec<u8> {
+        let mut out = Vec::new();
+        d.buffer
+            .read_into(0..d.buffer.len_bytes(), &mut out)
+            .unwrap();
+        out
+    }
+
+    fn append(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        f.write_all(bytes).unwrap();
+    }
+
+    #[test]
+    fn a_mapped_document_is_highlighted_simply_and_not_saved_yet() {
+        let dir = TempDir::new("mapped-save");
+        let path = dir.0.join("odd.rs");
+        // Not UTF-8, so it opens mapped although it is tiny.
+        let original = b"fn main() {}\n// \xff\n";
+        std::fs::write(&path, original).unwrap();
+        let mut d = Document::open(&path).unwrap();
+        assert!(d.buffer.is_mapped());
+        assert_eq!(raw(&d), original);
+        d.detect_language(&Languages::default());
+        assert!(d.syntax.lexical().is_some(), "small, but never parsed");
+        assert!(d.syntax.take_job(&d.buffer).is_none());
+
+        d.insert("x").unwrap();
+        let err = d.save().unwrap_err();
+        assert!(err.to_string().contains("next step"), "{err}");
+        assert!(d.is_dirty());
+        assert_eq!(std::fs::read(&path).unwrap(), original, "nothing written");
+    }
+
+    #[test]
+    fn copy_refuses_huge_selections() {
+        let mut d = Document {
+            buffer: nimbus_core::MappedBuffer::from_bytes(vec![b'x'; MAX_COPY_BYTES + 1]).into(),
+            ..Document::default()
+        };
+        d.select_all();
+        assert_eq!(d.selected_text(), None);
+        d.select(0..3);
+        assert_eq!(d.selected_text().as_deref(), Some("xxx"));
+    }
+
+    #[test]
+    fn mapped_documents_reload_by_themselves_only_when_cut_short() {
+        let dir = TempDir::new("mapped-disk");
+        let path = dir.0.join("app.log");
+        std::fs::write(&path, b"one \xff\ntwo\n").unwrap();
+        let langs = Languages::default();
+        let mut d = Document::open(&path).unwrap();
+        assert!(d.buffer.is_mapped());
+
+        // A growing log: marked as changed, never reloaded, said once.
+        append(&path, b"three\n");
+        assert_eq!(d.disk_changed(&langs), DiskChange::NotReloaded);
+        assert!(d.conflict && !d.is_dirty());
+        assert_eq!(raw(&d), b"one \xff\ntwo\n");
+        append(&path, b"four\n");
+        assert_eq!(d.disk_changed(&langs), DiskChange::None);
+        d.insert("x").unwrap();
+        append(&path, b"five\n");
+        assert_eq!(d.disk_changed(&langs), DiskChange::None, "still said once");
+
+        // Reloading by hand maps the longer file.
+        d.reload(&langs).unwrap();
+        assert!(!d.conflict && !d.is_dirty());
+        assert_eq!(raw(&d), b"one \xff\ntwo\nthree\nfour\nfive\n");
+        append(&path, b"six\n");
+        d.insert("y").unwrap();
+        assert_eq!(d.disk_changed(&langs), DiskChange::Conflict);
+
+        // Windows refuses to truncate a mapped file, so the rest is Unix.
+        #[cfg(unix)]
+        {
+            // Cut short with nothing unsaved: re-mapped at once, the cursor
+            // kept at its byte offset where it still exists.
+            d.reload(&langs).unwrap();
+            d.click(5, false);
+            std::fs::write(&path, b"on\xff").unwrap();
+            assert_eq!(
+                d.disk_changed(&langs),
+                DiskChange::Truncated { reloaded: true }
+            );
+            assert_eq!(raw(&d), b"on\xff");
+            assert_eq!(d.cursor(), 3);
+            assert!(!d.conflict);
+
+            // With unsaved edits it must wait for the user.
+            d.insert("z").unwrap();
+            std::fs::write(&path, b"o").unwrap();
+            assert_eq!(
+                d.disk_changed(&langs),
+                DiskChange::Truncated { reloaded: false }
+            );
+            assert!(d.conflict && d.is_dirty());
+        }
     }
 }

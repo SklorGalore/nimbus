@@ -25,7 +25,7 @@ use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
 use crate::config::{self, Config};
-use crate::document::{DiskChange, Document};
+use crate::document::{DiskChange, Document, MAX_COPY_BYTES};
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::input::{self, Command, Motion};
 use crate::io;
@@ -818,8 +818,11 @@ impl App {
                 continue;
             }
             // A file written to over and over (a growing log) reloads at
-            // most once per RELOAD_GAP; the rest wait for the timer.
+            // most once per RELOAD_GAP; the rest wait for the timer. Not a
+            // mapped one: it never reloads by itself unless cut short, and
+            // that must be handled at once.
             if let Some(at) = tab.doc.reloaded_at
+                && !tab.doc.buffer.is_mapped()
                 && now.duration_since(at) < RELOAD_GAP
             {
                 let due = at + RELOAD_GAP;
@@ -838,6 +841,21 @@ impl App {
                     format!(
                         "{name} changed on disk. Run Reload from Disk, or Keep My Version, \
                          from the command palette"
+                    )
+                }
+                DiskChange::NotReloaded => format!(
+                    "{name} changed on disk; huge files do not reload by themselves. \
+                     Run Reload from Disk from the command palette to see the changes"
+                ),
+                DiskChange::Truncated { reloaded: true } => {
+                    is_error = true;
+                    format!("{name} was truncated on disk; reloaded it")
+                }
+                DiskChange::Truncated { reloaded: false } => {
+                    is_error = true;
+                    format!(
+                        "{name} was truncated on disk. Reload it now (Reload from Disk in the \
+                         command palette): reading the missing part can crash Nimbus"
                     )
                 }
                 DiskChange::Deleted => {
@@ -1408,6 +1426,19 @@ impl App {
                 Some(text) => self.doc_mut().paste(&text).map(drop),
                 None => Ok(()),
             };
+        }
+        let len = self.doc().selection().range().len();
+        if len > MAX_COPY_BYTES {
+            // Refused before reading anything, and Cut deletes nothing.
+            self.say(
+                format!(
+                    "The selection is {} MB; copy and cut take at most {} MB",
+                    len >> 20,
+                    MAX_COPY_BYTES >> 20
+                ),
+                true,
+            );
+            return Ok(());
         }
         let Some(text) = self.doc().selected_text() else {
             return Ok(());

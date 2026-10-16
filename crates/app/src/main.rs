@@ -13,6 +13,7 @@ mod input;
 mod io;
 mod keymap;
 mod languages;
+mod mapping;
 mod menu;
 mod picker;
 mod sidebar;
@@ -62,6 +63,9 @@ pub struct Options {
     pub picker: Option<String>,
     /// Use this theme instead of the config's.
     pub theme: Option<String>,
+    /// Open every file in this backend, whatever its size (`--backend
+    /// rope|mapped`), for measuring one against the other.
+    pub backend: Option<io::Backend>,
 }
 
 /// Write a line to stdout. Command-line output such as `--version` and the
@@ -113,6 +117,7 @@ fn parse_options() -> Options {
     let mut headless = None;
     let mut picker = None;
     let mut theme = None;
+    let mut backend = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -136,6 +141,16 @@ fn parse_options() -> Options {
             Some("--wrap") => wrap = true,
             Some("--picker") => picker = args.next().and_then(|p| p.into_string().ok()),
             Some("--theme") => theme = args.next().and_then(|t| t.into_string().ok()),
+            Some("--backend") => {
+                let Some(b) = args
+                    .next()
+                    .and_then(|b| b.to_str().and_then(io::Backend::parse))
+                else {
+                    print_err("nimbus: --backend needs rope or mapped");
+                    std::process::exit(2);
+                };
+                backend = Some(b);
+            }
             Some("--headless") => {
                 let size = args.next().and_then(|a| {
                     let a = a.into_string().ok()?;
@@ -161,7 +176,7 @@ fn parse_options() -> Options {
             }
             Some("--help" | "-h") => {
                 print_out(
-                    "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--wrap] [--theme NAME] [--headless WxH] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
+                    "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--headless WxH] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
                 );
                 std::process::exit(0);
             }
@@ -182,6 +197,7 @@ fn parse_options() -> Options {
         headless,
         picker,
         theme,
+        backend,
     }
 }
 
@@ -267,6 +283,9 @@ fn main() {
         .format_timestamp_millis()
         .init();
     let options = parse_options();
+    if let Some(backend) = options.backend {
+        io::force_backend(backend);
+    }
 
     // Start opening the GPU next, so the driver work overlaps reading the
     // file, event-loop setup and window creation (DESIGN.md §4.3).
