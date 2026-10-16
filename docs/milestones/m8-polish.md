@@ -39,7 +39,8 @@ release builds for all three platforms.
       reference image with a tolerance (`crates/app/tests/screenshot.rs`:
       0 pixels differ on a clean run, 48 for one changed letter; at most
       20 allowed).
-- [ ] `cargo bloat` review recorded; anything over 1 MB justified.
+- [x] `cargo bloat` review recorded; anything over 1 MB justified (Results,
+      Size review).
 - [ ] Manual QA checklist run on Linux (Wayland and X11) and Windows,
       results recorded.
 - [ ] A tag push builds release artifacts in GitHub Actions: a macOS `.app`
@@ -239,4 +240,23 @@ Each one commit, with its tests.
 
 ## Results
 
-_Fill in when done._
+_Filled in as tasks land; completed at the end of the milestone._
+
+### Size review (task 14)
+
+macOS release binary: **14.68 MB** (M7: 14.45 MB). Code is 5.7 MiB; the
+rest is read-only data, 11.2 MB of it in `__const`.
+
+| Item | Size | Why it stays |
+|---|---|---|
+| Bundled regular font (Hack Nerd Font Mono) | 2.7 MB | The editor's only font until fallback; the Nerd Font icons (2.4 MB of it) are kept for file-tree icons |
+| Tree-sitter grammars (tables) | about 5.5 MB | TypeScript and TSX together 2.8 MB, Bash 1.3, Rust 1.1, Markdown 0.8, the rest under 0.5 each: the nine starter languages (DESIGN.md §4.2) |
+| `std` code | 1.1 MiB | The standard library |
+| Everything else | each under 1 MiB | `naga` (wgpu's shader compiler) 0.9 MiB is the largest crate |
+
+One item was trimmed: the bundled bold font. As shipped by Nerd Fonts it
+is 2.8 MB, almost all icons, and bold icons are never needed, so it was
+subset to its 1,881 text characters (185 KB, `pyftsubset`, recorded in
+`crates/render/src/font.rs`). The release binary went from 17.19 MB to
+14.68 MB. Its names keep clear of "Bitstream" and "Vera", as the font
+licence requires of a modified font.

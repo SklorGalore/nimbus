@@ -17,7 +17,12 @@ static BUNDLED: &[u8] = include_bytes!("../assets/HackNerdFontMono-Regular.ttf")
 /// Raw bytes of its bold weight, for themes that make captures bold. Italic
 /// is not bundled: Hack's italic is a slanted regular, which the
 /// rasterizer makes by slanting the outlines (`raster`), at no size cost.
-static BUNDLED_BOLD: &[u8] = include_bytes!("../assets/HackNerdFontMono-Bold.ttf");
+///
+/// The bold file has the Nerd Font icons taken out (subset with fonttools'
+/// `pyftsubset --unicodes="U+0000-DFFF,U+F900-FFFF"`, hinting dropped since
+/// Nimbus does not hint): 185 KB instead of 2.8 MB, with every other
+/// character kept. An icon in a bold run is drawn from the regular face.
+static BUNDLED_BOLD: &[u8] = include_bytes!("../assets/HackNerdFontMono-Bold-NoIcons.ttf");
 
 /// A font face the renderer can shape and rasterize with.
 ///
