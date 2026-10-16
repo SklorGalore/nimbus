@@ -12,6 +12,7 @@ pub mod line_index;
 pub mod long_line;
 pub mod mapped;
 pub mod movement;
+pub mod multi;
 pub mod rope;
 pub mod search;
 pub mod selection;
