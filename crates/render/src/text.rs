@@ -10,17 +10,32 @@ use std::collections::HashMap;
 use crate::atlas::{Atlas, AtlasError, AtlasSlot};
 use crate::font::{Font, Metrics};
 use crate::frame::FrameBuilder;
-use crate::raster::{GlyphKey, Rasterizer};
+use crate::raster::{BOLD, GlyphKey, REGULAR, Rasterizer};
 use crate::shape::{Grid, ShapedGlyph, Shaper};
 
-/// A colour for part of a line: from the end of the previous run (or the
-/// start of the text) up to byte `end` of the text being drawn.
+/// A colour and style for part of a line: from the end of the previous run
+/// (or the start of the text) up to byte `end` of the text being drawn.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColorRun {
     /// End byte, exclusive, within the text passed to the draw call.
     pub end: usize,
     /// Straight RGBA colour.
     pub color: [f32; 4],
+    /// Bold, italic or both.
+    pub style: Style,
+}
+
+/// Bold and italic, as a theme sets them per syntax capture.
+///
+/// Bold draws the glyph from the bundled bold font. Italic slants the
+/// outline as it is rasterized (Hack's italic is a slanted regular anyway).
+/// Neither changes a character's width, so the grid stays put.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Style {
+    /// Drawn from the bold font.
+    pub bold: bool,
+    /// Slanted.
+    pub italic: bool,
 }
 
 /// How to draw one line of text.
@@ -47,6 +62,8 @@ struct CachedGlyph {
 /// Shaping, rasterizing and caching state for one font at one size.
 pub(crate) struct TextRenderer {
     font: Font,
+    /// The faces glyph keys index: regular, then bold.
+    faces: [Font; 2],
     metrics: Metrics,
     tab_width: usize,
     shaper: Shaper,
@@ -71,8 +88,11 @@ fn px(v: i32) -> f32 {
 
 impl TextRenderer {
     pub(crate) fn new(font: Font, size_px: f32, tab_width: usize) -> Self {
+        // A broken bold asset would be a build mistake; draw regular then.
+        let bold = Font::bundled_bold().unwrap_or(font);
         Self {
             font,
+            faces: [font, bold],
             metrics: font.metrics(size_px),
             tab_width,
             shaper: Shaper::new(),
@@ -169,12 +189,24 @@ impl TextRenderer {
                 continue;
             }
             let whole = pen.floor();
-            let key = GlyphKey::new(g.id, size_px, pen - whole);
+            // Shaped glyphs come in cluster order in a monospace grid, but
+            // a search keeps this right even if one does not.
+            let cluster = g.cluster as usize;
+            let run = style
+                .runs
+                .get(style.runs.partition_point(|r| r.end <= cluster));
+            let (color, look) = run.map_or((style.color, Style::default()), |r| (r.color, r.style));
+            let key = self.styled_key(
+                GlyphKey::new(g.id, size_px, pen - whole),
+                line,
+                cluster,
+                look,
+            );
 
             let cached = if let Some(entry) = self.cache.get(&key) {
                 *entry
             } else {
-                match load_glyph(&self.font, &mut self.raster, atlas, queue, key) {
+                match load_glyph(&self.faces, &mut self.raster, atlas, queue, key) {
                     Loaded::Glyph(g) => {
                         self.cache.insert(key, Some(g));
                         Some(g)
@@ -193,13 +225,31 @@ impl TextRenderer {
                 // Shapers may shift a glyph vertically (combining marks);
                 // swash's y offset points up, screen y points down.
                 let y = (baseline_y - g.y).round() - px(c.top);
-                // Shaped glyphs come in cluster order in a monospace grid,
-                // but a search keeps this right even if one does not.
-                let cluster = g.cluster as usize;
-                let run = style.runs.partition_point(|r| r.end <= cluster);
-                let color = style.runs.get(run).map_or(style.color, |r| r.color);
                 frame.push_glyph([whole + px(c.left), y], &c.slot, color);
             }
+        }
+    }
+}
+
+impl TextRenderer {
+    /// `key` for a glyph shaped from the regular font, drawn in `look`.
+    /// Shaping uses the regular font only; a bold glyph is the bold font's
+    /// glyph for the same character, which in a monospace font with no
+    /// ligatures is the same shape in the same cell. A glyph that is not
+    /// simply its character's (part of a cluster, a stand-in box) stays
+    /// regular.
+    fn styled_key(&self, key: GlyphKey, line: &str, cluster: usize, look: Style) -> GlyphKey {
+        if !look.bold {
+            return key.styled(REGULAR, look.italic);
+        }
+        let ch = line.get(cluster..).and_then(|s| s.chars().next());
+        let bold = ch
+            .filter(|&c| self.font.glyph_id(c) == key.glyph)
+            .map(|c| self.faces[1].glyph_id(c))
+            .filter(|&id| id != 0);
+        match bold {
+            Some(id) => GlyphKey { glyph: id, ..key }.styled(BOLD, look.italic),
+            None => key.styled(REGULAR, look.italic),
         }
     }
 }
@@ -216,13 +266,13 @@ enum Loaded {
 
 /// Rasterize `key` and copy its bitmap into the atlas.
 fn load_glyph(
-    font: &Font,
+    fonts: &[Font],
     raster: &mut Rasterizer,
     atlas: &mut Atlas,
     queue: &wgpu::Queue,
     key: GlyphKey,
 ) -> Loaded {
-    let Some(bitmap) = raster.rasterize(font, key) else {
+    let Some(bitmap) = raster.rasterize(fonts, key) else {
         return Loaded::Blank;
     };
     match atlas.insert(queue, bitmap.width, bitmap.height, bitmap.coverage) {

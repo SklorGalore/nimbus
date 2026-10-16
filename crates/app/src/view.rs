@@ -13,12 +13,12 @@ use std::ops::Range;
 
 use nimbus_core::wrap::{self, RowPos, RowStart, WrapCache, WrapView};
 use nimbus_core::{LineEnding, Selection, Text, column, long_line};
-use nimbus_render::{ColorRun, Gpu, Metrics};
+use nimbus_render::{ColorRun, Gpu, Metrics, Style};
 use nimbus_syntax::highlight::{Highlighter, Span};
 
 use crate::document::Document;
 use crate::find::{Field, FindBar};
-use crate::theme::{Color, Ui};
+use crate::theme::{Look, Ui};
 
 #[expect(
     clippy::cast_precision_loss,
@@ -82,7 +82,7 @@ pub struct Decorations<'a> {
     pub ui: &'a Ui,
     /// Syntax colour per capture index of the document's language; empty
     /// when it has none.
-    pub captures: &'a [Option<Color>],
+    pub captures: &'a [Option<Look>],
 }
 
 /// Pixel geometry for one frame, from the window size and font metrics.
@@ -1221,7 +1221,7 @@ impl Painter<'_, '_> {
             if span.start >= range.end {
                 break;
             }
-            let Some(color) = self
+            let Some(look) = self
                 .deco
                 .captures
                 .get(span.capture as usize)
@@ -1235,11 +1235,13 @@ impl Painter<'_, '_> {
                 self.runs.push(ColorRun {
                     end: s - range.start,
                     color: text,
+                    style: Style::default(),
                 });
             }
             self.runs.push(ColorRun {
                 end: e - range.start,
-                color,
+                color: look.color.unwrap_or(text),
+                style: look.style,
             });
             pos = e;
         }

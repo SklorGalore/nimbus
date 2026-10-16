@@ -8,7 +8,7 @@
 
 use swash::scale::image::{Content, Image};
 use swash::scale::{Render, ScaleContext, Source};
-use swash::zeno::{Format, Vector};
+use swash::zeno::{Angle, Format, Transform, Vector};
 
 use crate::font::Font;
 
@@ -29,7 +29,21 @@ pub struct GlyphKey {
     pub size_64: u32,
     /// Horizontal subpixel bucket, `0..SUBPIXEL_STEPS`.
     pub subpx: u8,
+    /// Which face: [`REGULAR`] or [`BOLD`]. Glyph ids belong to a face.
+    pub face: u8,
+    /// Slanted, for italic.
+    pub slant: bool,
 }
+
+/// [`GlyphKey::face`] of the regular face.
+pub const REGULAR: u8 = 0;
+
+/// [`GlyphKey::face`] of the bold face.
+pub const BOLD: u8 = 1;
+
+/// How far italic text leans, in degrees: Hack's own italic leans about
+/// this much.
+const SLANT_DEGREES: f32 = 12.0;
 
 impl GlyphKey {
     /// Key for `glyph` at `size_px`, drawn with its pen at fractional pixel
@@ -47,6 +61,18 @@ impl GlyphKey {
             glyph,
             size_64: (size_px * 64.0).round() as u32,
             subpx,
+            face: REGULAR,
+            slant: false,
+        }
+    }
+
+    /// The same glyph from face `face`, slanted if `slant`.
+    #[must_use]
+    pub fn styled(self, face: u8, slant: bool) -> Self {
+        Self {
+            face,
+            slant,
+            ..self
         }
     }
 
@@ -110,7 +136,8 @@ impl Rasterizer {
         }
     }
 
-    /// Rasterize the glyph described by `key` from `font`.
+    /// Rasterize the glyph described by `key` from `fonts[key.face]` (the
+    /// first font if there is no such face), slanted for italic.
     ///
     /// Returns `None` when the glyph has no outline, which is normal for a
     /// space, and also when swash cannot render it. The returned bitmap
@@ -119,7 +146,8 @@ impl Rasterizer {
     /// Hinting is off: hinted outlines snap to the pixel grid differently at
     /// each size, which looks sharper on 1x displays but makes text width and
     /// shape inconsistent. macOS does not hint either.
-    pub fn rasterize(&mut self, font: &Font, key: GlyphKey) -> Option<GlyphBitmap<'_>> {
+    pub fn rasterize(&mut self, fonts: &[Font], key: GlyphKey) -> Option<GlyphBitmap<'_>> {
+        let font = fonts.get(usize::from(key.face)).or(fonts.first())?;
         let mut scaler = self
             .ctx
             .builder(font.face())
@@ -127,8 +155,13 @@ impl Rasterizer {
             .hint(false)
             .build();
         self.image.clear();
+        // Leaning the outline right: x grows with height above the baseline.
+        let slant = key
+            .slant
+            .then(|| Transform::skew(Angle::from_degrees(SLANT_DEGREES), Angle::ZERO));
         let ok = Render::new(&[Source::Outline])
             .format(Format::Alpha)
+            .transform(slant)
             .offset(Vector::new(key.subpx_offset(), 0.0))
             .render_into(&mut scaler, key.glyph, &mut self.image);
         let p = self.image.placement;
@@ -164,13 +197,13 @@ mod tests {
         let mut r = Rasterizer::new();
 
         let m = r
-            .rasterize(&font, GlyphKey::new(font.glyph_id('M'), 28.0, 0.0))
+            .rasterize(&[font], GlyphKey::new(font.glyph_id('M'), 28.0, 0.0))
             .unwrap();
         assert_eq!(m.coverage.len(), (m.width * m.height) as usize);
         assert!(m.coverage.contains(&255), "an M has fully covered pixels");
         assert!(m.top > 0, "M sits above the baseline");
 
-        let space = r.rasterize(&font, GlyphKey::new(font.glyph_id(' '), 28.0, 0.0));
+        let space = r.rasterize(&[font], GlyphKey::new(font.glyph_id(' '), 28.0, 0.0));
         assert!(space.is_none());
     }
 
@@ -180,12 +213,12 @@ mod tests {
         let id = font.glyph_id('l');
         let mut r = Rasterizer::new();
         let a = r
-            .rasterize(&font, GlyphKey::new(id, 14.0, 0.0))
+            .rasterize(&[font], GlyphKey::new(id, 14.0, 0.0))
             .unwrap()
             .coverage
             .to_vec();
         let b = r
-            .rasterize(&font, GlyphKey::new(id, 14.0, 0.5))
+            .rasterize(&[font], GlyphKey::new(id, 14.0, 0.5))
             .unwrap()
             .coverage
             .to_vec();
@@ -193,9 +226,24 @@ mod tests {
     }
 
     #[test]
+    fn bold_and_slanted_glyphs_differ_from_regular() {
+        let regular = Font::bundled().unwrap();
+        let bold = Font::bundled_bold().unwrap();
+        let faces = [regular, bold];
+        let mut r = Rasterizer::new();
+        let mut draw = |key: GlyphKey| r.rasterize(&faces, key).unwrap().coverage.to_vec();
+        let upright = GlyphKey::new(regular.glyph_id('l'), 20.0, 0.0);
+        let plain = draw(upright);
+        assert_ne!(draw(upright.styled(REGULAR, true)), plain, "slanted");
+        let heavy = GlyphKey::new(bold.glyph_id('l'), 20.0, 0.0).styled(BOLD, false);
+        let ink = |c: &[u8]| c.iter().map(|&v| u32::from(v)).sum::<u32>();
+        assert!(ink(&draw(heavy)) > ink(&plain), "bold has more ink");
+    }
+
+    #[test]
     fn missing_glyph_box_renders() {
         let font = Font::bundled().unwrap();
         let mut r = Rasterizer::new();
-        assert!(r.rasterize(&font, GlyphKey::new(0, 14.0, 0.0)).is_some());
+        assert!(r.rasterize(&[font], GlyphKey::new(0, 14.0, 0.0)).is_some());
     }
 }

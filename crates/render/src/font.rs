@@ -14,6 +14,11 @@ use swash::FontRef;
 /// Raw bytes of the bundled font.
 static BUNDLED: &[u8] = include_bytes!("../assets/HackNerdFontMono-Regular.ttf");
 
+/// Raw bytes of its bold weight, for themes that make captures bold. Italic
+/// is not bundled: Hack's italic is a slanted regular, which the
+/// rasterizer makes by slanting the outlines (`raster`), at no size cost.
+static BUNDLED_BOLD: &[u8] = include_bytes!("../assets/HackNerdFontMono-Bold.ttf");
+
 /// A font face the renderer can shape and rasterize with.
 ///
 /// Cheap to copy: it is a reference into font bytes plus a cache key that
@@ -70,6 +75,17 @@ impl Font {
     /// mean the asset file was replaced with something broken.
     pub fn bundled() -> Result<Self, FontError> {
         FontRef::from_index(BUNDLED, 0)
+            .map(|face| Self { face })
+            .ok_or(FontError)
+    }
+
+    /// The bold weight of the bundled font.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Font::bundled`].
+    pub fn bundled_bold() -> Result<Self, FontError> {
+        FontRef::from_index(BUNDLED_BOLD, 0)
             .map(|face| Self { face })
             .ok_or(FontError)
     }
@@ -164,6 +180,14 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn bold_has_the_same_cell_width() {
+        let regular = Font::bundled().unwrap().metrics(14.0);
+        let bold = Font::bundled_bold().unwrap().metrics(14.0);
+        assert!((regular.cell_width - bold.cell_width).abs() < 0.01);
+        assert!((regular.line_height - bold.line_height).abs() < f32::EPSILON);
     }
 
     #[test]

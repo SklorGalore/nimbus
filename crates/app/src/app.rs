@@ -2406,7 +2406,7 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     let ui = scene.theme.ui;
     let syntax = &scene.doc.syntax;
     let captures = match syntax.capture_names() {
-        Some((key, names)) => scene.theme.capture_colors(key, names),
+        Some((key, names)) => scene.theme.capture_looks(key, names),
         None => &[],
     };
     scene.view.draw(

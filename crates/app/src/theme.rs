@@ -8,10 +8,22 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use nimbus_render::Style;
 use nimbus_syntax::LanguageId;
 
 /// Straight RGBA, each channel 0–1.
 pub type Color = [f32; 4];
+
+/// How a syntax capture is drawn: its colour (the text colour if none) and
+/// whether it is bold or italic. A theme writes it as `"#rrggbb"`, or as a
+/// table such as `{ color = "#c678dd", bold = true, italic = true }`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Look {
+    /// The colour; `None` keeps the text colour.
+    pub color: Option<Color>,
+    /// Bold and italic.
+    pub style: Style,
+}
 
 const DARK: &str = include_str!("../themes/dark.toml");
 const LIGHT: &str = include_str!("../themes/light.toml");
@@ -106,9 +118,9 @@ pub struct Theme {
     pub base: String,
     /// Interface colours.
     pub ui: Ui,
-    syntax: HashMap<String, Color>,
-    /// Colour per capture index, per language, built on first use.
-    resolved: [Option<Vec<Option<Color>>>; LanguageId::ALL.len() + 1],
+    syntax: HashMap<String, Look>,
+    /// Look per capture index, per language, built on first use.
+    resolved: [Option<Vec<Option<Look>>>; LanguageId::ALL.len() + 1],
 }
 
 impl Default for Theme {
@@ -249,8 +261,17 @@ impl Theme {
                 }
                 ("syntax", toml::Value::Table(t)) => {
                     for (key, v) in t {
-                        if let Some(c) = color("syntax", key, v, &mut warnings) {
-                            theme.syntax.insert(key.clone(), c);
+                        let look = match v {
+                            toml::Value::Table(fields) => {
+                                syntax_look(name, key, fields, &mut warnings)
+                            }
+                            _ => color("syntax", key, v, &mut warnings).map(|c| Look {
+                                color: Some(c),
+                                style: Style::default(),
+                            }),
+                        };
+                        if let Some(look) = look {
+                            theme.syntax.insert(key.clone(), look);
                         }
                     }
                 }
@@ -266,14 +287,14 @@ impl Theme {
     #[cfg(test)]
     #[must_use]
     pub fn syntax_color(&self, capture: &str) -> Option<Color> {
-        lookup(&self.syntax, capture)
+        lookup(&self.syntax, capture).and_then(|l| l.color)
     }
 
-    /// Colours by capture index for a list of capture names, cached under
+    /// Looks by capture index for a list of capture names, cached under
     /// `key` (from `SyntaxState::capture_names`: one per grammar, plus one
     /// for the simple rules large files use). Worked out once per key, so
     /// each frame only indexes an array.
-    pub fn capture_colors(&mut self, key: usize, names: &[&str]) -> &[Option<Color>] {
+    pub fn capture_looks(&mut self, key: usize, names: &[&str]) -> &[Option<Look>] {
         let Some(slot) = self.resolved.get_mut(key) else {
             return &[];
         };
@@ -284,11 +305,35 @@ impl Theme {
     }
 }
 
-fn lookup(syntax: &HashMap<String, Color>, capture: &str) -> Option<Color> {
+/// A syntax entry written as a table: `color`, `bold` and `italic`, each
+/// optional. Mistakes become warnings; `None` if nothing usable is left.
+fn syntax_look(
+    theme: &str,
+    key: &str,
+    fields: &toml::Table,
+    warnings: &mut Vec<String>,
+) -> Option<Look> {
+    let mut look = Look::default();
+    for (field, v) in fields {
+        match (field.as_str(), v) {
+            ("color", toml::Value::String(s)) if parse_color(s).is_some() => {
+                look.color = parse_color(s);
+            }
+            ("bold", toml::Value::Boolean(b)) => look.style.bold = *b,
+            ("italic", toml::Value::Boolean(b)) => look.style.italic = *b,
+            _ => warnings.push(format!(
+                "theme {theme}: syntax.{key}.{field}: expected color = \"#rrggbb\", bold = true or italic = true"
+            )),
+        }
+    }
+    (look != Look::default()).then_some(look)
+}
+
+fn lookup(syntax: &HashMap<String, Look>, capture: &str) -> Option<Look> {
     let mut name = capture;
     loop {
-        if let Some(c) = syntax.get(name) {
-            return Some(*c);
+        if let Some(look) = syntax.get(name) {
+            return Some(*look);
         }
         name = &name[..name.rfind('.')?];
     }
@@ -357,10 +402,46 @@ mod tests {
         assert_eq!(t.syntax_color("variable"), None);
         let mut t = t;
         let names = ["variable", "function.method", "function.macro"];
-        assert_eq!(
-            t.capture_colors(LanguageId::Rust.index(), &names),
-            &[None, green, red]
+        let colors: Vec<_> = t
+            .capture_looks(LanguageId::Rust.index(), &names)
+            .iter()
+            .map(|l| l.and_then(|l| l.color))
+            .collect();
+        assert_eq!(colors, [None, green, red]);
+    }
+
+    #[test]
+    fn syntax_entries_can_be_bold_or_italic() {
+        let (mut t, w) = Theme::parse(
+            "t",
+            "[syntax]\nkeyword = { color = \"#ff0000\", bold = true }\ncomment = { italic = true }\nstring = { bold = \"yes\" }\n",
+            &Theme::empty("t"),
         );
+        assert_eq!(w.len(), 1, "{w:?}");
+        let looks = t
+            .capture_looks(0, &["keyword.control", "comment", "string"])
+            .to_vec();
+        assert_eq!(
+            looks[0],
+            Some(Look {
+                color: Some([1.0, 0.0, 0.0, 1.0]),
+                style: Style {
+                    bold: true,
+                    italic: false
+                },
+            })
+        );
+        assert_eq!(
+            looks[1],
+            Some(Look {
+                color: None,
+                style: Style {
+                    bold: false,
+                    italic: true
+                },
+            })
+        );
+        assert_eq!(looks[2], None, "a bad entry is ignored with a warning");
     }
 
     #[test]

@@ -17,4 +17,4 @@ pub use gpu::{
     BACKGROUND, Capture, FrameError, FrameStats, FrameStatus, Gpu, GpuContext, GpuError,
 };
 pub use pipeline::{GlyphInstance, RectInstance};
-pub use text::ColorRun;
+pub use text::{ColorRun, Style};

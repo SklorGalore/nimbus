@@ -27,7 +27,9 @@ release builds for all three platforms.
 - [ ] **Font fallback**: a missing glyph (CJK, emoji) is found in a system
       font through `fontdb`, loaded on a background thread, and drawn when
       ready; the `.notdef` box shows until then.
-- [ ] **Bold and italic** in themes, via bundled variants or synthesis.
+- [x] **Bold and italic** in themes, via bundled variants or synthesis:
+      Hack Bold bundled (+2.7 MB), italic by slanting (theme, raster and
+      font tests; headless render with a styled theme).
 - [ ] Shortcut labels use ⌘ ⌥ ⌃ ⌫ symbols on macOS once fallback fonts
       provide them (M4 shows `Cmd+Shift+P` because the bundled font lacks them).
 - [x] **Scrollbar** with a draggable thumb (view test of its geometry
