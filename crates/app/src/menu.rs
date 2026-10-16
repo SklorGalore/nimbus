@@ -50,6 +50,7 @@ mod native {
             "View",
             &[
                 "app.palette",
+                "view.toggleSidebar",
                 "view.toggleWrap",
                 "view.toggleTheme",
                 "-",

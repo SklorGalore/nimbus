@@ -96,7 +96,7 @@ Cargo workspace; crates live in `crates/`, each package named `nimbus-<dir>` exc
 - `core`: text buffers, edits, undo, cursors, search. No I/O, no GPU, no workspace deps. Must stay testable headlessly.
 - `syntax`: tree-sitter highlighting. Depends on `core`. `SyntaxState` (one per `Document`) must see every edit, undo and redo included, through `SyntaxState::edit`; a missed edit leaves the tree describing other text. It starts no threads: it returns `Job`s that the app runs (`spawn_syntax` in `app.rs`). Each grammar is a cargo feature; the Rust highlights query is vendored in `crates/syntax/queries/`. Files over 16 MB skip tree-sitter for the line-by-line rules in `lexical.rs`, whose checkpoints `Lexical::edit` must also see every edit of (it does, through `SyntaxState::edit`).
 - `render`: owns the wgpu surface and, later, the glyph atlas, layout, and the two instanced pipelines (rects and glyph quads). Depends on `core`.
-- `app`: winit `ApplicationHandler`, editor state, UI chrome, keymap, config. Depends on everything.
+- `app`: winit `ApplicationHandler`, editor state, UI chrome, keymap, config. Depends on everything. The sidebar (`sidebar.rs` over the arena tree in `tree.rs`) lists folders on workers when first expanded; `watch.rs` watches only listed folders and open files' folders, non-recursively, starting after the first frame. Nimbus never writes `config.toml`; remembered window state goes in `state.toml`. A `Document` records its file's size and mtime at open and save (`Stamp`) so watch events for our own saves are ignored.
 
 Dependencies only point downward. Don't add a dependency from `core` onto any other workspace crate, and don't put GPU or windowing types in `core`.
 

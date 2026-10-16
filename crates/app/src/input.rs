@@ -83,6 +83,16 @@ pub enum Command<'a> {
     ToggleWrap,
     /// Switch between the light and dark themes.
     ToggleTheme,
+    /// Show or hide the sidebar.
+    ToggleSidebar,
+    /// Show the sidebar and move the keyboard into it.
+    FocusSidebar,
+    /// Show or hide `.gitignore`d files in the sidebar.
+    ToggleIgnored,
+    /// Replace the text with the file on disk.
+    ReloadFromDisk,
+    /// Keep the edits here over a change on disk.
+    KeepMine,
     /// Find bar: toggle case-sensitive matching. Carries the text the key
     /// would type (Option+C is "ç" on macOS), typed instead when the find
     /// bar is closed.

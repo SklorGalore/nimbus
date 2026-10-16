@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use nimbus_core::movement;
 use nimbus_core::{
@@ -15,6 +15,42 @@ use nimbus_syntax::state::SyntaxState;
 use crate::input::Motion;
 use crate::io::{self, OpenError, SaveError};
 use crate::languages::{Detected, Languages};
+
+/// What identifies a version of a file on disk without reading it: its
+/// size and modification time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Option<Self> {
+        std::fs::metadata(path).ok().map(|m| Self::from(&m))
+    }
+
+    fn from(meta: &std::fs::Metadata) -> Self {
+        Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        }
+    }
+}
+
+/// What a change on disk did to a document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiskChange {
+    /// Nothing: our own save, or the same file.
+    None,
+    /// Reloaded: there were no unsaved edits.
+    Reloaded,
+    /// Changed on disk, and there are unsaved edits here.
+    Conflict,
+    /// Deleted on disk.
+    Deleted,
+    /// Changed on disk, but reading it failed.
+    Failed(String),
+}
 
 /// An open document.
 #[derive(Debug, Default)]
@@ -42,6 +78,18 @@ pub struct Document {
     pub syntax: SyntaxState,
     /// Key of the detected language (`Detected::key`), if any.
     language: Option<&'static str>,
+    /// The file on disk as last read or written; a change event that still
+    /// matches it is our own save.
+    disk: Option<Stamp>,
+    /// The file was deleted on disk; saving recreates it.
+    pub deleted: bool,
+    /// The file changed on disk while there were unsaved edits here.
+    pub conflict: bool,
+    /// `path` resolved (`io::canonical`), as file watching reports it;
+    /// worked out at open and save, not per use.
+    pub canonical: Option<PathBuf>,
+    /// When the file was last reloaded because it changed on disk.
+    pub reloaded_at: Option<Instant>,
     /// [`History::top_id`] when last saved or opened. The document is dirty
     /// whenever the top of the history differs, so undoing back to the saved
     /// point makes it clean again.
@@ -72,6 +120,9 @@ impl Document {
     ///
     /// Returns an [`OpenError`] for anything other than a missing file.
     pub fn open(path: &Path) -> Result<Self, OpenError> {
+        // The stamp is taken before reading: a write landing between the
+        // two then looks like a change, never like the version we read.
+        let disk = Stamp::of(path);
         let (buffer, line_ending, bom) = match io::open(path) {
             Ok(opened) => (opened.buffer, opened.line_ending, opened.bom),
             Err(OpenError::NotFound) => (RopeBuffer::default(), LineEnding::default(), false),
@@ -82,8 +133,89 @@ impl Document {
             path: Some(path.to_path_buf()),
             line_ending,
             bom,
+            disk,
+            canonical: Some(io::canonical(path)),
             ..Self::default()
         })
+    }
+
+    /// The file changed on disk (a watcher said so): work out what to do.
+    /// Reloads by itself when nothing here is unsaved.
+    pub fn disk_changed(&mut self, languages: &Languages) -> DiskChange {
+        let Some(path) = self.path.clone() else {
+            return DiskChange::None;
+        };
+        let now = Stamp::of(&path);
+        let Some(stamp) = now else {
+            if self.disk.is_none() {
+                return DiskChange::None; // never existed: an unsaved new file
+            }
+            self.deleted = true;
+            self.disk = None;
+            return DiskChange::Deleted;
+        };
+        if self.disk == Some(stamp) {
+            return DiskChange::None; // our own save, or no real change
+        }
+        self.deleted = false;
+        if self.is_dirty() {
+            self.conflict = true;
+            return DiskChange::Conflict;
+        }
+        match self.reload(languages) {
+            Ok(()) => DiskChange::Reloaded,
+            Err(e) => DiskChange::Failed(e.to_string()),
+        }
+    }
+
+    /// Replace the text with the file on disk, discarding unsaved edits
+    /// and the undo history. The cursor stays on the same line and column
+    /// where they still exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`OpenError`] if the file cannot be read; nothing
+    /// changes then.
+    pub fn reload(&mut self, languages: &Languages) -> Result<(), OpenError> {
+        let Some(path) = self.path.clone() else {
+            return Ok(());
+        };
+        let disk = Stamp::of(&path);
+        let opened = io::open(&path)?;
+        let head = self.cursor();
+        let line = self.buffer.byte_to_line(head);
+        let col = head - self.buffer.line_to_byte(line);
+        self.buffer = opened.buffer;
+        self.line_ending = opened.line_ending;
+        self.bom = opened.bom;
+        self.disk = disk;
+        self.reloaded_at = Some(Instant::now());
+        self.history = History::default();
+        self.saved_at = self.history.top_id();
+        self.deleted = false;
+        self.conflict = false;
+        self.version += 1;
+        let line = line.min(self.buffer.len_lines().saturating_sub(1));
+        let start = self.buffer.line_to_byte(line);
+        let len = self.buffer.line(line).len();
+        self.set_selection(Selection::cursor(movement::clamp(
+            &self.buffer,
+            start + col.min(len),
+        )));
+        self.preferred_column = None;
+        // The text is new, so the tree is too, even in the same language.
+        self.language = None;
+        self.detect_language(languages);
+        Ok(())
+    }
+
+    /// Keep the edits here over a change on disk: the next save overwrites
+    /// it, and only a newer change asks again.
+    pub fn keep_mine(&mut self) {
+        if let Some(path) = &self.path {
+            self.disk = Stamp::of(path);
+        }
+        self.conflict = false;
     }
 
     /// Pick the language (see [`Languages::detect`]) and start its syntax
@@ -134,7 +266,11 @@ impl Document {
                 source: std::io::Error::other("untitled documents can be saved from M4 on"),
             });
         };
-        io::save(path, &self.buffer, self.bom)?;
+        let written = io::save(path, &self.buffer, self.bom)?;
+        self.disk = Some(Stamp::from(&written));
+        self.canonical = Some(io::canonical(path));
+        self.deleted = false;
+        self.conflict = false;
         // Typing after a save must start a new undo step, or it would join
         // the saved step and the document would look clean.
         self.history.seal();
@@ -773,5 +909,47 @@ mod tests {
         d.click(0, false);
         d.delete_to(Motion::WordRight).unwrap();
         assert_eq!(text(&d), " 1");
+    }
+
+    #[test]
+    fn changes_on_disk_reload_conflict_or_mark_deleted() {
+        let dir = std::env::temp_dir().join(format!("nimbus-disk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.txt");
+        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let langs = Languages::default();
+        let mut d = Document::open(&path).unwrap();
+        d.set_selection(Selection::cursor(6)); // line 1, column 2
+        assert_eq!(d.disk_changed(&langs), DiskChange::None, "nothing changed");
+
+        // Changed outside, nothing unsaved: reloads, cursor on its line.
+        std::fs::write(&path, "ONE\nTWO!\nTHREE\nFOUR\n").unwrap();
+        assert_eq!(d.disk_changed(&langs), DiskChange::Reloaded);
+        assert_eq!(d.buffer.line(1), "TWO!");
+        assert_eq!(d.cursor(), 4 + 2);
+        assert!(!d.is_dirty() && !d.history.can_undo());
+
+        // Our own save is not a change.
+        d.insert("x").unwrap();
+        d.save().unwrap();
+        assert_eq!(d.disk_changed(&langs), DiskChange::None);
+
+        // Unsaved edits here: a conflict, until kept.
+        d.insert("y").unwrap();
+        std::fs::write(&path, "theirs, a longer text\n").unwrap();
+        assert_eq!(d.disk_changed(&langs), DiskChange::Conflict);
+        assert!(d.conflict && d.is_dirty());
+        d.keep_mine();
+        assert!(!d.conflict);
+        assert_eq!(d.disk_changed(&langs), DiskChange::None, "asked once");
+
+        // Deleted, then recreated by saving.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(d.disk_changed(&langs), DiskChange::Deleted);
+        assert!(d.deleted);
+        d.save().unwrap();
+        assert!(!d.deleted && path.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

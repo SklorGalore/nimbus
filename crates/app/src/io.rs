@@ -198,15 +198,37 @@ fn step(step: &'static str) -> impl FnOnce(std::io::Error) -> SaveError {
 ///
 /// Returns a [`SaveError`] naming the step that failed. The target file is
 /// untouched unless the final rename succeeded.
-pub fn save(path: &Path, buffer: &RopeBuffer, bom: bool) -> Result<(), SaveError> {
+/// `path` with its folder resolved (symlinks, `..`), so it compares equal
+/// to the paths file watching reports. Works for a file that does not exist
+/// (yet, or any more), as long as its folder does.
+#[must_use]
+pub fn canonical(path: &Path) -> std::path::PathBuf {
+    if let Ok(p) = fs::canonicalize(path) {
+        return p;
+    }
+    match (
+        path.parent().and_then(|d| fs::canonicalize(d).ok()),
+        path.file_name(),
+    ) {
+        (Some(dir), Some(name)) => dir.join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+pub fn save(path: &Path, buffer: &RopeBuffer, bom: bool) -> Result<fs::Metadata, SaveError> {
     // Write next to the real file, so the rename stays within one directory
     // (and one filesystem), and so a symlink is followed, not overwritten.
     let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let (tmp, mut file) = create_temp(&target)?;
 
     let result = write_temp(&mut file, &target, buffer, bom).and_then(|()| {
+        // The written file's size and time, read from the file itself before
+        // it replaces the old one: a write by anyone else after this point
+        // looks different. Renaming keeps both.
+        let meta = file.metadata().map_err(step("reading back the file"))?;
         drop(file);
-        rename_with_retry(&tmp, &target).map_err(step("replacing the file"))
+        rename_with_retry(&tmp, &target).map_err(step("replacing the file"))?;
+        Ok(meta)
     });
     if result.is_err() {
         // Best effort: do not leave temp files behind.

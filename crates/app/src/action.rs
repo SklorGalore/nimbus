@@ -377,6 +377,36 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::all(&["Alt+Z"]),
     ),
     act(
+        "view.toggleSidebar",
+        "Toggle Sidebar",
+        Command::ToggleSidebar,
+        Keys::all(&["Primary+B"]),
+    ),
+    act(
+        "view.focusSidebar",
+        "Focus Sidebar",
+        Command::FocusSidebar,
+        Keys::all(&["Primary+Shift+E"]),
+    ),
+    act(
+        "view.toggleIgnored",
+        "Show/Hide Ignored Files in Sidebar",
+        Command::ToggleIgnored,
+        Keys::NONE,
+    ),
+    act(
+        "file.reloadFromDisk",
+        "Reload from Disk",
+        Command::ReloadFromDisk,
+        Keys::NONE,
+    ),
+    act(
+        "file.keepMine",
+        "Keep My Version (ignore the change on disk)",
+        Command::KeepMine,
+        Keys::NONE,
+    ),
+    act(
         "view.toggleTheme",
         "Toggle Light/Dark Theme",
         Command::ToggleTheme,

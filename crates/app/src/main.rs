@@ -15,8 +15,12 @@ mod keymap;
 mod languages;
 mod menu;
 mod picker;
+mod sidebar;
+mod state;
 mod theme;
+mod tree;
 mod view;
+mod watch;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
