@@ -1,6 +1,6 @@
 # M8 — Polish
 
-**Status: plan drafted on `m8-wip`, waiting for approval**
+**Status: in progress on `m8-wip`**
 
 ## Goal
 
@@ -45,9 +45,9 @@ session restore, split views, find in files.
 
 ## Design
 
-Drafted on 2026-10-16 for the owner's approval. The multi-cursor part
-comes from a planning pass over the current code; the decisions marked
-**Owner** are open.
+Approved by the owner on 2026-10-16, with the recommendation taken for
+each open decision (marked **Decided**). The multi-cursor part comes from
+a planning pass over the current code.
 
 ### Multi-cursor (`selection.rs`, new `core/src/multi.rs`, `document.rs`)
 
@@ -85,10 +85,9 @@ each press adds the next occurrence (wrapping around). On a huge file the
 search for the next occurrence reads at most 32 MB per press, off the
 search results when the find bar already has them. `Alt+click` adds or
 removes a cursor; `Alt+drag` adds a selection. Escape returns to the
-primary. **Owner:** also add `Primary+Alt+Up/Down` (add a cursor on the
-line above or below)? Many window managers on Linux take Alt+click for
+primary. **Decided:** `Primary+Alt+Up/Down` also adds a cursor on the
+line above or below; many window managers on Linux take Alt+click for
 moving windows, so a keyboard way to add cursors helps there.
-Recommended: yes.
 
 **Drawing**: every selection and cursor; the gutter marks every cursor's
 line. No allocation per frame (the painter walks the sorted list as it
@@ -149,13 +148,11 @@ and palette shortcut labels switch to ⌘ ⌥ ⌃ ⇧ on macOS.
 ### Bold and italic
 
 Themes may set `bold` and `italic` per syntax capture (for example
-`keyword = { color = "#c678dd", bold = true }`). **Owner:** bundle the
-real Hack Bold, Italic and Bold Italic (+8.4 MB, Linux about 27 MB of the
-35 MB budget), or synthesise them while rasterising (0 MB; swash can
-embolden and slant)? Recommended: bundle Bold (+2.8 MB), since faked bold
-looks smeared at small sizes, and slant Regular and Bold for italic,
-which is what Hack's italic already is (an oblique), so it looks the
-same.
+`keyword = { color = "#c678dd", bold = true }`). **Decided:** bundle
+Hack Bold (+2.8 MB), since faked bold looks smeared at small sizes, and
+make italic by slanting Regular and Bold while rasterising, which is what
+Hack's italic already is (an oblique). Bundling all three would have cost
+8.4 MB.
 
 ### Screenshot test
 
@@ -179,16 +176,15 @@ a macOS `Nimbus.app` in a zip (a universal binary, Apple silicon and
 Intel, joined with `lipo`), a Linux `x86_64` tarball built on the oldest
 supported Ubuntu runner so it runs on older systems, and a Windows zip.
 The `.app` is made by a short script (`Info.plist`, binary, icon).
-Unsigned: the README says how to open it the first time. **Owner:** the
-app needs an icon; I can draw a simple one (a cloud outline on a dark
-rounded square) as SVG and render it to the sizes macOS and Windows need,
-or you can supply one.
+Unsigned: the README says how to open it the first time. **Decided:** a
+simple icon drawn here (a cloud outline on a dark rounded square), kept
+as SVG and rendered to the sizes macOS and Windows need.
 
 ### Manual QA
 
-A checklist in this doc run on Windows and Linux (Wayland and X11).
-**Owner:** do you have a Linux machine, or should Linux be covered by CI
-plus headless renders only?
+A checklist in this doc, run by the owner on Windows. **Decided:** Linux
+is covered by CI and headless renders for now (no Linux machine; a VM is
+possible later), so the Wayland and X11 checks are recorded as not run.
 
 ## Tasks
 
