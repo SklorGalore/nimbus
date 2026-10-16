@@ -1,6 +1,6 @@
 # M8 — Polish
 
-**Status: in progress on `m8-wip`**
+**Status: done on `m8-wip`, waiting for owner checks**
 
 ## Goal
 
@@ -8,6 +8,9 @@ Turn a working editor into one you would choose to use daily, and produce
 release builds for all three platforms.
 
 ## Done when
+
+Ticked items were verified here by tests, headless renders or measured
+runs. **Owner** items need a person at the keyboard; each says what to try.
 
 - [x] **Multi-cursor**: `Primary+D` adds a cursor at the next occurrence of
       the selection; `Alt+click` adds a cursor; Escape returns to one. Typing,
@@ -39,6 +42,9 @@ release builds for all three platforms.
 - [x] **Scrollbar** with a draggable thumb (view test of its geometry
       and dragging; headless renders, including the 4 GB log).
 - [ ] **Markdown inline highlighting** (stretch; skip without blocking).
+      Skipped: the Markdown grammar's inline part needs a second, nested
+      parse in the syntax state (an injection layer), more than a stretch
+      task. Left for after M8.
 - [x] A GPU screenshot smoke test on macOS compares a rendered frame to a
       reference image with a tolerance (`crates/app/tests/screenshot.rs`:
       0 pixels differ on a clean run, 48 for one changed letter; at most
@@ -46,7 +52,20 @@ release builds for all three platforms.
 - [x] `cargo bloat` review recorded; anything over 1 MB justified (Results,
       Size review).
 - [ ] Manual QA checklist run on Linux (Wayland and X11) and Windows,
-      results recorded.
+      results recorded. Linux: CI and headless renders only (owner has no
+      Linux machine; decided at approval). Windows: the owner checks below.
+- [ ] **Owner, Windows:** type with three cursors (Ctrl+D twice on a
+      word, then type), Alt+click to add and remove cursors, Ctrl+Alt+Up
+      and Down (some graphics drivers take these for screen rotation;
+      note if they do), Escape, undo and redo; copy at three cursors and
+      paste at three.
+- [ ] **Owner, Windows:** the status bar, F12 overlay, the scrollbar
+      (drag and click the track), bracket boxes next to the cursor, and a
+      file with Chinese or Japanese text (it appears after a moment).
+- [ ] **Owner, Windows:** the icon shows on `nimbus.exe` in Explorer and
+      in the taskbar.
+- [ ] **Owner, macOS:** the same multi-cursor steps with ⌘D and ⌥-click;
+      the palette shows ⇧⌘P-style shortcuts.
 - [ ] A tag push builds release artifacts in GitHub Actions: a macOS `.app`
       in a zip, a Linux tarball, a Windows zip. Workflow, bundle script
       (tested locally) and icon are in; **owner**: push a tag to run it.
@@ -172,7 +191,7 @@ Hack's italic already is (an oblique). Bundling all three would have cost
 ### Screenshot test
 
 Renders a fixed document through the existing headless path with a
-fixed config, theme and font size, and compares it to a stored PNG,
+fixed config, theme and font size, and compares it to a stored BMP,
 allowing small per-pixel differences. macOS only, since GPUs and
 rasterisers differ by platform. If CI's macOS runner has no usable GPU
 adapter, the test skips with a log line and runs locally; that is decided
@@ -245,7 +264,82 @@ Each one commit, with its tests.
 
 ## Results
 
-_Filled in as tasks land; completed at the end of the milestone._
+| Metric | Value |
+|---|---|
+| Tests | 344 passing, plus 12 opt-in benchmarks or diagnostics |
+| Release binary | 14.75 MB on macOS (M7: 14.45 MB) |
+| `--smoke` first frame | 192 ms first run after a rebuild, 141–150 ms warm (M5 Pro) |
+| Empty window | 35 MB RSS at 1400×700 (4 GB log: 35 MB too) |
+| Fallback fonts for a CJK + symbols sample | about +21 MB, only once such characters appear |
+| Replace All of 100,000 matches, with undo and redo | 0.21 s (debug) |
+
+**Design changes**
+
+- **Undo groups hold batches.** The plan merged each keystroke's N edits
+  into the group's edits. Instead a group keeps one batch per keystroke
+  and undo puts each back in one pass: simpler, and it never has to join
+  removed text held as pieces.
+- **Primary+D on a huge file** reads at most 32 MB per press and goes on
+  from there on the next press.
+- **Primary+Alt+Up/Down** add above the topmost or below the bottommost
+  cursor, so repeating them builds a column.
+- **Scrollbar** does not fade when idle (that needs timed redraws;
+  rendering is on demand).
+- **Font fallback** copies the smallest suitable font (owner's choice
+  over mapping it), prefers complete fonts for CJK, and skips colour-only
+  emoji fonts: emoji draw in the text colour where a font has outlines.
+- **Bold** comes from Hack Bold without its icons (185 KB); italic is a
+  12° slant. The plan's SVG icon became a Python script, since macOS has
+  no SVG renderer that keeps transparency.
+- **Small non-UTF-8 files** stayed in memory (from M7); the status bar
+  says "Not UTF-8" for them.
+
+**Concepts**
+
+- *Applying edits at several cursors* (`crates/core/src/multi.rs`,
+  `selection.rs`): each cursor's change is worked out in the text before
+  any of them, then all are applied from the end of the text back, so no
+  offset moves before it is used; the cursors are then moved through the
+  edits in one pass.
+- *Font fallback* (`crates/render/src/fallback.rs`): no font covers every
+  script, so missing characters are looked up in system fonts on a
+  worker, and drawn from whichever face has them.
+- *Offscreen rendering for tests* (`crates/app/tests/screenshot.rs`): the
+  headless path draws into a texture, which is compared with a stored
+  image.
+- *Release automation* (`.github/workflows/release.yml`): a tag push
+  builds every platform and drafts a release.
+
+**Surprises**
+
+- The bundled bold font was 2.8 MB, almost all Nerd Font icons; subset,
+  it is 185 KB.
+- Choosing the smallest font file for each character mixed fonts within
+  Chinese text (a symbol font happened to have 中); requiring the
+  script's common characters too fixed it.
+- The first scrollbar was too faint to see; the screenshot test's first
+  tolerance (0.5% of pixels) let a changed letter through, so it now
+  counts pixels (at most 20; one letter is 48).
+
+**End-of-milestone review** (code-review skill, xhigh) found nine issues,
+all fixed: an Alt+click that removed a cursor still started a drag that
+overwrote another; copy then paste with a bare last cursor lost its line;
+a failed batch during undo or redo left the text and history out of step
+(now rolled back); undo kept stale per-cursor columns; removing the middle
+primary chose the wrong neighbour; tree bracket matching was quadratic in
+a list's length and allocated each frame; the counting fallback and the
+status bar's character count re-read text each frame (both cached now);
+and two copies of the size formatter allocated each frame.
+
+**Known limitations**
+
+- Colour emoji draw as outlines in the text colour, or as boxes where no
+  font has outlines (most of macOS's emoji): colour needs an RGBA atlas.
+- Markdown inline highlighting was not done (stretch).
+- Bracket matching without a syntax tree can be misled by brackets in
+  strings.
+- Linux was not run by hand (CI and headless renders only).
+- The first release needs a tag push to try the workflow.
 
 ### Size review (task 14)
 
