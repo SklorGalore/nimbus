@@ -44,21 +44,32 @@ pub fn candidates(t: &dyn Text, pos: usize) -> [Option<usize>; 2] {
 /// bracket next to the cursor or no partner within reach.
 #[must_use]
 pub fn matching(t: &dyn Text, pos: usize, limit: usize) -> Option<(usize, usize)> {
+    matching_with(t, pos, limit, &mut Vec::new())
+}
+
+/// [`matching`], reading into `window`, a buffer the caller keeps, so
+/// asking again allocates nothing.
+pub fn matching_with(
+    t: &dyn Text,
+    pos: usize,
+    limit: usize,
+    window: &mut Vec<u8>,
+) -> Option<(usize, usize)> {
     candidates(t, pos)
         .into_iter()
         .flatten()
-        .find_map(|at| partner_of(t, at, limit).map(|other| (at.min(other), at.max(other))))
+        .find_map(|at| partner_of(t, at, limit, window).map(|other| (at.min(other), at.max(other))))
 }
 
 /// The partner of the bracket at `at`, within `limit` bytes.
-fn partner_of(t: &dyn Text, at: usize, limit: usize) -> Option<usize> {
+fn partner_of(t: &dyn Text, at: usize, limit: usize, window: &mut Vec<u8>) -> Option<usize> {
     let me = t.byte_at(at)?;
     let (other, opens) = partner(me)?;
-    let mut window = Vec::new();
+    window.clear();
     let mut depth = 0usize;
     if opens {
         let end = (at + 1 + limit).min(t.len_bytes());
-        t.read_into(at + 1..end, &mut window).ok()?;
+        t.read_into(at + 1..end, window).ok()?;
         for (i, &b) in window.iter().enumerate() {
             if b == me {
                 depth += 1;
@@ -71,7 +82,7 @@ fn partner_of(t: &dyn Text, at: usize, limit: usize) -> Option<usize> {
         }
     } else {
         let start = at.saturating_sub(limit);
-        t.read_into(start..at, &mut window).ok()?;
+        t.read_into(start..at, window).ok()?;
         for (i, &b) in window.iter().enumerate().rev() {
             if b == me {
                 depth += 1;

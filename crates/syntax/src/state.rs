@@ -267,21 +267,20 @@ impl SyntaxState {
                     return None;
                 }
                 let (other, opens) = nimbus_core::brackets::partner(text.byte_at(at)?)?;
-                let other = char::from(other).to_string();
-                // The partner is a sibling: the pair of a list, call,
-                // block or the like are both children of that node.
-                let mut sib = node;
-                loop {
-                    sib = if opens {
-                        sib.next_sibling()?
-                    } else {
-                        sib.prev_sibling()?
-                    };
-                    if !sib.is_named() && sib.kind() == other {
-                        let (a, b) = (at, sib.start_byte());
-                        return Some((a.min(b), a.max(b)));
-                    }
-                }
+                // The pair of a list, call, block or the like are its first
+                // and last children: two lookups, however long the list.
+                let parent = node.parent()?;
+                let sib = if opens {
+                    parent.child(parent.child_count().checked_sub(1)?)?
+                } else {
+                    parent.child(0)?
+                };
+                let matches =
+                    !sib.is_named() && sib.kind().as_bytes() == [other] && sib.id() != node.id();
+                matches.then(|| {
+                    let b = sib.start_byte();
+                    (at.min(b), at.max(b))
+                })
             });
         Some(found)
     }

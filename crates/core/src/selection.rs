@@ -199,7 +199,7 @@ impl Selections {
             return false;
         }
         self.items.remove(index);
-        if self.primary > index || self.primary == self.items.len() {
+        if self.primary > index || (self.primary == index && index > 0) {
             self.primary -= 1;
         }
         true
@@ -403,6 +403,20 @@ mod tests {
         assert_eq!(sels.primary(), sel(20, 25));
         assert!(sels.remove(2));
         assert_eq!(sels.primary(), Selection::cursor(10), "the one before");
+        // The primary from the middle: the one before it, not after.
+        let mut mid = Selections::from_vec(
+            vec![
+                Selection::cursor(2),
+                Selection::cursor(10),
+                Selection::cursor(20),
+            ],
+            1,
+        );
+        assert!(mid.remove(1));
+        assert_eq!(mid.primary(), Selection::cursor(2));
+        // The first, when it is the primary: the next one.
+        assert!(mid.remove(0));
+        assert_eq!(mid.primary(), Selection::cursor(20));
         sels.collapse_to_primary();
         assert_eq!(sels.as_slice(), &[Selection::cursor(10)]);
     }

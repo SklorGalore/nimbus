@@ -353,7 +353,9 @@ impl History {
     ///
     /// Returns an [`EditError`] if the buffer no longer matches the history,
     /// which means the buffer was edited without recording. The group is
-    /// kept, and edits reversed before the error stay reversed.
+    /// kept; batches of it already reversed are applied again, so the text
+    /// and the history still agree (within a batch put back one edit at a
+    /// time, edits reversed before the error stay reversed).
     pub fn undo(
         &mut self,
         buffer: &mut dyn Buffer,
@@ -364,13 +366,21 @@ impl History {
             return Ok(None);
         };
         // Batches last first; each put back in one pass when it can be.
-        let result =
-            group.batch_ranges().into_iter().rev().try_for_each(|r| {
-                undo_edits(buffer, group.edits.get(r).unwrap_or_default(), on_edit)
-            });
-        if let Err(e) = result {
-            self.undo.push(group);
-            return Err(e);
+        // If one fails, the batches already undone are redone, so the text
+        // still matches the history and the group can be tried again.
+        let ranges = group.batch_ranges();
+        for (k, r) in ranges.iter().enumerate().rev() {
+            let batch = group.edits.get(r.clone()).unwrap_or_default();
+            if let Err(e) = undo_edits(buffer, batch, on_edit) {
+                for done in ranges.get(k + 1..).unwrap_or_default() {
+                    let batch = group.edits.get(done.clone()).unwrap_or_default();
+                    if redo_edits(buffer, batch, on_edit).is_err() {
+                        break;
+                    }
+                }
+                self.undo.push(group);
+                return Err(e);
+            }
         }
         let restore = group.before.clone();
         self.redo.push(group);
@@ -392,13 +402,20 @@ impl History {
         let Some(group) = self.redo.pop() else {
             return Ok(None);
         };
-        let result = group
-            .batch_ranges()
-            .into_iter()
-            .try_for_each(|r| redo_edits(buffer, group.edits.get(r).unwrap_or_default(), on_edit));
-        if let Err(e) = result {
-            self.redo.push(group);
-            return Err(e);
+        // As undo: a batch that fails rolls back the ones already redone.
+        let ranges = group.batch_ranges();
+        for (k, r) in ranges.iter().enumerate() {
+            let batch = group.edits.get(r.clone()).unwrap_or_default();
+            if let Err(e) = redo_edits(buffer, batch, on_edit) {
+                for done in ranges.get(..k).unwrap_or_default().iter().rev() {
+                    let batch = group.edits.get(done.clone()).unwrap_or_default();
+                    if undo_edits(buffer, batch, on_edit).is_err() {
+                        break;
+                    }
+                }
+                self.redo.push(group);
+                return Err(e);
+            }
         }
         let restore = group.after.clone();
         self.undo.push(group);
@@ -623,6 +640,103 @@ mod tests {
         sels.collapse_to_primary();
         type_at(&mut buf, &mut hist, &mut sels, "?", later);
         assert_eq!(hist.undo.len(), 3);
+    }
+
+    /// A rope whose `put_sorted` refuses once, on its `fail_at`-th call.
+    struct Flaky {
+        inner: RopeBuffer,
+        calls: usize,
+        fail_at: usize,
+    }
+
+    impl Text for Flaky {
+        fn len_bytes(&self) -> usize {
+            self.inner.len_bytes()
+        }
+        fn len_lines(&self) -> usize {
+            self.inner.len_lines()
+        }
+        fn line(&self, idx: usize) -> std::borrow::Cow<'_, str> {
+            self.inner.line(idx)
+        }
+        fn byte_to_line(&self, byte: usize) -> usize {
+            self.inner.byte_to_line(byte)
+        }
+        fn line_to_byte(&self, line: usize) -> usize {
+            self.inner.line_to_byte(line)
+        }
+        fn slice(&self, range: std::ops::Range<usize>) -> std::borrow::Cow<'_, str> {
+            self.inner.slice(range)
+        }
+        fn is_char_boundary(&self, byte: usize) -> bool {
+            self.inner.is_char_boundary(byte)
+        }
+        fn chunk_at(&self, byte: usize) -> (&[u8], usize) {
+            self.inner.chunk_at(byte)
+        }
+    }
+
+    impl Buffer for Flaky {
+        fn replace(
+            &mut self,
+            range: std::ops::Range<usize>,
+            text: &str,
+        ) -> Result<Edit, EditError> {
+            self.inner.replace(range, text)
+        }
+        fn snapshot(&self) -> Box<dyn crate::Snapshot> {
+            self.inner.snapshot()
+        }
+        fn put_sorted(
+            &mut self,
+            items: &[(std::ops::Range<usize>, &Content)],
+        ) -> Result<Vec<Edit>, EditError> {
+            self.calls += 1;
+            if self.calls == self.fail_at {
+                return Err(EditError::Unsupported);
+            }
+            self.inner.put_sorted(items)
+        }
+    }
+
+    #[test]
+    fn a_batch_that_cannot_be_undone_rolls_back_the_group() {
+        let mut buf = RopeBuffer::from_text("a\nb");
+        let mut hist = History::new();
+        let mut sels = Selections::from_vec(vec![Selection::cursor(1), Selection::cursor(3)], 0);
+        let t = Instant::now();
+        for (i, ch) in ["x", "y", "z"].into_iter().enumerate() {
+            let at = t + Duration::from_millis(100 * u64::try_from(i).unwrap());
+            type_at(&mut buf, &mut hist, &mut sels, ch, at);
+        }
+        let typed = buf.slice(0..20).into_owned();
+        // Undo puts back three batches, last first; the third refuses.
+        let mut flaky = Flaky {
+            inner: buf,
+            calls: 0,
+            fail_at: 3,
+        };
+        assert!(hist.undo(&mut flaky, &mut |_, _| {}).is_err());
+        assert_eq!(
+            flaky.inner.slice(0..20),
+            typed,
+            "the two undone batches are redone"
+        );
+        assert!(hist.can_undo(), "the group is kept");
+        // Now it works, and the whole group goes.
+        hist.undo(&mut flaky, &mut |_, _| {}).unwrap();
+        assert_eq!(flaky.inner.slice(0..20), "a\nb");
+        // Redo the same way: the second batch refuses.
+        flaky.calls = 0;
+        flaky.fail_at = 2;
+        assert!(hist.redo(&mut flaky, &mut |_, _| {}).is_err());
+        assert_eq!(
+            flaky.inner.slice(0..20),
+            "a\nb",
+            "the redone batch is undone"
+        );
+        hist.redo(&mut flaky, &mut |_, _| {}).unwrap();
+        assert_eq!(flaky.inner.slice(0..20), typed);
     }
 
     #[test]

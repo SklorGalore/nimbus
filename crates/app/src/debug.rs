@@ -204,7 +204,8 @@ impl Debug {
         put(gpu, line);
 
         line.clear();
-        let _ = write!(line, "buffer   {} {}", facts.backend, human(facts.len));
+        let _ = write!(line, "buffer   {} ", facts.backend);
+        crate::view::write_size(line, facts.len);
         put(gpu, line);
 
         line.clear();
@@ -227,18 +228,6 @@ impl Debug {
             line.push_str("idle");
         }
         put(gpu, line);
-    }
-}
-
-/// A byte count in the largest unit that keeps it above 1.
-fn human(n: usize) -> String {
-    #[expect(clippy::cast_precision_loss, reason = "a size for display")]
-    let x = n as f64;
-    match n {
-        0..1024 => format!("{n} B"),
-        1024..1_048_576 => format!("{:.1} KB", x / 1024.0),
-        1_048_576..1_073_741_824 => format!("{:.1} MB", x / 1_048_576.0),
-        _ => format!("{:.1} GB", x / 1_073_741_824.0),
     }
 }
 

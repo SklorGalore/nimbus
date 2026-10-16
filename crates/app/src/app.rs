@@ -1941,8 +1941,9 @@ impl App {
         self.clicks.adding = count == 1 && self.modifiers.alt_key();
         match count {
             1 if self.clicks.adding => {
-                // Alt+click: add a cursor, or remove the one there.
-                doc.click_add(pos);
+                // Alt+click: add a cursor, or remove the one there. Only a
+                // new cursor can be dragged out into a selection.
+                self.clicks.adding = doc.click_add(pos);
                 self.clicks.anchor = pos..pos;
             }
             1 => {
@@ -1963,7 +1964,7 @@ impl App {
                 doc.select(line);
             }
         }
-        self.clicks.dragging = true;
+        self.clicks.dragging = !(count == 1 && self.modifiers.alt_key() && !self.clicks.adding);
         self.blink.reset(now);
         self.changed(false);
     }

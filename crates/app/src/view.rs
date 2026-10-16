@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 
 use nimbus_core::wrap::{self, RowPos, RowStart, WrapCache, WrapView};
-use nimbus_core::{LineEnding, Selection, Text, column, long_line};
+use nimbus_core::{LineEnding, Selection, Selections, Text, column, long_line};
 use nimbus_render::{ColorRun, Gpu, Metrics, Style};
 use nimbus_syntax::highlight::{Highlighter, Span};
 
@@ -304,22 +304,12 @@ fn begin_text(gpu: &mut Gpu, layout: &Layout, ui: &Ui) {
     ]));
 }
 
+/// What a remembered bracket pair was worked out for: the text's version,
+/// the cursor, and the syntax tree's revision.
+type BracketKey = (u64, usize, u64);
+
 /// How far each way bracket matching counts when there is no syntax tree.
 const BRACKET_LIMIT: usize = 64 * 1024;
-
-/// The bracket next to the primary cursor and its partner: from the syntax
-/// tree when it is up to date, otherwise by counting within
-/// [`BRACKET_LIMIT`] bytes. Only for a bare cursor.
-fn bracket_pair(doc: &Document) -> Option<(usize, usize)> {
-    let sel = doc.selection();
-    if !sel.is_empty() {
-        return None;
-    }
-    let t = &doc.buffer;
-    doc.syntax
-        .matching_bracket(t, sel.head)
-        .unwrap_or_else(|| nimbus_core::brackets::matching(t, sel.head, BRACKET_LIMIT))
-}
 
 /// Whether a cursor is on the line `span` (its number then stands out).
 /// `next` walks forward through the sorted `selections` from line to line,
@@ -335,19 +325,20 @@ fn has_cursor(selections: &[Selection], next: &mut usize, span: nimbus_core::Lin
 /// the status bar; longer ones in bytes, which needs no reading.
 const STATUS_COUNT_LIMIT: usize = 1024 * 1024;
 
-/// `n` bytes as a short human-readable size: `512 B`, `12.0 KB`, `3.4 MB`.
-fn human_bytes(n: usize) -> String {
+/// Write `n` bytes as a short human-readable size: `512 B`, `12.0 KB`,
+/// `3.4 MB`. Into a string the caller reuses, so it allocates nothing.
+pub fn write_size(out: &mut String, n: usize) {
     #[expect(clippy::cast_precision_loss, reason = "a size for display")]
     let x = n as f64;
-    if n < 1024 {
-        format!("{n} B")
+    let _ = if n < 1024 {
+        write!(out, "{n} B")
     } else if n < 1024 * 1024 {
-        format!("{:.1} KB", x / 1024.0)
+        write!(out, "{:.1} KB", x / 1024.0)
     } else if n < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", x / (1024.0 * 1024.0))
+        write!(out, "{:.1} MB", x / (1024.0 * 1024.0))
     } else {
-        format!("{:.1} GB", x / (1024.0 * 1024.0 * 1024.0))
-    }
+        write!(out, "{:.1} GB", x / (1024.0 * 1024.0 * 1024.0))
+    };
 }
 
 /// Add `r` to the sorted ranges in `out`, joining it to the last one if
@@ -501,6 +492,15 @@ pub struct View {
     scrollbar: Option<Scrollbar>,
     /// The pointer is over the scrollbar: it is drawn wider.
     pub scrollbar_hover: bool,
+    /// The bracket pair at the cursor, as last worked out: for the text
+    /// version, cursor and syntax revision it was worked out for. Each
+    /// frame asks again only when one of those changed.
+    brackets: Option<(BracketKey, Option<(usize, usize)>)>,
+    /// Reused for reading around the cursor when counting brackets.
+    bracket_window: Vec<u8>,
+    /// Characters in the selections, as last counted, with the version and
+    /// selections they were counted for.
+    selected_chars: Option<(u64, Selections, usize)>,
 }
 
 /// The scrollbar as drawn: a track down the right edge of the text and a
@@ -637,12 +637,65 @@ impl View {
         self.set_anchor(t, layout, tab_width, at);
     }
 
+    /// The bracket next to the primary cursor and its partner: from the
+    /// syntax tree when it is up to date, otherwise by counting within
+    /// [`BRACKET_LIMIT`] bytes. Only for a bare cursor. Remembered until
+    /// the text, the cursor or the tree changes, so most frames only
+    /// compare three numbers.
+    fn bracket_pair(&mut self, doc: &Document) -> Option<(usize, usize)> {
+        let sel = doc.selection();
+        if !sel.is_empty() {
+            return None;
+        }
+        let key = (doc.version, sel.head, doc.syntax.rev());
+        if let Some((k, pair)) = self.brackets
+            && k == key
+        {
+            return pair;
+        }
+        let t = &doc.buffer;
+        let pair = doc.syntax.matching_bracket(t, sel.head).unwrap_or_else(|| {
+            nimbus_core::brackets::matching_with(
+                t,
+                sel.head,
+                BRACKET_LIMIT,
+                &mut self.bracket_window,
+            )
+        });
+        self.brackets = Some((key, pair));
+        pair
+    }
+
+    /// How many characters the selections hold, counted again only when
+    /// the text or the selections change.
+    fn selected_chars(&mut self, doc: &Document) -> usize {
+        if let Some((v, sels, n)) = &self.selected_chars
+            && *v == doc.version
+            && *sels == doc.selections
+        {
+            return *n;
+        }
+        let t = &doc.buffer;
+        let n = doc
+            .selections
+            .iter()
+            .map(|s| t.slice(s.range()).chars().count())
+            .sum();
+        self.selected_chars = Some((doc.version, doc.selections.clone(), n));
+        n
+    }
+
     /// The right side of the status bar for `doc`: the cursor's line and
     /// column (`~` for a line not counted yet in a huge file), how much is
     /// selected, the line ending, the encoding, the language and, while a
     /// huge file's lines are being counted, how far that has got. Built in
     /// a reused string, so drawing it each frame allocates nothing.
     pub fn status_info(&mut self, doc: &Document, tab_width: usize) -> &str {
+        // Counting characters reads the selections; past a size where that
+        // costs, bytes say as much.
+        let selected = doc.selected_len();
+        let chars =
+            (selected > 0 && selected <= STATUS_COUNT_LIMIT).then(|| self.selected_chars(doc));
         let out = &mut self.status;
         out.clear();
         let t = &doc.buffer;
@@ -651,19 +704,12 @@ impl View {
         if count > 1 {
             let _ = write!(out, "{count} cursors   ");
         }
-        let selected = doc.selected_len();
         if selected > 0 {
-            // Counting characters reads the selections; past a size where
-            // that costs, bytes say as much.
-            if selected <= STATUS_COUNT_LIMIT {
-                let n: usize = doc
-                    .selections
-                    .iter()
-                    .map(|s| t.slice(s.range()).chars().count())
-                    .sum();
+            if let Some(n) = chars {
                 let _ = write!(out, "{n} selected   ");
             } else {
-                let _ = write!(out, "{} selected   ", human_bytes(selected));
+                write_size(out, selected);
+                out.push_str(" selected   ");
             }
         }
         let head = sel.head;
@@ -817,7 +863,7 @@ impl View {
         let lh = layout.metrics.line_height;
         let cursor = doc.cursor();
         let selections = doc.selections.as_slice();
-        let brackets = bracket_pair(doc);
+        let brackets = self.bracket_pair(doc);
         self.cache.next_frame();
         self.cursor_at = None;
 
@@ -1806,8 +1852,13 @@ mod tests {
             v.status_info(&d, 4),
             "2 cursors   Ln 1, Col 1   CRLF   UTF-8"
         );
-        assert_eq!(human_bytes(512), "512 B");
-        assert_eq!(human_bytes(3 * 1024 * 1024 + 400 * 1024), "3.4 MB");
+        let size = |n| {
+            let mut s = String::new();
+            write_size(&mut s, n);
+            s
+        };
+        assert_eq!(size(512), "512 B");
+        assert_eq!(size(3 * 1024 * 1024 + 400 * 1024), "3.4 MB");
     }
 
     #[test]

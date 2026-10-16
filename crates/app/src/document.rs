@@ -1143,17 +1143,20 @@ impl Document {
     /// its own line; otherwise each gets the whole text.
     pub fn paste(&mut self, text: &str) -> Result<(), EditError> {
         let unified = text.replace("\r\n", "\n");
-        let lines: Vec<&str> = unified
-            .strip_suffix('\n')
-            .unwrap_or(&unified)
-            .split('\n')
-            .collect();
+        // One line per cursor, as copying from these cursors gives (an
+        // empty last line for a bare last cursor), or, from elsewhere, the
+        // same with one line break at the end.
+        let count = self.selections.count();
+        let mut lines: Vec<&str> = unified.split('\n').collect();
+        if lines.len() == count + 1 && lines.last() == Some(&"") {
+            lines.pop();
+        }
         let ending = self.line_ending.as_str();
         let convert = |s: &str| match self.line_ending {
             LineEnding::Lf => s.to_owned(),
             LineEnding::CrLf => s.replace('\n', ending),
         };
-        let items = if self.selections.count() > 1 && lines.len() == self.selections.count() {
+        let items = if count > 1 && lines.len() == count {
             self.selections
                 .iter()
                 .zip(&lines)
@@ -1347,20 +1350,27 @@ impl Document {
     }
 
     /// Alt+click: add a cursor at `pos`, or remove the cursor already there
-    /// (unless it is the only one).
-    pub fn click_add(&mut self, pos: usize) {
+    /// (unless it is the only one). Returns whether a new cursor now sits
+    /// at `pos` as the primary, which a drag may then stretch into a
+    /// selection; not after a removal, nor a click inside a selection,
+    /// which the new cursor merges into.
+    pub fn click_add(&mut self, pos: usize) -> bool {
         let pos = movement::clamp(&self.buffer, pos);
         let existing = self.selections.iter().position(|s| s.head == pos);
-        match existing {
-            Some(i) if self.selections.count() > 1 => {
+        let added = if let Some(i) = existing {
+            if self.selections.count() > 1 {
                 self.selections.remove(i);
             }
-            Some(_) => {}
-            None => self.selections.push_primary(Selection::cursor(pos)),
-        }
+            false
+        } else {
+            let before = self.selections.count();
+            self.selections.push_primary(Selection::cursor(pos));
+            self.selections.count() > before
+        };
         self.goals.clear();
         self.preferred_column = None;
         self.history.seal();
+        added
     }
 
     /// Alt+drag: the selection being dragged out (the primary, added by
@@ -1738,6 +1748,7 @@ impl Document {
         self.selections = restored.clone();
         self.clamp_selections();
         self.preferred_column = None;
+        self.goals.clear();
         self.version += 1;
     }
 
@@ -2248,6 +2259,20 @@ mod tests {
     }
 
     #[test]
+    fn undo_forgets_the_columns_cursors_were_aiming_for() {
+        // Two cursors at columns 4 and 1; type, move down (columns kept),
+        // then undo: the next Down aims from where undo put them.
+        let mut d = doc("abcdef\nabcdef\nabcdef\nabcdef");
+        cursors(&mut d, &[4, 8]);
+        d.insert("x").unwrap();
+        d.move_cursor(Motion::Down, false, 4, 10);
+        d.undo().unwrap();
+        assert_eq!(heads(&d), [4, 8]);
+        d.move_cursor(Motion::Down, false, 4, 10);
+        assert_eq!(heads(&d), [11, 15], "columns 4 and 1 of the next lines");
+    }
+
+    #[test]
     fn copy_joins_selections_one_line_each() {
         let mut d = doc("one two three");
         d.selections = Selections::from_vec(
@@ -2307,12 +2332,15 @@ mod tests {
     fn alt_click_adds_and_removes_cursors_and_cursors_go_above_and_below() {
         let mut d = doc("one\ntwo\nthree");
         d.click(1, false);
-        d.click_add(5);
+        assert!(d.click_add(5));
         assert_eq!(heads(&d), [1, 5]);
-        d.click_add(1);
+        assert!(!d.click_add(1), "a removal is not dragged");
         assert_eq!(heads(&d), [5], "clicking a cursor removes it");
-        d.click_add(5);
+        assert!(!d.click_add(5));
         assert_eq!(heads(&d), [5], "but never the last one");
+        d.select(0..4);
+        assert!(!d.click_add(2), "inside a selection: merged, not dragged");
+        d.click(5, false);
         d.drag_added(5, 7);
         assert_eq!((d.selections.count(), d.selection().range()), (1, 5..7));
 
@@ -2324,6 +2352,24 @@ mod tests {
         assert_eq!(heads(&d), [1, 5, 9], "nothing above the first line");
         d.add_cursor_vertical(1, 4);
         assert_eq!(heads(&d), [1, 5, 9], "nor below the last");
+    }
+
+    #[test]
+    fn copy_and_paste_round_trip_with_a_bare_last_cursor() {
+        let mut d = doc("abc\nxyz");
+        d.selections = Selections::from_vec(
+            vec![Selection { anchor: 0, head: 1 }, Selection::cursor(6)],
+            0,
+        );
+        let copied = d.selected_text().unwrap();
+        assert_eq!(copied, "a\n");
+        d.paste(&copied).unwrap();
+        // The first cursor's "a" replaces "a"; the second gets "".
+        assert_eq!(text(&d), "abc\nxyz");
+        // From elsewhere, with a trailing line break: still one each.
+        d.selections = Selections::from_vec(vec![Selection::cursor(0), Selection::cursor(4)], 0);
+        d.paste("1\n2\n").unwrap();
+        assert_eq!(text(&d), "1abc\n2xyz");
     }
 
     #[test]
