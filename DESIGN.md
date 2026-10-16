@@ -333,10 +333,15 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
   deleted file's tab says "deleted"; saving recreates it. Our own saves are
   told apart by the file's size and modification time, recorded at each
   open and save.
-- **Diff view** (M9): side-by-side or unified, against the saved file,
-  another file or another tab, with hunks taken from either side as
-  undoable edits. The diff itself lives in `core` (pure, no I/O); the
-  view pairs two `View`s on aligned rows.
+- **Compare and merge** (M9): side-by-side or unified comparison against
+  the saved file, another file or another tab; two-way merge into an
+  editable result; three-way merge from a base, with conflicts; conflict
+  markers in and out; `--diff` and `--merge` so git can use Nimbus as its
+  difftool and mergetool. The diff lives in `core` (pure, no I/O), works on
+  interned line tokens, runs on workers, and is re-done locally around
+  each edit, so diff views keep the editor's typing budget at any file
+  size. Columns are ordinary `View`s on rows aligned through a prefix sum
+  over the hunks.
 - **Window state**: the sidebar's visibility and width are remembered in
   `state.toml` beside the config. Nimbus never writes the user's
   `config.toml`.
@@ -443,7 +448,7 @@ introduces and points at the code.
 | 6 | File tree | **Built on `m6-wip`, owner checks pending** | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
 | 7 | Huge files | Planned | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
 | 8 | Polish | Planned | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
-| 9 | File diffing | Planned | Side-by-side diff with saved, a file or a tab; take or revert changes | [m9](docs/milestones/m9-diff.md) |
+| 9 | Compare and merge | Planned | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -515,4 +520,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Watch sidebar folders and open files' folders, non-recursively | §4.4 |
 | 2026-10-16 | Window state in `state.toml`; the config file is never written | §4.4 |
 | 2026-10-16 | Reloading a file changed on disk clears its undo history | §4.4 |
-| 2026-10-16 | File diffing added as milestone 9, after Polish | §8 |
+| 2026-10-16 | Compare and merge (two- and three-way) added as milestone 9, after Polish, held to the editor's budgets | §4.4, §8 |
