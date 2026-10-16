@@ -290,6 +290,12 @@ another program truncating the file. Kept at 256 MB.
   of visible ranges.
 - Helper agents' worktrees were committed once by `git add -A`; they were
   removed in a follow-up commit and `.claude/worktrees/` is ignored.
+- **Owner testing:** a Save As to a new name left the file readable only
+  by its owner (`0600`): the temporary file is created owner-only so a
+  replaced file's contents never leak mid-save, and a new file had no
+  permissions to copy. A new file now gets the usual mode (`0666` less
+  the umask). The saved bytes themselves matched the original plus the
+  edit exactly.
 - Counting 4 GB of lines first took 1.06 s and 5.4 GB with the temporary
   full index; with the sparse index and `pread` it takes 0.26 s and leaves
   RSS where it started.

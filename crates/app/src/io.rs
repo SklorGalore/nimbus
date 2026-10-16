@@ -394,6 +394,16 @@ pub(crate) fn create_temp(target: &Path) -> Result<(PathBuf, fs::File), SaveErro
         .file_name()
         .map_or_else(|| "untitled".into(), |n| n.to_string_lossy().into_owned());
     let mut last_err = std::io::Error::other("no temporary name was free");
+    // Replacing a file: owner-only until its permissions are copied, so a
+    // secret file's new contents are never readable by others mid-save. A
+    // new file has nothing to copy: it gets the usual permissions for a
+    // new file (0o666 less the umask, typically 0o644).
+    #[cfg(unix)]
+    let mode = if fs::metadata(target).is_ok() {
+        0o600
+    } else {
+        0o666
+    };
     for attempt in 0..16u32 {
         let tmp = target.with_file_name(format!(
             ".{name}.nimbus-save-{}-{attempt}",
@@ -403,10 +413,8 @@ pub(crate) fn create_temp(target: &Path) -> Result<(PathBuf, fs::File), SaveErro
         options.read(true).write(true).create_new(true);
         #[cfg(unix)]
         {
-            // Owner-only until the real permissions are copied, so a secret
-            // file's new contents are never readable by others mid-save.
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(mode);
         }
         match options.open(&tmp) {
             Ok(file) => return Ok((tmp, file)),
@@ -737,8 +745,23 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
+    #[cfg(unix)]
+    fn a_new_file_gets_the_usual_permissions_not_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("new-perms");
+        let path = dir.0.join("new.txt");
+        save(&path, &RopeBuffer::from_text("x"), false).unwrap();
+        // Whatever the umask, a new file is made as 0o666 less it; compare
+        // with a file the system creates the ordinary way.
+        let plain = dir.0.join("plain.txt");
+        fs::write(&plain, "x").unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), mode(&plain));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn saving_through_a_symlink_keeps_the_link_and_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new("symlink");
