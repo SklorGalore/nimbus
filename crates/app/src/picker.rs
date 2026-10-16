@@ -1,0 +1,363 @@
+//! The fuzzy picker behind the command palette (Primary+Shift+P) and the
+//! file opener (Primary+P).
+//!
+//! Matching runs in `nucleo`, which scores items on its own thread pool and
+//! accepts new items while it works. The file opener exploits that: a
+//! walker thread streams paths from the project folder into it as it finds
+//! them (respecting `.gitignore`), so the first results show before the walk
+//! is done. Each frame takes the current best matches, cheaply.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use nimbus_core::Text;
+use nucleo::pattern::{CaseMatching, Normalization};
+use nucleo::{Config, Nucleo};
+
+use crate::action::{self, ActionInfo};
+use crate::document::Document;
+use crate::keymap::Keymap;
+
+/// Walking stops after this many files, so a huge folder (a home directory
+/// opened by mistake) cannot use unbounded memory.
+pub const MAX_FILES: usize = 300_000;
+
+/// Rows shown at once.
+pub const VISIBLE_ROWS: usize = 12;
+
+/// What a picker row stands for.
+#[derive(Debug, Clone)]
+pub enum Item {
+    /// A palette entry.
+    Action(&'static ActionInfo),
+    /// A file, as a path relative to the project folder.
+    File(PathBuf),
+}
+
+/// Which picker is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// The command palette.
+    Palette,
+    /// The file opener.
+    Files,
+}
+
+/// One row to draw.
+#[derive(Debug, Clone)]
+pub struct Row {
+    /// Main text: the action title or file name.
+    pub text: String,
+    /// Secondary text: the key binding or containing folder.
+    pub detail: String,
+}
+
+/// An open picker.
+pub struct Picker {
+    /// Which picker.
+    pub kind: Kind,
+    /// The query field.
+    pub input: Document,
+    matcher: Nucleo<Item>,
+    /// The query last given to the matcher, to tell appending from editing.
+    last_query: String,
+    /// Index of the highlighted row among the matches.
+    pub selected: usize,
+    /// First match shown, for scrolling through long lists.
+    pub scroll: usize,
+    /// Set by the walker thread when it has finished.
+    walk_done: Arc<AtomicBool>,
+    /// Asks the walker to stop early when the picker closes.
+    stop: Arc<AtomicBool>,
+    /// The project folder files are relative to.
+    pub root: PathBuf,
+}
+
+impl std::fmt::Debug for Picker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Picker")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Picker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Picker {
+    /// Open the command palette.
+    pub fn palette(notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let picker = Self::new(Kind::Palette, Config::DEFAULT, notify, PathBuf::new());
+        let injector = picker.matcher.injector();
+        for a in action::palette_actions() {
+            injector.push(Item::Action(a), |item, cols| {
+                if let Item::Action(a) = item {
+                    cols[0] = a.title.into();
+                }
+            });
+        }
+        picker.walk_done.store(true, Ordering::Relaxed);
+        picker
+    }
+
+    /// Open the file opener on `root`, starting a background walk.
+    pub fn files(root: &Path, notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let picker = Self::new(
+            Kind::Files,
+            Config::DEFAULT.match_paths(),
+            notify,
+            root.to_path_buf(),
+        );
+        let injector = picker.matcher.injector();
+        let (done, stop) = (Arc::clone(&picker.walk_done), Arc::clone(&picker.stop));
+        let root = root.to_path_buf();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spawned = std::thread::Builder::new()
+            .name("file-walk".into())
+            .spawn(move || {
+                ignore::WalkBuilder::new(&root)
+                    .hidden(true)
+                    .build_parallel()
+                    .run(|| {
+                        let injector = injector.clone();
+                        let (root, stop, count) =
+                            (root.clone(), Arc::clone(&stop), Arc::clone(&count));
+                        Box::new(move |entry| {
+                            if stop.load(Ordering::Relaxed)
+                                || count.load(Ordering::Relaxed) >= MAX_FILES
+                            {
+                                return ignore::WalkState::Quit;
+                            }
+                            let Ok(entry) = entry else {
+                                return ignore::WalkState::Continue;
+                            };
+                            if entry.file_type().is_some_and(|t| t.is_file()) {
+                                let rel = entry
+                                    .path()
+                                    .strip_prefix(&root)
+                                    .unwrap_or(entry.path())
+                                    .to_path_buf();
+                                count.fetch_add(1, Ordering::Relaxed);
+                                injector.push(Item::File(rel), |item, cols| {
+                                    if let Item::File(p) = item {
+                                        cols[0] = p.to_string_lossy().as_ref().into();
+                                    }
+                                });
+                            }
+                            ignore::WalkState::Continue
+                        })
+                    });
+                done.store(true, Ordering::Relaxed);
+            });
+        if let Err(e) = spawned {
+            log::error!("could not start file walk: {e}");
+            picker.walk_done.store(true, Ordering::Relaxed);
+        }
+        picker
+    }
+
+    fn new(kind: Kind, config: Config, notify: Arc<dyn Fn() + Send + Sync>, root: PathBuf) -> Self {
+        Self {
+            kind,
+            input: Document::untitled(),
+            matcher: Nucleo::new(config, notify, None, 1),
+            last_query: String::new(),
+            selected: 0,
+            scroll: 0,
+            walk_done: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+            root,
+        }
+    }
+
+    /// Feed the current query to the matcher and let it work for up to a
+    /// millisecond. Returns whether results changed or are still coming.
+    pub fn tick(&mut self) -> bool {
+        let query = self.input.buffer.line(0).into_owned();
+        if query != self.last_query {
+            // Appending lets nucleo narrow the previous results instead of
+            // starting over.
+            let append = query.starts_with(&self.last_query);
+            self.matcher.pattern.reparse(
+                0,
+                &query,
+                CaseMatching::Smart,
+                Normalization::Smart,
+                append,
+            );
+            self.last_query = query;
+            self.selected = 0;
+            self.scroll = 0;
+        }
+        let status = self.matcher.tick(1);
+        status.changed || status.running || !self.walk_done.load(Ordering::Relaxed)
+    }
+
+    /// Number of items matching the query.
+    #[must_use]
+    pub fn match_count(&self) -> usize {
+        self.matcher.snapshot().matched_item_count() as usize
+    }
+
+    /// Whether more items may still arrive (the walk is running).
+    #[must_use]
+    pub fn loading(&self) -> bool {
+        !self.walk_done.load(Ordering::Relaxed)
+    }
+
+    /// Move the highlight by `delta` rows, wrapping, and keep it in view.
+    pub fn move_selection(&mut self, delta: isize) {
+        let n = self.match_count();
+        if n == 0 {
+            return;
+        }
+        let n_i = isize::try_from(n).unwrap_or(isize::MAX);
+        let cur = isize::try_from(self.selected).unwrap_or(0);
+        self.selected = usize::try_from((cur + delta).rem_euclid(n_i)).unwrap_or(0);
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + VISIBLE_ROWS {
+            self.scroll = self.selected + 1 - VISIBLE_ROWS;
+        }
+    }
+
+    /// The highlighted item.
+    #[must_use]
+    pub fn chosen(&self) -> Option<Item> {
+        let i = u32::try_from(self.selected).ok()?;
+        self.matcher
+            .snapshot()
+            .get_matched_item(i)
+            .map(|it| it.data.clone())
+    }
+
+    /// The rows currently visible, with the index of the highlighted one.
+    #[must_use]
+    pub fn rows(&self, keymap: &Keymap) -> (Vec<Row>, Option<usize>) {
+        let snap = self.matcher.snapshot();
+        let n = snap.matched_item_count();
+        let start = u32::try_from(self.scroll).unwrap_or(0).min(n);
+        let end = start
+            .saturating_add(u32::try_from(VISIBLE_ROWS).unwrap_or(0))
+            .min(n);
+        let rows = snap
+            .matched_items(start..end)
+            .map(|it| match it.data {
+                Item::Action(a) => Row {
+                    text: a.title.to_owned(),
+                    detail: keymap.label(a.id),
+                },
+                Item::File(p) => Row {
+                    text: p
+                        .file_name()
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                    detail: p
+                        .parent()
+                        .map_or_else(String::new, |d| d.to_string_lossy().into_owned()),
+                },
+            })
+            .collect();
+        (rows, self.selected.checked_sub(self.scroll))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn no_notify() -> Arc<dyn Fn() + Send + Sync> {
+        Arc::new(|| {})
+    }
+
+    fn settle(p: &mut Picker) {
+        for _ in 0..2000 {
+            if !p.tick() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn palette_matches_titles_fuzzily() {
+        let mut p = Picker::palette(no_notify());
+        settle(&mut p);
+        assert!(p.match_count() > 10);
+        let _ = p.input.insert("sav as");
+        settle(&mut p);
+        match p.chosen() {
+            Some(Item::Action(a)) => assert_eq!(a.id, "file.saveAs"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_opener_walks_and_respects_gitignore() {
+        let dir = std::env::temp_dir().join(format!("nimbus-picker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "").unwrap();
+        std::fs::write(dir.join("README.md"), "").unwrap();
+        std::fs::write(dir.join("target/junk.rs"), "").unwrap();
+        std::fs::write(dir.join(".ignore"), "target/\n").unwrap();
+        let mut p = Picker::files(&dir, no_notify());
+        settle(&mut p);
+        assert_eq!(p.match_count(), 2, "target/ is ignored");
+        let _ = p.input.insert("mainrs");
+        settle(&mut p);
+        match p.chosen() {
+            Some(Item::File(path)) => assert_eq!(path, PathBuf::from("src/main.rs")),
+            other => panic!("{other:?}"),
+        }
+        let (rows, sel) = p.rows(&Keymap::default());
+        assert_eq!(
+            (rows[0].text.as_str(), rows[0].detail.as_str(), sel),
+            ("main.rs", "src", Some(0))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Time to first results and to the end of the walk on a big folder.
+    /// Ignored by default; run with `NIMBUS_BENCH_DIR=<folder> cargo test
+    /// --release -p nimbus -- --ignored --nocapture walk_benchmark`.
+    #[test]
+    #[ignore = "benchmark; needs NIMBUS_BENCH_DIR"]
+    fn walk_benchmark() {
+        let Ok(dir) = std::env::var("NIMBUS_BENCH_DIR") else {
+            println!("set NIMBUS_BENCH_DIR");
+            return;
+        };
+        let start = std::time::Instant::now();
+        let mut p = Picker::files(Path::new(&dir), no_notify());
+        let _ = p.input.insert("lib.rs");
+        let mut first = None;
+        while p.tick() {
+            if first.is_none() && p.match_count() > 0 {
+                first = Some(start.elapsed());
+            }
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        println!(
+            "first match after {first:?}; walk + match done after {:?}; {} matches",
+            start.elapsed(),
+            p.match_count()
+        );
+    }
+
+    #[test]
+    fn selection_wraps_and_scrolls() {
+        let mut p = Picker::palette(no_notify());
+        settle(&mut p);
+        let n = p.match_count();
+        p.move_selection(-1);
+        assert_eq!(p.selected, n - 1);
+        assert_eq!(p.scroll, n - VISIBLE_ROWS);
+        p.move_selection(1);
+        assert_eq!((p.selected, p.scroll), (0, 0));
+    }
+}

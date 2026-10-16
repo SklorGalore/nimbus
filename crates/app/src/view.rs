@@ -85,6 +85,8 @@ pub struct Layout {
     pub bottom: f32,
     /// Columns that fit in the text area: the soft-wrap width.
     pub wrap_cols: usize,
+    /// Height of the tab bar at the top (0 when hidden).
+    pub tabs_h: f32,
 }
 
 impl Layout {
@@ -116,25 +118,37 @@ impl Layout {
             top: margin,
             bottom: height,
             wrap_cols,
+            tabs_h: 0.0,
         }
     }
 
-    /// Reserve `top_rows` text rows at the top (the find bar) and
-    /// `bottom_rows` at the bottom (the message line).
+    /// Reserve room for the window chrome: a tab bar, `find_rows` rows of
+    /// find bar below it, and a message line at the bottom.
     #[must_use]
-    pub fn with_bars(mut self, top_rows: usize, bottom_rows: usize) -> Self {
+    pub fn with_chrome(mut self, tab_bar: bool, find_rows: usize, message: bool) -> Self {
         let lh = self.metrics.line_height;
-        if top_rows > 0 {
-            // The bar has its own padding: margin above and below its rows.
-            self.top = 3.0 * self.margin + f(top_rows) * lh;
-        }
-        self.bottom = (self.height - f(bottom_rows) * lh).max(self.top + lh);
+        let m = self.margin;
+        self.tabs_h = if tab_bar { (lh + 1.5 * m).round() } else { 0.0 };
+        // The find bar has its own padding: a margin above, between and
+        // below its rows.
+        let find_h = if find_rows > 0 {
+            2.0 * m + f(find_rows) * lh + f(find_rows - 1) * m
+        } else {
+            0.0
+        };
+        self.top = self.tabs_h + find_h + m;
+        self.bottom = (self.height - if message { lh } else { 0.0 }).max(self.top + lh);
         self
+    }
+
+    /// Top of the find bar area, just below the tab bar.
+    fn find_top(&self) -> f32 {
+        self.tabs_h
     }
 
     /// Height of the find bar area, if any rows are reserved for it.
     fn bar_height(&self) -> f32 {
-        (self.top - self.margin).max(0.0)
+        (self.top - self.margin - self.tabs_h).max(0.0)
     }
 
     /// Lines that fit entirely in the window: one "page" for Page Up/Down.
@@ -700,8 +714,9 @@ pub fn draw_find_bar(gpu: &mut Gpu, bar: &FindBar, layout: &Layout, cursor_visib
     let m = layout.metrics;
     let (cell, lh) = (m.cell_width, m.line_height);
     let height = layout.bar_height();
+    let y0 = layout.find_top();
     gpu.begin_layer(None);
-    gpu.push_rect([0.0, 0.0], [layout.width, height], BAR_COLOR);
+    gpu.push_rect([0.0, y0], [layout.width, height], BAR_COLOR);
 
     let label_x = layout.margin;
     let field_x = (label_x + 9.0 * cell).round();
@@ -717,7 +732,7 @@ pub fn draw_find_bar(gpu: &mut Gpu, bar: &FindBar, layout: &Layout, cursor_visib
         &[(Field::Find, "Find")]
     };
     for (row, (field, label)) in rows.iter().enumerate() {
-        let y = layout.margin + f(row) * (lh + layout.margin);
+        let y = y0 + layout.margin + f(row) * (lh + layout.margin);
         gpu.push_text_line([label_x, y], label, GUTTER_COLOR);
         let focused = bar.focused && bar.focus == *field;
         if focused {
@@ -744,7 +759,7 @@ pub fn draw_find_bar(gpu: &mut Gpu, bar: &FindBar, layout: &Layout, cursor_visib
     }
 
     // Toggles: case and regex, then the status.
-    let y = layout.margin;
+    let y = y0 + layout.margin;
     let mut x = field_x + field_w + 2.0 * cell;
     for (on, text) in [(bar.case_sensitive, "Aa"), (bar.regex, ".*")] {
         if on {
@@ -761,9 +776,27 @@ pub fn draw_find_bar(gpu: &mut Gpu, bar: &FindBar, layout: &Layout, cursor_visib
     gpu.push_text_line([x.round(), y], &status, color);
 }
 
+/// Which row of the find bar is at window height `y`: 0 for the query,
+/// 1 for the replacement, `None` outside the bar.
+#[must_use]
+pub fn find_bar_row(layout: &Layout, y: f32, rows: usize) -> Option<usize> {
+    let y0 = layout.find_top();
+    if rows == 0 || y < y0 || y >= layout.top - layout.margin {
+        return None;
+    }
+    let row_h = layout.metrics.line_height + layout.margin;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a small row index"
+    )]
+    let row = ((y - y0 - layout.margin / 2.0) / row_h).floor().max(0.0) as usize;
+    Some(row.min(rows - 1))
+}
+
 /// Draw a one-line text field: its first line, selection and cursor,
 /// clipped to `width` pixels from `origin`.
-fn draw_field(
+pub(crate) fn draw_field(
     gpu: &mut Gpu,
     doc: &Document,
     origin: [f32; 2],
@@ -810,6 +843,197 @@ fn draw_field(
         );
     }
     gpu.begin_layer(None);
+}
+
+const TAB_BAR_COLOR: [f32; 4] = [0.11, 0.12, 0.14, 1.0];
+const TAB_ACTIVE_COLOR: [f32; 4] = [0.102, 0.110, 0.133, 1.0];
+const TAB_ACCENT_COLOR: [f32; 4] = [0.98, 0.75, 0.30, 1.0];
+const PICKER_COLOR: [f32; 4] = [0.16, 0.17, 0.21, 1.0];
+const PICKER_BORDER: [f32; 4] = [0.30, 0.32, 0.38, 1.0];
+const PICKER_SELECTED: [f32; 4] = [0.25, 0.36, 0.55, 0.85];
+
+/// One tab's label, and whether it has unsaved changes.
+#[derive(Debug, Clone)]
+pub struct TabLabel {
+    /// File name, or "untitled".
+    pub name: String,
+    /// Unsaved changes.
+    pub dirty: bool,
+}
+
+/// Horizontal extent `[x0, x1)` of each tab in the tab bar, scrolled so the
+/// active tab is visible when they do not all fit.
+#[must_use]
+pub fn tab_extents(layout: &Layout, tabs: &[TabLabel], active: usize) -> Vec<(f32, f32)> {
+    let cell = layout.metrics.cell_width;
+    let mut x = layout.margin;
+    let mut out: Vec<(f32, f32)> = tabs
+        .iter()
+        .map(|t| {
+            // Room for the name, a dirty dot and padding on both sides.
+            let w = f(t.name.chars().count() + 5) * cell;
+            let ext = (x, x + w);
+            x += w + 1.0;
+            ext
+        })
+        .collect();
+    if let Some(&(_, end)) = out.get(active) {
+        let shift = (end - (layout.width - layout.margin)).max(0.0);
+        for e in &mut out {
+            e.0 -= shift;
+            e.1 -= shift;
+        }
+    }
+    out
+}
+
+/// The tab under window position `(x, y)`, if any.
+#[must_use]
+pub fn tab_at(layout: &Layout, tabs: &[TabLabel], active: usize, x: f32, y: f32) -> Option<usize> {
+    if y >= layout.tabs_h {
+        return None;
+    }
+    tab_extents(layout, tabs, active)
+        .iter()
+        .position(|&(a, b)| x >= a && x < b)
+}
+
+/// Draw the tab bar across the top of the window.
+pub fn draw_tabs(gpu: &mut Gpu, layout: &Layout, tabs: &[TabLabel], active: usize) {
+    if layout.tabs_h <= 0.0 {
+        return;
+    }
+    let (cell, lh) = (layout.metrics.cell_width, layout.metrics.line_height);
+    gpu.begin_layer(Some([0.0, 0.0, layout.width, layout.tabs_h]));
+    gpu.push_rect([0.0, 0.0], [layout.width, layout.tabs_h], TAB_BAR_COLOR);
+    let text_y = ((layout.tabs_h - lh) / 2.0).round();
+    let accent = (2.0 * layout.scale).round().max(1.0);
+    for (i, ((x0, x1), tab)) in tab_extents(layout, tabs, active)
+        .into_iter()
+        .zip(tabs)
+        .enumerate()
+    {
+        let is_active = i == active;
+        if is_active {
+            gpu.push_rect([x0, 0.0], [x1 - x0, layout.tabs_h], TAB_ACTIVE_COLOR);
+            gpu.push_rect(
+                [x0, layout.tabs_h - accent],
+                [x1 - x0, accent],
+                TAB_ACCENT_COLOR,
+            );
+        }
+        let color = if is_active { TEXT_COLOR } else { GUTTER_COLOR };
+        gpu.push_text_line([x0 + 2.0 * cell, text_y], &tab.name, color);
+        if tab.dirty {
+            let dot_x = x1 - 2.0 * cell;
+            gpu.push_text_line([dot_x, text_y], "●", color);
+        }
+    }
+}
+
+/// What the picker overlay shows.
+#[derive(Debug)]
+pub struct PickerView<'a> {
+    /// The query field.
+    pub input: &'a Document,
+    /// Hint shown while the query is empty.
+    pub placeholder: &'a str,
+    /// Visible rows: main text and detail.
+    pub rows: &'a [(String, String)],
+    /// Index in `rows` of the highlighted one.
+    pub selected: Option<usize>,
+    /// Summary such as "42 files" or "1,204 files…".
+    pub status: String,
+}
+
+/// Geometry of the picker box: `[x, y, width]` and row height.
+fn picker_box(layout: &Layout) -> ([f32; 3], f32) {
+    let cell = layout.metrics.cell_width;
+    let w = (layout.width - 4.0 * layout.margin)
+        .min(90.0 * cell)
+        .max(20.0 * cell);
+    let x = ((layout.width - w) / 2.0).round();
+    let y = layout.tabs_h + layout.margin;
+    (
+        [x, y, w],
+        layout.metrics.line_height + (layout.margin / 2.0).round(),
+    )
+}
+
+/// The picker row under window position `(x, y)`, if any.
+#[must_use]
+pub fn picker_row_at(layout: &Layout, rows: usize, x: f32, y: f32) -> Option<usize> {
+    let ([bx, by, bw], row_h) = picker_box(layout);
+    let list_y = by + row_h + layout.margin;
+    if x < bx || x >= bx + bw || y < list_y {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a small row index"
+    )]
+    let r = ((y - list_y) / row_h).floor() as usize;
+    (r < rows).then_some(r)
+}
+
+/// Draw the command palette or file opener as an overlay.
+pub fn draw_picker(gpu: &mut Gpu, layout: &Layout, view: &PickerView<'_>, cursor_visible: bool) {
+    let (cell, lh) = (layout.metrics.cell_width, layout.metrics.line_height);
+    let ([left, top, width], row_h) = picker_box(layout);
+    let pad = (layout.margin / 2.0).round();
+    let height = row_h + layout.margin + f(view.rows.len().max(1)) * row_h + pad;
+    gpu.begin_layer(None);
+    let b = layout.scale.round().max(1.0);
+    gpu.push_rect(
+        [left - b, top - b],
+        [width + 2.0 * b, height + 2.0 * b],
+        PICKER_BORDER,
+    );
+    gpu.push_rect([left, top], [width, height], PICKER_COLOR);
+    // The query field, with the status on its right.
+    let status_w = f(view.status.chars().count() + 2) * cell;
+    let field_w = width - 2.0 * cell - status_w;
+    let field_y = top + pad;
+    gpu.push_rect(
+        [left + cell - pad, field_y - pad / 2.0],
+        [field_w + 2.0 * pad, lh + pad],
+        FIELD_COLOR,
+    );
+    if view.input.buffer.len_bytes() == 0 {
+        gpu.push_text_line([left + cell, field_y], view.placeholder, GUTTER_COLOR);
+    }
+    draw_field(
+        gpu,
+        view.input,
+        [left + cell, field_y],
+        field_w,
+        layout,
+        cursor_visible,
+    );
+    gpu.begin_layer(None);
+    gpu.push_text_line(
+        [left + width - status_w + cell, field_y],
+        &view.status,
+        GUTTER_COLOR,
+    );
+    // The rows, clipped to the box.
+    let list_y = top + row_h + layout.margin;
+    gpu.begin_layer(Some([left, list_y, width, height - (list_y - top)]));
+    for (i, (text, detail)) in view.rows.iter().enumerate() {
+        let ry = list_y + f(i) * row_h;
+        if Some(i) == view.selected {
+            gpu.push_rect([left, ry], [width, row_h], PICKER_SELECTED);
+        }
+        let ty = (ry + (row_h - lh) / 2.0).round();
+        gpu.push_text_line([left + cell, ty], text, TEXT_COLOR);
+        let detail_x = left + width - f(detail.chars().count() + 1) * cell;
+        let text_end = left + cell + f(text.chars().count() + 2) * cell;
+        gpu.push_text_line([detail_x.max(text_end), ty], detail, GUTTER_COLOR);
+    }
+    if view.rows.is_empty() {
+        gpu.push_text_line([left + cell, list_y], "No matches", GUTTER_COLOR);
+    }
 }
 
 /// Draw a one-line message at the bottom of the window, as an overlay.
@@ -1048,6 +1272,38 @@ mod tests {
             ..row
         };
         assert!(last.owns(16));
+    }
+
+    #[test]
+    fn chrome_reserves_rows_top_and_bottom() {
+        let l = layout(10).with_chrome(true, 2, true);
+        assert!(l.tabs_h > 0.0);
+        assert!(l.top > l.tabs_h + 2.0 * 20.0);
+        assert!((l.bottom - (208.0 - 20.0)).abs() < 1e-3);
+        assert_eq!(find_bar_row(&l, l.tabs_h + 9.0, 2), Some(0));
+        assert_eq!(find_bar_row(&l, l.tabs_h + 40.0, 2), Some(1));
+        assert_eq!(find_bar_row(&l, 1.0, 2), None, "in the tab bar");
+    }
+
+    #[test]
+    fn tabs_scroll_to_keep_the_active_one_visible() {
+        let l = layout(10).with_chrome(true, 0, false);
+        let tabs: Vec<TabLabel> = (0..20)
+            .map(|i| TabLabel {
+                name: format!("file{i}.rs"),
+                dirty: false,
+            })
+            .collect();
+        let ext = tab_extents(&l, &tabs, 19);
+        assert!(ext[19].1 <= l.width - l.margin + 1e-3);
+        assert_eq!(
+            tab_at(&l, &tabs, 0, ext[0].0 + 1.0, 5.0),
+            None,
+            "scrolled only when active is far"
+        );
+        let ext0 = tab_extents(&l, &tabs, 0);
+        assert_eq!(tab_at(&l, &tabs, 0, ext0[1].0 + 1.0, 5.0), Some(1));
+        assert_eq!(tab_at(&l, &tabs, 0, ext0[1].0 + 1.0, l.tabs_h + 1.0), None);
     }
 
     #[test]

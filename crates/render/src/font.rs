@@ -148,6 +148,25 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "diagnostic: prints which UI symbols the bundled font covers"]
+    fn report_symbol_coverage() {
+        let font = Font::bundled().unwrap();
+        for ch in [
+            '⌘', '⌥', '⌃', '⇧', '↩', '⇥', '⎋', '⌫', '⌦', '←', '→', '↑', '↓', '●', '…', '×',
+        ] {
+            println!(
+                "{ch} U+{:04X}: {}",
+                ch as u32,
+                if font.glyph_id(ch) == 0 {
+                    "MISSING"
+                } else {
+                    "ok"
+                }
+            );
+        }
+    }
+
+    #[test]
     fn nerd_font_icons_are_one_cell() {
         let font = Font::bundled().unwrap();
         let m = font.metrics(14.0);
