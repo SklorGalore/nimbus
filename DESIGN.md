@@ -476,9 +476,11 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-1. **Dependency updates.** Add Dependabot for cargo and GitHub Actions, or
-   update by hand at each milestone? The Node 20 deprecation was a hand fix.
+None open.
 
+Resolved before M8: Dependabot updates GitHub Actions weekly
+(`.github/dependabot.yml`); cargo crates are updated by hand at each
+milestone, since wgpu, winit and swash change their APIs between versions.
 Resolved at approval: the two-backend buffer (§4.1), bidi out of scope (§2),
 the nine starter languages (§4.2), binary name `nimbus`. Resolved at the start
 of M1: the bundled font is Hack Nerd Font Mono Regular (§4.3). Resolved after
@@ -546,3 +548,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Replace All and its undo and redo apply in one pass (`replace_sorted`, `put_sorted`) | §4.1 |
 | 2026-10-16 | Files that are not UTF-8 and under the threshold are held in memory, not mapped | §4.1 |
 | 2026-10-16 | Truncation of a dirty mapped file (SIGBUS on macOS and Linux; blocked writers on Windows) accepted as a documented limitation | §4.1, m7 |
+| 2026-10-16 | Dependabot for GitHub Actions (weekly, grouped); cargo crates by hand each milestone | §9 |
