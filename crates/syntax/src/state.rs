@@ -21,10 +21,12 @@ use tree_sitter::{InputEdit, ParseOptions, ParseState, Parser, Tree};
 
 use crate::LanguageId;
 use crate::edit::{input_edit, point_at};
+use crate::lexical::Lexical;
 use crate::registry::{self, Grammar};
 use crate::text::bytes_from;
 
-/// Files larger than this are not highlighted (DESIGN.md §4.2).
+/// Files larger than this are not parsed; they get the simpler line-by-line
+/// highlighting in [`crate::lexical`] instead (DESIGN.md §4.2).
 pub const MAX_HIGHLIGHT_BYTES: usize = 16 * 1024 * 1024;
 
 static NEXT_JOB: AtomicU64 = AtomicU64::new(1);
@@ -34,14 +36,14 @@ static NEXT_JOB: AtomicU64 = AtomicU64::new(1);
 pub enum Off {
     /// Not a language Nimbus knows.
     NoLanguage,
-    /// Larger than [`MAX_HIGHLIGHT_BYTES`].
-    TooLarge,
     /// The grammar failed to load or the parse failed.
     Failed,
 }
 
 enum Phase {
     Off(Off),
+    /// Larger than [`MAX_HIGHLIGHT_BYTES`]: line-by-line rules, no tree.
+    Lexical(Lexical),
     /// The language is known; no parse has started.
     Waiting,
     /// A job is running. Edits since it started wait in `pending`; `stale`
@@ -189,7 +191,7 @@ impl SyntaxState {
     pub fn new(language: Option<LanguageId>, len: usize) -> Self {
         let phase = match language {
             None => Phase::Off(Off::NoLanguage),
-            Some(_) if len > MAX_HIGHLIGHT_BYTES => Phase::Off(Off::TooLarge),
+            Some(l) if len > MAX_HIGHLIGHT_BYTES => Phase::Lexical(Lexical::new(l)),
             Some(_) => Phase::Waiting,
         };
         Self {
@@ -224,6 +226,26 @@ impl SyntaxState {
         }
     }
 
+    /// The simple highlighter, when the document is too large to parse.
+    #[must_use]
+    pub fn lexical(&self) -> Option<&Lexical> {
+        match &self.phase {
+            Phase::Lexical(l) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// The capture names that spans index into, and a key to cache their
+    /// colours under (distinct per grammar, and for the simple rules).
+    #[must_use]
+    pub fn capture_names(&self) -> Option<(usize, &'static [&'static str])> {
+        if self.lexical().is_some() {
+            return Some((LanguageId::ALL.len(), crate::lexical::CAPTURES));
+        }
+        let (_, grammar) = self.tree()?;
+        Some((self.language?.index(), grammar.highlights.capture_names()))
+    }
+
     /// Changes whenever the highlighting may have changed.
     #[must_use]
     pub fn rev(&self) -> u64 {
@@ -252,11 +274,13 @@ impl SyntaxState {
 
     /// Record an edit just applied to `text` (the text after the edit).
     pub fn edit(&mut self, text: &dyn Text, edit: &Edit) {
-        if matches!(self.phase, Phase::Off(Off::TooLarge))
-            && text.len_bytes() <= MAX_HIGHLIGHT_BYTES
-        {
-            // Shrunk back under the limit (an undone paste): parse afresh.
-            self.phase = Phase::Waiting;
+        if let Phase::Lexical(lexical) = &self.phase {
+            if text.len_bytes() <= MAX_HIGHLIGHT_BYTES {
+                // Shrunk back under the limit (an undone paste): parse.
+                self.phase = Phase::Waiting;
+            } else {
+                lexical.edit(text, edit);
+            }
             self.rev += 1;
             return;
         }
@@ -277,7 +301,7 @@ impl SyntaxState {
                 tree.edit(&ie);
                 *dirty = true;
             }
-            Phase::Off(_) | Phase::Waiting => {}
+            Phase::Off(_) | Phase::Lexical(_) | Phase::Waiting => {}
         }
         self.rev += 1;
     }
@@ -287,6 +311,12 @@ impl SyntaxState {
     pub fn take_job<B: Buffer>(&mut self, text: &B) -> Option<Job> {
         let language = self.language?;
         if !matches!(self.phase, Phase::Waiting) {
+            return None;
+        }
+        if text.len_bytes() > MAX_HIGHLIGHT_BYTES {
+            // Grew past the limit before the first parse began.
+            self.phase = Phase::Lexical(Lexical::new(language));
+            self.rev += 1;
             return None;
         }
         let id = NEXT_JOB.fetch_add(1, Ordering::Relaxed);
@@ -356,7 +386,7 @@ impl SyntaxState {
             return None;
         }
         if text.len_bytes() > MAX_HIGHLIGHT_BYTES {
-            self.phase = Phase::Off(Off::TooLarge);
+            self.phase = Phase::Lexical(Lexical::new(self.language?));
             self.rev += 1;
             return None;
         }
@@ -458,7 +488,11 @@ mod tests {
             Some(Off::NoLanguage)
         );
         let s = SyntaxState::new(Some(LanguageId::Rust), MAX_HIGHLIGHT_BYTES + 1);
-        assert_eq!(s.off_reason(), Some(Off::TooLarge));
+        assert!(s.lexical().is_some(), "huge files get the simple rules");
+        assert_eq!(
+            s.capture_names().map(|(_, n)| n),
+            Some(crate::lexical::CAPTURES)
+        );
     }
 
     #[test]
@@ -469,9 +503,9 @@ mod tests {
         let big = "x".repeat(MAX_HIGHLIGHT_BYTES);
         apply(&mut buf, &mut state, 0..0, &big);
         assert!(state.refresh(&buf, Duration::MAX).is_none());
-        assert_eq!(state.off_reason(), Some(Off::TooLarge));
+        assert!(state.lexical().is_some());
         apply(&mut buf, &mut state, 0..big.len(), "");
-        assert_eq!(state.off_reason(), None);
+        assert!(state.lexical().is_none());
         state.parse_now(&buf);
         assert_eq!(sexp(&state), fresh("fn a() {}\n"));
     }

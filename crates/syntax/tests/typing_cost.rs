@@ -115,3 +115,47 @@ fn first_parse_times() {
         println!("{mb} MB first parse: {:?}", t.elapsed());
     }
 }
+
+#[test]
+#[ignore = "benchmark"]
+fn simple_highlighting_in_a_100mb_file() {
+    use nimbus_syntax::lexical::Lexical;
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/out/src-100mb.rs");
+    let src = std::fs::read_to_string(path).expect("run bench/gen.sh first");
+    let mut buf = RopeBuffer::from_text(&src);
+    drop(src);
+    let lex = Lexical::new(LanguageId::Rust);
+    let screen = |buf: &RopeBuffer, line: usize| {
+        buf.line_to_byte(line)..buf.line_to_byte((line + 60).min(buf.len_lines() - 1))
+    };
+    let mut out = Vec::new();
+    let t = Instant::now();
+    lex.spans(&buf, screen(&buf, 0), &mut out);
+    println!("100 MB, first screen: {:?}", t.elapsed());
+    let middle = buf.len_lines() / 2;
+    let t = Instant::now();
+    out.clear();
+    lex.spans(&buf, screen(&buf, middle), &mut out);
+    println!(
+        "100 MB, jump to the middle: {:?} ({} spans)",
+        t.elapsed(),
+        out.len()
+    );
+    // Typing there: each edit drops the checkpoints after it, then redraws.
+    let mut samples = Vec::new();
+    let first = buf.line_to_byte(middle + 30) + 4;
+    for at in first..first + 100 {
+        let start = Instant::now();
+        let edit = buf.replace(at..at, "x").unwrap();
+        lex.edit(&buf, &edit);
+        out.clear();
+        lex.spans(&buf, screen(&buf, middle), &mut out);
+        samples.push(start.elapsed());
+    }
+    samples.sort();
+    println!(
+        "100 MB, per keystroke (edit + spans for 60 lines): p50 {:?} p99 {:?}",
+        percentile(&samples, 50),
+        percentile(&samples, 99)
+    );
+}

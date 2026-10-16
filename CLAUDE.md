@@ -93,7 +93,7 @@ Subagents do not commit, push, or edit `DESIGN.md` or milestone docs. After a su
 Cargo workspace; crates live in `crates/`, each package named `nimbus-<dir>` except the binary, which is `nimbus` in `crates/app`.
 
 - `core`: text buffers, edits, undo, cursors, search. No I/O, no GPU, no workspace deps. Must stay testable headlessly.
-- `syntax`: tree-sitter highlighting. Depends on `core`. `SyntaxState` (one per `Document`) must see every edit, undo and redo included, through `SyntaxState::edit`; a missed edit leaves the tree describing other text. It starts no threads: it returns `Job`s that the app runs (`spawn_syntax` in `app.rs`). Each grammar is a cargo feature; the Rust highlights query is vendored in `crates/syntax/queries/`.
+- `syntax`: tree-sitter highlighting. Depends on `core`. `SyntaxState` (one per `Document`) must see every edit, undo and redo included, through `SyntaxState::edit`; a missed edit leaves the tree describing other text. It starts no threads: it returns `Job`s that the app runs (`spawn_syntax` in `app.rs`). Each grammar is a cargo feature; the Rust highlights query is vendored in `crates/syntax/queries/`. Files over 16 MB skip tree-sitter for the line-by-line rules in `lexical.rs`, whose checkpoints `Lexical::edit` must also see every edit of (it does, through `SyntaxState::edit`).
 - `render`: owns the wgpu surface and, later, the glyph atlas, layout, and the two instanced pipelines (rects and glyph quads). Depends on `core`.
 - `app`: winit `ApplicationHandler`, editor state, UI chrome, keymap, config. Depends on everything.
 
