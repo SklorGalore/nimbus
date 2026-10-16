@@ -13,24 +13,12 @@ use std::ops::Range;
 
 use nimbus_core::wrap::{self, RowPos, RowStart, WrapCache, WrapView};
 use nimbus_core::{Text, column};
-use nimbus_render::{Gpu, Metrics};
+use nimbus_render::{ColorRun, Gpu, Metrics};
+use nimbus_syntax::highlight::{Highlighter, Span};
 
 use crate::document::Document;
 use crate::find::{Field, FindBar};
-
-const TEXT_COLOR: [f32; 4] = [0.85, 0.87, 0.91, 1.0];
-const GUTTER_COLOR: [f32; 4] = [0.42, 0.45, 0.52, 1.0];
-const CURRENT_LINE_NUMBER: [f32; 4] = [0.75, 0.78, 0.84, 1.0];
-const CURSOR_COLOR: [f32; 4] = [0.98, 0.75, 0.30, 1.0];
-const PREEDIT_COLOR: [f32; 4] = [0.98, 0.75, 0.30, 1.0];
-const SELECTION_COLOR: [f32; 4] = [0.25, 0.36, 0.55, 0.65];
-const MATCH_COLOR: [f32; 4] = [0.55, 0.45, 0.15, 0.45];
-const CURRENT_MATCH_COLOR: [f32; 4] = [0.85, 0.62, 0.20, 0.70];
-const BAR_COLOR: [f32; 4] = [0.14, 0.15, 0.18, 1.0];
-const FIELD_COLOR: [f32; 4] = [0.08, 0.09, 0.11, 1.0];
-const FIELD_FOCUS_COLOR: [f32; 4] = [0.30, 0.42, 0.62, 1.0];
-const TOGGLE_ON_COLOR: [f32; 4] = [0.30, 0.42, 0.62, 1.0];
-const ERROR_COLOR: [f32; 4] = [0.95, 0.45, 0.42, 1.0];
+use crate::theme::{Color, Ui};
 
 #[expect(
     clippy::cast_precision_loss,
@@ -60,6 +48,11 @@ pub struct Decorations<'a> {
     pub matches: &'a [Range<usize>],
     /// The current search match, highlighted more strongly.
     pub current: Option<Range<usize>>,
+    /// Interface colours.
+    pub ui: &'a Ui,
+    /// Syntax colour per capture index of the document's language; empty
+    /// when it has none.
+    pub captures: &'a [Option<Color>],
 }
 
 /// Pixel geometry for one frame, from the window size and font metrics.
@@ -196,6 +189,87 @@ fn visible_span(
     (s, seg.len(), sc)
 }
 
+/// The bytes to highlight for a frame whose top row is `at`: the lines
+/// that can be on screen (at most one per row), or for long lines only
+/// from the first visible byte to the last, so a long line costs what is
+/// on screen, not its length.
+fn highlight_range(
+    t: &dyn Text,
+    w: &mut WrapView<'_>,
+    at: RowPos,
+    layout: &Layout,
+    scroll_x: f32,
+    tab_width: usize,
+) -> Range<usize> {
+    let cell = layout.metrics.cell_width;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "small non-negative row and column counts"
+    )]
+    let (rows, scroll_cols, width) = (
+        ((layout.bottom - layout.top) / layout.metrics.line_height)
+            .ceil()
+            .max(0.0) as usize
+            + 1,
+        (scroll_x / cell).max(0.0).floor() as usize,
+        ((layout.width - layout.text_left) / cell).ceil().max(0.0) as usize,
+    );
+    let first = t.line_to_byte(at.line);
+    let last_line = at.line + rows;
+    let end = if last_line >= t.len_lines() {
+        t.len_bytes()
+    } else {
+        t.line_to_byte(last_line)
+    };
+    if end - first <= WHOLE_LINES_LIMIT {
+        first..end
+    } else {
+        visible_bytes(t, w, at, rows, (scroll_cols, width), tab_width)
+    }
+}
+
+/// Above this many bytes in the visible lines, highlighting works out the
+/// exact visible bytes instead of taking whole lines.
+const WHOLE_LINES_LIMIT: usize = 64 * 1024;
+
+/// The bytes from the first visible character to the last, over `rows` rows
+/// from `at`. `(scroll_cols, width)` is the horizontal scroll and window
+/// width in columns, as each row is drawn.
+fn visible_bytes(
+    t: &dyn Text,
+    w: &mut WrapView<'_>,
+    mut at: RowPos,
+    rows: usize,
+    (scroll_cols, width): (usize, usize),
+    tab_width: usize,
+) -> Range<usize> {
+    let (mut lo, mut hi) = (usize::MAX, 0);
+    let mut left = rows;
+    while left > 0 && at.line < t.len_lines() {
+        let text = t.line(at.line);
+        let line_start = t.line_to_byte(at.line);
+        let starts: &[RowStart] = w.rows(&text);
+        for r in at.row..starts.len() {
+            if left == 0 {
+                break;
+            }
+            left -= 1;
+            let range = wrap::row_range(starts, r, text.len());
+            let seg = text.get(range.clone()).unwrap_or("");
+            let col = starts[r].col;
+            let (s, e, _) = visible_span(seg, col, col + scroll_cols, width, tab_width);
+            lo = lo.min(line_start + range.start + s);
+            hi = hi.max(line_start + range.start + e);
+        }
+        at = RowPos {
+            line: at.line + 1,
+            row: 0,
+        };
+    }
+    if lo > hi { 0..0 } else { lo..hi }
+}
+
 /// Number of decimal digits in `n` (at least 1).
 fn digits(n: usize) -> usize {
     n.checked_ilog10().map_or(1, |d| d as usize + 1)
@@ -243,6 +317,10 @@ pub struct View {
     number: String,
     /// Reused for splicing preedit text into the cursor's row.
     spliced: String,
+    /// Syntax spans for the visible lines, cached between frames.
+    highlighter: Highlighter,
+    /// Reused for each row's colour runs.
+    runs: Vec<ColorRun>,
 }
 
 /// Everything needed to draw one visual row.
@@ -440,6 +518,7 @@ impl View {
         self.cursor_at = None;
 
         gpu.begin_frame();
+        gpu.set_background(deco.ui.background);
         // The text area is its own layer, clipped so rows scrolled under a
         // bar above or below do not show through it.
         gpu.begin_layer(Some([
@@ -464,8 +543,16 @@ impl View {
             let first = t.line_to_byte(at.line) + self.scroll_byte;
             deco.matches.partition_point(|m| m.end <= first)
         };
+        let spans: &[Span] = if deco.captures.is_empty() {
+            &[]
+        } else {
+            let range = highlight_range(t, &mut w, at, layout, scroll_x, tab_width);
+            self.highlighter.spans(&doc.syntax, t, range)
+        };
         let mut top = layout.top - px;
         let mut painter = Painter {
+            spans,
+            runs: &mut self.runs,
             gpu,
             layout,
             tab_width,
@@ -515,6 +602,9 @@ impl View {
 /// Draws rows for one frame; holds what every row needs.
 struct Painter<'a, 'g> {
     gpu: &'g mut Gpu,
+    /// Syntax spans covering the visible lines, sorted.
+    spans: &'a [Span],
+    runs: &'a mut Vec<ColorRun>,
     layout: &'a Layout,
     tab_width: usize,
     deco: &'a Decorations<'a>,
@@ -535,9 +625,9 @@ impl Painter<'_, '_> {
         let _ = write!(self.number, "{}", line + 1);
         let pad = self.layout.gutter_cols.saturating_sub(self.number.len());
         let color = if current {
-            CURRENT_LINE_NUMBER
+            self.deco.ui.current_line_number
         } else {
-            GUTTER_COLOR
+            self.deco.ui.gutter
         };
         self.gpu.push_text_line(
             [self.layout.margin + f(pad) * cell, top],
@@ -556,7 +646,7 @@ impl Painter<'_, '_> {
         );
         let tab = self.tab_width;
         if let Some((x0, x1)) = self.selected(row) {
-            self.rect(x0, x1, row.top, SELECTION_COLOR);
+            self.rect(x0, x1, row.top, self.deco.ui.selection);
         }
         let next = self.matches(row, next_match);
         #[expect(
@@ -576,7 +666,14 @@ impl Painter<'_, '_> {
         {
             self.preedit_row(row, p, (first, width));
         } else {
-            self.span(row.seg, row.start_col, [row.left, row.top], (first, width));
+            let origin = [row.left, row.top];
+            self.span(
+                row.seg,
+                Some(row.seg_start),
+                row.start_col,
+                origin,
+                (first, width),
+            );
         }
         if row.owns(self.cursor) {
             let x = row.x_of(self.cursor, cell, tab);
@@ -586,7 +683,8 @@ impl Painter<'_, '_> {
             self.cursor_at = Some([x, row.top]);
             if self.deco.cursor_visible && preedit.is_none() && x >= self.layout.text_left {
                 let w = (2.0 * self.layout.scale).round().max(1.0);
-                self.gpu.push_rect([x, row.top], [w, lh], CURSOR_COLOR);
+                self.gpu
+                    .push_rect([x, row.top], [w, lh], self.deco.ui.cursor);
             }
         }
         next
@@ -640,9 +738,9 @@ impl Painter<'_, '_> {
                 row.x_of(m.end.min(end), cell, self.tab_width) + if past_end { cell } else { 0.0 };
             let x1 = x1.max(x0 + cell);
             let color = if self.deco.current.as_ref() == Some(m) {
-                CURRENT_MATCH_COLOR
+                self.deco.ui.current_match
             } else {
-                MATCH_COLOR
+                self.deco.ui.find_match
             };
             self.rect(x0, x1, row.top, color);
             if m.end > end {
@@ -654,10 +752,12 @@ impl Painter<'_, '_> {
     }
 
     /// Draw the visible part of `seg`, which starts at column `start_col`
-    /// and is drawn with that column at `origin`.
+    /// and is drawn with that column at `origin`. `seg_start` is where
+    /// `seg` is in the document, to colour it; `None` draws it plain.
     fn span(
         &mut self,
         seg: &str,
+        seg_start: Option<usize>,
         start_col: usize,
         origin: [f32; 2],
         (first, width): (usize, usize),
@@ -666,14 +766,53 @@ impl Painter<'_, '_> {
         if s >= e {
             return;
         }
+        self.runs.clear();
+        if let Some(at) = seg_start {
+            self.colour_runs(at + s..at + e);
+        }
         let x = origin[0] + f(sc - start_col) * self.layout.metrics.cell_width;
-        self.gpu.push_text_span(
+        self.gpu.push_text_runs(
             [x, origin[1]],
             &seg[s..e],
             sc,
-            TEXT_COLOR,
+            self.runs,
+            self.deco.ui.text,
             self.layout.text_left,
         );
+    }
+
+    /// Fill `runs` with syntax colours for document bytes `range`, as
+    /// offsets from its start.
+    fn colour_runs(&mut self, range: Range<usize>) {
+        let text = self.deco.ui.text;
+        let mut pos = range.start;
+        let first = self.spans.partition_point(|s| s.end <= range.start);
+        for span in self.spans.get(first..).unwrap_or(&[]) {
+            if span.start >= range.end {
+                break;
+            }
+            let Some(color) = self
+                .deco
+                .captures
+                .get(span.capture as usize)
+                .copied()
+                .flatten()
+            else {
+                continue;
+            };
+            let (s, e) = (span.start.max(pos), span.end.min(range.end));
+            if s > pos {
+                self.runs.push(ColorRun {
+                    end: s - range.start,
+                    color: text,
+                });
+            }
+            self.runs.push(ColorRun {
+                end: e - range.start,
+                color,
+            });
+            pos = e;
+        }
     }
 
     /// Draw the cursor's row with the composition `p` spliced in at the
@@ -693,30 +832,35 @@ impl Painter<'_, '_> {
         let (x0, x1) = (x(self.spliced, at), x(self.spliced, at + p.text.len()));
         let underline_y = row.top + m.baseline + thin;
         self.gpu
-            .push_rect([x0, underline_y], [x1 - x0, thin], PREEDIT_COLOR);
+            .push_rect([x0, underline_y], [x1 - x0, thin], self.deco.ui.preedit);
         if let Some((a, b)) = p.cursor {
             let (ca, cb) = (x(self.spliced, at + a), x(self.spliced, at + b));
             if cb > ca {
-                self.gpu
-                    .push_rect([ca, underline_y], [cb - ca, 2.0 * thin], PREEDIT_COLOR);
+                self.gpu.push_rect(
+                    [ca, underline_y],
+                    [cb - ca, 2.0 * thin],
+                    self.deco.ui.preedit,
+                );
             } else {
-                self.gpu.push_rect([ca, row.top], [thin, lh], CURSOR_COLOR);
+                self.gpu
+                    .push_rect([ca, row.top], [thin, lh], self.deco.ui.cursor);
             }
         }
         let spliced = std::mem::take(self.spliced);
-        self.span(&spliced, row.start_col, [row.left, row.top], view);
+        // Composed text is not in the document, so it is drawn uncoloured.
+        self.span(&spliced, None, row.start_col, [row.left, row.top], view);
         *self.spliced = spliced;
     }
 }
 
 /// Draw the find bar at the top of the window, as an overlay layer.
-pub fn draw_find_bar(gpu: &mut Gpu, bar: &FindBar, layout: &Layout, cursor_visible: bool) {
+pub fn draw_find_bar(gpu: &mut Gpu, ui: &Ui, bar: &FindBar, layout: &Layout, cursor_visible: bool) {
     let m = layout.metrics;
     let (cell, lh) = (m.cell_width, m.line_height);
     let height = layout.bar_height();
     let y0 = layout.find_top();
     gpu.begin_layer(None);
-    gpu.push_rect([0.0, y0], [layout.width, height], BAR_COLOR);
+    gpu.push_rect([0.0, y0], [layout.width, height], ui.bar);
 
     let label_x = layout.margin;
     let field_x = (label_x + 9.0 * cell).round();
@@ -733,23 +877,24 @@ pub fn draw_find_bar(gpu: &mut Gpu, bar: &FindBar, layout: &Layout, cursor_visib
     };
     for (row, (field, label)) in rows.iter().enumerate() {
         let y = y0 + layout.margin + f(row) * (lh + layout.margin);
-        gpu.push_text_line([label_x, y], label, GUTTER_COLOR);
+        gpu.push_text_line([label_x, y], label, ui.gutter);
         let focused = bar.focused && bar.focus == *field;
         if focused {
             let b = layout.scale.round().max(1.0);
             gpu.push_rect(
                 [field_x - b, y - b],
                 [field_w + 2.0 * b, lh + 2.0 * b],
-                FIELD_FOCUS_COLOR,
+                ui.field_focus,
             );
         }
-        gpu.push_rect([field_x, y], [field_w, lh], FIELD_COLOR);
+        gpu.push_rect([field_x, y], [field_w, lh], ui.field);
         let doc = match field {
             Field::Find => &bar.find,
             Field::Replace => &bar.replace,
         };
         draw_field(
             gpu,
+            ui,
             doc,
             [field_x, y],
             field_w,
@@ -763,15 +908,15 @@ pub fn draw_find_bar(gpu: &mut Gpu, bar: &FindBar, layout: &Layout, cursor_visib
     let mut x = field_x + field_w + 2.0 * cell;
     for (on, text) in [(bar.case_sensitive, "Aa"), (bar.regex, ".*")] {
         if on {
-            gpu.push_rect([x - cell / 2.0, y], [3.0 * cell, lh], TOGGLE_ON_COLOR);
+            gpu.push_rect([x - cell / 2.0, y], [3.0 * cell, lh], ui.toggle_on);
         }
-        gpu.push_text_line([x, y], text, TEXT_COLOR);
+        gpu.push_text_line([x, y], text, ui.text);
         x += 3.5 * cell;
     }
     let color = if bar.error.is_some() {
-        ERROR_COLOR
+        ui.error
     } else {
-        GUTTER_COLOR
+        ui.gutter
     };
     gpu.push_text_line([x.round(), y], &status, color);
 }
@@ -798,6 +943,7 @@ pub fn find_bar_row(layout: &Layout, y: f32, rows: usize) -> Option<usize> {
 /// clipped to `width` pixels from `origin`.
 pub(crate) fn draw_field(
     gpu: &mut Gpu,
+    ui: &Ui,
     doc: &Document,
     origin: [f32; 2],
     width: f32,
@@ -823,7 +969,7 @@ pub(crate) fn draw_field(
         gpu.push_rect(
             [x0 + f(a) * cell, origin[1]],
             [f(b - a) * cell, m.line_height],
-            SELECTION_COLOR,
+            ui.selection,
         );
     }
     let (start, end, start_col) = visible_span(&text, 0, first, visible + 1, 4);
@@ -831,7 +977,7 @@ pub(crate) fn draw_field(
         [x0 + f(start_col) * cell, origin[1]],
         &text[start..end],
         start_col,
-        TEXT_COLOR,
+        ui.text,
         origin[0],
     );
     if cursor {
@@ -839,18 +985,11 @@ pub(crate) fn draw_field(
         gpu.push_rect(
             [x0 + f(cursor_col) * cell, origin[1]],
             [w, m.line_height],
-            CURSOR_COLOR,
+            ui.cursor,
         );
     }
     gpu.begin_layer(None);
 }
-
-const TAB_BAR_COLOR: [f32; 4] = [0.11, 0.12, 0.14, 1.0];
-const TAB_ACTIVE_COLOR: [f32; 4] = [0.102, 0.110, 0.133, 1.0];
-const TAB_ACCENT_COLOR: [f32; 4] = [0.98, 0.75, 0.30, 1.0];
-const PICKER_COLOR: [f32; 4] = [0.16, 0.17, 0.21, 1.0];
-const PICKER_BORDER: [f32; 4] = [0.30, 0.32, 0.38, 1.0];
-const PICKER_SELECTED: [f32; 4] = [0.25, 0.36, 0.55, 0.85];
 
 /// One tab's label, and whether it has unsaved changes.
 #[derive(Debug, Clone)]
@@ -899,13 +1038,13 @@ pub fn tab_at(layout: &Layout, tabs: &[TabLabel], active: usize, x: f32, y: f32)
 }
 
 /// Draw the tab bar across the top of the window.
-pub fn draw_tabs(gpu: &mut Gpu, layout: &Layout, tabs: &[TabLabel], active: usize) {
+pub fn draw_tabs(gpu: &mut Gpu, ui: &Ui, layout: &Layout, tabs: &[TabLabel], active: usize) {
     if layout.tabs_h <= 0.0 {
         return;
     }
     let (cell, lh) = (layout.metrics.cell_width, layout.metrics.line_height);
     gpu.begin_layer(Some([0.0, 0.0, layout.width, layout.tabs_h]));
-    gpu.push_rect([0.0, 0.0], [layout.width, layout.tabs_h], TAB_BAR_COLOR);
+    gpu.push_rect([0.0, 0.0], [layout.width, layout.tabs_h], ui.tab_bar);
     let text_y = ((layout.tabs_h - lh) / 2.0).round();
     let accent = (2.0 * layout.scale).round().max(1.0);
     for (i, ((x0, x1), tab)) in tab_extents(layout, tabs, active)
@@ -915,14 +1054,14 @@ pub fn draw_tabs(gpu: &mut Gpu, layout: &Layout, tabs: &[TabLabel], active: usiz
     {
         let is_active = i == active;
         if is_active {
-            gpu.push_rect([x0, 0.0], [x1 - x0, layout.tabs_h], TAB_ACTIVE_COLOR);
+            gpu.push_rect([x0, 0.0], [x1 - x0, layout.tabs_h], ui.tab_active);
             gpu.push_rect(
                 [x0, layout.tabs_h - accent],
                 [x1 - x0, accent],
-                TAB_ACCENT_COLOR,
+                ui.tab_accent,
             );
         }
-        let color = if is_active { TEXT_COLOR } else { GUTTER_COLOR };
+        let color = if is_active { ui.text } else { ui.gutter };
         gpu.push_text_line([x0 + 2.0 * cell, text_y], &tab.name, color);
         if tab.dirty {
             let dot_x = x1 - 2.0 * cell;
@@ -987,7 +1126,13 @@ pub fn picker_contains(layout: &Layout, rows: usize, x: f32, y: f32) -> bool {
 }
 
 /// Draw the command palette or file opener as an overlay.
-pub fn draw_picker(gpu: &mut Gpu, layout: &Layout, view: &PickerView<'_>, cursor_visible: bool) {
+pub fn draw_picker(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    view: &PickerView<'_>,
+    cursor_visible: bool,
+) {
     let (cell, lh) = (layout.metrics.cell_width, layout.metrics.line_height);
     let ([left, top, width], row_h) = picker_box(layout);
     let pad = (layout.margin / 2.0).round();
@@ -997,9 +1142,9 @@ pub fn draw_picker(gpu: &mut Gpu, layout: &Layout, view: &PickerView<'_>, cursor
     gpu.push_rect(
         [left - b, top - b],
         [width + 2.0 * b, height + 2.0 * b],
-        PICKER_BORDER,
+        ui.picker_border,
     );
-    gpu.push_rect([left, top], [width, height], PICKER_COLOR);
+    gpu.push_rect([left, top], [width, height], ui.picker);
     // The query field, with the status on its right.
     let status_w = f(view.status.chars().count() + 2) * cell;
     let field_w = width - 2.0 * cell - status_w;
@@ -1007,13 +1152,14 @@ pub fn draw_picker(gpu: &mut Gpu, layout: &Layout, view: &PickerView<'_>, cursor
     gpu.push_rect(
         [left + cell - pad, field_y - pad / 2.0],
         [field_w + 2.0 * pad, lh + pad],
-        FIELD_COLOR,
+        ui.field,
     );
     if view.input.buffer.len_bytes() == 0 {
-        gpu.push_text_line([left + cell, field_y], view.placeholder, GUTTER_COLOR);
+        gpu.push_text_line([left + cell, field_y], view.placeholder, ui.gutter);
     }
     draw_field(
         gpu,
+        ui,
         view.input,
         [left + cell, field_y],
         field_w,
@@ -1024,7 +1170,7 @@ pub fn draw_picker(gpu: &mut Gpu, layout: &Layout, view: &PickerView<'_>, cursor
     gpu.push_text_line(
         [left + width - status_w + cell, field_y],
         &view.status,
-        GUTTER_COLOR,
+        ui.gutter,
     );
     // The rows, clipped to the box.
     let list_y = top + row_h + layout.margin;
@@ -1032,29 +1178,29 @@ pub fn draw_picker(gpu: &mut Gpu, layout: &Layout, view: &PickerView<'_>, cursor
     for (i, (text, detail)) in view.rows.iter().enumerate() {
         let ry = list_y + f(i) * row_h;
         if Some(i) == view.selected {
-            gpu.push_rect([left, ry], [width, row_h], PICKER_SELECTED);
+            gpu.push_rect([left, ry], [width, row_h], ui.picker_selected);
         }
         let ty = (ry + (row_h - lh) / 2.0).round();
-        gpu.push_text_line([left + cell, ty], text, TEXT_COLOR);
+        gpu.push_text_line([left + cell, ty], text, ui.text);
         let detail_x = left + width - f(detail.chars().count() + 1) * cell;
         let text_end = left + cell + f(text.chars().count() + 2) * cell;
-        gpu.push_text_line([detail_x.max(text_end), ty], detail, GUTTER_COLOR);
+        gpu.push_text_line([detail_x.max(text_end), ty], detail, ui.gutter);
     }
     if view.rows.is_empty() {
-        gpu.push_text_line([left + cell, list_y], "No matches", GUTTER_COLOR);
+        gpu.push_text_line([left + cell, list_y], "No matches", ui.gutter);
     }
 }
 
 /// Draw a one-line message at the bottom of the window, as an overlay.
-pub fn draw_message(gpu: &mut Gpu, text: &str, layout: &Layout, is_error: bool) {
+pub fn draw_message(gpu: &mut Gpu, ui: &Ui, text: &str, layout: &Layout, is_error: bool) {
     let lh = layout.metrics.line_height;
     gpu.begin_layer(None);
     gpu.push_rect(
         [0.0, layout.bottom],
         [layout.width, layout.height - layout.bottom],
-        BAR_COLOR,
+        ui.bar,
     );
-    let color = if is_error { ERROR_COLOR } else { TEXT_COLOR };
+    let color = if is_error { ui.error } else { ui.text };
     let y = (layout.bottom + (layout.height - layout.bottom - lh) / 2.0).round();
     gpu.push_text_line([layout.margin, y], text, color);
 }
@@ -1097,6 +1243,28 @@ mod tests {
 
     fn doc(text: &str) -> Document {
         Document::from_text(text)
+    }
+
+    #[test]
+    fn long_lines_highlight_only_their_visible_bytes() {
+        use nimbus_core::RopeBuffer;
+        let long = "ab".repeat(100_000);
+        let buf = RopeBuffer::from_text(&format!("short\n{long}\nend\n"));
+        let mut cache = WrapCache::default();
+        let l = layout(3);
+        let at = RowPos { line: 1, row: 0 };
+        // No wrap, scrolled 1000 columns right, 50 columns wide.
+        let mut w = wrapper(&mut cache, false, &l, 4);
+        let r = visible_bytes(&buf, &mut w, at, 1, (1000, 50), 4);
+        let start = buf.line_to_byte(1);
+        assert_eq!(r, start + 1000..start + 1051);
+        // Wrapped: the rows on screen, from the top row on.
+        let mut w = wrapper(&mut cache, true, &l, 4);
+        let at = RowPos { line: 1, row: 5 };
+        let r = visible_bytes(&buf, &mut w, at, 3, (0, 50), 4);
+        let cols = l.wrap_cols;
+        assert_eq!(r.start, start + 5 * cols);
+        assert!(r.end <= start + 8 * cols + 1, "{r:?}");
     }
 
     #[test]

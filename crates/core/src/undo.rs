@@ -11,7 +11,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::buffer::{Buffer, Edit, EditError};
+use crate::buffer::{Buffer, Edit, EditError, Text};
 use crate::selection::Selections;
 
 /// Pause after which typing starts a new undo step.
@@ -170,15 +170,22 @@ impl History {
     /// Returns an [`EditError`] if the buffer no longer matches the history,
     /// which means the buffer was edited without recording. The group is
     /// kept, and edits reversed before the error stay reversed.
-    pub fn undo(&mut self, buffer: &mut dyn Buffer) -> Result<Option<Selections>, EditError> {
+    pub fn undo(
+        &mut self,
+        buffer: &mut dyn Buffer,
+        on_edit: &mut dyn FnMut(&dyn Text, &Edit),
+    ) -> Result<Option<Selections>, EditError> {
         self.seal();
         let Some(group) = self.undo.pop() else {
             return Ok(None);
         };
         for edit in group.edits.iter().rev() {
-            if let Err(e) = buffer.replace(edit.new_range(), &edit.removed) {
-                self.undo.push(group);
-                return Err(e);
+            match buffer.replace(edit.new_range(), &edit.removed) {
+                Ok(applied) => on_edit(&*buffer, &applied),
+                Err(e) => {
+                    self.undo.push(group);
+                    return Err(e);
+                }
             }
         }
         let restore = group.before.clone();
@@ -192,15 +199,22 @@ impl History {
     /// # Errors
     ///
     /// As for [`History::undo`].
-    pub fn redo(&mut self, buffer: &mut dyn Buffer) -> Result<Option<Selections>, EditError> {
+    pub fn redo(
+        &mut self,
+        buffer: &mut dyn Buffer,
+        on_edit: &mut dyn FnMut(&dyn Text, &Edit),
+    ) -> Result<Option<Selections>, EditError> {
         self.seal();
         let Some(group) = self.redo.pop() else {
             return Ok(None);
         };
         for edit in &group.edits {
-            if let Err(e) = buffer.replace(edit.old_range(), &edit.inserted) {
-                self.redo.push(group);
-                return Err(e);
+            match buffer.replace(edit.old_range(), &edit.inserted) {
+                Ok(applied) => on_edit(&*buffer, &applied),
+                Err(e) => {
+                    self.redo.push(group);
+                    return Err(e);
+                }
             }
         }
         let restore = group.after.clone();
@@ -256,13 +270,13 @@ mod tests {
         }
 
         fn undo(&mut self) -> Option<usize> {
-            let s = self.hist.undo(&mut self.buf).unwrap()?;
+            let s = self.hist.undo(&mut self.buf, &mut |_, _| {}).unwrap()?;
             self.cursor = s.primary().head;
             Some(self.cursor)
         }
 
         fn redo(&mut self) -> Option<usize> {
-            let s = self.hist.redo(&mut self.buf).unwrap()?;
+            let s = self.hist.redo(&mut self.buf, &mut |_, _| {}).unwrap()?;
             self.cursor = s.primary().head;
             Some(self.cursor)
         }
@@ -355,9 +369,9 @@ mod tests {
         let e2 = buf.replace(3..4, "+").unwrap();
         hist.record_group(vec![e1, e2], &before, &before);
         assert_eq!(buf.slice(0..9), "a+b+c");
-        hist.undo(&mut buf).unwrap();
+        hist.undo(&mut buf, &mut |_, _| {}).unwrap();
         assert_eq!(buf.slice(0..9), "a-b-c");
-        hist.redo(&mut buf).unwrap();
+        hist.redo(&mut buf, &mut |_, _| {}).unwrap();
         assert_eq!(buf.slice(0..9), "a+b+c");
     }
 
@@ -377,7 +391,7 @@ mod tests {
     fn empty_history_is_a_no_op() {
         let mut buf = RopeBuffer::from_text("x");
         let mut hist = History::new();
-        assert!(hist.undo(&mut buf).unwrap().is_none());
-        assert!(hist.redo(&mut buf).unwrap().is_none());
+        assert!(hist.undo(&mut buf, &mut |_, _| {}).unwrap().is_none());
+        assert!(hist.redo(&mut buf, &mut |_, _| {}).unwrap().is_none());
     }
 }

@@ -116,6 +116,16 @@ impl Text for RopeBuffer {
             Err(_) => false,
         }
     }
+
+    fn chunk_at(&self, byte: usize) -> (&str, usize) {
+        if byte >= self.rope.len_bytes() {
+            return ("", self.rope.len_bytes());
+        }
+        match self.rope.get_chunk_at_byte(byte) {
+            Some((chunk, start, _, _)) => (chunk, start),
+            None => ("", self.rope.len_bytes()),
+        }
+    }
 }
 
 impl Buffer for RopeBuffer {
@@ -203,6 +213,22 @@ mod tests {
     fn slice_widens_to_char_boundaries() {
         let b = RopeBuffer::from_text("café!");
         assert_eq!(b.slice(4..5), "é");
+    }
+
+    #[test]
+    fn chunks_tile_the_text() {
+        let text = "abcdefghij\n".repeat(500);
+        let b = RopeBuffer::from_text(&text);
+        let mut pos = 0;
+        let mut rebuilt = String::new();
+        while pos < b.len_bytes() {
+            let (chunk, start) = b.chunk_at(pos);
+            assert!(start <= pos && pos < start + chunk.len());
+            rebuilt.push_str(&chunk[pos - start..]);
+            pos = start + chunk.len();
+        }
+        assert_eq!(rebuilt, text);
+        assert_eq!(b.chunk_at(b.len_bytes()), ("", b.len_bytes()));
     }
 
     #[test]

@@ -21,9 +21,11 @@ NIMBUS_SCALE=1 cargo run -- --screenshot /tmp/1x.bmp         # debug builds: ren
 bench/gen.sh                                                # 10 MB / 100 MB test files in bench/out (also: logs, longline)
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp   # render with no window (works with the screen locked)
 cargo run -- FILE --wrap --find PATTERN                     # start with soft wrap on and the find bar searching
+cargo run -- FILE --theme light --headless 1600x1000 --screenshot /tmp/l.bmp   # override the config's theme
 cargo run -- FOLDER a.rs b.rs                              # several tabs; a folder sets the file opener's root
 cargo run -- . --headless 1600x900 --picker files:main --screenshot /tmp/p.bmp   # render a picker (palette|files[:query])
 cargo test --release -p nimbus-core -- --ignored --nocapture # opt-in benchmarks (e.g. wrapping a 1 MB line)
+cargo test --release -p nimbus-syntax -- --ignored --nocapture --test-threads 1   # keystroke and first-parse cost, tree memory (needs bench/gen.sh)
 cargo test --workspace
 cargo test -p nimbus-core <test_name>    # single test in one crate
 cargo fmt --all --check
@@ -41,9 +43,11 @@ The strict lints live in `[workspace.lints]` in the root `Cargo.toml`, and every
 ```sh
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets
 # Platform-specific code (menus, AltGr, dead code on one OS) only shows up
-# per target; check the other two before pushing (targets installed via rustup):
-RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu
-RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc
+# per target; check the other two before pushing (targets installed via rustup).
+# The script stands in for the C compiler the tree-sitter build scripts need,
+# which macOS lacks for these targets; clippy never links, so that is enough:
+scripts/clippy-cross.sh x86_64-unknown-linux-gnu
+scripts/clippy-cross.sh x86_64-pc-windows-msvc
 ```
 
 The set is `clippy::pedantic` plus `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `dbg_macro`, `print_stdout`, `print_stderr`, `undocumented_unsafe_blocks`, `missing_docs`, and `unsafe_code = "deny"`. Don't weaken the table to get a change through.
@@ -89,7 +93,7 @@ Subagents do not commit, push, or edit `DESIGN.md` or milestone docs. After a su
 Cargo workspace; crates live in `crates/`, each package named `nimbus-<dir>` except the binary, which is `nimbus` in `crates/app`.
 
 - `core`: text buffers, edits, undo, cursors, search. No I/O, no GPU, no workspace deps. Must stay testable headlessly.
-- `syntax`: tree-sitter highlighting (milestone 5). Depends on `core`.
+- `syntax`: tree-sitter highlighting. Depends on `core`. `SyntaxState` (one per `Document`) must see every edit, undo and redo included, through `SyntaxState::edit`; a missed edit leaves the tree describing other text. It starts no threads: it returns `Job`s that the app runs (`spawn_syntax` in `app.rs`). Each grammar is a cargo feature; the Rust highlights query is vendored in `crates/syntax/queries/`.
 - `render`: owns the wgpu surface and, later, the glyph atlas, layout, and the two instanced pipelines (rects and glyph quads). Depends on `core`.
 - `app`: winit `ApplicationHandler`, editor state, UI chrome, keymap, config. Depends on everything.
 

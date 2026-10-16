@@ -81,6 +81,8 @@ pub enum Command<'a> {
     Replace,
     /// Toggle soft wrap.
     ToggleWrap,
+    /// Switch between the light and dark themes.
+    ToggleTheme,
     /// Find bar: toggle case-sensitive matching. Carries the text the key
     /// would type (Option+C is "ç" on macOS), typed instead when the find
     /// bar is closed.

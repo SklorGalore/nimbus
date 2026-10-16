@@ -1,0 +1,380 @@
+//! Colour themes: interface colours, and syntax colours by capture name.
+//!
+//! Two themes are built in (`themes/dark.toml` and `themes/light.toml`,
+//! compiled into the binary). A user theme is a file of the same format in
+//! the config directory's `themes` folder; anything it leaves out comes from
+//! its `base` theme.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use nimbus_syntax::LanguageId;
+
+/// Straight RGBA, each channel 0–1.
+pub type Color = [f32; 4];
+
+const DARK: &str = include_str!("../themes/dark.toml");
+const LIGHT: &str = include_str!("../themes/light.toml");
+
+/// Names of the built-in themes.
+#[cfg(test)]
+const BUILT_IN: [&str; 2] = ["dark", "light"];
+
+macro_rules! ui_colors {
+    ($($(#[$doc:meta])* $name:ident),* $(,)?) => {
+        /// Colours for everything other than syntax.
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        pub struct Ui {
+            $($(#[$doc])* pub $name: Color,)*
+        }
+
+        impl Ui {
+            /// Set the colour named `key`; `false` if there is no such colour.
+            fn set(&mut self, key: &str, color: Color) -> bool {
+                match key {
+                    $(stringify!($name) => self.$name = color,)*
+                    _ => return false,
+                }
+                true
+            }
+        }
+
+        impl Default for Ui {
+            /// Everything magenta, so a colour missing from a built-in
+            /// theme stands out (and fails the tests).
+            fn default() -> Self {
+                Self { $($name: [1.0, 0.0, 1.0, 1.0],)* }
+            }
+        }
+
+        #[cfg(test)]
+        const UI_KEYS: &[&str] = &[$(stringify!($name)),*];
+    };
+}
+
+ui_colors! {
+    /// The editor and window background.
+    background,
+    /// Text with no syntax colour.
+    text,
+    /// Line numbers, labels and other secondary text.
+    gutter,
+    /// The cursor line's number.
+    current_line_number,
+    /// The text cursor.
+    cursor,
+    /// The underline of text being composed with an input method.
+    preedit,
+    /// Selected text's background.
+    selection,
+    /// Search matches.
+    find_match,
+    /// The current search match.
+    current_match,
+    /// The find bar and message line.
+    bar,
+    /// Text fields.
+    field,
+    /// The border of the focused text field.
+    field_focus,
+    /// An option toggle that is on.
+    toggle_on,
+    /// Error messages.
+    error,
+    /// The tab bar.
+    tab_bar,
+    /// The active tab.
+    tab_active,
+    /// The line marking the active tab.
+    tab_accent,
+    /// The picker's box.
+    picker,
+    /// The picker's border.
+    picker_border,
+    /// The picker's selected row.
+    picker_selected,
+}
+
+/// A loaded theme.
+#[derive(Debug, Clone)]
+pub struct Theme {
+    /// The built-in theme it starts from: its own name for a built-in.
+    pub base: String,
+    /// Interface colours.
+    pub ui: Ui,
+    syntax: HashMap<String, Color>,
+    /// Colour per capture index, per language, built on first use.
+    resolved: [Option<Vec<Option<Color>>>; LanguageId::ALL.len()],
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::built_in("dark").unwrap_or_else(|| Self::empty("dark"))
+    }
+}
+
+/// Parse `"#rrggbb"` or `"#rrggbbaa"`.
+fn parse_color(s: &str) -> Option<Color> {
+    let hex = s.strip_prefix('#')?;
+    if !matches!(hex.len(), 6 | 8) || !hex.is_ascii() {
+        return None;
+    }
+    let channel = |i: usize| -> Option<f32> {
+        let v = u8::from_str_radix(hex.get(i..i + 2)?, 16).ok()?;
+        Some(f32::from(v) / 255.0)
+    };
+    let a = if hex.len() == 8 { channel(6)? } else { 1.0 };
+    Some([channel(0)?, channel(2)?, channel(4)?, a])
+}
+
+impl Theme {
+    fn empty(name: &str) -> Self {
+        Self {
+            base: name.to_owned(),
+            ui: Ui::default(),
+            syntax: HashMap::new(),
+            resolved: Default::default(),
+        }
+    }
+
+    /// A theme compiled into the binary.
+    #[must_use]
+    pub fn built_in(name: &str) -> Option<Self> {
+        let source = match name {
+            "dark" => DARK,
+            "light" => LIGHT,
+            _ => return None,
+        };
+        let (theme, warnings) = Self::parse(name, source, &Self::empty(name));
+        debug_assert!(warnings.is_empty(), "{warnings:?}");
+        Some(theme)
+    }
+
+    /// Where user themes live: `themes/NAME.toml` next to the config file.
+    #[must_use]
+    pub fn user_path(name: &str) -> Option<PathBuf> {
+        crate::config::path().and_then(|p| {
+            p.parent()
+                .map(|d| d.join("themes").join(format!("{name}.toml")))
+        })
+    }
+
+    /// The theme called `name`: built in, or a user theme. Falls back to
+    /// dark, with a warning, if it cannot be found or read.
+    #[must_use]
+    pub fn load(name: &str) -> (Self, Vec<String>) {
+        if let Some(t) = Self::built_in(name) {
+            return (t, Vec::new());
+        }
+        let valid = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
+        let Some(path) = Self::user_path(name).filter(|_| valid) else {
+            return (
+                Self::default(),
+                vec![format!("theme {name:?} not found; using dark")],
+            );
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let base = toml::from_str::<toml::Table>(&text)
+                    .ok()
+                    .and_then(|t| t.get("base").and_then(|b| b.as_str()).map(str::to_owned))
+                    .unwrap_or_else(|| "dark".to_owned());
+                let Some(base_theme) = Self::built_in(&base) else {
+                    return (
+                        Self::default(),
+                        vec![format!(
+                            "theme {name}: base {base:?} must be a built-in theme; using dark"
+                        )],
+                    );
+                };
+                Self::parse(name, &text, &base_theme)
+            }
+            Err(e) => (
+                Self::default(),
+                vec![format!(
+                    "theme {name:?}: cannot read {}: {e}; using dark",
+                    path.display()
+                )],
+            ),
+        }
+    }
+
+    /// Parse theme text over `base`. Bad entries become warnings and keep
+    /// the base's colour.
+    #[must_use]
+    pub fn parse(name: &str, text: &str, base: &Self) -> (Self, Vec<String>) {
+        let mut theme = Self {
+            base: base.base.clone(),
+            ui: base.ui,
+            syntax: base.syntax.clone(),
+            resolved: Default::default(),
+        };
+        let mut warnings = Vec::new();
+        let table = match text.parse::<toml::Table>() {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = e.to_string();
+                let first = msg.lines().next().unwrap_or("syntax error");
+                warnings.push(format!("theme {name}: {first}"));
+                return (theme, warnings);
+            }
+        };
+        let color = |section: &str, key: &str, value: &toml::Value, warnings: &mut Vec<String>| {
+            let c = value.as_str().and_then(parse_color);
+            if c.is_none() {
+                warnings.push(format!(
+                    "theme {name}: {section}.{key}: expected \"#rrggbb\" or \"#rrggbbaa\""
+                ));
+            }
+            c
+        };
+        for (section, value) in &table {
+            match (section.as_str(), value) {
+                ("base", toml::Value::String(_)) => {}
+                ("ui", toml::Value::Table(t)) => {
+                    for (key, v) in t {
+                        if let Some(c) = color("ui", key, v, &mut warnings)
+                            && !theme.ui.set(key, c)
+                        {
+                            warnings.push(format!("theme {name}: unknown ui colour {key:?}"));
+                        }
+                    }
+                }
+                ("syntax", toml::Value::Table(t)) => {
+                    for (key, v) in t {
+                        if let Some(c) = color("syntax", key, v, &mut warnings) {
+                            theme.syntax.insert(key.clone(), c);
+                        }
+                    }
+                }
+                _ => warnings.push(format!("theme {name}: unknown setting {section:?}")),
+            }
+        }
+        (theme, warnings)
+    }
+
+    /// The colour for a capture name: its own entry, or the longest
+    /// dotted prefix that has one (`function.method` falls back to
+    /// `function`). `None` means the default text colour.
+    #[cfg(test)]
+    #[must_use]
+    pub fn syntax_color(&self, capture: &str) -> Option<Color> {
+        lookup(&self.syntax, capture)
+    }
+
+    /// Colours by capture index for `language`'s query, whose capture
+    /// names are `names`. Worked out once per language, so each frame
+    /// only indexes an array.
+    pub fn capture_colors(&mut self, language: LanguageId, names: &[&str]) -> &[Option<Color>] {
+        let slot = &mut self.resolved[language.index()];
+        if slot.as_ref().is_none_or(|v| v.len() != names.len()) {
+            *slot = Some(names.iter().map(|n| lookup(&self.syntax, n)).collect());
+        }
+        slot.as_deref().unwrap_or(&[])
+    }
+}
+
+fn lookup(syntax: &HashMap<String, Color>, capture: &str) -> Option<Color> {
+    let mut name = capture;
+    loop {
+        if let Some(c) = syntax.get(name) {
+            return Some(*c);
+        }
+        name = &name[..name.rfind('.')?];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn built_in_themes_set_every_colour() {
+        for name in BUILT_IN {
+            let (theme, warnings) = Theme::parse(
+                name,
+                if name == "dark" { DARK } else { LIGHT },
+                &Theme::empty(name),
+            );
+            assert_eq!(warnings, Vec::<String>::new(), "{name}");
+            let ui = theme.ui;
+            assert_ne!(ui, Ui::default());
+            let magenta = [1.0, 0.0, 1.0, 1.0];
+            for key in UI_KEYS {
+                let mut probe = ui;
+                assert!(probe.set(key, magenta));
+                assert_ne!(probe, ui, "{name}: {key} left at the placeholder");
+            }
+        }
+    }
+
+    #[test]
+    fn dark_matches_the_old_constants_to_eight_bits() {
+        let ui = Theme::built_in("dark").unwrap().ui;
+        let close = |a: Color, b: Color| {
+            a.iter()
+                .zip(b)
+                .all(|(x, y)| (x - y).abs() <= 0.5 / 255.0 + 1e-6)
+        };
+        assert!(close(ui.background, [0.102, 0.110, 0.133, 1.0]));
+        assert!(close(ui.text, [0.85, 0.87, 0.91, 1.0]));
+        assert!(close(ui.selection, [0.25, 0.36, 0.55, 0.65]));
+        assert!(close(ui.picker_selected, [0.25, 0.36, 0.55, 0.85]));
+    }
+
+    #[test]
+    fn colours_parse_with_and_without_alpha() {
+        assert_eq!(parse_color("#ff0000"), Some([1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(parse_color("#00000000"), Some([0.0; 4]));
+        for bad in ["ff0000", "#ff00", "#gg0000", "#ff00000", "#ffé000"] {
+            assert_eq!(parse_color(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn longest_prefix_wins() {
+        let (t, w) = Theme::parse(
+            "t",
+            "[syntax]\nfunction = \"#ff0000\"\n\"function.method\" = \"#00ff00\"\n",
+            &Theme::empty("t"),
+        );
+        assert_eq!(w, Vec::<String>::new());
+        let red = Some([1.0, 0.0, 0.0, 1.0]);
+        let green = Some([0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(t.syntax_color("function"), red);
+        assert_eq!(t.syntax_color("function.builtin"), red);
+        assert_eq!(t.syntax_color("function.method.call"), green);
+        assert_eq!(t.syntax_color("variable"), None);
+        let mut t = t;
+        let names = ["variable", "function.method", "function.macro"];
+        assert_eq!(
+            t.capture_colors(LanguageId::Rust, &names),
+            &[None, green, red]
+        );
+    }
+
+    #[test]
+    fn user_themes_override_their_base_and_warn_on_mistakes() {
+        let light = Theme::built_in("light").unwrap();
+        let (t, w) = Theme::parse(
+            "mine",
+            "base = \"light\"\n[ui]\ncursor = \"#ff0000\"\nnope = \"#000000\"\n[syntax]\nkeyword = \"red\"\n[extra]\n",
+            &light,
+        );
+        assert_eq!(t.ui.cursor, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(t.base, "light");
+        assert_eq!(t.ui.background, light.ui.background);
+        assert_eq!(t.syntax_color("keyword"), light.syntax_color("keyword"));
+        assert_eq!(w.len(), 3, "{w:?}");
+    }
+
+    #[test]
+    fn unknown_names_fall_back_to_dark() {
+        let (t, w) = Theme::load("../etc/passwd");
+        assert_eq!(t.base, "dark");
+        assert_eq!(w.len(), 1);
+    }
+}

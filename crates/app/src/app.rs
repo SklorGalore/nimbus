@@ -7,7 +7,7 @@
 //! short retries), so an idle editor uses no CPU.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,7 @@ use winit::window::{Window, WindowId};
 
 use nimbus_core::Text;
 use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
+use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
 use crate::config::{self, Config};
 use crate::document::Document;
@@ -29,6 +30,7 @@ use crate::input::{self, Command, Motion};
 use crate::keymap::Keymap;
 use crate::menu::{self, MenuBar};
 use crate::picker::{self, Item, Kind, Picker};
+use crate::theme::{Theme, Ui};
 use crate::view::{self, Decorations, Layout, PickerView, Preedit, TabLabel, View};
 use crate::{Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
 
@@ -41,6 +43,38 @@ pub enum AppEvent {
     PickerChanged,
     /// A menu item was chosen; carries its action id.
     Menu(String),
+    /// A background parse finished.
+    Syntax(JobResult),
+}
+
+/// Time a reparse may take on the main thread before it moves to a worker
+/// (DESIGN.md §4.2). Typing reparses take microseconds.
+const SYNTAX_BUDGET: Duration = Duration::from_millis(2);
+
+/// Run a parse job on its own thread and send the result back. Jobs are
+/// rare (the first parse of a file, or a reparse that ran over budget), so
+/// a thread each is simpler than a pool and costs nothing while idle.
+fn spawn_syntax(proxy: &EventLoopProxy<AppEvent>, job: Job) {
+    // The job waits in a slot the thread takes it from, so that if the
+    // thread cannot start, it is still here to run.
+    let slot = Arc::new(Mutex::new(Some(job)));
+    let theirs = Arc::clone(&slot);
+    let sender = proxy.clone();
+    let spawned = std::thread::Builder::new()
+        .name("nimbus-parse".to_owned())
+        .spawn(move || {
+            if let Some(job) = theirs.lock().ok().and_then(|mut j| j.take()) {
+                let _ = sender.send_event(AppEvent::Syntax(job.run()));
+            }
+        });
+    if let Err(e) = spawned {
+        // The document is waiting for this result; without it, it would
+        // never be coloured again. Parse here instead, once.
+        log::error!("could not start a parse thread ({e}); parsing on the main thread");
+        if let Some(job) = slot.lock().ok().and_then(|mut j| j.take()) {
+            let _ = proxy.send_event(AppEvent::Syntax(job.run()));
+        }
+    }
 }
 
 /// A short note at the bottom of the window that disappears by itself.
@@ -70,6 +104,8 @@ pub struct Tab {
     pub doc: Document,
     /// Its scroll position and wrap setting.
     pub view: View,
+    /// The "too large to highlight" note has been shown.
+    noted_size: bool,
 }
 
 impl Tab {
@@ -78,7 +114,11 @@ impl Tab {
     pub fn new(doc: Document, wrap: bool) -> Self {
         let mut view = View::default();
         view.set_wrap(wrap);
-        Self { doc, view }
+        Self {
+            doc,
+            view,
+            noted_size: false,
+        }
     }
 }
 
@@ -167,6 +207,7 @@ pub struct App {
     options: Options,
     started: Instant,
     config: Config,
+    theme: Theme,
     keymap: Keymap,
     /// Folder the file opener searches.
     root: PathBuf,
@@ -264,12 +305,17 @@ impl App {
         warnings: Vec<String>,
     ) -> Self {
         let (keymap, key_warnings) = Keymap::new(&config.keys);
+        let (theme, theme_warnings) = Theme::load(&config.theme);
         let wrap = options.wrap || config.soft_wrap;
         let mut tabs: Vec<Tab> = docs.into_iter().map(|d| Tab::new(d, wrap)).collect();
         if tabs.is_empty() {
             tabs.push(Tab::new(Document::untitled(), wrap));
         }
-        let all_warnings: Vec<String> = warnings.into_iter().chain(key_warnings).collect();
+        let all_warnings: Vec<String> = warnings
+            .into_iter()
+            .chain(key_warnings)
+            .chain(theme_warnings)
+            .collect();
         let message = (!all_warnings.is_empty()).then(|| {
             for w in &all_warnings {
                 log::warn!("{w}");
@@ -284,6 +330,7 @@ impl App {
             options,
             started,
             config,
+            theme,
             keymap,
             root,
             gpu_init: Some(gpu_init),
@@ -433,6 +480,15 @@ impl App {
             Command::QuickOpen => self.open_picker(Kind::Files),
             Command::Palette => self.open_picker(Kind::Palette),
             Command::ReloadConfig => self.reload_config(),
+            Command::ToggleTheme => {
+                let next = if self.theme.base == "light" {
+                    "dark"
+                } else {
+                    "light"
+                };
+                self.theme = Theme::built_in(next).unwrap_or_default();
+                self.say(format!("Theme: {next}"), false);
+            }
             Command::OpenConfig => self.open_config(),
             Command::Close => {
                 self.quit(event_loop);
@@ -624,7 +680,10 @@ impl App {
         let old = self.tabs[i].doc.path.replace(path);
         self.title_key = None;
         let saved = self.save(i);
-        if !saved {
+        if saved {
+            // A new name can mean a new language: untitled to `notes.md`.
+            self.tabs[i].doc.detect_language();
+        } else {
             // Keep pointing at the old file, so the next save does not
             // silently retry the path that failed.
             self.tabs[i].doc.path = old;
@@ -705,9 +764,15 @@ impl App {
     }
 
     fn reload_config(&mut self) {
-        let (config, mut warnings) = Config::load();
+        let (mut config, mut warnings) = Config::load();
+        if let Some(theme) = &self.options.theme {
+            config.theme.clone_from(theme);
+        }
         let (keymap, key_warnings) = Keymap::new(&config.keys);
         warnings.extend(key_warnings);
+        let (theme, theme_warnings) = Theme::load(&config.theme);
+        warnings.extend(theme_warnings);
+        self.theme = theme;
         self.keymap = keymap;
         self.config = config;
         if let Some(menu) = &self.menu_bar {
@@ -904,6 +969,7 @@ impl App {
             | Command::Close
             | Command::CloseTab
             | Command::ToggleWrap
+            | Command::ToggleTheme
             | Command::OpenFile
             | Command::NewFile
             | Command::NextTab
@@ -1159,17 +1225,37 @@ impl App {
         self.changed(false);
     }
 
+    /// Start the active tab's first parse if it has not started, and say
+    /// once if its file is too large to highlight.
+    fn start_syntax(&mut self) {
+        let tab = &mut self.tabs[self.active];
+        if let Some(job) = tab.doc.syntax.take_job(&tab.doc.buffer) {
+            spawn_syntax(&self.proxy, job);
+        }
+        if tab.doc.syntax.off_reason() == Some(Off::TooLarge) && !tab.noted_size {
+            tab.noted_size = true;
+            let mb = MAX_HIGHLIGHT_BYTES / (1024 * 1024);
+            self.say(format!("Over {mb} MB: shown without syntax colours"), false);
+        }
+    }
+
     /// Queue the whole frame: editor text, then the overlays.
     fn paint(&mut self, gpu: &mut Gpu, layout: &Layout) {
         let labels = self.tab_labels();
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
+        // Bring the tree up to date with this frame's edits, or hand the
+        // rest to a worker if that would take too long.
+        if let Some(job) = tab.doc.syntax.refresh(&tab.doc.buffer, SYNTAX_BUDGET) {
+            spawn_syntax(&self.proxy, job);
+        }
         paint_scene(
             gpu,
             layout,
             &mut Scene {
                 doc: &tab.doc,
                 view: &mut tab.view,
+                theme: &mut self.theme,
                 find: &self.find,
                 message: self.message.as_ref(),
                 cursor_visible: self.blink.visible && self.picker.is_none(),
@@ -1177,13 +1263,18 @@ impl App {
                 tab_width,
             },
         );
-        view::draw_tabs(gpu, layout, &labels, self.active);
+        view::draw_tabs(gpu, &self.theme.ui, layout, &labels, self.active);
         if let Some(p) = &self.picker {
-            draw_picker_overlay(gpu, layout, p, &self.keymap, self.blink.visible);
+            let ui = &self.theme.ui;
+            draw_picker_overlay(gpu, ui, layout, p, &self.keymap, self.blink.visible);
         }
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        // The first parse runs on a worker while this frame shows the
+        // text plain; colours follow when it finishes. Before the layout,
+        // which leaves room for any message this adds.
+        self.start_syntax();
         let Some(layout) = self.layout() else { return };
         // Painting reads the whole app; take the GPU out while it does.
         if let Some(mut gpu) = self.gpu.take() {
@@ -1351,6 +1442,7 @@ pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar, message
 pub struct Scene<'a> {
     doc: &'a Document,
     view: &'a mut View,
+    theme: &'a mut Theme,
     find: &'a FindBar,
     message: Option<&'a Message>,
     /// Blink phase: the cursor is in its visible half.
@@ -1364,6 +1456,14 @@ pub struct Scene<'a> {
 pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     let find = scene.find;
     let current = find.current.and_then(|i| find.matches.get(i)).cloned();
+    let ui = scene.theme.ui;
+    let syntax = &scene.doc.syntax;
+    let captures = match (syntax.language(), syntax.tree()) {
+        (Some(language), Some((_, grammar))) => scene
+            .theme
+            .capture_colors(language, grammar.highlights.capture_names()),
+        _ => &[],
+    };
     scene.view.draw(
         gpu,
         scene.doc,
@@ -1379,13 +1479,15 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
                 &[]
             },
             current,
+            ui: &ui,
+            captures,
         },
     );
     if find.open {
-        view::draw_find_bar(gpu, find, layout, scene.cursor_visible);
+        view::draw_find_bar(gpu, &ui, find, layout, scene.cursor_visible);
     }
     if let Some(m) = scene.message {
-        view::draw_message(gpu, &m.text, layout, m.is_error);
+        view::draw_message(gpu, &ui, &m.text, layout, m.is_error);
     }
 }
 
@@ -1441,6 +1543,12 @@ pub fn run_headless(
     }
     let layout = layout_for(&gpu, to_f32(scale), &doc, &find, false);
     view.ensure_cursor_visible(&doc, &layout, config.tab_width);
+    // One frame only: parse here rather than on a worker.
+    doc.syntax.parse_now(&doc.buffer);
+    let (mut theme, warnings) = Theme::load(&config.theme);
+    for w in warnings {
+        print_err(&format!("nimbus: {w}"));
+    }
     let label = TabLabel {
         name: doc.display_name(),
         dirty: false,
@@ -1448,6 +1556,7 @@ pub fn run_headless(
     let mut scene = Scene {
         doc: &doc,
         view: &mut view,
+        theme: &mut theme,
         find: &find,
         message: None,
         cursor_visible: true,
@@ -1460,7 +1569,7 @@ pub fn run_headless(
     } else {
         labels
     };
-    view::draw_tabs(&mut gpu, &layout, &labels, 0);
+    view::draw_tabs(&mut gpu, &theme.ui, &layout, &labels, 0);
     if let Some(spec) = &options.picker {
         // "palette" or "files", optionally followed by ":query".
         let (kind, query) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
@@ -1477,7 +1586,7 @@ pub fn run_headless(
             std::thread::sleep(Duration::from_millis(5));
         }
         let (keymap, _) = Keymap::new(&config.keys);
-        draw_picker_overlay(&mut gpu, &layout, &p, &keymap, true);
+        draw_picker_overlay(&mut gpu, &theme.ui, &layout, &p, &keymap, true);
     }
     gpu.request_capture();
     if let Err(e) = gpu.render() {
@@ -1488,7 +1597,14 @@ pub fn run_headless(
 }
 
 /// Draw an open picker over everything else.
-fn draw_picker_overlay(gpu: &mut Gpu, layout: &Layout, p: &Picker, keymap: &Keymap, blink: bool) {
+fn draw_picker_overlay(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    p: &Picker,
+    keymap: &Keymap,
+    blink: bool,
+) {
     let (rows, selected) = p.rows(keymap);
     let rows: Vec<(String, String)> = rows.into_iter().map(|r| (r.text, r.detail)).collect();
     let n = p.match_count();
@@ -1511,7 +1627,7 @@ fn draw_picker_overlay(gpu: &mut Gpu, layout: &Layout, p: &Picker, keymap: &Keym
         selected,
         status,
     };
-    view::draw_picker(gpu, layout, &pv, blink);
+    view::draw_picker(gpu, ui, layout, &pv, blink);
 }
 
 /// Apply a text-editing command to a one-line field (the find bar). Returns
@@ -1580,6 +1696,25 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
                 self.run(action.command, event_loop);
+            }
+            AppEvent::Syntax(result) => {
+                let Some(i) = self
+                    .tabs
+                    .iter()
+                    .position(|t| t.doc.syntax.waiting_for(result.id()))
+                else {
+                    return; // the tab closed, or its file was reloaded
+                };
+                let doc = &mut self.tabs[i].doc;
+                if let Some(job) = doc.syntax.finish(result, &doc.buffer, SYNTAX_BUDGET) {
+                    spawn_syntax(&self.proxy, job);
+                }
+                if let Some(Off::Failed) = doc.syntax.off_reason() {
+                    log::warn!("highlighting failed for {}", doc.display_name());
+                }
+                if i == self.active {
+                    self.changed(false);
+                }
             }
             AppEvent::Search(batch) => {
                 if !self.find.receive(batch) {
