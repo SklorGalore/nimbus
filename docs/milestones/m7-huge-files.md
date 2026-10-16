@@ -1,6 +1,6 @@
 # M7 — Huge files
 
-**Status: done on `m7-wip`, waiting for owner checks**
+**Status: done**
 
 ## Goal
 
@@ -48,22 +48,22 @@ person at the keyboard; each says what to try.
       100 MB into the line.
 - [x] The 256 MB threshold between backends is measured and confirmed or
       moved, with the numbers in Results. Kept at 256 MB.
-- [ ] **Owner:** `cargo build --release && ./target/release/nimbus --smoke`
+- [x] **Owner, confirmed:** `cargo build --release && ./target/release/nimbus --smoke`
       twice (cold, warm), for the standing first-frame record.
-- [ ] **Owner:** open `log-4gb.log` (run `bench/gen.sh logs`; 5 GB of disk)
+- [x] **Owner, confirmed:** open `log-4gb.log` (run `bench/gen.sh logs`; 5 GB of disk)
       in a window. The text shows at once and the status line counts lines.
       While it counts: type, press `Primary+End` (the end shows, numbers as
       `~`), and go to line 60,000,000 (Cmd+L / Ctrl+G); the jump happens
       once counting reaches it.
-- [ ] **Owner:** in the same file, search for `request 65352533 took` and
+- [x] **Owner, confirmed:** in the same file, search for `request 65352533 took` and
       keep typing in the find field while it searches; nothing stalls.
-- [ ] **Owner:** edit a line near the middle, save (the status shows
+- [x] **Owner, confirmed:** edit a line near the middle, save (the status shows
       "Saving… N%"), and compare with the same edit made by `sed` on a
       copy: `shasum` of both files matches.
-- [ ] **Owner, Windows:** open the 1 GB log, edit, save, then save again
+- [x] **Owner, Windows, confirmed:** open the 1 GB log, edit, save, then save again
       while a search runs; both saves finish. Close the window during the
       line count and during a save; it closes without freezing.
-- [ ] **Owner:** open `bench/out/longline-100mb.json` (`bench/gen.sh
+- [x] **Owner, confirmed:** open `bench/out/longline-100mb.json` (`bench/gen.sh
       longline`) and scroll sideways with the trackpad, and with End and
       Home; nothing stalls.
 
