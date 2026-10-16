@@ -23,8 +23,12 @@ use nimbus_core::{AnyBuffer, Buffer, LineEnding, MappedBuffer, RopeBuffer, Sourc
 use crate::mapping::MappedFile;
 
 /// Files at or above this size open in the mapped backend instead of being
-/// read into a rope (DESIGN.md §4.1). M7 task 14 measures where the line
-/// should be.
+/// read into a rope (DESIGN.md §4.1). Measured in M7 (bench/threshold.sh):
+/// the rope opens 256 MB in 0.2 s at about 1.25x the file in memory and
+/// stays within budget up to 512 MB, while the mapped buffer opens any
+/// size in 0.02 s at a flat ~33 MB. Below this, the rope's advantages win:
+/// undo survives saving, saving does not pause edits, and another program
+/// truncating the file cannot crash Nimbus.
 pub const MAX_ROPE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// How much of a mapped file is read to guess its line ending: 1 MiB, so a

@@ -460,16 +460,15 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-1. **Huge-file threshold.** 256 MB is a guess. M7 measures ropey's load time
-   and memory and may move it.
-2. **Dependency updates.** Add Dependabot for cargo and GitHub Actions, or
+1. **Dependency updates.** Add Dependabot for cargo and GitHub Actions, or
    update by hand at each milestone? The Node 20 deprecation was a hand fix.
 
 Resolved at approval: the two-backend buffer (§4.1), bidi out of scope (§2),
 the nine starter languages (§4.2), binary name `nimbus`. Resolved at the start
 of M1: the bundled font is Hack Nerd Font Mono Regular (§4.3). Resolved after
 M1: the startup budget is under 500 ms total (§1). Resolved after M2: the
-memory budget is per file, at most 1.5× file size over an empty window (§1). Resolved after M5: the
+memory budget is per file, at most 1.5× file size over an empty window (§1). Resolved in M7: the rope-versus-mapped threshold stays at 256 MB,
+measured (M7 doc, Results). Resolved after M5: the
 binary budget is under 35 MB (§1); highlighting memory is not counted in
 the per-file budget, and files over 16 MB get simple line-by-line
 highlighting instead of a syntax tree (§4.2).
@@ -526,4 +525,5 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | The file watcher runs on its own thread; the main thread never calls `notify` | §4.4 |
 | 2026-10-16 | M9 diffs large files in layers: trim common ends, full diff, anchored block diff; long lines split | §8 (m9) |
 | 2026-10-16 | M7 design approved: SUB for invalid bytes, walking by byte, `Content` undo, `unsafe` mapping in app, pread for bulk reads | §4.1, m7 |
+| 2026-10-16 | Rope-versus-mapped threshold kept at 256 MB after measuring 64–512 MB | §4.1, §9 |
 | 2026-10-16 | Compare and merge (two- and three-way) added as milestone 9, after Polish, held to the editor's budgets | §4.4, §8 |
