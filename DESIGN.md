@@ -17,7 +17,7 @@ and add a line to the decision log (§10).
 | Fast startup | First frame in < 500 ms, total time from the top of `main` | `nimbus --smoke` prints `first-frame-ms` | M1: 116–132 ms warm, of which about 3 ms is ours |
 | Typing latency | Keystroke to pixels in < 1 frame (≤ 8 ms at 120 Hz) | Frame timer in debug overlay | — |
 | Huge files | Open a 4 GB log, scroll and search it, under 1 s to interactive | Bench file from `bench/gen.sh` | — |
-| Low footprint | Opening a file adds at most 1.5× its size over an empty window (rope backend); mapped files (M7) add roughly nothing. Total reported, not budgeted. Single binary < 15 MB | `vmmap` physical footprint after settling; CI size job | M2: 45 MB empty, 58 MB with a 10 MB file (1.3×); 7.5 MB binary |
+| Low footprint | Opening a file adds at most 1.5× its size over an empty window (rope backend); mapped files (M7) add roughly nothing. Total reported, not budgeted. Single binary < 35 MB | `vmmap` physical footprint after settling; CI size job | M2: 45 MB empty, 58 MB with a 10 MB file (1.3×); 7.5 MB binary |
 | Modeless editing | Type to insert; Cmd/Ctrl shortcuts; mouse works | — | — |
 
 Content we care about, in order: source code, prose and notes (Markdown),
@@ -325,7 +325,8 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
 - **Rendering**: `nimbus --screenshot FILE.bmp` saves the first frame read
   back from the GPU, so rendering can be checked without OS screenshot
   permission. `NIMBUS_SCALE` overrides the scale factor in debug builds.
-- **Size**: the CI `release-size` job fails above 15 MB. `cargo bloat`
+- **Size**: the CI `release-size` job fails above 35 MB (MiB, checked on
+  Linux, the largest build; 15 MB until M5). `cargo bloat`
   reviews at M5 (after grammars) and M8.
 - **Runtime**: a debug overlay (`F12`, M8, with a log-only version from M2)
   shows frame time, keystroke-to-present latency, atlas occupancy, buffer
@@ -389,7 +390,7 @@ introduces and points at the code.
 | 2 | Editable | **Done** | Open, edit, scroll and save a file | [m2](docs/milestones/m2-editable.md) |
 | 3 | Editing essentials | **Done** | Select, clipboard, undo, find and replace, soft wrap, auto-indent | [m3](docs/milestones/m3-editing-essentials.md) |
 | 4 | Many files | **Done** | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
-| 5 | Highlighting | **Built on `m5-wip`, owner checks pending** | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
+| 5 | Highlighting | **Done** | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
 | 6 | File tree | Planned | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
 | 7 | Huge files | Planned | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
 | 8 | Polish | Planned | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
@@ -417,7 +418,8 @@ Resolved at approval: the two-backend buffer (§4.1), bidi out of scope (§2),
 the nine starter languages (§4.2), binary name `nimbus`. Resolved at the start
 of M1: the bundled font is Hack Nerd Font Mono Regular (§4.3). Resolved after
 M1: the startup budget is under 500 ms total (§1). Resolved after M2: the
-memory budget is per file, at most 1.5× file size over an empty window (§1).
+memory budget is per file, at most 1.5× file size over an empty window (§1). Resolved after M5: the
+binary budget is under 35 MB (§1).
 
 ## 10. Decision log
 
@@ -461,3 +463,4 @@ memory budget is per file, at most 1.5× file size over an empty window (§1).
 | 2026-10-16 | `History::undo`/`redo` report each edit through a callback | §4.1, §4.2 |
 | 2026-10-16 | Main-thread reparse budget 2 ms, then a worker; syntax crate starts no threads | §4.2 |
 | 2026-10-16 | Themes are TOML, built in or in the config directory, hex colours | §4.4 |
+| 2026-10-16 | Binary budget raised from 15 MB to 35 MB: grammars put Linux at 19 MB | §1, §5 |

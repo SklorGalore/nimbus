@@ -45,9 +45,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwayland-dev libxkbcommon-dev
       - run: cargo build --release -p nimbus
-      - name: Enforce 15 MB budget (DESIGN.md §5)
+      - name: Enforce 35 MB budget (DESIGN.md §5)
         shell: bash
         run: |
           size=$(stat -c %s target/release/nimbus)
           echo "nimbus release binary: $((size / 1024 / 1024)) MB ($size bytes)"
-          test "$size" -le $((15 * 1024 * 1024))
+          test "$size" -le $((35 * 1024 * 1024))
