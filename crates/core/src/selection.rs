@@ -217,8 +217,9 @@ impl Selections {
 
     /// Sort the selections and merge any that overlap, keeping track of
     /// the primary. A merged selection covers both; it points the way the
-    /// primary did if the primary is one of them, otherwise the way the
-    /// earlier one did. Allocates nothing.
+    /// primary did if the primary is one of them and is not a bare cursor,
+    /// otherwise the way the earlier one did (or the later one, if the
+    /// earlier is a bare cursor). Allocates nothing.
     pub fn normalize(&mut self) {
         if self.items.len() <= 1 {
             self.primary = 0;
@@ -236,7 +237,12 @@ impl Selections {
             if overlaps(a, b) {
                 let (ra, rb) = (a.range(), b.range());
                 let merged = ra.start..ra.end.max(rb.end);
-                let like = if r == pi && !b.is_empty() { b } else { a };
+                // A bare cursor has no direction to keep.
+                let like = if (r == pi && !b.is_empty()) || a.is_empty() {
+                    b
+                } else {
+                    a
+                };
                 self.items[w] = directed(merged, like);
                 if r == pi {
                     pi = w;
@@ -417,6 +423,10 @@ mod tests {
         let s = Selections::from_vec(vec![sel(0, 4), Selection::cursor(4)], 1);
         assert_eq!(s.as_slice(), &[sel(0, 4)]);
         assert_eq!(s.primary_index(), 0);
+        // A primary cursor at the start of a backward selection merges
+        // into it without turning it round.
+        let s = Selections::from_vec(vec![sel(8, 3), Selection::cursor(3)], 1);
+        assert_eq!(s.as_slice(), &[sel(8, 3)]);
         // Two cursors at one place are one.
         let s = Selections::from_vec(vec![Selection::cursor(3); 3], 2);
         assert_eq!(s.as_slice(), &[Selection::cursor(3)]);
