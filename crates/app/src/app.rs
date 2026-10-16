@@ -26,7 +26,7 @@ use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
 use crate::config::{self, Config};
 use crate::document::{DiskChange, Document};
-use crate::find::{Field, FindBar, SearchBatch};
+use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::input::{self, Command, Motion};
 use crate::io;
 use crate::keymap::Keymap;
@@ -1310,8 +1310,9 @@ impl App {
         let sel = self.doc().selection().range();
         let is_match = self.find.current.and_then(|i| self.find.matches.get(i)) == Some(&sel);
         if is_match && !sel.is_empty() {
-            let replacement = self.find.replacement_for(self.doc(), sel.clone());
-            if let Err(e) = self.doc_mut().replace(sel, &replacement) {
+            if let Some(replacement) = self.find.replacement_for(self.doc(), sel.clone())
+                && let Err(e) = self.doc_mut().replace(sel, &replacement)
+            {
                 log::error!("replace refused: {e}");
             }
             self.doc_mut().history.seal();
@@ -1333,11 +1334,24 @@ impl App {
             let doc = &self.tabs[self.active].doc;
             self.find.search_now(doc);
         }
+        if self.find.capped {
+            self.say(
+                format!(
+                    "Too many matches to replace all (over {}); narrow the search",
+                    find::MAX_KEPT
+                ),
+                true,
+            );
+            return;
+        }
         let items: Vec<(std::ops::Range<usize>, String)> = self
             .find
             .matches
             .iter()
-            .map(|r| (r.clone(), self.find.replacement_for(self.doc(), r.clone())))
+            .filter_map(|r| {
+                let rep = self.find.replacement_for(self.doc(), r.clone())?;
+                Some((r.clone(), rep))
+            })
             .collect();
         match self.doc_mut().replace_many(&items) {
             Ok(n) => {
