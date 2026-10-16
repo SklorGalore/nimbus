@@ -9,12 +9,14 @@ release builds for all three platforms.
 
 ## Done when
 
-- [ ] **Multi-cursor**: `Primary+D` adds a cursor at the next occurrence of
+- [x] **Multi-cursor**: `Primary+D` adds a cursor at the next occurrence of
       the selection; `Alt+click` adds a cursor; Escape returns to one. Typing,
       deleting, movement and paste apply to every cursor; undo restores all.
-- [ ] **Bracket matching**: the bracket pair around the cursor is
+      Also `Primary+Alt+Up/Down`. Property suite `multi_oracle.rs` on both
+      backends; document tests; headless renders with `--cursors`.
+- [x] **Bracket matching**: the bracket pair around the cursor is
       highlighted, using the syntax tree where there is one and a bounded
-      scan otherwise.
+      scan otherwise (syntax and core tests; headless renders).
 - [x] **Status bar**: line and column, selection length, line ending,
       encoding note for lossy files, language, indexing progress.
       Messages show on its left (view test; headless renders).
@@ -28,7 +30,8 @@ release builds for all three platforms.
 - [ ] **Bold and italic** in themes, via bundled variants or synthesis.
 - [ ] Shortcut labels use ⌘ ⌥ ⌃ ⌫ symbols on macOS once fallback fonts
       provide them (M4 shows `Cmd+Shift+P` because the bundled font lacks them).
-- [ ] **Scrollbar** with a draggable thumb.
+- [x] **Scrollbar** with a draggable thumb (view test of its geometry
+      and dragging; headless renders, including the 4 GB log).
 - [ ] **Markdown inline highlighting** (stretch; skip without blocking).
 - [ ] A GPU screenshot smoke test on macOS compares a rendered frame to a
       reference image with a tolerance.

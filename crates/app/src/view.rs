@@ -286,6 +286,24 @@ const WHOLE_LINES_LIMIT: usize = 64 * 1024;
 /// Visible ranges closer than this are highlighted as one.
 const MERGE_GAP: usize = 4096;
 
+#[expect(clippy::cast_precision_loss, reason = "scrollbar geometry")]
+fn f32_of(n: usize) -> f32 {
+    n as f32
+}
+
+/// Start a frame with the text area as its own layer, clipped so rows
+/// scrolled under a bar above or below do not show through it.
+fn begin_text(gpu: &mut Gpu, layout: &Layout, ui: &Ui) {
+    gpu.begin_frame();
+    gpu.set_background(ui.background);
+    gpu.begin_layer(Some([
+        layout.left,
+        layout.top,
+        layout.width - layout.left,
+        layout.bottom - layout.top,
+    ]));
+}
+
 /// How far each way bracket matching counts when there is no syntax tree.
 const BRACKET_LIMIT: usize = 64 * 1024;
 
@@ -475,6 +493,38 @@ pub struct View {
     runs: Vec<ColorRun>,
     /// Reused for the right side of the status bar.
     status: String,
+    /// How many bytes of text the last frame showed, for the scrollbar's
+    /// thumb. Kept as a count rather than an end, so it stays right while
+    /// a drag moves the scroll before the next frame.
+    shown: usize,
+    /// Where the scrollbar was drawn in the last frame, for clicks.
+    scrollbar: Option<Scrollbar>,
+    /// The pointer is over the scrollbar: it is drawn wider.
+    pub scrollbar_hover: bool,
+}
+
+/// The scrollbar as drawn: a track down the right edge of the text and a
+/// thumb showing which part of the text is on screen. Its position is by
+/// byte, not line, so it needs no line count and works on a 4 GB file
+/// before its lines are counted.
+#[derive(Debug, Clone, Copy)]
+struct Scrollbar {
+    /// Left edge of the area that takes clicks (wider than the bar).
+    x: f32,
+    top: f32,
+    h: f32,
+    thumb_top: f32,
+    thumb_h: f32,
+}
+
+/// What a press on the scrollbar hit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScrollbarHit {
+    /// The thumb, this far below its top: dragging keeps that point under
+    /// the pointer.
+    Thumb(f32),
+    /// The track: jump so the thumb is centred there.
+    Track,
 }
 
 /// Everything needed to draw one visual row.
@@ -567,10 +617,6 @@ impl View {
     /// in a huge file before its lines are counted. A scrollbar by bytes
     /// moves unevenly over lines of very different lengths, which is the
     /// price of not counting them.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the scrollbar that drags with it is M8")
-    )]
     pub fn scroll_to_fraction(
         &mut self,
         fraction: f64,
@@ -775,16 +821,7 @@ impl View {
         self.cache.next_frame();
         self.cursor_at = None;
 
-        gpu.begin_frame();
-        gpu.set_background(deco.ui.background);
-        // The text area is its own layer, clipped so rows scrolled under a
-        // bar above or below do not show through it.
-        gpu.begin_layer(Some([
-            layout.left,
-            layout.top,
-            layout.width - layout.left,
-            layout.bottom - layout.top,
-        ]));
+        begin_text(gpu, layout, deco.ui);
 
         let px = self.px();
         let (wrapping, scroll_x) = (self.wrap, self.scroll_x);
@@ -797,6 +834,7 @@ impl View {
         let mut next_head = selections.partition_point(|s| s.head < at.start);
         // Counted once for the top line, then by one per line while known.
         let mut number = t.line_number(at.start);
+        let mut shown_end = t.len_bytes();
         let spans: &[Span] = if deco.captures.is_empty() {
             &[]
         } else {
@@ -864,6 +902,7 @@ impl View {
                     top += lh;
                 }
             }
+            shown_end = span.next.unwrap_or(t.len_bytes());
             let Some(next) = span.next else {
                 break;
             };
@@ -874,6 +913,77 @@ impl View {
             };
         }
         self.cursor_at = painter.cursor_at;
+        self.shown = shown_end.saturating_sub(self.scroll_top);
+    }
+
+    /// Draw the scrollbar for the frame just drawn, or nothing when the
+    /// whole text fits on screen.
+    pub fn draw_scrollbar(&mut self, gpu: &mut Gpu, doc: &Document, layout: &Layout, ui: &Ui) {
+        self.scrollbar = self.scrollbar_geometry(doc.buffer.len_bytes(), layout);
+        let Some(bar) = self.scrollbar else { return };
+        let cell = layout.metrics.cell_width;
+        let w = (cell * if self.scrollbar_hover { 0.9 } else { 0.5 })
+            .round()
+            .max(3.0);
+        let x = layout.width - w - 2.0 * layout.scale;
+        gpu.begin_layer(None);
+        gpu.push_rect([x, bar.thumb_top], [w, bar.thumb_h], ui.scrollbar);
+    }
+
+    /// Where the scrollbar goes for a text of `len` bytes, as last drawn;
+    /// `None` when it all fits on screen. The thumb's height is the share
+    /// of the text on screen (at least three cells), and its place the
+    /// share scrolled past, both by byte.
+    fn scrollbar_geometry(&self, len: usize, layout: &Layout) -> Option<Scrollbar> {
+        let shown = self.shown;
+        if len == 0 || (self.scroll_top == 0 && shown >= len) {
+            return None;
+        }
+        let cell = layout.metrics.cell_width;
+        let (top, h) = (layout.top, layout.bottom - layout.top);
+        let thumb_h = (h * f32_of(shown) / f32_of(len)).clamp((3.0 * cell).min(h), h);
+        let frac = (f32_of(self.scroll_top) / f32_of(len.saturating_sub(shown).max(1))).min(1.0);
+        Some(Scrollbar {
+            x: layout.width - cell,
+            top,
+            h,
+            thumb_top: top + (h - thumb_h) * frac,
+            thumb_h,
+        })
+    }
+
+    /// The scrollbar thumb's height in the last frame (0 when none).
+    #[must_use]
+    pub fn thumb_height(&self) -> f32 {
+        self.scrollbar.map_or(0.0, |b| b.thumb_h)
+    }
+
+    /// What a press at `(x, y)` hits on the scrollbar, if anything.
+    #[must_use]
+    pub fn scrollbar_hit(&self, x: f32, y: f32) -> Option<ScrollbarHit> {
+        let bar = self.scrollbar?;
+        if x < bar.x || y < bar.top || y > bar.top + bar.h {
+            return None;
+        }
+        Some(
+            if (bar.thumb_top..=bar.thumb_top + bar.thumb_h).contains(&y) {
+                ScrollbarHit::Thumb(y - bar.thumb_top)
+            } else {
+                ScrollbarHit::Track
+            },
+        )
+    }
+
+    /// Drag the thumb so that its top is at `y`: scroll by the same
+    /// fraction of the text ([`View::scroll_to_fraction`]).
+    pub fn drag_scrollbar(&mut self, y: f32, doc: &Document, layout: &Layout, tab_width: usize) {
+        let Some(bar) = self.scrollbar else { return };
+        let travel = (bar.h - bar.thumb_h).max(1.0);
+        let frac = f64::from(((y - bar.top) / travel).clamp(0.0, 1.0));
+        let len = doc.buffer.len_bytes();
+        let shown = self.shown;
+        let target = frac * f64_of(len.saturating_sub(shown));
+        self.scroll_to_fraction(target / f64_of(len.max(1)), doc, layout, tab_width);
     }
 }
 
@@ -1749,6 +1859,45 @@ mod tests {
         assert_eq!(v.scroll_top, text.len(), "clamped to the last line");
         v.scroll_to_fraction(0.0, &d, &l, 4);
         assert_eq!(v.scroll_top, 0);
+    }
+
+    #[test]
+    fn the_scrollbar_thumb_follows_the_scroll_and_drags_it() {
+        // 100 lines of 10 bytes; pretend lines 0..10 are on screen.
+        let d = doc(&"123456789\n".repeat(100));
+        let l = layout(10);
+        let mut v = View {
+            shown: 100,
+            ..View::default()
+        };
+        let bar = v.scrollbar_geometry(1000, &l).unwrap();
+        assert!((bar.thumb_top - l.top).abs() < 1e-3, "at the top");
+        // A tenth of the text shown: a tenth of the track, at least.
+        let h = l.bottom - l.top;
+        assert!(bar.thumb_h >= (h / 10.0).min(30.0) - 1e-3);
+        v.scrollbar = Some(bar);
+        assert_eq!(
+            v.scrollbar_hit(l.width - 2.0, l.top + 1.0),
+            Some(ScrollbarHit::Thumb(1.0))
+        );
+        assert_eq!(
+            v.scrollbar_hit(l.width - 2.0, l.bottom - 1.0),
+            Some(ScrollbarHit::Track)
+        );
+        assert_eq!(v.scrollbar_hit(l.width / 2.0, l.top + 1.0), None);
+
+        // Dragging the thumb to the bottom shows the end; halfway, the middle.
+        v.drag_scrollbar(l.bottom, &d, &l, 4);
+        assert_eq!(v.scroll_top, 900);
+        v.drag_scrollbar(l.top + (h - bar.thumb_h) / 2.0, &d, &l, 4);
+        assert_eq!(v.scroll_top, 450);
+
+        // Everything on screen: no scrollbar.
+        let v = View {
+            shown: 1000,
+            ..View::default()
+        };
+        assert!(v.scrollbar_geometry(1000, &l).is_none());
     }
 
     #[test]

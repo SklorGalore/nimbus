@@ -69,6 +69,8 @@ ui_colors! {
     selection,
     /// Behind the bracket at the cursor and its partner.
     bracket,
+    /// The scrollbar's thumb.
+    scrollbar,
     /// Search matches.
     find_match,
     /// The current search match.

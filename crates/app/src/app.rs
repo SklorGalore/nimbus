@@ -368,6 +368,8 @@ struct Clicks {
     /// The press held Alt: it added a cursor, and dragging extends that
     /// one instead of replacing every selection.
     adding: bool,
+    /// Dragging the scrollbar's thumb, held this far below its top.
+    scrollbar_grab: Option<f32>,
 }
 
 const MULTI_CLICK: Duration = Duration::from_millis(500);
@@ -1915,6 +1917,21 @@ impl App {
         self.find.focused = false;
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
+        if let Some(hit) = tab.view.scrollbar_hit(x, y) {
+            // Grab the thumb where pressed, or jump to centre it there.
+            let grab = match hit {
+                view::ScrollbarHit::Thumb(offset) => offset,
+                view::ScrollbarHit::Track => {
+                    let half = tab.view.thumb_height() / 2.0;
+                    tab.view
+                        .drag_scrollbar(y - half, &tab.doc, &layout, tab_width);
+                    half
+                }
+            };
+            self.clicks.scrollbar_grab = Some(grab);
+            self.changed(false);
+            return;
+        }
         let pos = tab.view.hit(x, y, &tab.doc, &layout, tab_width);
         let count = self.clicks.press(now, (x, y), layout.metrics.cell_width);
         let doc = &mut tab.doc;
@@ -1971,6 +1988,17 @@ impl App {
             tab.view.scroll_x_by(-dx);
         }
         self.changed(false);
+    }
+
+    /// Widen the scrollbar while the pointer is over it.
+    fn update_scrollbar_hover(&mut self) {
+        let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        let view = &mut self.tabs[self.active].view;
+        let hover = self.clicks.scrollbar_grab.is_some() || view.scrollbar_hit(x, y).is_some();
+        if hover != view.scrollbar_hover {
+            view.scrollbar_hover = hover;
+            self.changed(false);
+        }
     }
 
     /// Show the resize cursor over the sidebar's divider, the usual one
@@ -2400,6 +2428,7 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
             captures,
         },
     );
+    scene.view.draw_scrollbar(gpu, scene.doc, layout, &ui);
     if find.open {
         view::draw_find_bar(gpu, &ui, find, layout, scene.cursor_visible);
     }
@@ -2955,9 +2984,18 @@ impl ApplicationHandler<AppEvent> for App {
                         self.sidebar.drag_to(&layout, to_f32(position.x));
                         self.changed(false);
                     }
+                } else if let Some(grab) = self.clicks.scrollbar_grab {
+                    if let Some(layout) = self.layout() {
+                        let tab_width = self.tab_width();
+                        let tab = &mut self.tabs[self.active];
+                        let y = to_f32(position.y) - grab;
+                        tab.view.drag_scrollbar(y, &tab.doc, &layout, tab_width);
+                        self.changed(false);
+                    }
                 } else if self.clicks.dragging {
                     self.mouse_drag();
                 }
+                self.update_scrollbar_hover();
                 self.update_cursor_icon();
             }
 
@@ -2973,6 +3011,7 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 } else {
                     self.clicks.dragging = false;
+                    self.clicks.scrollbar_grab = None;
                     if self.sidebar.resizing {
                         self.sidebar.resizing = false;
                         self.remember();
