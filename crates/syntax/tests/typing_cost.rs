@@ -124,7 +124,7 @@ fn simple_highlighting_in_a_100mb_file() {
     let src = std::fs::read_to_string(path).expect("run bench/gen.sh first");
     let mut buf = RopeBuffer::from_text(&src);
     drop(src);
-    let lex = Lexical::new(LanguageId::Rust);
+    let lex = Lexical::new(nimbus_syntax::lexical::builtin(LanguageId::Rust));
     let screen = |buf: &RopeBuffer, line: usize| {
         buf.line_to_byte(line)..buf.line_to_byte((line + 60).min(buf.len_lines() - 1))
     };

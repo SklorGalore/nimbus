@@ -10,11 +10,11 @@ use nimbus_core::{
     Buffer, Edit, EditError, History, LineEnding, RopeBuffer, Selection, Selections, Text,
 };
 
-use nimbus_syntax::LanguageId;
 use nimbus_syntax::state::SyntaxState;
 
 use crate::input::Motion;
 use crate::io::{self, OpenError, SaveError};
+use crate::languages::{Detected, Languages};
 
 /// An open document.
 #[derive(Debug, Default)]
@@ -40,6 +40,8 @@ pub struct Document {
     pub history: History,
     /// The syntax tree for highlighting, kept in step with every edit.
     pub syntax: SyntaxState,
+    /// Key of the detected language (`Detected::key`), if any.
+    language: Option<&'static str>,
     /// [`History::top_id`] when last saved or opened. The document is dirty
     /// whenever the top of the history differs, so undoing back to the saved
     /// point makes it clean again.
@@ -75,32 +77,32 @@ impl Document {
             Err(OpenError::NotFound) => (RopeBuffer::default(), LineEnding::default(), false),
             Err(e) => return Err(e),
         };
-        let mut doc = Self {
+        Ok(Self {
             buffer,
             path: Some(path.to_path_buf()),
             line_ending,
             bom,
             ..Self::default()
-        };
-        doc.detect_language();
-        Ok(doc)
+        })
     }
 
-    /// Pick the language from the path, or a `#!` line, and start its
-    /// syntax state over. Keeps the state when the language is unchanged.
-    pub fn detect_language(&mut self) {
+    /// Pick the language (see [`Languages::detect`]) and start its syntax
+    /// state over. Keeps the state when the language is unchanged.
+    pub fn detect_language(&mut self, languages: &Languages) {
         // Only a shebang needs the text, and only its start: never copy a
         // whole (possibly huge) first line.
-        let language = self
-            .path
-            .as_deref()
-            .and_then(LanguageId::from_path)
-            .or_else(|| {
-                let head = self.buffer.slice(0..self.buffer.len_bytes().min(256));
-                LanguageId::from_shebang(head.lines().next().unwrap_or(""))
-            });
-        if language != self.syntax.language() || self.syntax.off_reason().is_some() {
-            self.syntax.reset(language, self.buffer.len_bytes());
+        let head = self.buffer.slice(0..self.buffer.len_bytes().min(256));
+        let detected = languages.detect(self.path.as_deref(), head.lines().next().unwrap_or(""));
+        drop(head);
+        let key = detected.map(Detected::key);
+        if key == self.language && self.syntax.off_reason().is_none() {
+            return;
+        }
+        self.language = key;
+        match detected {
+            Some(Detected::Builtin(id)) => self.syntax.reset(Some(id), self.buffer.len_bytes()),
+            Some(Detected::Simple(_, rules)) => self.syntax.reset_simple(rules),
+            None => self.syntax.reset(None, self.buffer.len_bytes()),
         }
     }
 

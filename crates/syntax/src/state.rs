@@ -21,7 +21,7 @@ use tree_sitter::{InputEdit, ParseOptions, ParseState, Parser, Tree};
 
 use crate::LanguageId;
 use crate::edit::{input_edit, point_at};
-use crate::lexical::Lexical;
+use crate::lexical::{self, Lexical, Rules};
 use crate::registry::{self, Grammar};
 use crate::text::bytes_from;
 
@@ -191,7 +191,9 @@ impl SyntaxState {
     pub fn new(language: Option<LanguageId>, len: usize) -> Self {
         let phase = match language {
             None => Phase::Off(Off::NoLanguage),
-            Some(l) if len > MAX_HIGHLIGHT_BYTES => Phase::Lexical(Lexical::new(l)),
+            Some(l) if len > MAX_HIGHLIGHT_BYTES => {
+                Phase::Lexical(Lexical::new(lexical::builtin(l)))
+            }
             Some(_) => Phase::Waiting,
         };
         Self {
@@ -211,7 +213,15 @@ impl SyntaxState {
         self.rev = rev;
     }
 
-    /// The language, if one was detected.
+    /// Start over with simple rules only, for a user-defined language:
+    /// no tree-sitter grammar, at any size.
+    pub fn reset_simple(&mut self, rules: &'static Rules) {
+        self.reset(None, 0);
+        self.phase = Phase::Lexical(Lexical::new(rules));
+    }
+
+    /// The built-in language, if one was detected (`None` for a
+    /// user-defined language).
     #[must_use]
     pub fn language(&self) -> Option<LanguageId> {
         self.language
@@ -275,8 +285,9 @@ impl SyntaxState {
     /// Record an edit just applied to `text` (the text after the edit).
     pub fn edit(&mut self, text: &dyn Text, edit: &Edit) {
         if let Phase::Lexical(lexical) = &self.phase {
-            if text.len_bytes() <= MAX_HIGHLIGHT_BYTES {
-                // Shrunk back under the limit (an undone paste): parse.
+            if self.language.is_some() && text.len_bytes() <= MAX_HIGHLIGHT_BYTES {
+                // A built-in language shrunk back under the limit (an
+                // undone paste): parse.
                 self.phase = Phase::Waiting;
             } else {
                 lexical.edit(text, edit);
@@ -315,7 +326,7 @@ impl SyntaxState {
         }
         if text.len_bytes() > MAX_HIGHLIGHT_BYTES {
             // Grew past the limit before the first parse began.
-            self.phase = Phase::Lexical(Lexical::new(language));
+            self.phase = Phase::Lexical(Lexical::new(lexical::builtin(language)));
             self.rev += 1;
             return None;
         }
@@ -386,7 +397,7 @@ impl SyntaxState {
             return None;
         }
         if text.len_bytes() > MAX_HIGHLIGHT_BYTES {
-            self.phase = Phase::Lexical(Lexical::new(self.language?));
+            self.phase = Phase::Lexical(Lexical::new(lexical::builtin(self.language?)));
             self.rev += 1;
             return None;
         }

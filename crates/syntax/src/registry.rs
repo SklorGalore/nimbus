@@ -6,8 +6,14 @@
 //! so it never happens at startup: each language sits behind a `OnceLock`,
 //! filled on first use, normally on a worker thread doing a file's first
 //! parse.
+//!
+//! A user can replace a language's query with `queries/<key>.scm` in a
+//! folder the app names with [`set_user_queries`], or add to it by starting
+//! the file with `;; extends`. A user query that does not compile is
+//! reported through [`take_warnings`] and the built-in one is used.
 
-use std::sync::OnceLock;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use tree_sitter::{Language, Query};
 
@@ -111,6 +117,71 @@ fn source(id: LanguageId) -> Option<(Language, String)> {
     }
 }
 
+static USER_QUERIES: OnceLock<PathBuf> = OnceLock::new();
+static WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Look for user queries in `dir` (`dir/rust.scm`, ...). Call once, before
+/// any grammar loads; later calls are ignored, since loaded queries are
+/// never recompiled (a change takes effect on restart).
+pub fn set_user_queries(dir: PathBuf) {
+    let _ = USER_QUERIES.set(dir);
+}
+
+/// Problems found while loading user queries since the last call.
+#[must_use]
+pub fn take_warnings() -> Vec<String> {
+    WARNINGS
+        .lock()
+        .map(|mut w| std::mem::take(&mut *w))
+        .unwrap_or_default()
+}
+
+fn warn(message: String) {
+    log::warn!("{message}");
+    if let Ok(mut w) = WARNINGS.lock() {
+        w.push(message);
+    }
+}
+
+/// The user's query for `id`, if there is one: the whole query, or the
+/// built-in followed by the user's additions for an `;; extends` file.
+fn user_query(dir: &std::path::Path, id: LanguageId, builtin: &str) -> Option<(PathBuf, String)> {
+    let path = dir.join(format!("{}.scm", id.key()));
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warn(format!("cannot read {}: {e}", path.display()));
+            return None;
+        }
+    };
+    let extends = text
+        .lines()
+        .next()
+        .is_some_and(|l| l.trim() == ";; extends");
+    let query = if extends {
+        format!("{builtin}\n{text}")
+    } else {
+        text
+    };
+    Some((path, query))
+}
+
+/// The user's query if it compiles, else the built-in one.
+fn compile(
+    language: &Language,
+    builtin: &str,
+    user: Option<(PathBuf, String)>,
+) -> Result<Query, tree_sitter::QueryError> {
+    if let Some((path, query)) = user {
+        match Query::new(language, &query) {
+            Ok(q) => return Ok(q),
+            Err(e) => warn(format!("{}: {e}; using the built-in query", path.display())),
+        }
+    }
+    Query::new(language, builtin)
+}
+
 fn slot(id: LanguageId) -> &'static OnceLock<Option<Grammar>> {
     static SLOTS: [OnceLock<Option<Grammar>>; LanguageId::ALL.len()] =
         [const { OnceLock::new() }; LanguageId::ALL.len()];
@@ -130,8 +201,12 @@ pub fn grammar(id: LanguageId) -> Option<&'static Grammar> {
     slot(id)
         .get_or_init(|| {
             let started = std::time::Instant::now();
-            let (language, query) = source(id)?;
-            match Query::new(&language, &query) {
+            let (language, builtin) = source(id)?;
+            let user = USER_QUERIES
+                .get()
+                .and_then(|dir| user_query(dir, id, &builtin));
+            let compiled = compile(&language, &builtin, user);
+            match compiled {
                 Ok(highlights) => {
                     log::debug!("{} grammar ready in {:?}", id.name(), started.elapsed());
                     Some(Grammar {
@@ -176,6 +251,45 @@ mod tests {
             assert_ne!(g.highlights.capture_names().len(), 0);
             assert!(is_loaded(id));
         }
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn user_queries_replace_extend_or_fall_back() {
+        let dir = std::env::temp_dir().join(format!("nimbus-queries-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (language, builtin) = source(LanguageId::Json).unwrap();
+        let names = |user| {
+            let q = compile(&language, &builtin, user).unwrap();
+            q.capture_names()
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            user_query(&dir, LanguageId::Json, &builtin),
+            None,
+            "no file"
+        );
+
+        std::fs::write(dir.join("json.scm"), "(string) @mine\n").unwrap();
+        let user = user_query(&dir, LanguageId::Json, &builtin);
+        assert_eq!(names(user), ["mine"], "replaces");
+
+        std::fs::write(dir.join("json.scm"), ";; extends\n(string) @mine\n").unwrap();
+        let user = user_query(&dir, LanguageId::Json, &builtin);
+        let got = names(user);
+        assert!(
+            got.contains(&"mine".to_owned()) && got.contains(&"string".to_owned()),
+            "{got:?}"
+        );
+
+        std::fs::write(dir.join("json.scm"), "(not_a_node) @x\n").unwrap();
+        let _ = take_warnings();
+        let user = user_query(&dir, LanguageId::Json, &builtin);
+        assert!(names(user).contains(&"string".to_owned()), "falls back");
+        assert_eq!(take_warnings().len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Prints every capture name, for writing themes.

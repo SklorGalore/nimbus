@@ -52,6 +52,7 @@ pub const CHECKPOINT_LINES: usize = 256;
 pub const LOOKBACK_BYTES: usize = 256 * 1024;
 
 /// A kind of string literal.
+#[derive(Debug)]
 struct StringRule {
     open: &'static str,
     close: &'static str,
@@ -70,12 +71,15 @@ const fn s(open: &'static str, close: &'static str, escapes: bool, multiline: bo
     }
 }
 
-/// How one language looks, as far as these rules go.
+/// How one language looks, as far as these rules go. Built in for the
+/// starter languages ([`builtin`]); user languages come from a
+/// [`RuleSpec`] ([`Rules::from_spec`]).
+#[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent traits of a language, written as a table"
 )]
-struct Rules {
+pub struct Rules {
     line_comments: &'static [&'static str],
     /// `#` starts a comment only at the start of a line or after
     /// whitespace (Bash's `$#`, YAML's `a#b`).
@@ -290,7 +294,9 @@ const MARKDOWN: Rules = Rules {
     ..NONE
 };
 
-fn rules(language: LanguageId) -> &'static Rules {
+/// The built-in rules for `language`, used for its files over 16 MB.
+#[must_use]
+pub fn builtin(language: LanguageId) -> &'static Rules {
     match language {
         LanguageId::Rust => &RUST,
         LanguageId::Markdown => &MARKDOWN,
@@ -301,6 +307,143 @@ fn rules(language: LanguageId) -> &'static Rules {
         LanguageId::JavaScript => &JAVASCRIPT,
         LanguageId::TypeScript => &TYPESCRIPT,
         LanguageId::Bash => &BASH,
+    }
+}
+
+/// A user-defined language's rules, as read from its file in the config
+/// directory (the app parses the file; this checks and stores it).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct RuleSpec {
+    /// Markers that comment out the rest of the line, such as `--`.
+    pub line_comments: Vec<String>,
+    /// `#` starts a comment only at the start of a line or after
+    /// whitespace.
+    pub hash_needs_space: bool,
+    /// Opening and closing marker of block comments.
+    pub block_comment: Option<(String, String)>,
+    /// Block comments nest.
+    pub nested_comments: bool,
+    /// String literals, checked in order: put longer openers first.
+    pub strings: Vec<StringSpec>,
+    /// Words coloured as keywords.
+    pub keywords: Vec<String>,
+    /// Words coloured as constants, such as `true` and `nil`.
+    pub constants: Vec<String>,
+}
+
+/// One kind of string literal in a [`RuleSpec`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct StringSpec {
+    /// Opening delimiter.
+    pub open: String,
+    /// Closing delimiter.
+    pub close: String,
+    /// A backslash escapes the next character.
+    pub escapes: bool,
+    /// May continue onto following lines.
+    pub multiline: bool,
+}
+
+/// Why a [`RuleSpec`] was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleError {
+    /// A comment marker or string delimiter is empty; it would match
+    /// everywhere.
+    EmptyDelimiter(&'static str),
+    /// More string kinds than the line state can number.
+    TooManyStrings(usize),
+}
+
+impl std::fmt::Display for RuleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyDelimiter(what) => write!(f, "{what} must not be empty"),
+            Self::TooManyStrings(n) => write!(f, "{n} string kinds; at most 255"),
+        }
+    }
+}
+
+impl std::error::Error for RuleError {}
+
+fn leak(s: &str) -> &'static str {
+    Box::leak(s.to_owned().into_boxed_str())
+}
+
+fn leak_all(v: &[String]) -> &'static [&'static str] {
+    Box::leak(
+        v.iter()
+            .map(|s| leak(s))
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    )
+}
+
+impl Rules {
+    /// Check `spec` and turn it into rules.
+    ///
+    /// Rules live for the rest of the program, like the built-in ones, so
+    /// the scanner needs no lifetimes. Each distinct spec is stored once:
+    /// reloading an unchanged config reuses it, and a changed one costs a
+    /// few kilobytes.
+    ///
+    /// # Errors
+    ///
+    /// A [`RuleError`] if a delimiter is empty or there are too many
+    /// string kinds.
+    pub fn from_spec(spec: &RuleSpec) -> Result<&'static Self, RuleError> {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+        static STORED: OnceLock<Mutex<HashMap<RuleSpec, &'static Rules>>> = OnceLock::new();
+
+        if spec.line_comments.iter().any(String::is_empty) {
+            return Err(RuleError::EmptyDelimiter("a line comment marker"));
+        }
+        if spec
+            .block_comment
+            .as_ref()
+            .is_some_and(|(a, b)| a.is_empty() || b.is_empty())
+        {
+            return Err(RuleError::EmptyDelimiter("a block comment marker"));
+        }
+        if spec
+            .strings
+            .iter()
+            .any(|s| s.open.is_empty() || s.close.is_empty())
+        {
+            return Err(RuleError::EmptyDelimiter("a string delimiter"));
+        }
+        if spec.strings.len() > usize::from(u8::MAX) {
+            return Err(RuleError::TooManyStrings(spec.strings.len()));
+        }
+        let stored = STORED.get_or_init(Mutex::default);
+        if let Some(rules) = stored.lock().ok().and_then(|m| m.get(spec).copied()) {
+            return Ok(rules);
+        }
+        let strings: Vec<StringRule> = spec
+            .strings
+            .iter()
+            .map(|s| StringRule {
+                open: leak(&s.open),
+                close: leak(&s.close),
+                escapes: s.escapes,
+                multiline: s.multiline,
+            })
+            .collect();
+        let rules: &'static Self = Box::leak(Box::new(Self {
+            line_comments: leak_all(&spec.line_comments),
+            hash_after_space: spec.hash_needs_space,
+            block_comment: spec.block_comment.as_ref().map(|(a, b)| (leak(a), leak(b))),
+            nested_comments: spec.nested_comments,
+            strings: Box::leak(strings.into_boxed_slice()),
+            char_literals: false,
+            keywords: leak_all(&spec.keywords),
+            constants: leak_all(&spec.constants),
+            markdown: false,
+        }));
+        if let Ok(mut m) = stored.lock() {
+            m.insert(spec.clone(), rules);
+        }
+        Ok(rules)
     }
 }
 
@@ -439,17 +582,8 @@ fn lex_line(
     while i < bytes.len() {
         let rest = &bytes[i..];
         let ch = bytes[i];
-        let line_comment = rules.line_comments.iter().any(|m| {
-            rest.starts_with(m.as_bytes())
-                && !(*m == "#"
-                    && rules.hash_after_space
-                    && i > 0
-                    && !bytes[i - 1].is_ascii_whitespace())
-        });
-        if line_comment {
-            emit(i..bytes.len(), COMMENT);
-            return state;
-        }
+        // Block comments first: an opener may begin with the line
+        // comment marker (Lua's `--[[` and `--`).
         if let Some((open, _)) = rules.block_comment
             && rest.starts_with(open.as_bytes())
         {
@@ -460,6 +594,17 @@ fn lex_line(
             }
             i = end;
             continue;
+        }
+        let line_comment = rules.line_comments.iter().any(|m| {
+            rest.starts_with(m.as_bytes())
+                && !(*m == "#"
+                    && rules.hash_after_space
+                    && i > 0
+                    && !bytes[i - 1].is_ascii_whitespace())
+        });
+        if line_comment {
+            emit(i..bytes.len(), COMMENT);
+            return state;
         }
         if let Some(k) = rules
             .strings
@@ -517,7 +662,7 @@ fn lex_line(
 /// Line-by-line highlighting state for one large document.
 #[derive(Debug)]
 pub struct Lexical {
-    language: LanguageId,
+    rules: &'static Rules,
     /// State at the start of line `k * CHECKPOINT_LINES`, contiguous from
     /// the first line. Filled as lines are scanned; behind a `RefCell`
     /// because highlighting reads the document state immutably.
@@ -529,11 +674,11 @@ pub struct Lexical {
 }
 
 impl Lexical {
-    /// Highlighting for a document in `language`.
+    /// Highlighting by `rules`: [`builtin`] ones, or a user language's.
     #[must_use]
-    pub fn new(language: LanguageId) -> Self {
+    pub fn new(rules: &'static Rules) -> Self {
         Self {
-            language,
+            rules,
             checkpoints: RefCell::new(vec![LexState::Normal]),
             near: RefCell::new(None),
         }
@@ -555,7 +700,7 @@ impl Lexical {
 
     /// The state line `line` starts in.
     fn state_at(&self, text: &dyn Text, line: usize) -> LexState {
-        let r = rules(self.language);
+        let r = self.rules;
         let mut cps = self.checkpoints.borrow_mut();
         let k = (line / CHECKPOINT_LINES).min(cps.len().saturating_sub(1));
         let base = k * CHECKPOINT_LINES;
@@ -603,7 +748,7 @@ impl Lexical {
         if range.is_empty() || text.len_lines() == 0 {
             return;
         }
-        let r = rules(self.language);
+        let r = self.rules;
         let first = text.byte_to_line(range.start);
         let last = text.byte_to_line(range.end - 1).min(text.len_lines() - 1);
         let mut state = self.state_at(text, first);
@@ -636,7 +781,7 @@ mod tests {
     fn names(language: LanguageId, src: &str) -> Vec<(String, &'static str)> {
         let buf = RopeBuffer::from_text(src);
         let mut out = Vec::new();
-        Lexical::new(language).spans(&buf, 0..src.len(), &mut out);
+        Lexical::new(builtin(language)).spans(&buf, 0..src.len(), &mut out);
         out.iter()
             .map(|s| (src[s.start..s.end].to_owned(), CAPTURES[s.capture as usize]))
             .collect()
@@ -713,7 +858,7 @@ mod tests {
         let src = "let x = \"long string\";\n";
         let buf = RopeBuffer::from_text(src);
         let mut out = Vec::new();
-        Lexical::new(LanguageId::Rust).spans(&buf, 10..15, &mut out);
+        Lexical::new(builtin(LanguageId::Rust)).spans(&buf, 10..15, &mut out);
         assert_eq!(
             out,
             vec![Span {
@@ -730,7 +875,7 @@ mod tests {
         // top must reach the bottom, and closing it must too.
         let body = "let x = 1;\n".repeat(3 * CHECKPOINT_LINES);
         let mut buf = RopeBuffer::from_text(&body);
-        let lex = Lexical::new(LanguageId::Rust);
+        let lex = Lexical::new(builtin(LanguageId::Rust));
         let last = buf.line_to_byte(buf.len_lines() - 2);
         let bottom = |lex: &Lexical, buf: &RopeBuffer| {
             let mut out = Vec::new();
@@ -759,7 +904,7 @@ mod tests {
         let mut src = String::from("/* never closed\n");
         src.push_str(&"let x = 1;\n".repeat(LOOKBACK_BYTES / 11 + 2 * CHECKPOINT_LINES));
         let buf = RopeBuffer::from_text(&src);
-        let lex = Lexical::new(LanguageId::Rust);
+        let lex = Lexical::new(builtin(LanguageId::Rust));
         let line = buf.len_lines() - 2;
         assert_eq!(lex.state_at(&buf, line), LexState::Normal, "approximate");
         assert_eq!(
@@ -778,7 +923,7 @@ mod tests {
     fn a_far_guess_is_kept_while_typing_below_it() {
         let src = "let x = 1;\n".repeat(LOOKBACK_BYTES / 11 + 4 * CHECKPOINT_LINES);
         let mut buf = RopeBuffer::from_text(&src);
-        let lex = Lexical::new(LanguageId::Rust);
+        let lex = Lexical::new(builtin(LanguageId::Rust));
         let top = buf.len_lines() - 100;
         lex.state_at(&buf, top);
         assert_eq!(*lex.near.borrow(), Some((top, LexState::Normal)));
@@ -796,9 +941,59 @@ mod tests {
     }
 
     #[test]
+    fn user_rules_work_and_are_checked() {
+        let spec = RuleSpec {
+            line_comments: vec!["--".to_owned()],
+            block_comment: Some(("--[[".to_owned(), "]]".to_owned())),
+            strings: vec![StringSpec {
+                open: "\"".to_owned(),
+                close: "\"".to_owned(),
+                escapes: true,
+                multiline: false,
+            }],
+            keywords: vec!["local".to_owned(), "end".to_owned()],
+            constants: vec!["nil".to_owned()],
+            ..RuleSpec::default()
+        };
+        let rules = Rules::from_spec(&spec).unwrap();
+        assert!(
+            std::ptr::eq(rules, Rules::from_spec(&spec).unwrap()),
+            "stored once"
+        );
+        let src = "local x = nil -- note\n--[[ a\nb ]] end \"s\"\n";
+        let buf = RopeBuffer::from_text(src);
+        let mut out = Vec::new();
+        Lexical::new(rules).spans(&buf, 0..src.len(), &mut out);
+        let got: Vec<(&str, &str)> = out
+            .iter()
+            .map(|s| (&src[s.start..s.end], CAPTURES[s.capture as usize]))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("local", "keyword"),
+                ("nil", "constant.builtin"),
+                ("-- note", "comment"),
+                ("--[[ a", "comment"),
+                ("b ]]", "comment"),
+                ("end", "keyword"),
+                ("\"s\"", "string"),
+            ]
+        );
+        let empty = RuleSpec {
+            strings: vec![StringSpec::default()],
+            ..RuleSpec::default()
+        };
+        assert_eq!(
+            Rules::from_spec(&empty).unwrap_err(),
+            RuleError::EmptyDelimiter("a string delimiter")
+        );
+    }
+
+    #[test]
     fn every_language_has_rules() {
         for id in LanguageId::ALL {
-            let r = rules(id);
+            let r = builtin(id);
             let some = r.markdown || !r.strings.is_empty() || !r.line_comments.is_empty();
             assert!(some, "{}", id.name());
         }

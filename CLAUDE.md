@@ -22,6 +22,7 @@ bench/gen.sh                                                # 10 MB / 100 MB tes
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp   # render with no window (works with the screen locked)
 cargo run -- FILE --wrap --find PATTERN                     # start with soft wrap on and the find bar searching
 cargo run -- FILE --theme light --headless 1600x1000 --screenshot /tmp/l.bmp   # override the config's theme
+NIMBUS_CONFIG_DIR=/tmp/cfg cargo run -- FILE --headless 1600x1000 --screenshot /tmp/c.bmp   # use another config folder (themes/, languages/, queries/); never write to the owner's real one
 cargo run -- FOLDER a.rs b.rs                              # several tabs; a folder sets the file opener's root
 cargo run -- . --headless 1600x900 --picker files:main --screenshot /tmp/p.bmp   # render a picker (palette|files[:query])
 cargo test --release -p nimbus-core -- --ignored --nocapture # opt-in benchmarks (e.g. wrapping a 1 MB line)
