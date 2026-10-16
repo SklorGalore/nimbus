@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Nimbus is a fast, lightweight, modeless text editor in Rust with its own GPU text pipeline (winit + wgpu, glyphs rasterized with swash into our own atlas). `DESIGN.md` is the source of truth for architecture, performance budgets, and the milestone plan; read the relevant section before starting a milestone, and check its "Open questions" list. Work proceeds one milestone at a time, each ending in something runnable.
+Nimbus is a fast, lightweight, modeless text editor in Rust with its own GPU text pipeline (winit + wgpu, glyphs rasterized with swash into our own atlas). `DESIGN.md` is the source of truth for architecture, performance budgets, and the milestone plan; check its "Open questions" list before starting a milestone. Each milestone has a plan in `docs/milestones/` with a done-when checklist and ordered tasks; work through the tasks in order, tick the checklist, and fill in the plan's Results section (startup time, binary size, surprises) when the milestone lands. Standing requirements for every milestone are in `docs/milestones/README.md`.
 
 The owner is new to Rust, wgpu, and text rendering. When landing a milestone, explain each new concept in plain language and point at the code that embodies it. Prefer clear over clever.
 
@@ -14,6 +14,9 @@ The owner is new to Rust, wgpu, and text rendering. When landing a milestone, ex
 cargo build                              # debug build (deps are built at opt-level 2, see Cargo.toml)
 cargo run -- --smoke                     # open window, exit after first frame, print first-frame-ms=
 cargo build --release && ./target/release/nimbus --smoke   # the startup number that matters
+RUST_LOG=nimbus=debug ./target/release/nimbus --smoke       # same, with per-phase startup times
+cargo run -- --screenshot /tmp/frame.bmp                    # save the first frame; convert with `sips -s format png`
+NIMBUS_SCALE=1 cargo run -- --screenshot /tmp/1x.bmp         # debug builds: render at another scale factor
 cargo test --workspace
 cargo test -p nimbus-core <test_name>    # single test in one crate
 cargo fmt --all --check
@@ -43,6 +46,31 @@ Rules behind those lints:
 - **Tests live with the code.** Use `#[cfg(test)] mod tests` in the same file. Buffer logic needs property tests against a `String` oracle once `proptest` is added in milestone 2.
 - **Dependencies need a reason.** A new crate must fit the binary-size budget and be added with `cargo add` to the crate that uses it. Say why in the commit message.
 
+## Subagents
+
+Do most work inline. Spawn a subagent only for the cases in the table below; each one starts cold, so a subagent for a small or already-understood task costs more than it saves. Pass the `effort` listed. Raise it one level if the task touches `unsafe`, saving, or concurrency, even when it looks routine.
+
+| Situation | Agent | Effort | Notes |
+|---|---|---|---|
+| Confirm a dependency's API before using it (wgpu, winit, swash, ropey, tree-sitter, muda, nucleo) | `Explore`, model `haiku` | `low` | Ask for exact signatures and enum variants from `~/.cargo/registry/src/*/<crate>-<version>/`, not prose. Keeps crate source out of the main context. This repo has already hit API drift once. |
+| Locate code across several crates ("where is the cursor clamped", "every caller of `Buffer::line`") | `Explore` | `low`, or `medium` if the answer spans more than three files | Say "medium" or "very thorough" for breadth. |
+| Turn a milestone task with real design uncertainty into an implementation plan: atlas packing and upload (M1), movement and IME (M2), anchored scrolling with soft wrap (M3), first parse plus replayed edits (M5), piece table and sparse index (M7), multi-cursor edit application (M8) | `Plan` | `high` | Give it the milestone doc and the `DESIGN.md` sections. Review the plan before writing code; don't forward it unread. |
+| Implement two or more independent, well-specified tasks from the same milestone at once (for example the M1 atlas packer and font metrics, or the M2 property tests and `bench/gen.sh`) | `general-purpose` with `isolation: "worktree"` | `medium` | Only when the tasks touch disjoint files. Never for tasks that edit the same module. |
+| Property tests and oracles for buffers, undo, search chunking or the line index | `general-purpose` | `high` | Tests that compare against a `String` oracle are where data-loss bugs get caught. |
+| Anything in `unsafe` code, atomic save, the mmap backend, or cross-thread version checks | `general-purpose` | `xhigh` | Ask it to state the invariant each piece of code relies on. |
+| End-of-milestone review | `/code-review` skill | `high`; `xhigh` for M2, M7 and M8 | M2 adds save, M7 adds `unsafe` and mmap, M8 adds multi-cursor edits. |
+| A rendering or input bug that survived two focused attempts inline | `general-purpose` | `max` | Include what was tried and what was observed. |
+| Questions about Claude Code itself | `claude-code-guide` | default | Continue an existing one with `SendMessage` rather than starting another. |
+
+Every subagent prompt must stand on its own. Include:
+- the milestone doc path and the `DESIGN.md` section numbers that apply;
+- the invariants from Architecture below that the task could break;
+- the lint rules, or the instruction to make `RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets` pass;
+- the wgpu 30 warning below when GPU code is involved;
+- for implementation agents, which files they may change.
+
+Subagents do not commit, push, or edit `DESIGN.md` or milestone docs. After a subagent returns, verify its work in the main session before relying on it: read the diff, then run fmt, strict clippy and the tests. Merge worktree results one at a time and rerun the checks after each.
+
 ## Architecture
 
 Cargo workspace; crates live in `crates/`, each package named `nimbus-<dir>` except the binary, which is `nimbus` in `crates/app`.
@@ -61,7 +89,7 @@ Invariants from DESIGN.md that code above the buffer must respect:
 
 ## Performance budgets (enforced or measured)
 
-- Time to first frame under 100 ms in release. Milestone 0 measured about 95 ms warm on an M5 Pro while drawing nothing, so startup work added later must be lazy or off the main thread.
+- First frame under 500 ms in release, measured from the top of `main` by `--smoke`. M1 measured 116–132 ms warm on an M5 Pro, of which about 3 ms is ours and the rest is winit and AppKit. The headroom is for real features (opening files, config, highlighting), not for unnecessary work: keep startup work lazy or off the main thread. Check per-phase times with `RUST_LOG=nimbus=debug`.
 - Release binary under 15 MB; the `release-size` CI job fails above that.
 - The release profile (`lto = "fat"`, `panic = "abort"`, `strip`) is deliberate; don't loosen it.
 

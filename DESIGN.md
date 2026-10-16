@@ -3,21 +3,35 @@
 A fast, lightweight, modeless text editor with its own GPU rendering pipeline.
 Written in Rust. Personal tool first; clean enough to share later.
 
-Decisions below come from the kickoff interview on 2026-10-15. Items marked
-**open** need a decision before the milestone that touches them.
+Decisions come from the kickoff interview on 2026-10-15 and the approval of
+the first draft the same day. Each milestone has a detailed plan in
+[`docs/milestones/`](docs/milestones/). This document holds the decisions that
+span milestones; a milestone doc holds the work breakdown for one milestone.
+When a milestone changes a decision here, update this file in the same commit
+and add a line to the decision log (§10).
 
 ## 1. Goals
 
-| Goal | Target | How we measure |
-|---|---|---|
-| Instant startup | Editable window in < 100 ms (cold, mid-size file) | `hyperfine` on launch-to-first-frame, logged at startup |
-| Typing latency | Keystroke to pixels in < 1 frame (≤ 8 ms at 120 Hz) | Frame timer in debug overlay |
-| Huge files | Open a 4 GB log, scroll and search it, under 1 s to interactive | Bench file in `bench/` |
-| Low footprint | < 30 MB resident with one file open; single binary < 15 MB | `ps`, `ls -l target/release` |
-| Modeless editing | Type to insert; Cmd/Ctrl shortcuts; mouse works | — |
+| Goal | Target | How we measure | Baseline (M0) |
+|---|---|---|---|
+| Fast startup | First frame in < 500 ms, total time from the top of `main` | `nimbus --smoke` prints `first-frame-ms` | M1: 116–132 ms warm, of which about 3 ms is ours |
+| Typing latency | Keystroke to pixels in < 1 frame (≤ 8 ms at 120 Hz) | Frame timer in debug overlay | — |
+| Huge files | Open a 4 GB log, scroll and search it, under 1 s to interactive | Bench file from `bench/gen.sh` | — |
+| Low footprint | < 30 MB resident with one file open; single binary < 15 MB | `ps`, CI size job | M1: 7.3 MB binary |
+| Modeless editing | Type to insert; Cmd/Ctrl shortcuts; mouse works | — | — |
 
 Content we care about, in order: source code, prose and notes (Markdown),
 config and data files (JSON, YAML, TOML, CSV, logs).
+
+**Startup budget: under 500 ms**, set by the owner on 2026-10-15 after M1
+showed that the original 100 ms was below the platform floor. M1 measured
+each phase from the top of `main` (M1 doc, Results). About 120 ms goes to
+winit and AppKit: creating the application, creating the window, and
+showing it before the first redraw request. Our own work is about 3 ms, with
+GPU setup overlapped on a background thread. The budget leaves room for
+opening a file, config and highlighting setup, but later milestones should
+still keep work lazy or off the main thread. Record warm, and first-run
+after a rebuild, in each milestone's Results.
 
 ## 2. Non-goals (for now)
 
@@ -25,20 +39,24 @@ config and data files (JSON, YAML, TOML, CSV, logs).
 - Plugins or a scripting language.
 - LSP, debugging, terminals, git integration.
 - Collaborative editing.
-- Rich text, proportional fonts in the editor area (UI chrome may use them later).
-
-Several of these are easy to add later if the core is clean. None are needed
-for the editor to be useful.
+- Rich text, or proportional fonts in the editor area. UI chrome may use them later.
+- Bidirectional and right-to-left text. Decided at approval; the renderer
+  assumes left-to-right runs.
+- Multiple windows. One window with tabs.
+- Session restore. Reopening the last files is a nice-to-have after M8.
+- Native menu bar on Linux (§4.4).
 
 ## 3. Platform
 
 Targets macOS, Linux, Windows from day one, all through `winit` + `wgpu`.
-No platform-specific windowing code. Native menu bar via `muda` (works on all
-three). Primary development and testing happens on macOS; other platforms are
-checked by CI builds and occasional manual runs.
+No platform-specific windowing code. Primary development and testing happens
+on macOS; CI builds, lints and tests all three on every push (verified since
+M0). Linux CI needs `libwayland-dev` and `libxkbcommon-dev`.
 
-Consequence: the modifier key is "Cmd on macOS, Ctrl elsewhere". We call it
-`Primary` in keybindings and resolve it per platform.
+The modifier key is "Cmd on macOS, Ctrl elsewhere". We call it `Primary` in
+keybindings and resolve it per platform.
+
+Rust edition 2024, stable toolchain (1.99 at M0). No nightly features.
 
 ## 4. Architecture
 
@@ -47,14 +65,17 @@ no GPU, and keeps compile times down when iterating on one layer.
 
 ```
 nimbus/
-  Cargo.toml            workspace
+  Cargo.toml            workspace, lint table, release profile
+  clippy.toml           test-only lint relaxations
   crates/
-    core/               text buffer, edits, undo, cursors, search   (no I/O, no GPU)
-    syntax/             tree-sitter integration, highlight spans
-    render/             wgpu pipeline, glyph atlas, text layout, rect/quad batching
-    app/                winit loop, editor state, tabs, palette, file tree, keymap, config
+    core/    nimbus-core     text buffers, edits, undo, cursors, search   (no I/O, no GPU)
+    syntax/  nimbus-syntax   tree-sitter integration, highlight spans
+    render/  nimbus-render   wgpu pipeline, glyph atlas, text layout, rect/quad batching
+    app/     nimbus          winit loop, editor state, tabs, palette, file tree, keymap, config
   bench/                large test files, generated on demand
+  docs/milestones/      one plan per milestone
   DESIGN.md
+  CLAUDE.md             agent instructions: commands, invariants, code quality rules
 ```
 
 Dependency direction is strictly downward: `app → render, syntax, core`;
@@ -63,22 +84,21 @@ nothing in the workspace.
 
 ### 4.1 core: the text buffer
 
-**Decision needed (open).** Two interview answers conflict:
+**Decided: two backends behind one trait.** The interview chose both ropey
+and lazy memory-mapping. Ropey holds the whole text in memory, so it cannot be
+the only backend. A narrow `Buffer` trait has two implementations:
 
-- *Buffer:* rope via `ropey`. Ropey holds the entire text in memory.
-- *Huge files:* memory-map and index lazily, never loading the whole file.
-
-Recommended resolution: define a small `Buffer` trait in `core` and ship two
-backends, in this order.
-
-1. **`RopeBuffer`** (milestone 2). Wraps `ropey::Rope`. Used for every file
-   under a size threshold (initially 256 MB). Gets us a correct, fast editor
-   quickly.
-2. **`MappedBuffer`** (milestone 7). A piece table whose "original" piece is
-   an `mmap` of the file and whose "add" piece is an append-only `Vec<u8>`.
-   Line starts are indexed in the background in 64 MB chunks; the UI shows
-   what is indexed so far and the scrollbar grows as indexing proceeds.
-   Edits are allowed; saving writes a new file and renames over the old one.
+1. **`RopeBuffer`** (M2). Wraps `ropey::Rope` from ropey 1.6, the stable line
+   used by Helix. Used for files under a size threshold (initially 256 MB)
+   that are valid UTF-8. Ropey 1.x indexes by `char`; the wrapper converts at
+   the boundary so nothing above it sees char indices. Ropey 2.0, currently in
+   beta, indexes by byte natively; revisit when it is stable.
+2. **`MappedBuffer`** (M7). A piece table whose original piece is an `mmap`
+   of the file and whose add piece is an append-only `Vec<u8>`. Lines are
+   indexed in the background with a sparse checkpoint index, so a 4 GB file
+   costs kilobytes of index, not hundreds of megabytes (M7 doc). Edits are
+   allowed; saving streams to a temp file and renames it over the original.
+   Also used for files that are not valid UTF-8, at any size.
 
 The trait is intentionally narrow so both backends stay honest:
 
@@ -86,184 +106,286 @@ The trait is intentionally narrow so both backends stay honest:
 pub trait Buffer {
     fn len_bytes(&self) -> usize;
     fn len_lines(&self) -> usize;            // may be a lower bound while indexing
-    fn line(&self, idx: usize) -> Cow<str>;  // without trailing newline
+    fn line(&self, idx: usize) -> Cow<str>;  // without trailing newline; lossy for invalid UTF-8
     fn byte_to_line(&self, b: usize) -> usize;
     fn line_to_byte(&self, l: usize) -> usize;
     fn slice(&self, range: Range<usize>) -> Cow<str>;
     fn replace(&mut self, range: Range<usize>, text: &str) -> Edit;
     fn is_fully_indexed(&self) -> bool;
+    fn snapshot(&self) -> Box<dyn BufferSnapshot>; // cheap, Send, read-only; for worker threads
 }
 ```
 
+`snapshot` was added after the first draft: background search (M3) and
+initial parsing (M5) need to read the text off the main thread while the user
+keeps typing. A ropey clone is O(1) because ropes share structure; a mapped
+snapshot clones the piece list and shares the mmap.
+
 Everything above the buffer (cursors, undo, search, rendering) works in byte
 offsets and asks the buffer for line conversions. Nothing else may assume the
-whole text is resident.
+whole text is resident, or that a single line is small: minified JSON or a
+log without newlines can be one line of hundreds of megabytes. M7 adds
+`line_slice(idx, byte_range)` so the view fetches only the visible columns
+of any line over 64 KB.
 
 Other `core` responsibilities:
 
 - **Positions** are byte offsets into UTF-8. Char and grapheme boundaries are
-  resolved via `unicode-segmentation` when moving the cursor. Column display
-  is computed at render time, not stored.
+  resolved with `unicode-segmentation` when the cursor moves. Display column
+  is computed at render time, not stored. Vertical movement keeps a "sticky"
+  preferred column so moving through a short line does not lose your place.
 - **Cursors and selections**: a `Selection` is `{anchor, head}`. The editor
-  holds a `Vec<Selection>`, so multi-cursor is possible later without a
-  redesign, but v1 uses exactly one.
+  holds a `Vec<Selection>`, so multi-cursor (M8) needs no redesign, but
+  M2–M7 use exactly one.
 - **Undo**: a linear history of `Edit` records (range, removed text, inserted
-  text, cursor before/after). Adjacent single-char insertions coalesce into
-  one record. Branching undo trees are a non-goal.
-- **Search**: literal and regex (`regex` crate) over `Buffer::slice` in
-  chunks, so it works on mapped files. Results are byte ranges.
-- **Line endings**: detected on open (LF / CRLF / mixed → LF), preserved on
-  save. Tabs are kept as tabs; display width is a setting.
+  text, selections before and after). Typing coalesces into one record until
+  the cursor jumps, the edit kind changes, or 500 ms pass. Branching undo
+  trees are a non-goal.
+- **Search**: literal and regex (`regex` crate) over `BufferSnapshot` in
+  chunks, so it works on mapped files and runs off the main thread. Results
+  are byte ranges.
+- **Line endings**: detected on open (LF, CRLF, or mixed, which normalises to
+  the majority) and preserved on save. Tabs are kept as tabs; display width
+  is a setting.
 
 ### 4.2 syntax: highlighting
 
-`tree-sitter` with grammars compiled into the binary as crates
-(`tree-sitter-rust`, `-markdown`, `-json`, `-toml`, `-yaml`, `-python`,
-`-javascript`, `-typescript`, `-bash`). Highlighting through
-`tree-sitter-highlight` queries, producing spans of `(byte_range, scope)`.
+`tree-sitter` 0.27 with grammars compiled into the binary as crates. Starter
+set, confirmed at approval: Rust, Markdown, JSON, TOML, YAML, Python,
+JavaScript, TypeScript, Bash. Each grammar sits behind a cargo feature so a
+grammar that costs too much binary size can be dropped (M5 measures).
+
+Highlighting runs our own query loop rather than `tree-sitter-highlight`:
+that crate wants the whole document as one `&[u8]`, and our text lives in a
+rope or a piece table. A `QueryCursor` restricted to the visible byte range,
+reading text through a chunk callback, avoids copying the document.
 
 Rules that protect the performance goals:
 
-- Grammars are initialized lazily on first use of that language, on a
-  background thread. Startup never pays for a parser.
-- Parsing is incremental: every `Edit` is fed to `Parser::parse` with the old
-  tree, so a keystroke costs a few microseconds of reparse, not a full parse.
+- Grammars are initialized lazily on first use of that language. Startup
+  never pays for a parser.
+- The first parse of a file runs on a worker thread against a snapshot; the
+  edits made meanwhile are replayed into the tree when it returns.
+- After that, parsing is incremental on the main thread: every `Edit` is fed
+  to the parser with the old tree, so a keystroke costs microseconds.
 - Highlighting is computed only for the visible line range plus a margin.
-- Above a per-file size threshold (initially 16 MB) or for `MappedBuffer`,
-  highlighting is off. Big logs are plain text; that is fine.
+- Above 16 MB, or for any `MappedBuffer`, highlighting is off.
 
-The `app` crate maps scopes to colors via the theme.
+Markdown needs a second, inline grammar injected into each paragraph. M5
+ships block-level Markdown highlighting; inline emphasis and code spans are
+an M8 stretch item.
+
+The `app` crate maps capture names to colours via the theme, with
+longest-prefix matching (`keyword.control` falls back to `keyword`).
 
 ### 4.3 render: GPU text
 
-Our own pipeline on `wgpu`. Three pieces:
+Our own pipeline on `wgpu` 30. Four pieces:
 
-1. **Font loading and shaping**: `swash` for both. We discover fonts with
-   `fontdb` (system fonts) and ship one bundled monospace fallback so the
-   editor renders identically everywhere. Shaping is per line; results are
-   cached keyed on `(line content hash, font id, size)`. Monospace is assumed
-   for the editor area, which makes column math trivial and lets us skip
-   bidi for now (**open**: bidi support is a non-goal until someone needs it).
-2. **Glyph atlas**: a single `R8Unorm` texture (2048², grows by allocating a
-   second page). Shelf packing. Glyphs are rasterized by `swash::scale` with
-   grayscale antialiasing at the exact pixel size and device scale factor;
-   subpixel positioning is quantized to 1/4 pixel horizontally. The atlas is
-   invalidated and rebuilt on DPI or font-size change.
-3. **Draw**: two instanced pipelines, one for solid rectangles (backgrounds,
+1. **Fonts**: one monospace font is bundled in the binary with
+   `include_bytes!`, so the first frame never waits for a system font scan.
+   That scan (`fontdb`) is slow, tens to hundreds of milliseconds, so it runs
+   on a background thread only when the config names a system font or a
+   glyph is missing and needs a fallback (M8). The bundled font is Hack Nerd
+   Font Mono Regular (MIT and Bitstream Vera licences, about 2.7 MB), chosen
+   by the owner. Its Nerd Font icons are scaled to one cell, so file-type and
+   status icons can appear in the tree, tabs and status bar without breaking
+   the grid.
+2. **Shaping**: `swash`, per line. Results are cached keyed on
+   `(line content hash, font id, size)`. The editor area is monospace, which
+   makes column math trivial.
+3. **Glyph atlas**: one `R8Unorm` texture (2048², a second page is added when
+   full). Our own shelf packer, about a hundred lines, written by hand
+   because learning how atlases work was a goal. `etagere` is the drop-in
+   fallback if the packer becomes a time sink. Glyphs are rasterized by
+   `swash::scale` with grayscale antialiasing at the exact pixel size and
+   scale factor. Horizontal subpixel position is quantized to quarter pixels,
+   so each glyph has up to four atlas entries. The atlas is cleared and
+   refilled on scale-factor or font-size change.
+4. **Draw**: two instanced pipelines, one for solid rectangles (backgrounds,
    cursor, selection, gutter, UI chrome) and one for textured glyph quads.
-   One vertex buffer each, rebuilt per frame from a `Vec<Instance>`. A whole
-   frame of a 4K window is two draw calls.
+   Each frame fills two reusable `Vec<Instance>`s, uploads them, and issues
+   two draw calls. Instance structs are `#[repr(C)]` and cast to bytes with
+   `bytemuck`.
 
-Frames are drawn **on demand**, not in a loop. The app requests a redraw on
-input, scroll, resize, cursor blink tick, and when a background task
-(indexing, highlighting) posts an update. Idle CPU is zero.
+**Colour and blending.** The surface uses a non-sRGB format, so blending
+happens in gamma space, which is how most platforms' native text looks.
+Coverage gets a small adjustable contrast curve, because light text on dark
+backgrounds otherwise looks thin. Linear blending is a possible later
+experiment, not a v1 goal.
 
-Layout is simple because everything is a monospace grid: a `View` has a
-scroll offset in lines plus a pixel fraction, a visible line range, and
-produces `Vec<Instance>` from `Buffer::line` + highlight spans. Soft wrap for
-prose is done in layout: a logical line maps to N visual rows, computed for
-visible lines only and cached.
+**Startup path (M1).** M0 creates the GPU instance, adapter and device on the
+main thread after the window exists. M1 moves that work to a thread spawned
+first thing in `main`, together with font parsing and shader compilation, so
+it overlaps the OS creating the window. The adapter is requested without a
+surface and checked for compatibility once the surface exists. The window is
+created on the main thread, which macOS requires.
+
+**Frames are drawn on demand**, not in a loop. The app requests a redraw on
+input, scroll, resize, cursor blink, and when a background task (indexing,
+parsing, search) posts an update. Cursor blink uses `ControlFlow::WaitUntil`
+for the next blink, and blinking stops after 10 s without input, so an idle
+editor wakes nothing.
+
+Layout is simple because everything is a monospace grid. A `View` has a
+scroll position, a visible line range, and produces instances from
+`Buffer::line` plus highlight spans. Soft wrap maps a logical line to N
+visual rows, computed only for visible lines and cached. Scrolling is
+anchored: the position is "logical line L, visual row R within it, plus a
+pixel offset", so wrapped documents never need a prefix sum over every line.
 
 ### 4.4 app: the editor
 
-- **Event loop**: `winit`. All editor state lives in one `Editor` struct on
-  the main thread. Background threads (file loading, indexing, parsing, file
-  walking) send messages through a channel; the loop drains it and requests
-  a redraw.
-- **Actions**: every user-visible operation is an `Action` enum variant with
-  a name and a description. Keymap maps chords to actions. The command
-  palette (`Primary+Shift+P`) lists them with fuzzy search. This is the only
-  way to add a feature: define the action, bind it, register it. Nothing is
-  reachable only by a hard-coded key.
+- **Event loop**: `winit` 0.30, pinned below the 0.31 beta. All editor state
+  lives in one `Editor` struct on the main thread. Background threads send
+  messages over a `crossbeam-channel`; the loop is woken with an
+  `EventLoopProxy` user event, drains the channel, and requests a redraw.
+- **Actions**: every user-visible operation is an `Action` with a stable
+  name, a description and default keybindings. The keymap maps chords to
+  actions. The command palette lists them with fuzzy search. Nothing is
+  reachable only through a hard-coded key.
 - **Tabs**: a `Vec<Document>` plus the active index. `Primary+1..9` switch,
-  `Primary+W` closes, `Primary+Tab` cycles. Dirty state in the tab title.
+  `Primary+W` closes, `Ctrl+Tab` cycles. Dirty state shows in the tab.
 - **Fuzzy file opener** (`Primary+P`): the project root is the folder passed
-  on the command line, else the parent of the first opened file, else cwd.
-  Walked with `ignore` (respects `.gitignore`) on a background thread;
-  matched with `nucleo`.
+  on the command line, else the parent of the first opened file, else the
+  current directory. Walked with `ignore`, which respects `.gitignore`, on a
+  background thread, streaming into `nucleo`, which matches incrementally.
 - **File tree sidebar** (`Primary+B` toggles): lazy directory listing,
-  expanded on click, same walker as above. Rendered with the same rect and
-  glyph pipelines; it is just rows of text.
-- **Find / replace** (`Primary+F`, `Primary+H`): inline bar at the top of
-  the view, incremental, match count, regex toggle.
+  expanded on click, refreshed by a `notify` file watcher. Rendered with the
+  same rect and glyph pipelines; it is rows of text.
+- **External changes**: the same watcher reloads an open file that changed on
+  disk if it has no unsaved edits, and warns if it does (M6).
+- **Find / replace** (`Primary+F`, `Primary+H` on Windows and Linux,
+  `Primary+Alt+F` on macOS where `Cmd+H` hides the app): an inline bar at the
+  top of the view, incremental, with match count and regex and case toggles.
+- **Menus**: native menu bar with `muda` on macOS and Windows. On Linux,
+  `muda` needs GTK, which we avoid, so Linux relies on the command palette.
 - **Clipboard**: `arboard`. **File dialogs**: `rfd`.
-- **Config**: one TOML file at the platform config dir
-  (`~/Library/Application Support/nimbus/config.toml` on macOS). Font, size,
-  tab width, theme, soft-wrap default, keybinding overrides. Missing file
-  means defaults; a broken file is reported in the status bar, never fatal.
-- **Themes**: a built-in dark and light theme as TOML; user themes are the
-  same format in the config dir.
+- **Config**: one TOML file in the platform config directory (from `dirs`):
+  `~/Library/Application Support/nimbus/config.toml` on macOS,
+  `~/.config/nimbus/config.toml` on Linux, `%APPDATA%\nimbus\config.toml` on
+  Windows. Font, size, tab width, theme, soft-wrap default, keybinding
+  overrides. A missing file means defaults; a broken one is reported in the
+  message line, never fatal.
+- **Themes**: built-in dark and light themes as TOML compiled in with
+  `include_str!`; user themes use the same format in the config directory.
 
-## 5. Performance budget enforcement
+## 5. Quality and performance enforcement
 
-- A debug overlay (`F12`) shows frame time, last-keystroke latency, atlas
-  occupancy, buffer backend, and background task status.
-- `bench/gen.sh` generates 100 MB, 1 GB, and 4 GB files. `cargo bench` has
-  criterion benches for buffer ops and line layout.
-- CI fails if the release binary exceeds 15 MB.
-- Release profile: `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`,
+- **Lints**: a strict lint table in the root `Cargo.toml` (clippy pedantic,
+  no `unwrap`/`expect`/`panic` outside tests, no stray prints, `missing_docs`,
+  `unsafe_code` denied except where a module lifts it with a reason). CI runs
+  clippy with `-D warnings` on all three platforms. Rules are in `CLAUDE.md`.
+- **Startup**: `nimbus --smoke` exits after the first frame and prints
+  `first-frame-ms`, timed from the top of `main`. Run with
+  `RUST_LOG=nimbus=debug` to see per-phase times. Record it in each
+  milestone doc's results.
+- **Rendering**: `nimbus --screenshot FILE.bmp` saves the first frame read
+  back from the GPU, so rendering can be checked without OS screenshot
+  permission. `NIMBUS_SCALE` overrides the scale factor in debug builds.
+- **Size**: the CI `release-size` job fails above 15 MB. `cargo bloat`
+  reviews at M5 (after grammars) and M8.
+- **Runtime**: a debug overlay (`F12`, M8, with a log-only version from M2)
+  shows frame time, keystroke-to-present latency, atlas occupancy, buffer
+  backend and background task status.
+- **Benchmarks**: `bench/gen.sh` (M2) generates 10 MB, 100 MB, 1 GB and
+  4 GB files. `criterion` benches cover buffer operations and line layout.
+- **Release profile**: `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`,
   `panic = "abort"`, `strip = true`.
 
 ## 6. Testing
 
-- `core` and `syntax` are pure and get ordinary unit tests plus property
-  tests (`proptest`) that random edit sequences on `RopeBuffer` and
-  `MappedBuffer` produce identical text to a `String` oracle.
-- `render` layout code is tested headlessly: given a buffer and view, assert
-  the produced instances. Shader and atlas code is tested by a single
-  screenshot smoke test on macOS.
-- `app` gets integration tests that drive `Action`s directly without a
-  window.
+- `core` and `syntax` are pure and get unit tests plus property tests
+  (`proptest`): random edit sequences on `RopeBuffer` and `MappedBuffer` must
+  produce the same text as a `String` oracle.
+- `render` layout code is tested headlessly: given a buffer, metrics and a
+  view, assert the produced instances. The atlas packer has its own unit
+  tests. GPU output gets one screenshot smoke test on macOS in M8.
+- `app` gets integration tests that drive `Action`s against an `Editor`
+  without a window.
 
-## 7. Dependencies (initial)
+## 7. Dependencies
 
-| Crate | Role |
-|---|---|
-| `winit`, `wgpu`, `pollster` | window, GPU, blocking on adapter setup |
-| `swash`, `fontdb` | shaping, rasterization, font discovery |
-| `ropey`, `memmap2` | buffer backends |
-| `unicode-segmentation`, `unicode-width` | grapheme and width rules |
-| `regex` | search |
-| `tree-sitter`, `tree-sitter-highlight`, grammar crates | syntax |
-| `muda` | native menu bar |
-| `arboard`, `rfd` | clipboard, dialogs |
-| `ignore`, `nucleo` | project walking, fuzzy matching |
-| `serde`, `toml`, `dirs` | config |
-| `crossbeam-channel` | background → main thread messages |
-| `log`, `env_logger` | logging |
+Versions are the latest stable at planning time (2026-10-15). Each is added
+in the milestone that first needs it, with `cargo add` on the crate that uses
+it.
 
-Each dependency is pinned in `Cargo.lock`; we review the tree for size with
-`cargo bloat` at milestone 4 and 8.
+| Crate | Version | Role | Milestone |
+|---|---|---|---|
+| `winit` | 0.30 | window, input | M0 |
+| `wgpu` | 30 | GPU | M0 |
+| `pollster` | 1 | block on adapter and device setup | M0 |
+| `log`, `env_logger` | 0.4, 0.11 | logging | M0 |
+| `swash` | 0.2 | shaping, rasterization | M1 |
+| `bytemuck` | 1 | instance structs to bytes | M1 |
+| `ropey` | 1.6 | rope buffer | M2 |
+| `unicode-segmentation`, `unicode-width` | 1.13, 0.2 | grapheme and width rules | M2 |
+| `proptest` | 1 | property tests (dev) | M2 |
+| `criterion` | 0.8 | benchmarks (dev) | M2 |
+| `arboard` | 3 | clipboard | M3 |
+| `regex` | 1 | search | M3 |
+| `crossbeam-channel` | 0.5 | background to main thread | M3 |
+| `serde`, `toml`, `dirs` | 1, 1, 7 | config | M4 |
+| `muda` | 0.21 | native menus (macOS, Windows) | M4 |
+| `rfd` | 0.17 | file dialogs | M4 |
+| `ignore`, `nucleo` | 0.4, 0.5 | project walking, fuzzy matching | M4 |
+| `tree-sitter` + grammar crates | 0.27 | syntax | M5 |
+| `notify` | latest at M6 | file watching | M6 |
+| `memmap2`, `memchr` | 0.9, 2 | mapped buffer, newline scanning | M7 |
+| `fontdb` | 0.24 | system font discovery and fallback | M8 |
 
 ## 8. Milestones
 
 Each milestone ends with something you can run. Since most of the stack is
-new to you, each milestone's PR description explains the concepts it
-introduces (what a rope is, what shaping is, how instanced drawing works)
-and points at the specific code.
+new to the owner, each milestone's commit or PR explains the concepts it
+introduces and points at the code.
 
-| # | Name | You can… | Key concepts explained |
-|---|---|---|---|
-| 0 | Scaffold | Run `cargo run` and see an empty window that resizes and closes cleanly on all three OSes. CI builds all three. | workspace layout, winit event loop, wgpu surface |
-| 1 | Text on screen | See a hard-coded paragraph in a monospace font at correct DPI. Resize keeps it crisp. | swash shaping, glyph atlas, instanced quads, scale factor |
-| 2 | Editable | `nimbus file.txt` opens a file; move with arrows and mouse, type, delete, scroll, see line numbers, `Primary+S` saves. | ropey, byte offsets vs graphemes, `Buffer` trait, on-demand redraw |
-| 3 | Editing essentials | Shift-select, cut/copy/paste, undo/redo, find/replace bar, soft wrap toggle, auto-indent on Enter. | undo records and coalescing, regex search in chunks, layout rows vs lines |
-| 4 | Many files | Tabs, `Primary+P` fuzzy opener, command palette, keymap and config file, native menus. | action registry, background walker and channels, nucleo |
-| 5 | Highlighting | Syntax colors for the nine starter languages, updating as you type. Dark and light themes. | tree-sitter incremental parsing, highlight queries, scopes → theme |
-| 6 | File tree | Sidebar with lazy folders, open on click, follows the active file. | — |
-| 7 | Huge files | Open a 4 GB log in under a second, scroll it, search it, edit a line and save. | mmap, piece table, background indexing, atomic save |
-| 8 | Polish | Bracket matching, multi-cursor (`Primary+D`), status bar, debug overlay, `cargo bloat` pass, Linux/Windows manual QA, a release build. | — |
+| # | Name | Status | You can… | Plan |
+|---|---|---|---|---|
+| 0 | Scaffold | **Done** | Run an empty window on all three OSes; CI builds all three | [m0](docs/milestones/m0-scaffold.md) |
+| 1 | Text on screen | **Done** | See a paragraph in a monospace font at correct DPI; cold start under 100 ms | [m1](docs/milestones/m1-text-on-screen.md) |
+| 2 | Editable | Next | Open, edit, scroll and save a file | [m2](docs/milestones/m2-editable.md) |
+| 3 | Editing essentials | Planned | Select, clipboard, undo, find and replace, soft wrap, auto-indent | [m3](docs/milestones/m3-editing-essentials.md) |
+| 4 | Many files | Planned | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
+| 5 | Highlighting | Planned | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
+| 6 | File tree | Planned | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
+| 7 | Huge files | Planned | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
+| 8 | Polish | Planned | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
 
-Milestones 0–2 are the risky ones: they are where wgpu and swash either work
-or fight us. If milestone 1 takes much longer than expected, the fallback is
-to swap in `glyphon` for the atlas and shader while keeping our own layout,
-which is a contained change inside `render`.
+M1 and M2 carry the most risk: they are where wgpu and swash either work or
+fight us. If M1's atlas takes much longer than planned, the fallback is to
+swap in `glyphon` for the atlas and shader while keeping our own layout,
+which is contained inside `render`.
 
 ## 9. Open questions
 
-1. Confirm the two-backend buffer resolution in §4.1, or choose one.
-2. Bidi / RTL text: non-goal for v1? (§4.3)
-3. Starter language list for highlighting: the nine in §4.2, or a different
-   set?
-4. Project name is `nimbus`. Binary name `nimbus`? Any conflict with a tool
-   you already have on PATH?
+1. **Huge-file threshold.** 256 MB is a guess. M7 measures ropey's load time
+   and memory and may move it.
+2. **Dependency updates.** Add Dependabot for cargo and GitHub Actions, or
+   update by hand at each milestone? The Node 20 deprecation was a hand fix.
+
+Resolved at approval: the two-backend buffer (§4.1), bidi out of scope (§2),
+the nine starter languages (§4.2), binary name `nimbus`. Resolved at the start
+of M1: the bundled font is Hack Nerd Font Mono Regular (§4.3). Resolved after
+M1: the startup budget is under 500 ms total (§1).
+
+## 10. Decision log
+
+| Date | Decision | Where |
+|---|---|---|
+| 2026-10-15 | Two buffer backends behind one trait | §4.1 |
+| 2026-10-15 | Bidi, multiple windows and Linux menus are non-goals | §2, §4.4 |
+| 2026-10-15 | wgpu 30 and winit 0.30; 0.31 is beta | §4.3, §4.4 |
+| 2026-10-15 | Strict lints enforced in CI via workspace lint table | §5 |
+| 2026-10-15 | Bundled font, so first frame skips the system font scan | §4.3 |
+| 2026-10-15 | GPU setup moves off the main thread in M1 to meet startup budget | §4.3 |
+| 2026-10-15 | Own highlight query loop instead of tree-sitter-highlight | §4.2 |
+| 2026-10-15 | `Buffer::snapshot` added for worker threads | §4.1 |
+| 2026-10-15 | Invalid UTF-8 files go to `MappedBuffer` | §4.1 |
+| 2026-10-15 | `notify` file watching added to M6 | §4.4 |
+| 2026-10-15 | Long lines fetched by visible column range (M7), both backends | §4.1 |
+| 2026-10-15 | Bundled font is Hack Nerd Font Mono Regular, about 2.7 MB of the binary | §4.3 |
+| 2026-10-15 | M0 startup numbers corrected; real floor is winit and AppKit, budget reopened | §1, §9 |
+| 2026-10-15 | `--screenshot` frame capture added in M1, ahead of M8 | §5 |
+| 2026-10-15 | `Gpu::render` reports `FrameStatus`; GPU validation errors are logged, never panic | §4.3 |
+| 2026-10-15 | Startup budget changed from 100 ms to under 500 ms total | §1 |
