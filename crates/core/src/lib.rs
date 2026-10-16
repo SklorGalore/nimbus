@@ -26,7 +26,7 @@ pub use buffer::{
 pub use line_ending::LineEnding;
 pub use mapped::{Limits, MappedBuffer, MappedSnapshot, PieceRun};
 pub use rope::RopeBuffer;
-pub use selection::{Selection, Selections};
+pub use selection::{Bias, Selection, Selections};
 pub use source::{Source, VecSource};
 pub use undo::History;
 

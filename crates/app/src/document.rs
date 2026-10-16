@@ -997,7 +997,7 @@ impl Document {
             self.buffer.is_char_boundary(sel.head),
             "cursor off a char boundary"
         );
-        self.selections.set_primary(sel);
+        self.selections.set_single(sel);
     }
 
     /// Replace `range` with `text`, put the cursor after it, and record the
