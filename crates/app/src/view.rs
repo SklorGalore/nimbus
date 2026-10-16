@@ -977,6 +977,15 @@ pub fn picker_row_at(layout: &Layout, rows: usize, x: f32, y: f32) -> Option<usi
     (r < rows).then_some(r)
 }
 
+/// Whether window position `(x, y)` is inside the picker box showing
+/// `rows` rows.
+#[must_use]
+pub fn picker_contains(layout: &Layout, rows: usize, x: f32, y: f32) -> bool {
+    let ([bx, by, bw], row_h) = picker_box(layout);
+    let h = row_h + layout.margin + f(rows.max(1)) * row_h + (layout.margin / 2.0).round();
+    x >= bx && x < bx + bw && y >= by && y < by + h
+}
+
 /// Draw the command palette or file opener as an overlay.
 pub fn draw_picker(gpu: &mut Gpu, layout: &Layout, view: &PickerView<'_>, cursor_visible: bool) {
     let (cell, lh) = (layout.metrics.cell_width, layout.metrics.line_height);

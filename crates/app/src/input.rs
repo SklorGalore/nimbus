@@ -57,6 +57,12 @@ pub enum Command<'a> {
     DeleteBack,
     /// Delete the grapheme after the cursor, or the selection.
     DeleteForward,
+    /// Delete back to the start of the word, or the selection.
+    DeleteWordBack,
+    /// Delete forward to the end of the word, or the selection.
+    DeleteWordForward,
+    /// Delete back to the start of the line, or the selection.
+    DeleteToLineStart,
     /// Undo the last change.
     Undo,
     /// Redo the last undone change.
@@ -157,6 +163,9 @@ fn repeats(cmd: Command<'_>) -> bool {
             | Command::Outdent
             | Command::DeleteBack
             | Command::DeleteForward
+            | Command::DeleteWordBack
+            | Command::DeleteWordForward
+            | Command::DeleteToLineStart
             | Command::Undo
             | Command::Redo
     )

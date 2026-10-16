@@ -56,6 +56,11 @@ const RESEARCH_DELAY: Duration = Duration::from_millis(150);
 /// How long `--smoke` and `--screenshot` wait for a first frame.
 const UNATTENDED_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Menu events for the same item closer together than this are key
+/// repeats from a held shortcut. Auto-repeat runs at about 30 ms; a
+/// deliberate second press is rarely this fast.
+const MENU_REPEAT_GAP: Duration = Duration::from_millis(250);
+
 /// How long a message stays on screen.
 const MESSAGE_TIME: Duration = Duration::from_secs(4);
 
@@ -168,10 +173,11 @@ pub struct App {
     /// GPU setup running on a background thread since the start of `main`.
     /// Taken (left `None`) when the window joins it in `resumed`.
     gpu_init: Option<JoinHandle<Result<GpuContext, GpuError>>>,
+    /// Declared before the window so it is dropped first: fields drop in
+    /// declaration order, and the menu is attached to the window's handle.
+    menu_bar: Option<MenuBar>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
-    /// Kept alive for as long as the window; dropping it removes the menus.
-    menu_bar: Option<MenuBar>,
     /// Modifier keys currently held, tracked from `ModifiersChanged`.
     modifiers: ModifiersState,
     /// Process exit status once the event loop ends; non-zero when a
@@ -212,6 +218,8 @@ pub struct App {
     research_at: Option<Instant>,
     /// A palette action chosen by mouse, run once the click is handled.
     pending_action: Option<Command<'static>>,
+    /// The last menu event and when it arrived, to drop auto-repeats.
+    last_menu: Option<(String, Instant)>,
 }
 
 /// Multi-click detection and drag state. winit reports presses, not
@@ -304,6 +312,7 @@ impl App {
             proxy,
             research_at: None,
             pending_action: None,
+            last_menu: None,
         }
     }
 
@@ -488,6 +497,9 @@ impl App {
             }
             Command::DeleteBack => self.doc_mut().delete_back().map(drop),
             Command::DeleteForward => self.doc_mut().delete_forward().map(drop),
+            Command::DeleteWordBack => self.doc_mut().delete_to(Motion::WordLeft).map(drop),
+            Command::DeleteWordForward => self.doc_mut().delete_to(Motion::WordRight).map(drop),
+            Command::DeleteToLineStart => self.doc_mut().delete_to(Motion::LineStart).map(drop),
             _ => Ok(()),
         }
     }
@@ -609,9 +621,15 @@ impl App {
         let Some(path) = dialog.save_file() else {
             return false;
         };
-        self.tabs[i].doc.path = Some(path);
+        let old = self.tabs[i].doc.path.replace(path);
         self.title_key = None;
-        self.save(i)
+        let saved = self.save(i);
+        if !saved {
+            // Keep pointing at the old file, so the next save does not
+            // silently retry the path that failed.
+            self.tabs[i].doc.path = old;
+        }
+        saved
     }
 
     fn dialog(&self, level: MessageLevel, title: &str, text: &str) {
@@ -692,6 +710,9 @@ impl App {
         warnings.extend(key_warnings);
         self.keymap = keymap;
         self.config = config;
+        if let Some(menu) = &self.menu_bar {
+            menu.update(&self.keymap);
+        }
         if let (Some(gpu), Some(window)) = (self.gpu.as_mut(), self.window.as_ref()) {
             gpu.set_font_size(to_f32(
                 self.config.font_size * effective_scale(window.scale_factor()),
@@ -1129,7 +1150,11 @@ impl App {
                     None => {}
                 }
             }
-            None => self.picker = None,
+            None => {
+                if !view::picker_contains(layout, rows.len(), x, y) {
+                    self.picker = None;
+                }
+            }
         }
         self.changed(false);
     }
@@ -1165,12 +1190,11 @@ impl App {
             self.paint(&mut gpu, &layout);
             self.gpu = Some(gpu);
         }
-        if let Some(p) = self.picker.as_mut()
-            && p.tick()
-            && let Some(window) = &self.window
-        {
-            // Results still arriving: keep drawing until they settle.
-            window.request_redraw();
+        // Picker results arriving later wake the loop through the
+        // matcher's notify callback (AppEvent::PickerChanged), not by
+        // redrawing continuously.
+        if let Some(p) = self.picker.as_mut() {
+            p.tick();
         }
         let (Some(window), Some(gpu)) = (self.window.clone(), self.gpu.as_mut()) else {
             return;
@@ -1540,9 +1564,22 @@ impl ApplicationHandler<AppEvent> for App {
         match event {
             AppEvent::PickerChanged => self.tick_picker(),
             AppEvent::Menu(id) => {
-                if let Some(action) = crate::action::by_id(&id) {
-                    self.run(action.command, event_loop);
+                // A held menu shortcut delivers a menu event for every key
+                // repeat, with no repeat flag. Drop events for the same item
+                // arriving in quick succession, unless the command is one
+                // that should repeat (undo, redo).
+                let now = Instant::now();
+                let repeat = self.last_menu.as_ref().is_some_and(|(last, at)| {
+                    *last == id && now.duration_since(*at) < MENU_REPEAT_GAP
+                });
+                let Some(action) = crate::action::by_id(&id) else {
+                    return;
+                };
+                self.last_menu = Some((id, now));
+                if repeat && !matches!(action.command, Command::Undo | Command::Redo) {
+                    return;
                 }
+                self.run(action.command, event_loop);
             }
             AppEvent::Search(batch) => {
                 if !self.find.receive(batch) {

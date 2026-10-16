@@ -58,9 +58,23 @@ mod native {
         ),
     ];
 
-    /// The built menu bar. Keep it alive for as long as the window.
+    /// The built menu bar. Keep it alive for as long as the window, and
+    /// drop it before the window: it is attached to the window's handle.
     pub struct MenuBar {
         _menu: Menu,
+        items: Vec<(&'static str, MenuItem)>,
+    }
+
+    impl MenuBar {
+        /// Show the keymap's current shortcuts, after the config changed.
+        pub fn update(&self, keymap: &Keymap) {
+            for (id, item) in &self.items {
+                let accel = keymap.accelerator(id).and_then(|s| s.parse().ok());
+                if let Err(e) = item.set_accelerator(accel) {
+                    log::warn!("menu shortcut for {id}: {e}");
+                }
+            }
+        }
     }
 
     impl std::fmt::Debug for MenuBar {
@@ -69,10 +83,16 @@ mod native {
         }
     }
 
-    fn item(id: &str, keymap: &Keymap) -> Option<MenuItem> {
+    fn item(
+        id: &str,
+        keymap: &Keymap,
+        items: &mut Vec<(&'static str, MenuItem)>,
+    ) -> Option<MenuItem> {
         let info = action::by_id(id)?;
         let accel = keymap.accelerator(id).and_then(|s| s.parse().ok());
-        Some(MenuItem::with_id(id, info.title, true, accel))
+        let it = MenuItem::with_id(id, info.title, true, accel);
+        items.push((info.id, it.clone()));
+        Some(it)
     }
 
     /// Build the menu bar and attach it. `on_action` receives the action id
@@ -83,9 +103,10 @@ mod native {
         on_action: impl Fn(String) + Send + Sync + 'static,
     ) -> Option<MenuBar> {
         let menu = Menu::new();
+        let mut items = Vec::new();
         #[cfg(target_os = "macos")]
         {
-            let quit = item("app.quit", keymap)?;
+            let quit = item("app.quit", keymap, &mut items)?;
             let app = Submenu::with_items(
                 "Nimbus",
                 true,
@@ -104,7 +125,7 @@ mod native {
             for id in *ids {
                 let result = if *id == "-" {
                     sub.append(&PredefinedMenuItem::separator())
-                } else if let Some(it) = item(id, keymap) {
+                } else if let Some(it) = item(id, keymap, &mut items) {
                     sub.append(&it)
                 } else {
                     Ok(())
@@ -117,7 +138,7 @@ mod native {
         }
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| on_action(e.id.0)));
         attach(&menu, window)?;
-        Some(MenuBar { _menu: menu })
+        Some(MenuBar { _menu: menu, items })
     }
 
     #[cfg(target_os = "macos")]
@@ -137,9 +158,10 @@ mod native {
         let RawWindowHandle::Win32(handle) = window.window_handle().ok()?.as_raw() else {
             return None;
         };
-        // SAFETY: the handle comes from a live winit window that outlives
-        // the menu (both are owned by the app until exit), which is what
-        // `init_for_hwnd` requires.
+        // SAFETY: the handle comes from a live winit window. The app owns
+        // both and declares the menu bar before the window, so the menu is
+        // dropped (and detached) first and never outlives the HWND, which is
+        // what `init_for_hwnd` requires.
         unsafe { menu.init_for_hwnd(handle.hwnd.get()) }.ok()
     }
 }
@@ -151,6 +173,12 @@ pub use native::{MenuBar, install};
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[derive(Debug)]
 pub struct MenuBar;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+impl MenuBar {
+    /// Nothing to update without menus.
+    pub fn update(&self, _keymap: &crate::keymap::Keymap) {}
+}
 
 /// No native menus on this platform; the command palette covers them.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

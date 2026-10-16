@@ -195,26 +195,50 @@ impl Keymap {
             }
         }
         let mut km = Self::default();
+        // Each action's chords, as configured or by default.
+        let chords_of = |a: &ActionInfo| -> Vec<String> {
+            overrides
+                .get(a.id)
+                .cloned()
+                .unwrap_or_else(|| a.keys.for_this_platform().map(str::to_owned).collect())
+        };
+        let mut parsed: Vec<(&'static ActionInfo, Vec<(Chord, String)>)> = Vec::new();
         for action in ACTIONS {
-            let chords: Vec<String> = match overrides.get(action.id) {
-                Some(list) => list.clone(),
-                None => action.keys.for_this_platform().map(str::to_owned).collect(),
-            };
-            for text in &chords {
-                match parse_chord(text) {
-                    Ok(chord) => {
-                        if let Some(prev) = km.map.insert(chord, action) {
-                            warnings.push(format!(
-                                "keys: {text:?} was bound to {} and is now {}",
-                                prev.id, action.id
-                            ));
-                        }
-                        km.primary_chord
-                            .entry(action.id)
-                            .or_insert((chord, text.clone()));
-                    }
+            let mut list = Vec::new();
+            for text in chords_of(action) {
+                match parse_chord(&text) {
+                    Ok(chord) => list.push((chord, text)),
                     Err(e) => warnings.push(format!("keys: {e}")),
                 }
+            }
+            parsed.push((action, list));
+        }
+        // Defaults first, then the user's overrides, so a configured chord
+        // always wins over a default one, whatever order actions are in.
+        for pass_overrides in [false, true] {
+            for (action, list) in &parsed {
+                if overrides.contains_key(action.id) != pass_overrides {
+                    continue;
+                }
+                for (chord, text) in list {
+                    if let Some(prev) = km.map.insert(*chord, action)
+                        && prev.id != action.id
+                    {
+                        warnings.push(format!(
+                            "keys: {text:?} moved from {} to {}",
+                            prev.id, action.id
+                        ));
+                    }
+                }
+            }
+        }
+        // Labels and menu shortcuts use the first chord an action still owns.
+        for (action, list) in &parsed {
+            if let Some((chord, text)) = list
+                .iter()
+                .find(|(c, _)| km.map.get(c).is_some_and(|a| a.id == action.id))
+            {
+                km.primary_chord.insert(action.id, (*chord, text.clone()));
             }
         }
         (km, warnings)
@@ -243,6 +267,16 @@ impl Keymap {
         logical
             .and_then(|k| self.map.get(&Chord { mods: m, key: k }))
             .or_else(|| {
+                // Fall back to the key's position only when the layout
+                // changed the character because of Option/Alt (Ω for Z), or
+                // it is not ASCII at all. On layouts that move letters
+                // (Dvorak, AZERTY) an unbound ASCII chord must stay unbound,
+                // or Cmd+, would run whatever sits on the US W key.
+                let renamed =
+                    m & ALT != 0 || matches!(logical, Some(KeyName::Char(c)) if !c.is_ascii());
+                if !renamed {
+                    return None;
+                }
                 let c = physical_char(physical)?;
                 self.map.get(&Chord {
                     mods: m,
@@ -263,6 +297,10 @@ impl Keymap {
 
     /// The action's first chord in `muda`'s accelerator syntax, for menus.
     #[must_use]
+    #[cfg_attr(
+        all(not(test), not(any(target_os = "macos", target_os = "windows"))),
+        expect(dead_code, reason = "only native menus use it; Linux has none")
+    )]
     pub fn accelerator(&self, id: &str) -> Option<String> {
         let (_, text) = self.primary_chord.get(id)?;
         let parts: Vec<&str> = text
@@ -406,6 +444,14 @@ mod tests {
         o.insert("edit.copy".to_owned(), vec!["Bogus+K".to_owned()]);
         let (km, warnings) = Keymap::new(&o);
         assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert_eq!(
+            km.label("file.save"),
+            if cfg!(target_os = "macos") {
+                "Cmd+Shift+W"
+            } else {
+                "Ctrl+Shift+W"
+            }
+        );
         let w = Key::Character("w".into());
         assert_eq!(
             id(&km, &w, KeyCode::KeyW, primary() | ModifiersState::SHIFT),
@@ -423,6 +469,34 @@ mod tests {
             None,
             "unbound"
         );
+    }
+
+    #[test]
+    fn a_configured_chord_beats_a_later_default() {
+        let mut o = HashMap::new();
+        o.insert("file.save".to_owned(), vec!["Alt+Z".to_owned()]);
+        let (km, warnings) = Keymap::new(&o);
+        let omega = Key::Character("Ω".into());
+        assert_eq!(
+            id(&km, &omega, KeyCode::KeyZ, ModifiersState::ALT),
+            Some("file.save")
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(km.label("view.toggleWrap"), "", "lost its only chord");
+        // And the other way round: the default owner loses its label.
+        let mut o = HashMap::new();
+        o.insert("view.toggleWrap".to_owned(), vec!["Primary+S".to_owned()]);
+        let (km, _) = Keymap::new(&o);
+        assert_eq!(km.label("file.save"), "");
+        assert_eq!(km.accelerator("file.save"), None);
+    }
+
+    #[test]
+    fn unbound_ascii_chords_do_not_fall_back_to_position() {
+        let km = defaults();
+        // Dvorak: Cmd+, is on the US W key. Must not close the tab.
+        let comma = Key::Character(",".into());
+        assert_eq!(id(&km, &comma, KeyCode::KeyW, primary()), None);
     }
 
     #[test]

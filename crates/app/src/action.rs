@@ -312,7 +312,25 @@ pub const ACTIONS: &[ActionInfo] = &[
         "edit.deleteForward",
         "Delete Forward",
         Command::DeleteForward,
-        Keys::all(&["Delete"]),
+        Keys::all(&["Delete", "Shift+Delete"]),
+    ),
+    act(
+        "edit.deleteWordBack",
+        "Delete Word Backward",
+        Command::DeleteWordBack,
+        mac_other(&["Alt+Backspace"], &["Ctrl+Backspace"]),
+    ),
+    act(
+        "edit.deleteWordForward",
+        "Delete Word Forward",
+        Command::DeleteWordForward,
+        mac_other(&["Alt+Delete"], &["Ctrl+Delete"]),
+    ),
+    act(
+        "edit.deleteToLineStart",
+        "Delete to Line Start",
+        Command::DeleteToLineStart,
+        mac_other(&["Primary+Backspace"], &[]),
     ),
     act(
         "edit.cancel",
@@ -418,13 +436,19 @@ pub const ACTIONS: &[ActionInfo] = &[
         "cursor.docStart",
         "Cursor to Start of File",
         mv(Motion::DocStart),
-        mac_other(&["Primary+Up", "Primary+Home"], &["Ctrl+Home"]),
+        mac_other(
+            &["Primary+Up", "Primary+Home", "Ctrl+Home"],
+            &["Ctrl+Home", "Ctrl+Up"],
+        ),
     ),
     act(
         "cursor.docEnd",
         "Cursor to End of File",
         mv(Motion::DocEnd),
-        mac_other(&["Primary+Down", "Primary+End"], &["Ctrl+End"]),
+        mac_other(
+            &["Primary+Down", "Primary+End", "Ctrl+End"],
+            &["Ctrl+End", "Ctrl+Down"],
+        ),
     ),
     act(
         "select.left",

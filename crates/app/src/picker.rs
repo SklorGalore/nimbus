@@ -109,11 +109,12 @@ impl Picker {
         let picker = Self::new(
             Kind::Files,
             Config::DEFAULT.match_paths(),
-            notify,
+            Arc::clone(&notify),
             root.to_path_buf(),
         );
         let injector = picker.matcher.injector();
         let (done, stop) = (Arc::clone(&picker.walk_done), Arc::clone(&picker.stop));
+        let notify_done = notify;
         let root = root.to_path_buf();
         let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let spawned = std::thread::Builder::new()
@@ -152,6 +153,8 @@ impl Picker {
                         })
                     });
                 done.store(true, Ordering::Relaxed);
+                // Wake the app once more so "loading" can end on screen.
+                notify_done();
             });
         if let Err(e) = spawned {
             log::error!("could not start file walk: {e}");

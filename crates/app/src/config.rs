@@ -37,6 +37,22 @@ impl Default for Config {
     }
 }
 
+/// Read one setting from `table` into `into`, keeping the default and
+/// adding a warning if it has the wrong type.
+fn take<T: serde::de::DeserializeOwned>(
+    table: &toml::Table,
+    key: &str,
+    into: &mut T,
+    warnings: &mut Vec<String>,
+) {
+    if let Some(v) = table.get(key) {
+        match v.clone().try_into::<T>() {
+            Ok(x) => *into = x,
+            Err(e) => warnings.push(format!("config: {key}: {}; using the default", e.message())),
+        }
+    }
+}
+
 const KNOWN: &[&str] = &["font_size", "tab_width", "soft_wrap", "theme", "keys"];
 
 /// A commented starting point written by "Open Config File" when there is
@@ -83,13 +99,14 @@ impl Config {
                 warnings.push(format!("config: unknown setting {key:?}"));
             }
         }
-        let mut config = match toml::from_str::<Self>(text) {
-            Ok(c) => c,
-            Err(e) => {
-                warnings.push(format!("config: {}; using defaults", e.message()));
-                Self::default()
-            }
-        };
+        // Read each setting on its own, so one wrong value costs only that
+        // setting, not the whole file.
+        let mut config = Self::default();
+        take(&table, "font_size", &mut config.font_size, &mut warnings);
+        take(&table, "tab_width", &mut config.tab_width, &mut warnings);
+        take(&table, "soft_wrap", &mut config.soft_wrap, &mut warnings);
+        take(&table, "theme", &mut config.theme, &mut warnings);
+        take(&table, "keys", &mut config.keys, &mut warnings);
         if !(6.0..=72.0).contains(&config.font_size) {
             warnings.push(format!(
                 "config: font_size {} out of range 6–72",
@@ -169,6 +186,13 @@ mod tests {
         let (c, w) = Config::parse("tab_width = \"wide\"\n");
         assert_eq!(c, Config::default());
         assert_eq!(w.len(), 1);
+        // One wrong value does not cost the other settings.
+        let (c, w) = Config::parse(
+            "font_size = 16.0\nsoft_wrap = \"yes\"\n[keys]\n\"file.save\" = [\"F2\"]\n",
+        );
+        assert_eq!(c.font_size, 16.0);
+        assert_eq!(c.keys["file.save"], vec!["F2".to_owned()]);
+        assert_eq!(w.len(), 1, "{w:?}");
     }
 
     #[test]
