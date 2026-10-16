@@ -316,11 +316,30 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
   on the command line, else the parent of the first opened file, else the
   current directory. Walked with `ignore`, which respects `.gitignore`, on a
   background thread, streaming into `nucleo`, which matches incrementally.
-- **File tree sidebar** (`Primary+B` toggles): lazy directory listing,
-  expanded on click, refreshed by a `notify` file watcher. Rendered with the
-  same rect and glyph pipelines; it is rows of text.
-- **External changes**: the same watcher reloads an open file that changed on
-  disk if it has no unsaved edits, and warns if it does (M6).
+- **File tree sidebar** (`Primary+B` toggles, `Primary+Shift+E` focuses):
+  an arena tree (`tree.rs`) whose folders are listed on a worker when first
+  expanded, with `ignore` so `.gitignore` applies ("Show/Hide Ignored
+  Files" toggles that). Rendered with the same rect and glyph pipelines; it
+  is rows of text. The editor column starts at `Layout::left`.
+- **Watching** (`watch.rs`): `notify`, watching only the folders listed in
+  the sidebar and the folders of open files, each non-recursively. A
+  recursive watch would register every folder of a large repository up front
+  on Linux (startup time, and the system's watch limit). Events are
+  debounced for 100 ms. Watching starts after the first frame.
+- **External changes**: an open file that changed on disk reloads if it has
+  no unsaved edits, keeping the cursor's line and column; the reload clears
+  undo. With unsaved edits, the tab says "changed on disk" and the message
+  line offers "Reload from Disk" and "Keep My Version" (palette actions). A
+  deleted file's tab says "deleted"; saving recreates it. Our own saves are
+  told apart by the file's size and modification time, recorded at each
+  open and save.
+- **Diff view** (M9): side-by-side or unified, against the saved file,
+  another file or another tab, with hunks taken from either side as
+  undoable edits. The diff itself lives in `core` (pure, no I/O); the
+  view pairs two `View`s on aligned rows.
+- **Window state**: the sidebar's visibility and width are remembered in
+  `state.toml` beside the config. Nimbus never writes the user's
+  `config.toml`.
 - **Find / replace** (`Primary+F`, `Primary+H` on Windows and Linux,
   `Primary+Alt+F` on macOS where `Cmd+H` hides the app): an inline bar at the
   top of the view, incremental, with match count and regex and case toggles.
@@ -421,9 +440,10 @@ introduces and points at the code.
 | 3 | Editing essentials | **Done** | Select, clipboard, undo, find and replace, soft wrap, auto-indent | [m3](docs/milestones/m3-editing-essentials.md) |
 | 4 | Many files | **Done** | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
 | 5 | Highlighting | **Done** | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
-| 6 | File tree | Planned | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
+| 6 | File tree | **Built on `m6-wip`, owner checks pending** | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
 | 7 | Huge files | Planned | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
 | 8 | Polish | Planned | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
+| 9 | File diffing | Planned | Side-by-side diff with saved, a file or a tab; take or revert changes | [m9](docs/milestones/m9-diff.md) |
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -492,3 +512,7 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Highlighting memory not counted in the per-file budget | §1, §4.2 |
 | 2026-10-16 | Files over 16 MB get simple line-by-line highlighting, any backend | §4.2 |
 | 2026-10-16 | Users add languages as simple rules, map patterns, and override queries; no runtime grammars | §4.2 |
+| 2026-10-16 | Watch sidebar folders and open files' folders, non-recursively | §4.4 |
+| 2026-10-16 | Window state in `state.toml`; the config file is never written | §4.4 |
+| 2026-10-16 | Reloading a file changed on disk clears its undo history | §4.4 |
+| 2026-10-16 | File diffing added as milestone 9, after Polish | §8 |

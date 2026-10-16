@@ -80,6 +80,8 @@ pub struct Layout {
     pub wrap_cols: usize,
     /// Height of the tab bar at the top (0 when hidden).
     pub tabs_h: f32,
+    /// Left edge of the editor column: 0, or the sidebar's width.
+    pub left: f32,
 }
 
 impl Layout {
@@ -112,7 +114,26 @@ impl Layout {
             bottom: height,
             wrap_cols,
             tabs_h: 0.0,
+            left: 0.0,
         }
+    }
+
+    /// Move the editor column right of a sidebar `left` pixels wide.
+    #[must_use]
+    pub fn with_sidebar(mut self, left: f32) -> Self {
+        let left = left.clamp(0.0, (self.width - 10.0 * self.metrics.cell_width).max(0.0));
+        self.text_left += left - self.left;
+        self.left = left;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small non-negative column count"
+        )]
+        let wrap_cols = ((self.width - self.text_left - self.margin) / self.metrics.cell_width)
+            .floor()
+            .max(1.0) as usize;
+        self.wrap_cols = wrap_cols;
+        self
     }
 
     /// Reserve room for the window chrome: a tab bar, `find_rows` rows of
@@ -522,9 +543,9 @@ impl View {
         // The text area is its own layer, clipped so rows scrolled under a
         // bar above or below do not show through it.
         gpu.begin_layer(Some([
-            0.0,
+            layout.left,
             layout.top,
-            layout.width,
+            layout.width - layout.left,
             layout.bottom - layout.top,
         ]));
 
@@ -630,7 +651,7 @@ impl Painter<'_, '_> {
             self.deco.ui.gutter
         };
         self.gpu.push_text_line(
-            [self.layout.margin + f(pad) * cell, top],
+            [self.layout.left + self.layout.margin + f(pad) * cell, top],
             self.number,
             color,
         );
@@ -860,9 +881,13 @@ pub fn draw_find_bar(gpu: &mut Gpu, ui: &Ui, bar: &FindBar, layout: &Layout, cur
     let height = layout.bar_height();
     let y0 = layout.find_top();
     gpu.begin_layer(None);
-    gpu.push_rect([0.0, y0], [layout.width, height], ui.bar);
+    gpu.push_rect(
+        [layout.left, y0],
+        [layout.width - layout.left, height],
+        ui.bar,
+    );
 
-    let label_x = layout.margin;
+    let label_x = layout.left + layout.margin;
     let field_x = (label_x + 9.0 * cell).round();
     // Right side: toggles and the match count.
     let status = bar.status();
@@ -1005,7 +1030,7 @@ pub struct TabLabel {
 #[must_use]
 pub fn tab_extents(layout: &Layout, tabs: &[TabLabel], active: usize) -> Vec<(f32, f32)> {
     let cell = layout.metrics.cell_width;
-    let mut x = layout.margin;
+    let mut x = layout.left + layout.margin;
     let mut out: Vec<(f32, f32)> = tabs
         .iter()
         .map(|t| {
@@ -1043,8 +1068,9 @@ pub fn draw_tabs(gpu: &mut Gpu, ui: &Ui, layout: &Layout, tabs: &[TabLabel], act
         return;
     }
     let (cell, lh) = (layout.metrics.cell_width, layout.metrics.line_height);
-    gpu.begin_layer(Some([0.0, 0.0, layout.width, layout.tabs_h]));
-    gpu.push_rect([0.0, 0.0], [layout.width, layout.tabs_h], ui.tab_bar);
+    let w = layout.width - layout.left;
+    gpu.begin_layer(Some([layout.left, 0.0, w, layout.tabs_h]));
+    gpu.push_rect([layout.left, 0.0], [w, layout.tabs_h], ui.tab_bar);
     let text_y = ((layout.tabs_h - lh) / 2.0).round();
     let accent = (2.0 * layout.scale).round().max(1.0);
     for (i, ((x0, x1), tab)) in tab_extents(layout, tabs, active)

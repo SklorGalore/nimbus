@@ -6,6 +6,7 @@
 //! not in `main`. Nothing redraws on a timer except the cursor blink (and
 //! short retries), so an idle editor uses no CPU.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -17,22 +18,27 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::ModifiersState;
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
 use nimbus_core::Text;
 use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
 use crate::config::{self, Config};
-use crate::document::Document;
+use crate::document::{DiskChange, Document};
 use crate::find::{Field, FindBar, SearchBatch};
 use crate::input::{self, Command, Motion};
+use crate::io;
 use crate::keymap::Keymap;
 use crate::languages::Languages;
 use crate::menu::{self, MenuBar};
 use crate::picker::{self, Item, Kind, Picker};
+use crate::sidebar::{self, Sidebar};
+use crate::state::State;
 use crate::theme::{Theme, Ui};
+use crate::tree::{self, Entry, ListRequest};
 use crate::view::{self, Decorations, Layout, PickerView, Preedit, TabLabel, View};
+use crate::watch::{Change, Watch};
 use crate::{Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
 
 /// Events sent to the event loop from other threads.
@@ -46,7 +52,28 @@ pub enum AppEvent {
     Menu(String),
     /// A background parse finished.
     Syntax(JobResult),
+    /// A sidebar folder listing finished.
+    Listing(ListRequest, Result<Vec<Entry>, String>),
+    /// Files or folders changed on disk.
+    Disk(Vec<Change>),
 }
+
+/// List a folder for the sidebar on its own thread.
+fn spawn_listing(proxy: &EventLoopProxy<AppEvent>, req: ListRequest) {
+    let proxy = proxy.clone();
+    let spawned = std::thread::Builder::new()
+        .name("nimbus-list".to_owned())
+        .spawn(move || {
+            let result = tree::list_dir(&req.path, req.show_ignored).map_err(|e| e.to_string());
+            let _ = proxy.send_event(AppEvent::Listing(req, result));
+        });
+    if let Err(e) = spawned {
+        log::error!("could not start a listing thread: {e}");
+    }
+}
+
+/// The least time between automatic reloads of one file changed on disk.
+const RELOAD_GAP: Duration = Duration::from_secs(1);
 
 /// Time a reparse may take on the main thread before it moves to a worker
 /// (DESIGN.md §4.2). Typing reparses take microseconds.
@@ -264,6 +291,20 @@ pub struct App {
     pending_action: Option<Command<'static>>,
     /// The last menu event and when it arrived, to drop auto-repeats.
     last_menu: Option<(String, Instant)>,
+    /// The project tree.
+    sidebar: Sidebar,
+    /// Changes on disk to the sidebar's folders and open files.
+    watch: Watch,
+    /// Remembered between runs (sidebar visibility and width).
+    ui_state: State,
+    /// The pointer shows the resize cursor.
+    resize_cursor: bool,
+    /// Watching has started (after the first frame).
+    watching: bool,
+    /// Open files that changed on disk too soon after their last reload,
+    /// to look at again at `recheck_at`.
+    recheck: Vec<PathBuf>,
+    recheck_at: Option<Instant>,
 }
 
 /// Multi-click detection and drag state. winit reports presses, not
@@ -309,6 +350,13 @@ impl App {
     ) -> Self {
         let (keymap, key_warnings) = Keymap::new(&config.keys);
         let (theme, theme_warnings) = Theme::load(&config.theme);
+        let ui_state = State::load();
+        let disk_proxy = proxy.clone();
+        let sidebar = Sidebar::new(
+            io::canonical(&root),
+            ui_state.sidebar_visible,
+            ui_state.sidebar_width,
+        );
         let wrap = options.wrap || config.soft_wrap;
         let mut tabs: Vec<Tab> = docs.into_iter().map(|d| Tab::new(d, wrap)).collect();
         if tabs.is_empty() {
@@ -364,6 +412,15 @@ impl App {
             research_at: None,
             pending_action: None,
             last_menu: None,
+            sidebar,
+            watch: Watch::new(move |paths| {
+                let _ = disk_proxy.send_event(AppEvent::Disk(paths));
+            }),
+            ui_state,
+            resize_cursor: false,
+            watching: false,
+            recheck: Vec::new(),
+            recheck_at: None,
         }
     }
 
@@ -387,13 +444,10 @@ impl App {
     fn layout(&self) -> Option<Layout> {
         let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
         let scale = to_f32(effective_scale(window.scale_factor()));
-        Some(layout_for(
-            gpu,
-            scale,
-            self.doc(),
-            &self.find,
-            self.message.is_some(),
-        ))
+        Some(
+            layout_for(gpu, scale, self.doc(), &self.find, self.message.is_some())
+                .with_sidebar(self.sidebar.px(scale)),
+        )
     }
 
     /// Show a short message at the bottom of the window.
@@ -437,6 +491,10 @@ impl App {
             return;
         }
         if self.find.focused && self.run_find(cmd) {
+            self.changed(false);
+            return;
+        }
+        if self.sidebar.focused && self.picker.is_none() && self.run_sidebar(cmd) {
             self.changed(false);
             return;
         }
@@ -492,6 +550,49 @@ impl App {
                 };
                 self.theme = Theme::built_in(next).unwrap_or_default();
                 self.say(format!("Theme: {next}"), false);
+            }
+            Command::ToggleSidebar => {
+                self.sidebar.visible = !self.sidebar.visible;
+                if self.sidebar.visible {
+                    self.show_sidebar();
+                } else {
+                    self.sidebar.focused = false;
+                }
+                self.remember();
+            }
+            Command::FocusSidebar => {
+                self.sidebar.visible = true;
+                self.sidebar.focused = true;
+                self.find.focused = false;
+                self.show_sidebar();
+                self.remember();
+            }
+            Command::ToggleIgnored => {
+                let show = !self.sidebar.tree.show_ignored;
+                let requests = self.sidebar.tree.set_show_ignored(show);
+                self.start_listings(requests);
+                self.say(
+                    if show {
+                        "Showing ignored files"
+                    } else {
+                        "Hiding ignored files"
+                    },
+                    false,
+                );
+            }
+            Command::ReloadFromDisk => {
+                let languages = &self.languages;
+                match self.tabs[self.active].doc.reload(languages) {
+                    Ok(()) => self.say("Reloaded from disk", false),
+                    Err(e) => self.say(format!("Cannot reload: {e}"), true),
+                }
+            }
+            Command::KeepMine => {
+                self.doc_mut().keep_mine();
+                self.say(
+                    "Keeping your version; saving overwrites the file on disk",
+                    false,
+                );
             }
             Command::OpenConfig => self.open_config(),
             Command::Close => {
@@ -593,15 +694,180 @@ impl App {
         }
         self.active = i;
         self.preedit = None;
+        self.sidebar.focused = false;
         if self.find.open {
             self.find_origin = self.doc().cursor();
             self.search(false);
         }
+        self.reveal_active();
         self.changed(false);
+    }
+
+    /// Start folder listings for the sidebar on worker threads.
+    fn start_listings(&self, requests: Vec<ListRequest>) {
+        for req in requests {
+            spawn_listing(&self.proxy, req);
+        }
+    }
+
+    /// The sidebar became visible: list the root the first time, and show
+    /// the active file.
+    fn show_sidebar(&mut self) {
+        let requests = self.sidebar.tree.start();
+        self.start_listings(requests);
+        self.reveal_active();
+    }
+
+    /// Select the active tab's file in the sidebar, opening folders to it.
+    fn reveal_active(&mut self) {
+        if !self.sidebar.visible {
+            return;
+        }
+        let Some(path) = self.doc().canonical.clone() else {
+            return;
+        };
+        let layout = self.layout();
+        let requests = self.sidebar.reveal(&path, layout.as_ref());
+        self.start_listings(requests);
+    }
+
+    /// Remember the sidebar's visibility and width for the next run.
+    fn remember(&mut self) {
+        let state = State {
+            sidebar_visible: self.sidebar.visible,
+            sidebar_width: self.sidebar.width,
+        };
+        if state != self.ui_state {
+            state.save();
+            self.ui_state = state;
+        }
+    }
+
+    /// Watch the sidebar's listed folders and the folders of open files.
+    /// Does nothing until the first frame is up.
+    fn sync_watch(&mut self) {
+        if !self.watching {
+            return;
+        }
+        let mut wanted: HashSet<PathBuf> = self
+            .sidebar
+            .tree
+            .loaded_dirs()
+            .map(Path::to_path_buf)
+            .collect();
+        for tab in &self.tabs {
+            if let Some(parent) = tab.doc.canonical.as_deref().and_then(Path::parent) {
+                wanted.insert(parent.to_path_buf());
+            }
+        }
+        if let Some(warning) = self.watch.sync(&wanted) {
+            self.say(warning, true);
+        }
+    }
+
+    /// Paths changed on disk: list affected sidebar folders again, and
+    /// reload, or warn about, open files that changed.
+    fn disk_changed(&mut self, changes: &[Change]) {
+        let mut requests = Vec::new();
+        // Only creating, removing or renaming changes a folder's listing;
+        // a file being written to does not.
+        for change in changes.iter().filter(|c| c.structural) {
+            requests.extend(self.sidebar.tree.affected_by(&change.path));
+        }
+        self.start_listings(requests);
+        let now = Instant::now();
+        let mut notes = Vec::new();
+        let mut is_error = false;
+        for tab in &mut self.tabs {
+            let Some(path) = tab.doc.canonical.as_deref() else {
+                continue;
+            };
+            if !changes.iter().any(|c| c.path == path) {
+                continue;
+            }
+            // A file written to over and over (a growing log) reloads at
+            // most once per RELOAD_GAP; the rest wait for the timer.
+            if let Some(at) = tab.doc.reloaded_at
+                && now.duration_since(at) < RELOAD_GAP
+            {
+                let due = at + RELOAD_GAP;
+                self.recheck_at = Some(self.recheck_at.map_or(due, |t| t.min(due)));
+                if !self.recheck.iter().any(|p| p == path) {
+                    self.recheck.push(path.to_path_buf());
+                }
+                continue;
+            }
+            let name = tab.doc.display_name();
+            let note = match tab.doc.disk_changed(&self.languages) {
+                DiskChange::None => continue,
+                DiskChange::Reloaded => format!("{name} changed on disk; reloaded"),
+                DiskChange::Conflict => {
+                    is_error = true;
+                    format!(
+                        "{name} changed on disk. Run Reload from Disk, or Keep My Version, \
+                         from the command palette"
+                    )
+                }
+                DiskChange::Deleted => {
+                    is_error = true;
+                    format!("{name} was deleted on disk; saving recreates it")
+                }
+                DiskChange::Failed(e) => {
+                    is_error = true;
+                    format!("{name} changed on disk but cannot be read: {e}")
+                }
+            };
+            notes.push(note);
+        }
+        if !notes.is_empty() {
+            self.say(notes.join("; "), is_error);
+        }
+        self.changed(false);
+    }
+
+    /// A command while the sidebar has focus. Movement and Enter work in
+    /// the tree, Escape gives focus back to the text, and typing is
+    /// ignored. Returns `false` for commands that should run as usual.
+    fn run_sidebar(&mut self, cmd: Command<'_>) -> bool {
+        let Some(layout) = self.layout() else {
+            return false;
+        };
+        let (motion, enter) = match cmd {
+            Command::Move(m, _) => (Some(m), false),
+            Command::Newline => (None, true),
+            Command::Escape => {
+                self.sidebar.focused = false;
+                return true;
+            }
+            Command::Insert(_)
+            | Command::Tab
+            | Command::Outdent
+            | Command::DeleteBack
+            | Command::DeleteForward
+            | Command::DeleteWordBack
+            | Command::DeleteWordForward
+            | Command::DeleteToLineStart
+            | Command::Cut
+            | Command::Paste
+            | Command::SelectAll => return true,
+            _ => return false,
+        };
+        let Some(outcome) = self.sidebar.key(motion, enter, &layout) else {
+            return false;
+        };
+        self.start_listings(outcome.requests);
+        if let Some(path) = outcome.open {
+            self.sidebar.focused = false;
+            self.open_path(&path);
+        }
+        true
     }
 
     /// Open `path` in a tab, or switch to it if it is already open.
     fn open_path(&mut self, path: &Path) {
+        // Whatever asked (the sidebar, the picker, a dialog), the file
+        // gets the keyboard.
+        self.sidebar.focused = false;
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         if let Some(i) = self.tabs.iter().position(|t| {
             t.doc.path.as_ref().is_some_and(|p| {
@@ -623,10 +889,12 @@ impl App {
                     self.tabs[0] = tab;
                     self.active = 0;
                     self.title_key = None;
+                    self.reveal_active();
                 } else {
                     self.tabs.push(tab);
                     self.switch_to(self.tabs.len() - 1);
                 }
+                self.sync_watch();
                 self.changed(false);
             }
             Err(e) => self.say(format!("Cannot open {}: {e}", path.display()), true),
@@ -688,6 +956,8 @@ impl App {
         if saved {
             // A new name can mean a new language: untitled to `notes.md`.
             self.tabs[i].doc.detect_language(&self.languages);
+            self.sync_watch();
+            self.reveal_active();
         } else {
             // Keep pointing at the old file, so the next save does not
             // silently retry the path that failed.
@@ -712,15 +982,23 @@ impl App {
     /// the user cancelled, or the save failed, and the tab must stay open.
     fn confirm_discard(&mut self, i: usize) -> bool {
         let unattended = self.options.smoke || self.options.screenshot.is_some();
-        if !self.tabs[i].doc.is_dirty() || unattended {
+        let doc = &self.tabs[i].doc;
+        // A deleted file's tab holds the only copy left, edited or not.
+        if !(doc.is_dirty() || doc.deleted) || unattended {
             return true;
         }
         self.switch_to(i);
-        let name = self.tabs[i].doc.display_name();
+        let doc = &self.tabs[i].doc;
+        let name = doc.display_name();
+        let question = if doc.deleted {
+            format!("{name} was deleted on disk. Save it before closing?")
+        } else {
+            format!("Save changes to {name} before closing?")
+        };
         let mut dialog = MessageDialog::new()
             .set_level(MessageLevel::Warning)
             .set_title("Unsaved changes")
-            .set_description(format!("Save changes to {name} before closing?"))
+            .set_description(question)
             .set_buttons(MessageButtons::YesNoCancelCustom(
                 "Save".into(),
                 "Don't Save".into(),
@@ -756,6 +1034,8 @@ impl App {
         if self.find.open {
             self.search(false);
         }
+        self.sync_watch();
+        self.reveal_active();
     }
 
     /// Quit, offering to save every tab with unsaved changes.
@@ -907,6 +1187,7 @@ impl App {
         true
     }
     fn open_find(&mut self, replace_mode: bool) {
+        self.sidebar.focused = false;
         let selection = self.doc().selected_text();
         self.find.open(replace_mode, selection);
         self.find_origin = self.doc().selection().range().start;
@@ -983,6 +1264,11 @@ impl App {
             | Command::CloseTab
             | Command::ToggleWrap
             | Command::ToggleTheme
+            | Command::ToggleSidebar
+            | Command::FocusSidebar
+            | Command::ToggleIgnored
+            | Command::ReloadFromDisk
+            | Command::KeepMine
             | Command::OpenFile
             | Command::NewFile
             | Command::NextTab
@@ -1123,6 +1409,22 @@ impl App {
             self.picker_click(&layout, x, y);
             return;
         }
+        if self.sidebar.on_divider(&layout, x) {
+            self.sidebar.resizing = true;
+            return;
+        }
+        if self.sidebar.contains(&layout, x) {
+            self.find.focused = false;
+            let outcome = self.sidebar.click(&layout, y);
+            self.start_listings(outcome.requests);
+            if let Some(path) = outcome.open {
+                self.sidebar.focused = false;
+                self.open_path(&path);
+            }
+            self.changed(false);
+            return;
+        }
+        self.sidebar.focused = false;
         let labels = self.tab_labels();
         if let Some(i) = view::tab_at(&layout, &labels, self.active, x, y) {
             self.switch_to(i);
@@ -1177,6 +1479,49 @@ impl App {
         self.changed(false);
     }
 
+    /// Scroll the sidebar or the text under the pointer.
+    fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        let Some(layout) = self.layout() else { return };
+        let lh = layout.metrics.line_height;
+        let cell = layout.metrics.cell_width;
+        // Trackpads send pixels, with momentum from the OS; wheels send
+        // lines, already accelerated on macOS.
+        let lines_per_notch = if cfg!(target_os = "macos") { 1.0 } else { 3.0 };
+        let (dx, dy) = match delta {
+            MouseScrollDelta::PixelDelta(p) => (to_f32(p.x), to_f32(p.y)),
+            MouseScrollDelta::LineDelta(x, y) => {
+                (x * cell * lines_per_notch, y * lh * lines_per_notch)
+            }
+        };
+        if self.sidebar.contains(&layout, to_f32(self.mouse.x)) {
+            self.sidebar.wheel(-dy, &layout);
+        } else {
+            let tab_width = self.tab_width();
+            let tab = &mut self.tabs[self.active];
+            tab.view.scroll_by(-dy, &tab.doc, &layout, tab_width);
+            tab.view.scroll_x_by(-dx);
+        }
+        self.changed(false);
+    }
+
+    /// Show the resize cursor over the sidebar's divider, the usual one
+    /// elsewhere. Only tells the window when it changes.
+    fn update_cursor_icon(&mut self) {
+        let Some(layout) = self.layout() else { return };
+        let resize =
+            self.sidebar.resizing || self.sidebar.on_divider(&layout, to_f32(self.mouse.x));
+        if resize != self.resize_cursor {
+            self.resize_cursor = resize;
+            if let Some(window) = &self.window {
+                window.set_cursor(if resize {
+                    CursorIcon::ColResize
+                } else {
+                    CursorIcon::Default
+                });
+            }
+        }
+    }
+
     /// The mouse moved with the button held: extend the selection by the
     /// unit of the click that started it (character, word or line).
     fn mouse_drag(&mut self) {
@@ -1204,9 +1549,19 @@ impl App {
     fn tab_labels(&self) -> Vec<TabLabel> {
         self.tabs
             .iter()
-            .map(|t| TabLabel {
-                name: t.doc.display_name(),
-                dirty: t.doc.is_dirty(),
+            .map(|t| {
+                let name = t.doc.display_name();
+                let name = if t.doc.deleted {
+                    format!("{name} (deleted)")
+                } else if t.doc.conflict {
+                    format!("{name} (changed on disk)")
+                } else {
+                    name
+                };
+                TabLabel {
+                    name,
+                    dirty: t.doc.is_dirty(),
+                }
             })
             .collect()
     }
@@ -1271,12 +1626,16 @@ impl App {
                 theme: &mut self.theme,
                 find: &self.find,
                 message: self.message.as_ref(),
-                cursor_visible: self.blink.visible && self.picker.is_none(),
+                cursor_visible: self.blink.visible
+                    && self.picker.is_none()
+                    && !self.sidebar.focused,
                 preedit: self.preedit.as_ref(),
                 tab_width,
             },
         );
         view::draw_tabs(gpu, &self.theme.ui, layout, &labels, self.active);
+        let active = self.tabs[self.active].doc.canonical.as_deref();
+        sidebar::draw(gpu, &self.theme.ui, layout, &self.sidebar, active);
         if let Some(p) = &self.picker {
             let ui = &self.theme.ui;
             draw_picker_overlay(gpu, ui, layout, p, &self.keymap, self.blink.visible);
@@ -1288,6 +1647,10 @@ impl App {
         // text plain; colours follow when it finishes. Before the layout,
         // which leaves room for any message this adds.
         self.start_syntax();
+        if self.frames == 0 && self.sidebar.visible {
+            // Listing runs on a worker; this only starts it.
+            self.show_sidebar();
+        }
         let Some(layout) = self.layout() else { return };
         // Painting reads the whole app; take the GPU out while it does.
         if let Some(mut gpu) = self.gpu.take() {
@@ -1543,16 +1906,12 @@ pub fn run_headless(
     gpu.set_tab_width(config.tab_width);
     let mut view = View::default();
     view.set_wrap(options.wrap || config.soft_wrap);
-    let mut find = FindBar::default();
-    if let Some(pattern) = &options.find {
-        find.open(false, None);
-        let _ = find.find.insert(pattern);
-        find.search_now(&doc);
-        if let Some(range) = find.select_from(0, false) {
-            doc.select(range);
-        }
-    }
-    let layout = layout_for(&gpu, to_f32(scale), &doc, &find, false);
+    let find = headless_find(options.find.as_deref(), &mut doc);
+    let (sidebar, layout) = headless_sidebar(
+        &root,
+        layout_for(&gpu, to_f32(scale), &doc, &find, false),
+        doc.canonical.as_deref(),
+    );
     view.ensure_cursor_visible(&doc, &layout, config.tab_width);
     // One frame only: parse here rather than on a worker.
     doc.syntax.parse_now(&doc.buffer);
@@ -1584,6 +1943,13 @@ pub fn run_headless(
         labels
     };
     view::draw_tabs(&mut gpu, &theme.ui, &layout, &labels, 0);
+    sidebar::draw(
+        &mut gpu,
+        &theme.ui,
+        &layout,
+        &sidebar,
+        doc.canonical.as_deref(),
+    );
     if let Some(spec) = &options.picker {
         // "palette" or "files", optionally followed by ":query".
         let (kind, query) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
@@ -1608,6 +1974,46 @@ pub fn run_headless(
         return 1;
     }
     i32::from(!save_screenshot(path, gpu.take_capture().as_ref()))
+}
+
+/// `--find PATTERN`: the find bar searching, with the first match selected.
+fn headless_find(pattern: Option<&str>, doc: &mut Document) -> FindBar {
+    let mut find = FindBar::default();
+    if let Some(pattern) = pattern {
+        find.open(false, None);
+        let _ = find.find.insert(pattern);
+        find.search_now(doc);
+        if let Some(range) = find.select_from(0, false) {
+            doc.select(range);
+        }
+    }
+    find
+}
+
+/// The sidebar as the window would show it, listed here in place, and the
+/// layout with room for it.
+fn headless_sidebar(root: &Path, layout: Layout, file: Option<&Path>) -> (Sidebar, Layout) {
+    let state = State::load();
+    let mut sidebar = Sidebar::new(
+        io::canonical(root),
+        state.sidebar_visible,
+        state.sidebar_width,
+    );
+    let layout = layout.with_sidebar(sidebar.px(layout.scale));
+    if sidebar.visible {
+        let mut requests = sidebar.tree.start();
+        if let Some(p) = file {
+            requests.extend(sidebar.reveal(p, Some(&layout)));
+        }
+        while let Some(req) = requests.pop() {
+            match tree::list_dir(&req.path, req.show_ignored) {
+                Ok(entries) => requests.extend(sidebar.tree.loaded(&req, entries)),
+                Err(_) => sidebar.tree.failed(&req),
+            }
+        }
+        sidebar.after_change(Some(&layout));
+    }
+    (sidebar, layout)
 }
 
 /// Draw an open picker over everything else.
@@ -1735,6 +2141,22 @@ impl ApplicationHandler<AppEvent> for App {
                     self.changed(false);
                 }
             }
+            AppEvent::Listing(req, result) => {
+                let requests = match result {
+                    Ok(entries) => self.sidebar.tree.loaded(&req, entries),
+                    Err(e) => {
+                        log::debug!("cannot list {}: {e}", req.path.display());
+                        self.sidebar.tree.failed(&req);
+                        Vec::new()
+                    }
+                };
+                let layout = self.layout();
+                self.sidebar.after_change(layout.as_ref());
+                self.start_listings(requests);
+                self.sync_watch();
+                self.changed(false);
+            }
+            AppEvent::Disk(paths) => self.disk_changed(&paths),
             AppEvent::Search(batch) => {
                 if !self.find.receive(batch) {
                     return;
@@ -1843,6 +2265,17 @@ impl ApplicationHandler<AppEvent> for App {
                 self.changed(false);
             }
         }
+        if self.recheck_at.is_some_and(|t| now >= t) {
+            self.recheck_at = None;
+            let changes: Vec<Change> = std::mem::take(&mut self.recheck)
+                .into_iter()
+                .map(|path| Change {
+                    path,
+                    structural: false,
+                })
+                .collect();
+            self.disk_changed(&changes);
+        }
         let message_expired = self.message.as_ref().is_some_and(|m| now >= m.until);
         if message_expired {
             self.message = None;
@@ -1858,6 +2291,12 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.frames > 0 && !self.watching {
+            // Starting watches can take milliseconds (macOS restarts its
+            // event stream for each folder), so not before the first frame.
+            self.watching = true;
+            self.sync_watch();
+        }
         // --smoke and --screenshot must not wait forever: a locked screen or
         // a hidden window never lets the first frame be drawn.
         // winit keeps calling this while it shuts down; once an exit is
@@ -1882,6 +2321,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.hidden_retry.map(|(at, _)| at),
             self.message.as_ref().map(|m| m.until),
             self.research_at,
+            self.recheck_at,
             (unattended && self.frames == 0).then_some(deadline),
         ]
         .into_iter()
@@ -1927,9 +2367,15 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = position;
-                if self.clicks.dragging {
+                if self.sidebar.resizing {
+                    if let Some(layout) = self.layout() {
+                        self.sidebar.drag_to(&layout, to_f32(position.x));
+                        self.changed(false);
+                    }
+                } else if self.clicks.dragging {
                     self.mouse_drag();
                 }
+                self.update_cursor_icon();
             }
 
             WindowEvent::MouseInput {
@@ -1944,29 +2390,14 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 } else {
                     self.clicks.dragging = false;
+                    if self.sidebar.resizing {
+                        self.sidebar.resizing = false;
+                        self.remember();
+                    }
                 }
             }
 
-            WindowEvent::MouseWheel { delta, .. } => {
-                if let Some(layout) = self.layout() {
-                    let lh = layout.metrics.line_height;
-                    let cell = layout.metrics.cell_width;
-                    // Trackpads send pixels, with momentum from the OS; wheels
-                    // send lines, already accelerated on macOS.
-                    let lines_per_notch = if cfg!(target_os = "macos") { 1.0 } else { 3.0 };
-                    let (dx, dy) = match delta {
-                        MouseScrollDelta::PixelDelta(p) => (to_f32(p.x), to_f32(p.y)),
-                        MouseScrollDelta::LineDelta(x, y) => {
-                            (x * cell * lines_per_notch, y * lh * lines_per_notch)
-                        }
-                    };
-                    let tab_width = self.tab_width();
-                    let tab = &mut self.tabs[self.active];
-                    tab.view.scroll_by(-dy, &tab.doc, &layout, tab_width);
-                    tab.view.scroll_x_by(-dx);
-                    self.changed(false);
-                }
-            }
+            WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
 
             WindowEvent::Focused(false) => {
                 // Show the cursor solid in the background; it may have been
