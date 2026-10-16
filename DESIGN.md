@@ -357,8 +357,8 @@ introduces and points at the code.
 | 0 | Scaffold | **Done** | Run an empty window on all three OSes; CI builds all three | [m0](docs/milestones/m0-scaffold.md) |
 | 1 | Text on screen | **Done** | See a paragraph in a monospace font at correct DPI; cold start under 100 ms | [m1](docs/milestones/m1-text-on-screen.md) |
 | 2 | Editable | **Done** | Open, edit, scroll and save a file | [m2](docs/milestones/m2-editable.md) |
-| 3 | Editing essentials | **Built on `m3-wip`, owner checks pending** | Select, clipboard, undo, find and replace, soft wrap, auto-indent | [m3](docs/milestones/m3-editing-essentials.md) |
-| 4 | Many files | Planned | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
+| 3 | Editing essentials | **Done** | Select, clipboard, undo, find and replace, soft wrap, auto-indent | [m3](docs/milestones/m3-editing-essentials.md) |
+| 4 | Many files | Next | Tabs, fuzzy opener, command palette, config, menus | [m4](docs/milestones/m4-many-files.md) |
 | 5 | Highlighting | Planned | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
 | 6 | File tree | Planned | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
 | 7 | Huge files | Planned | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |

@@ -1,6 +1,6 @@
 # M3 — Editing essentials
 
-**Status: built on branch `m3-wip` (draft PR #1); owner checks pending** (2026-10-16)
+**Status: done** (2026-10-16, merged from PR #1)
 
 ## Goal
 
@@ -15,27 +15,27 @@ items need a person at the keyboard; each lists what to try.
 
 - [x] Shift plus any movement extends the selection; selections render behind
       the text, including the line break as one extra cell.
-- [ ] **Owner:** mouse drag selects; double-click selects a word, triple-click
+- [x] **Owner, confirmed:** mouse drag selects; double-click selects a word, triple-click
       a line, and dragging after them extends by words or lines; Shift+click
       extends the selection. Logic is unit-tested; needs real clicks.
 - [x] Primary+A selects all.
 - [x] Word movement (Option+arrows on macOS, Ctrl+arrows elsewhere) stops at
       code-style word boundaries: `.` and `(` split words.
-- [ ] **Owner:** Primary+X/C/V with the system clipboard; pasting CRLF text
+- [x] **Owner, confirmed:** Primary+X/C/V with the system clipboard; pasting CRLF text
       into an LF file converts it (conversion is unit-tested).
 - [x] Undo restores text and cursor; a typed word is one step; redo works;
       Ctrl+Y redoes off macOS. Two property suites cover undo.
 - [x] Find bar: incremental search, match count, Enter/Shift+Enter, regex
       and case toggles (Option+R, Option+C), Escape, all visible matches
       highlighted, the current one brighter (headless render).
-- [ ] **Owner:** use the find bar by keyboard: Primary+F, type, Enter and
+- [x] **Owner, confirmed:** use the find bar by keyboard: Primary+F, type, Enter and
       Shift+Enter, Tab to the replace field (Cmd+Option+F opens it), Enter
       to replace one, Primary+Enter to replace all, then undo it in one step.
 - [x] Search in a 100 MB file runs on a background thread and streams
       results; typing stays at one display refresh per key.
 - [x] Soft wrap toggles with Option+Z; rows break at word boundaries, and up
       and down move by visual row (headless render plus tests).
-- [ ] **Owner:** Option+Z in a real window, then resize the window with wrap
+- [x] **Owner, confirmed:** Option+Z in a real window, then resize the window with wrap
       on: the top line should stay put and text should rewrap.
 - [x] Enter keeps the indentation; Tab and Shift+Tab indent and outdent
       selected lines as one step; Shift+Tab on one line keeps the cursor.
@@ -177,8 +177,8 @@ fixed:
 
 - Typing inside a wrapped line near 1 MB costs about 20 ms per keystroke,
   two or three refreshes. The fix, if needed, is lazy prefix wrapping.
-- Option+Z on macOS toggles wrap, so it no longer types Ω. M4's keymap makes
-  this rebindable.
+- Option+Z on macOS toggles wrap, so it no longer types Ω. The owner
+  accepted this until M4's keymap makes it rebindable.
 - A second stacked combining mark still hangs one cell right; CJK and emoji
   draw as boxes until M8 font fallback.
 - Typing latency, IME and the click/drag behaviours were not measured or
