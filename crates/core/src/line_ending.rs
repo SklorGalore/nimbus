@@ -27,13 +27,13 @@ impl LineEnding {
     /// Detect the ending used by most lines in `chunks`, which together form
     /// the text. A file with no line breaks gets the platform-neutral default,
     /// LF. Ties go to LF.
-    pub fn detect<'a>(chunks: impl IntoIterator<Item = &'a str>) -> Self {
+    pub fn detect<C: AsRef<[u8]>>(chunks: impl IntoIterator<Item = C>) -> Self {
         let (mut lf, mut crlf) = (0usize, 0usize);
         // A \r at the end of one chunk may pair with a \n at the start of
         // the next, so remember the last byte seen.
         let mut prev = 0u8;
         for chunk in chunks {
-            for &b in chunk.as_bytes() {
+            for &b in chunk.as_ref() {
                 if b == b'\n' {
                     if prev == b'\r' {
                         crlf += 1;

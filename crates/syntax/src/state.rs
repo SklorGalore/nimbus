@@ -300,7 +300,12 @@ impl SyntaxState {
         }
         // The start of an edit is unchanged by it, so its position can be
         // read from the text after.
-        let ie = input_edit(edit, point_at(text, edit.start));
+        let Some(ie) = input_edit(edit, point_at(text, edit.start)) else {
+            // Positions unknown: start over with a fresh parse.
+            self.phase = Phase::Waiting;
+            self.rev += 1;
+            return;
+        };
         match &mut self.phase {
             Phase::Parsing { pending, stale, .. } => {
                 pending.push(ie);

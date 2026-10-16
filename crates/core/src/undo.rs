@@ -42,7 +42,7 @@ enum Kind {
 }
 
 fn kind(edit: &Edit) -> Kind {
-    if edit.removed.is_empty() && !edit.inserted.is_empty() && !edit.inserted.contains('\n') {
+    if edit.removed.is_empty() && !edit.inserted.is_empty() && !edit.inserted.has_newline() {
         Kind::Typing
     } else if !edit.removed.is_empty() && edit.inserted.is_empty() {
         Kind::Deleting
@@ -180,7 +180,7 @@ impl History {
             return Ok(None);
         };
         for edit in group.edits.iter().rev() {
-            match buffer.replace(edit.new_range(), &edit.removed) {
+            match buffer.put(edit.new_range(), &edit.removed) {
                 Ok(applied) => on_edit(&*buffer, &applied),
                 Err(e) => {
                     self.undo.push(group);
@@ -209,7 +209,7 @@ impl History {
             return Ok(None);
         };
         for edit in &group.edits {
-            match buffer.replace(edit.old_range(), &edit.inserted) {
+            match buffer.put(edit.old_range(), &edit.inserted) {
                 Ok(applied) => on_edit(&*buffer, &applied),
                 Err(e) => {
                     self.redo.push(group);

@@ -146,9 +146,11 @@ fn any_op() -> BoxedStrategy<Op> {
 
 /// A callback for undo and redo that applies each reported edit to `mirror`
 /// and checks it against the buffer's length after the edit.
+#[expect(clippy::unwrap_used, reason = "test helper")]
 fn replay_into(mirror: &mut String) -> impl FnMut(&dyn Text, &Edit) + '_ {
     |after, edit| {
-        mirror.replace_range(edit.old_range(), &edit.inserted);
+        let inserted = std::str::from_utf8(edit.inserted.as_bytes().unwrap()).unwrap();
+        mirror.replace_range(edit.old_range(), inserted);
         assert_eq!(mirror.len(), after.len_bytes());
     }
 }
@@ -173,7 +175,7 @@ enum Kind {
 }
 
 fn kind(e: &Edit) -> Kind {
-    if e.removed.is_empty() && !e.inserted.is_empty() && !e.inserted.contains('\n') {
+    if e.removed.is_empty() && !e.inserted.is_empty() && !e.inserted.has_newline() {
         Kind::Typing
     } else if !e.removed.is_empty() && e.inserted.is_empty() {
         Kind::Deleting
@@ -321,8 +323,8 @@ impl Session {
     fn replace(&mut self, range: Range<usize>, text: &str) -> Edit {
         let expected = Edit {
             start: range.start,
-            removed: self.text[range.clone()].to_owned(),
-            inserted: text.to_owned(),
+            removed: self.text[range.clone()].into(),
+            inserted: text.into(),
         };
         let got = self.buf.replace(range.clone(), text);
         assert_eq!(

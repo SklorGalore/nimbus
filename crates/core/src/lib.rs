@@ -14,7 +14,7 @@ pub mod selection;
 pub mod undo;
 pub mod wrap;
 
-pub use buffer::{Buffer, Edit, EditError, Snapshot, Text};
+pub use buffer::{Buffer, Content, Edit, EditError, LineSpan, SUBSTITUTE, Snapshot, Text};
 pub use line_ending::LineEnding;
 pub use rope::RopeBuffer;
 pub use selection::{Selection, Selections};

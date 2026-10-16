@@ -229,7 +229,7 @@ fn check_chunks<T: Text + ?Sized>(t: &T, oracle: &str) {
         if b >= len {
             assert_eq!(
                 (chunk, start),
-                ("", len),
+                (&[][..], len),
                 "chunk_at({b}) at or past the end"
             );
             continue;
@@ -239,13 +239,13 @@ fn check_chunks<T: Text + ?Sized>(t: &T, oracle: &str) {
             "chunk_at({b}) = {chunk:?} at {start} does not contain it, in {oracle:?}"
         );
         assert_eq!(
-            oracle.get(start..start + chunk.len()),
+            oracle.as_bytes().get(start..start + chunk.len()),
             Some(chunk),
             "chunk_at({b}) is not the text at {start} of {oracle:?}"
         );
     }
 
-    let mut rebuilt = String::with_capacity(len);
+    let mut rebuilt = Vec::with_capacity(len);
     let mut pos = 0;
     while pos < len {
         let (chunk, start) = t.chunk_at(pos);
@@ -253,17 +253,53 @@ fn check_chunks<T: Text + ?Sized>(t: &T, oracle: &str) {
             start, pos,
             "the chunk after one ending at {pos} starts there"
         );
-        assert_ne!(chunk, "", "chunk_at({pos}) is empty before the end");
-        rebuilt.push_str(chunk);
+        assert_ne!(chunk, b"", "chunk_at({pos}) is empty before the end");
+        rebuilt.extend_from_slice(chunk);
         pos = start + chunk.len();
     }
-    assert_eq!(rebuilt, oracle, "chunks rebuild the text");
+    assert_eq!(rebuilt, oracle.as_bytes(), "chunks rebuild the text");
+}
+
+/// `line_span`, `byte_at` and `read_into` against the oracle: every line's
+/// span from every byte in it, and raw reads of sample ranges.
+#[expect(clippy::unwrap_used, reason = "test helper")]
+fn check_spans<T: Text + ?Sized>(t: &T, oracle: &str) {
+    let len = oracle.len();
+    let bytes = oracle.as_bytes();
+    let mut start = 0;
+    loop {
+        let lf = oracle[start..].find('\n').map(|i| start + i);
+        let next = lf.map(|i| i + 1);
+        let end = match lf {
+            Some(i) if i > start && bytes[i - 1] == b'\r' => i - 1,
+            Some(i) => i,
+            None => len,
+        };
+        let want = nimbus_core::LineSpan { start, end, next };
+        for b in start..next.unwrap_or(len + 1) {
+            assert_eq!(t.line_span(b), want, "line_span({b}) of {oracle:?}");
+        }
+        match next {
+            Some(n) => start = n,
+            None => break,
+        }
+    }
+    for b in 0..len + 3 {
+        assert_eq!(t.byte_at(b), bytes.get(b).copied(), "byte_at({b})");
+    }
+    for (a, z) in [(0, len), (0, 0), (len / 3, len / 2), (len, len + 4)] {
+        let mut out = Vec::new();
+        t.read_into(a..z, &mut out).unwrap();
+        let z = z.min(len);
+        assert_eq!(out, &bytes[a.min(z)..z], "read_into({a}..{z})");
+    }
 }
 
 /// Compare every read-only answer of `t` with the oracle.
 fn check_text<T: Text + ?Sized>(t: &T, oracle: &str) {
     let len = oracle.len();
     check_chunks(t, oracle);
+    check_spans(t, oracle);
     assert_eq!(t.len_bytes(), len, "len_bytes of {oracle:?}");
     assert_eq!(t.slice(0..len), oracle, "full text");
 
@@ -335,8 +371,8 @@ fn check_text<T: Text + ?Sized>(t: &T, oracle: &str) {
 fn apply(buf: &mut RopeBuffer, oracle: &mut String, range: Range<usize>, text: &str) {
     let edit = Edit {
         start: range.start,
-        removed: oracle[range.clone()].to_owned(),
-        inserted: text.to_owned(),
+        removed: oracle[range.clone()].into(),
+        inserted: text.into(),
     };
     assert_eq!(
         buf.replace(range.clone(), text),

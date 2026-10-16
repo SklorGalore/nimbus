@@ -14,7 +14,7 @@ pub fn bytes_from(text: &dyn Text, byte: usize) -> &[u8] {
         return &[];
     }
     let (chunk, start) = text.chunk_at(byte);
-    chunk.as_bytes().get(byte - start..).unwrap_or(&[])
+    chunk.get(byte - start..).unwrap_or(&[])
 }
 
 /// The text of a node, chunk by chunk, for query predicates such as

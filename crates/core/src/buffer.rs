@@ -7,9 +7,34 @@
 //!
 //! Lines end at `\n` only. A `\r` directly before a `\n` belongs to the line
 //! ending, so [`Text::line`] never returns it; a lone `\r` is ordinary text.
+//!
+//! A buffer may hold bytes that are not valid UTF-8 (a mapped file, M7).
+//! Then a unit of text is either a valid UTF-8 character or one invalid
+//! byte. Strings handed out ([`Text::line`], [`Text::slice`]) replace each
+//! invalid byte by the one-byte character [`SUBSTITUTE`], so their lengths
+//! and offsets are still the raw bytes'; readers that need the real bytes
+//! (save, clipboard, search) use [`Text::read_into`] or
+//! [`Text::chunk_at`].
 
 use std::borrow::Cow;
 use std::ops::Range;
+
+/// Stands in for each invalid byte in strings from [`Text::line`] and
+/// [`Text::slice`]: one byte for one byte, so offsets stay the same. The
+/// renderer draws it as `�`.
+pub const SUBSTITUTE: char = '\u{1a}';
+
+/// One line found from a byte position, without needing its line number
+/// (which a mapped file may not know yet).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineSpan {
+    /// Where the line starts.
+    pub start: usize,
+    /// Where its content ends: before the `\n` or `\r\n`.
+    pub end: usize,
+    /// Where the next line starts; `None` on the last line.
+    pub next: Option<usize>,
+}
 
 /// Read-only access to text. Implemented by buffers and by their snapshots.
 pub trait Text {
@@ -41,11 +66,141 @@ pub trait Text {
     /// UTF-8 character boundary.
     fn is_char_boundary(&self, byte: usize) -> bool;
 
-    /// The contiguous piece of storage containing byte `byte`, and the
-    /// offset where that piece starts. For readers that stream the whole
-    /// text without copying it, such as the syntax parser. At or past the
-    /// end it returns `("", len_bytes)`.
-    fn chunk_at(&self, byte: usize) -> (&str, usize);
+    /// The contiguous piece of storage containing byte `byte`, as raw
+    /// bytes, and the offset where that piece starts. For readers that
+    /// stream the whole text without copying it, such as the syntax parser.
+    /// At or past the end it returns `(&[], len_bytes)`.
+    fn chunk_at(&self, byte: usize) -> (&[u8], usize);
+
+    /// The byte at `byte`, if within the text.
+    fn byte_at(&self, byte: usize) -> Option<u8> {
+        let (chunk, start) = self.chunk_at(byte);
+        chunk.get(byte.checked_sub(start)?).copied()
+    }
+
+    /// The line containing `byte`. Offsets past the end give the last line.
+    fn line_span(&self, byte: usize) -> LineSpan {
+        let line = self.byte_to_line(byte);
+        let start = self.line_to_byte(line);
+        let next = (line + 1 < self.len_lines()).then(|| self.line_to_byte(line + 1));
+        let end = match next {
+            // Before the "\n", and a "\r" before it.
+            Some(n) => {
+                let lf = n - 1;
+                if lf > start && self.byte_at(lf - 1) == Some(b'\r') {
+                    lf - 1
+                } else {
+                    lf
+                }
+            }
+            None => self.len_bytes(),
+        };
+        LineSpan { start, end, next }
+    }
+
+    /// The number of the line containing `byte`, or `None` if lines that
+    /// far in are not counted yet (a mapped file still indexing).
+    fn line_number(&self, byte: usize) -> Option<usize> {
+        Some(self.byte_to_line(byte))
+    }
+
+    /// Line numbers are exact for every offset up to this one.
+    fn indexed_bytes(&self) -> usize {
+        self.len_bytes()
+    }
+
+    /// Append the raw bytes in `range` (clamped to the text) to `out`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from reading the file behind a mapped buffer; an
+    /// in-memory buffer never fails.
+    fn read_into(&self, range: Range<usize>, out: &mut Vec<u8>) -> std::io::Result<()> {
+        let end = range.end.min(self.len_bytes());
+        let mut pos = range.start.min(end);
+        while pos < end {
+            let (chunk, start) = self.chunk_at(pos);
+            let Some(rest) = chunk.get(pos - start..) else {
+                break;
+            };
+            if rest.is_empty() {
+                break;
+            }
+            let take = rest.len().min(end - pos);
+            out.extend_from_slice(&rest[..take]);
+            pos += take;
+        }
+        Ok(())
+    }
+
+    /// Append [`Text::slice`] of `range` to `out`, reusing its storage.
+    fn slice_into(&self, range: Range<usize>, out: &mut String) {
+        out.push_str(&self.slice(range));
+    }
+}
+
+/// Text removed or inserted by an edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Content {
+    /// The bytes themselves. Always valid UTF-8 from typing and from an
+    /// in-memory buffer; may hold invalid bytes from a mapped file.
+    Bytes(Vec<u8>),
+}
+
+impl Content {
+    /// Length in bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Bytes(b) => b.len(),
+        }
+    }
+
+    /// Whether there is nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The bytes, when they are held directly.
+    #[must_use]
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Bytes(b) => Some(b),
+        }
+    }
+
+    /// Whether it contains a line break.
+    #[must_use]
+    pub fn has_newline(&self) -> bool {
+        match self {
+            Self::Bytes(b) => b.contains(&b'\n'),
+        }
+    }
+}
+
+impl From<&str> for Content {
+    fn from(s: &str) -> Self {
+        Self::Bytes(s.as_bytes().to_vec())
+    }
+}
+
+impl From<String> for Content {
+    fn from(s: String) -> Self {
+        Self::Bytes(s.into_bytes())
+    }
+}
+
+impl PartialEq<str> for Content {
+    fn eq(&self, other: &str) -> bool {
+        self.as_bytes() == Some(other.as_bytes())
+    }
+}
+
+impl PartialEq<&str> for Content {
+    fn eq(&self, other: &&str) -> bool {
+        self == *other
+    }
 }
 
 /// A record of one replacement, enough to undo it and to tell other systems
@@ -55,9 +210,9 @@ pub struct Edit {
     /// Where the replacement started, in bytes, in the text before the edit.
     pub start: usize,
     /// The text that was removed.
-    pub removed: String,
+    pub removed: Content,
     /// The text that was inserted in its place.
-    pub inserted: String,
+    pub inserted: Content,
 }
 
 impl Edit {
@@ -90,6 +245,9 @@ pub enum EditError {
         /// The offending offset.
         offset: usize,
     },
+    /// The content cannot be put into this kind of buffer (bytes that are
+    /// not UTF-8 into an in-memory buffer).
+    Unsupported,
 }
 
 impl std::fmt::Display for EditError {
@@ -101,6 +259,7 @@ impl std::fmt::Display for EditError {
             EditError::NotCharBoundary { offset } => {
                 write!(f, "edit offset {offset} is inside a character")
             }
+            EditError::Unsupported => write!(f, "this buffer cannot hold that text"),
         }
     }
 }
@@ -123,6 +282,21 @@ pub trait Buffer: Text {
     /// Returns [`EditError`] if `range` is outside the text or does not fall
     /// on character boundaries. The buffer is unchanged in that case.
     fn replace(&mut self, range: Range<usize>, text: &str) -> Result<Edit, EditError>;
+
+    /// Replace `range` with `content`, for undo and redo replaying an
+    /// [`Edit`]. Unlike [`Buffer::replace`], only the bounds are checked:
+    /// a deletion can join invalid bytes into a valid character, so the
+    /// place to put them back is no longer a character boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EditError`] if `range` is outside the text, or the content
+    /// cannot be held by this buffer.
+    fn put(&mut self, range: Range<usize>, content: &Content) -> Result<Edit, EditError> {
+        let bytes = content.as_bytes().ok_or(EditError::Unsupported)?;
+        let text = std::str::from_utf8(bytes).map_err(|_| EditError::Unsupported)?;
+        self.replace(range, text)
+    }
 
     /// A read-only copy for use on another thread.
     fn snapshot(&self) -> Box<dyn Snapshot>;

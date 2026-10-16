@@ -23,10 +23,15 @@ pub fn point_at(text: &dyn Text, byte: usize) -> Point {
 /// `start` moved past `s`: rows for each line break, then the bytes after
 /// the last one.
 #[must_use]
-pub fn advance(start: Point, s: &str) -> Point {
-    match s.rfind('\n') {
+#[expect(
+    clippy::naive_bytecount,
+    reason = "edit text is short; not worth a crate for counting"
+)]
+pub fn advance(start: Point, s: impl AsRef<[u8]>) -> Point {
+    let s = s.as_ref();
+    match s.iter().rposition(|b| *b == b'\n') {
         Some(last) => Point {
-            row: start.row + s.bytes().filter(|b| *b == b'\n').count(),
+            row: start.row + s.iter().filter(|b| **b == b'\n').count(),
             column: s.len() - last - 1,
         },
         None => Point {
@@ -38,17 +43,19 @@ pub fn advance(start: Point, s: &str) -> Point {
 
 /// Convert `edit`, given the position of its start in the text before it
 /// was applied. The start position does not change, so it can equally be
-/// computed from the text after.
+/// computed from the text after. `None` when the edit's text is not held
+/// as bytes (a large deletion in a mapped file), so its positions cannot be
+/// worked out; the tree then has to be rebuilt.
 #[must_use]
-pub fn input_edit(edit: &Edit, start_position: Point) -> InputEdit {
-    InputEdit {
+pub fn input_edit(edit: &Edit, start_position: Point) -> Option<InputEdit> {
+    Some(InputEdit {
         start_byte: edit.start,
         old_end_byte: edit.start + edit.removed.len(),
         new_end_byte: edit.start + edit.inserted.len(),
         start_position,
-        old_end_position: advance(start_position, &edit.removed),
-        new_end_position: advance(start_position, &edit.inserted),
-    }
+        old_end_position: advance(start_position, edit.removed.as_bytes()?),
+        new_end_position: advance(start_position, edit.inserted.as_bytes()?),
+    })
 }
 
 #[cfg(test)]
@@ -75,7 +82,7 @@ mod tests {
         let mut t = RopeBuffer::from_text("fn a() {\n    x\n}\n");
         let start = point_at(&t, 13);
         let e = t.replace(13..14, "let y = 1;\nlet z").unwrap();
-        let ie = input_edit(&e, start);
+        let ie = input_edit(&e, start).unwrap();
         assert_eq!(ie.start_position, Point { row: 1, column: 4 });
         assert_eq!(ie.old_end_position, Point { row: 1, column: 5 });
         assert_eq!(
