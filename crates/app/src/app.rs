@@ -1779,7 +1779,7 @@ impl App {
                 None => Ok(()),
             };
         }
-        let len = self.doc().selection().range().len();
+        let len = self.doc().selected_len();
         if len > MAX_COPY_BYTES {
             // Refused before reading anything, and Cut deletes nothing.
             self.say(

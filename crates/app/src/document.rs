@@ -1159,18 +1159,31 @@ impl Document {
         self.apply_each(items, (Bias::After, Bias::After)).map(drop)
     }
 
-    /// The selected text, or `None` if the selection is empty or longer
-    /// than [`MAX_COPY_BYTES`].
+    /// How many bytes the selections hold together.
+    #[must_use]
+    pub fn selected_len(&self) -> usize {
+        self.selections.iter().map(|s| s.range().len()).sum()
+    }
+
+    /// The selected text, or `None` if nothing is selected or it is longer
+    /// than [`MAX_COPY_BYTES`]. Several selections are joined with line
+    /// breaks, one line per cursor (an empty one for a bare cursor), so
+    /// pasting at the same number of cursors gives each its own back.
     #[must_use]
     pub fn selected_text(&self) -> Option<String> {
-        let range = self.selection().range();
-        if range.is_empty() || range.len() > MAX_COPY_BYTES {
+        let len = self.selected_len();
+        if len == 0 || len > MAX_COPY_BYTES {
             return None;
         }
         // The raw bytes, not the display string: bytes that are not UTF-8
         // become `�` here rather than the display stand-in.
-        let mut bytes = Vec::with_capacity(range.len());
-        self.buffer.read_into(range, &mut bytes).ok()?;
+        let mut bytes = Vec::with_capacity(len + self.selections.count());
+        for (i, s) in self.selections.iter().enumerate() {
+            if i > 0 {
+                bytes.push(b'\n');
+            }
+            self.buffer.read_into(s.range(), &mut bytes).ok()?;
+        }
         Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -1213,9 +1226,10 @@ impl Document {
         self.select(0..self.buffer.len_bytes());
     }
 
-    /// Move the cursor. With `extend` the selection grows or shrinks;
+    /// Move every cursor. With `extend` each selection grows or shrinks;
     /// without it, a selection collapses (Left and Right collapse to the
     /// selection's edge instead of moving). `page_lines` is one screenful.
+    /// Up and Down keep each cursor's own column across shorter lines.
     pub fn move_cursor(
         &mut self,
         motion: Motion,
@@ -1223,50 +1237,37 @@ impl Document {
         tab_width: usize,
         page_lines: usize,
     ) {
-        let sel = self.selection();
-        self.history.seal();
-        if !extend && !sel.is_empty() && matches!(motion, Motion::Left | Motion::Right) {
-            let r = sel.range();
-            let pos = if motion == Motion::Left {
-                r.start
-            } else {
-                r.end
-            };
-            self.set_selection(Selection::cursor(pos));
-            self.preferred_column = None;
-            return;
-        }
-        let t = &self.buffer;
-        let pos = sel.head;
         let page = isize::try_from(page_lines.max(1)).unwrap_or(isize::MAX);
-        let vertical =
-            |lines: isize| movement::vertical(t, pos, self.preferred_column, lines, tab_width);
-        let (new_pos, preferred) = match motion {
-            Motion::Left => (movement::prev_grapheme(t, pos), None),
-            Motion::Right => (movement::next_grapheme(t, pos), None),
-            Motion::WordLeft => (movement::word_left(t, pos), None),
-            Motion::WordRight => (movement::word_right(t, pos), None),
-            Motion::LineStart => (movement::smart_home(t, pos), None),
-            Motion::LineEnd => (movement::line_end(t, pos), None),
-            Motion::DocStart => (0, None),
-            Motion::DocEnd => (t.len_bytes(), None),
-            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {
-                let lines = match motion {
-                    Motion::Up => -1,
-                    Motion::Down => 1,
-                    Motion::PageUp => -page,
-                    _ => page,
-                };
-                let v = vertical(lines);
+        let lines = match motion {
+            Motion::Up => Some(-1),
+            Motion::Down => Some(1),
+            Motion::PageUp => Some(-page),
+            Motion::PageDown => Some(page),
+            _ => None,
+        };
+        self.move_each(motion, extend, |t, pos, goal| match lines {
+            Some(lines) => {
+                let v = movement::vertical(t, pos, goal, lines, tab_width);
                 (v.pos, Some(v.preferred_col))
             }
-        };
-        self.set_selection(sel.moved_to(new_pos, extend));
-        self.preferred_column = preferred;
+            None => (
+                match motion {
+                    Motion::Left => movement::prev_grapheme(t, pos),
+                    Motion::Right => movement::next_grapheme(t, pos),
+                    Motion::WordLeft => movement::word_left(t, pos),
+                    Motion::WordRight => movement::word_right(t, pos),
+                    Motion::LineStart => movement::smart_home(t, pos),
+                    Motion::LineEnd => movement::line_end(t, pos),
+                    Motion::DocStart => 0,
+                    _ => t.len_bytes(),
+                },
+                None,
+            ),
+        });
     }
 
     /// Like [`Document::move_cursor`] with soft wrap on: Up, Down and the
-    /// Page keys move by visual row; `preferred_column` is then a column
+    /// Page keys move by visual row; the column aimed for is then a column
     /// within the row. Other motions are the same as unwrapped.
     pub fn move_cursor_wrapped(
         &mut self,
@@ -1282,11 +1283,62 @@ impl Document {
             Motion::PageDown => isize::try_from(page_lines.max(1)).unwrap_or(isize::MAX),
             _ => return self.move_cursor(motion, extend, w.tab_width(), page_lines),
         };
-        let sel = self.selection();
+        self.move_each(motion, extend, |t, pos, goal| {
+            let v = movement::vertical_rows(t, w, pos, goal, rows);
+            (v.pos, Some(v.preferred_col))
+        });
+    }
+
+    /// Move every selection's head with `step`, which takes the text, the
+    /// head and the column it aims for, and returns where it goes and the column to
+    /// aim for next (`None` for motions that do not keep one). Collapses
+    /// selections for Left and Right without `extend`, then sorts and
+    /// merges. The primary's column is [`Document::preferred_column`].
+    fn move_each(
+        &mut self,
+        motion: Motion,
+        extend: bool,
+        mut step: impl FnMut(&dyn Text, usize, Option<usize>) -> (usize, Option<usize>),
+    ) {
         self.history.seal();
-        let v = movement::vertical_rows(&self.buffer, w, sel.head, self.preferred_column, rows);
-        self.set_selection(sel.moved_to(v.pos, extend));
-        self.preferred_column = Some(v.preferred_col);
+        let count = self.selections.count();
+        let primary = self.selections.primary_index();
+        if self.goals.len() != count {
+            self.goals.clear();
+            self.goals.resize(count, None);
+        }
+        let (goals, preferred) = (&mut self.goals, &mut self.preferred_column);
+        let t = &self.buffer;
+        if let Some(g) = goals.get_mut(primary) {
+            *g = *preferred;
+        }
+        let edge = !extend && matches!(motion, Motion::Left | Motion::Right);
+        self.selections.transform(|i, s| {
+            let goal = goals.get(i).copied().flatten();
+            let (sel, next) = if edge && !s.is_empty() {
+                let r = s.range();
+                let pos = if motion == Motion::Left {
+                    r.start
+                } else {
+                    r.end
+                };
+                (Selection::cursor(pos), None)
+            } else {
+                let (pos, next) = step(t, s.head, goal);
+                (s.moved_to(pos, extend), next)
+            };
+            if let Some(g) = goals.get_mut(i) {
+                *g = next;
+            }
+            if i == primary {
+                *preferred = next;
+            }
+            sel
+        });
+        if self.selections.count() != count {
+            // Cursors merged: which goal belongs to which is lost.
+            self.goals.clear();
+        }
     }
 
     /// Backspace at every cursor: delete each selection, or the grapheme
@@ -1989,6 +2041,47 @@ mod tests {
         d.undo().unwrap();
         d.undo().unwrap();
         assert_eq!(text(&d), "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn every_cursor_moves_and_keeps_its_own_column() {
+        // Cursors at column 4 of line 0 and column 1 of line 1; line 2 is
+        // short, line 3 long again.
+        let mut d = doc("abcdef\nxyz\nq\nlonglong\nlonglong");
+        cursors(&mut d, &[4, 8]);
+        d.move_cursor(Motion::Down, false, 4, 10);
+        // Line 1 has 3 columns: the first cursor stops at its end (col 3).
+        assert_eq!(heads(&d), [10, 12]);
+        d.move_cursor(Motion::Down, false, 4, 10);
+        d.move_cursor(Motion::Down, false, 4, 10);
+        // Back at their own columns on the long lines: 4 and 1.
+        assert_eq!(heads(&d), [17, 23]);
+        // Moving to the line start merges cursors that meet.
+        d.move_cursor(Motion::DocStart, false, 4, 10);
+        assert_eq!(heads(&d), [0]);
+    }
+
+    #[test]
+    fn copy_joins_selections_one_line_each() {
+        let mut d = doc("one two three");
+        d.selections = Selections::from_vec(
+            vec![
+                Selection { anchor: 0, head: 3 },
+                Selection::cursor(5),
+                Selection {
+                    anchor: 8,
+                    head: 13,
+                },
+            ],
+            0,
+        );
+        assert_eq!(d.selected_text().as_deref(), Some("one\n\nthree"));
+        assert_eq!(d.selected_len(), 8);
+        // Shift+Right extends each; Right collapses each to its end.
+        d.move_cursor(Motion::Right, true, 4, 10);
+        assert_eq!(heads(&d), [4, 6, 13]);
+        d.move_cursor(Motion::Right, false, 4, 10);
+        assert_eq!(heads(&d), [4, 6, 13]);
     }
 
     #[test]
