@@ -28,9 +28,14 @@ cargo run -- . --headless 1600x900 --picker files:main --screenshot /tmp/p.bmp  
 cargo test --release -p nimbus-core -- --ignored --nocapture # opt-in benchmarks (e.g. wrapping a 1 MB line)
 bench/gen.sh logs && ./target/release/nimbus bench/out/log-4gb.log --headless 1400x700 --screenshot /tmp/l.bmp --wait-index   # huge-file check (mapped buffer, all lines counted first)
 ./target/release/nimbus FILE --backend rope|mapped ...      # force a buffer backend (measurement)
+cargo run -- FILE --debug-overlay --headless 1400x500 --screenshot /tmp/d.bmp   # the F12 overlay, shown from the start
+cargo run -- FILE --cursors 4,19,33 --headless 900x300 --screenshot /tmp/m.bmp  # several cursors (byte offsets; the last is primary)
 bench/gen.sh sizes && bench/threshold.sh                    # rope vs mapped open time and memory at 64-512 MB
 cargo test --release -p nimbus-syntax -- --ignored --nocapture --test-threads 1   # keystroke and first-parse cost, tree memory (needs bench/gen.sh)
 cargo test --workspace
+python3 scripts/make-icons.py                               # redraw the app icon (PNG, .icns via iconutil, .ico) into assets/icon
+scripts/bundle-macos.sh target/release/nimbus VERSION OUT_DIR  # Nimbus.app and its zip; releases: push a tag vX.Y.Z matching Cargo.toml (.github/workflows/release.yml)
+NIMBUS_UPDATE_SCREENSHOT=1 cargo test -p nimbus --test screenshot   # remake the screenshot test's reference after an intended drawing change; look at it before committing
 cargo test -p nimbus-core <test_name>    # single test in one crate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets   # strict lints from Cargo.toml; CI fails on any warning

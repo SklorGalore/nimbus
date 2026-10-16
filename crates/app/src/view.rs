@@ -12,13 +12,13 @@ use std::fmt::Write as _;
 use std::ops::Range;
 
 use nimbus_core::wrap::{self, RowPos, RowStart, WrapCache, WrapView};
-use nimbus_core::{Text, column, long_line};
-use nimbus_render::{ColorRun, Gpu, Metrics};
+use nimbus_core::{LineEnding, Selection, Selections, Text, column, long_line};
+use nimbus_render::{ColorRun, Gpu, Metrics, Style};
 use nimbus_syntax::highlight::{Highlighter, Span};
 
 use crate::document::Document;
 use crate::find::{Field, FindBar};
-use crate::theme::{Color, Ui};
+use crate::theme::{Look, Ui};
 
 #[expect(
     clippy::cast_precision_loss,
@@ -82,7 +82,7 @@ pub struct Decorations<'a> {
     pub ui: &'a Ui,
     /// Syntax colour per capture index of the document's language; empty
     /// when it has none.
-    pub captures: &'a [Option<Color>],
+    pub captures: &'a [Option<Look>],
 }
 
 /// Pixel geometry for one frame, from the window size and font metrics.
@@ -104,7 +104,7 @@ pub struct Layout {
     pub scale: f32,
     /// Top of the text area: below the margin and any bar at the top.
     pub top: f32,
-    /// Bottom of the text area: above any message line.
+    /// Bottom of the text area: above the status bar.
     pub bottom: f32,
     /// Columns that fit in the text area: the soft-wrap width.
     pub wrap_cols: usize,
@@ -167,9 +167,9 @@ impl Layout {
     }
 
     /// Reserve room for the window chrome: a tab bar, `find_rows` rows of
-    /// find bar below it, and a message line at the bottom.
+    /// find bar below it, and a status bar at the bottom.
     #[must_use]
-    pub fn with_chrome(mut self, tab_bar: bool, find_rows: usize, message: bool) -> Self {
+    pub fn with_chrome(mut self, tab_bar: bool, find_rows: usize, status: bool) -> Self {
         let lh = self.metrics.line_height;
         let m = self.margin;
         self.tabs_h = if tab_bar { (lh + 1.5 * m).round() } else { 0.0 };
@@ -181,7 +181,7 @@ impl Layout {
             0.0
         };
         self.top = self.tabs_h + find_h + m;
-        self.bottom = (self.height - if message { lh } else { 0.0 }).max(self.top + lh);
+        self.bottom = (self.height - if status { lh } else { 0.0 }).max(self.top + lh);
         self
     }
 
@@ -285,6 +285,61 @@ const WHOLE_LINES_LIMIT: usize = 64 * 1024;
 
 /// Visible ranges closer than this are highlighted as one.
 const MERGE_GAP: usize = 4096;
+
+#[expect(clippy::cast_precision_loss, reason = "scrollbar geometry")]
+fn f32_of(n: usize) -> f32 {
+    n as f32
+}
+
+/// Start a frame with the text area as its own layer, clipped so rows
+/// scrolled under a bar above or below do not show through it.
+fn begin_text(gpu: &mut Gpu, layout: &Layout, ui: &Ui) {
+    gpu.begin_frame();
+    gpu.set_background(ui.background);
+    gpu.begin_layer(Some([
+        layout.left,
+        layout.top,
+        layout.width - layout.left,
+        layout.bottom - layout.top,
+    ]));
+}
+
+/// What a remembered bracket pair was worked out for: the text's version,
+/// the cursor, and the syntax tree's revision.
+type BracketKey = (u64, usize, u64);
+
+/// How far each way bracket matching counts when there is no syntax tree.
+const BRACKET_LIMIT: usize = 64 * 1024;
+
+/// Whether a cursor is on the line `span` (its number then stands out).
+/// `next` walks forward through the sorted `selections` from line to line,
+/// so the whole screen costs one pass.
+fn has_cursor(selections: &[Selection], next: &mut usize, span: nimbus_core::LineSpan) -> bool {
+    while selections.get(*next).is_some_and(|s| s.head < span.start) {
+        *next += 1;
+    }
+    selections.get(*next).is_some_and(|s| s.head <= span.end)
+}
+
+/// Selections up to this many bytes show their length in characters in
+/// the status bar; longer ones in bytes, which needs no reading.
+const STATUS_COUNT_LIMIT: usize = 1024 * 1024;
+
+/// Write `n` bytes as a short human-readable size: `512 B`, `12.0 KB`,
+/// `3.4 MB`. Into a string the caller reuses, so it allocates nothing.
+pub fn write_size(out: &mut String, n: usize) {
+    #[expect(clippy::cast_precision_loss, reason = "a size for display")]
+    let x = n as f64;
+    let _ = if n < 1024 {
+        write!(out, "{n} B")
+    } else if n < 1024 * 1024 {
+        write!(out, "{:.1} KB", x / 1024.0)
+    } else if n < 1024 * 1024 * 1024 {
+        write!(out, "{:.1} MB", x / (1024.0 * 1024.0))
+    } else {
+        write!(out, "{:.1} GB", x / (1024.0 * 1024.0 * 1024.0))
+    };
+}
 
 /// Add `r` to the sorted ranges in `out`, joining it to the last one if
 /// they are close.
@@ -427,6 +482,49 @@ pub struct View {
     highlighter: Highlighter,
     /// Reused for each row's colour runs.
     runs: Vec<ColorRun>,
+    /// Reused for the right side of the status bar.
+    status: String,
+    /// How many bytes of text the last frame showed, for the scrollbar's
+    /// thumb. Kept as a count rather than an end, so it stays right while
+    /// a drag moves the scroll before the next frame.
+    shown: usize,
+    /// Where the scrollbar was drawn in the last frame, for clicks.
+    scrollbar: Option<Scrollbar>,
+    /// The pointer is over the scrollbar: it is drawn wider.
+    pub scrollbar_hover: bool,
+    /// The bracket pair at the cursor, as last worked out: for the text
+    /// version, cursor and syntax revision it was worked out for. Each
+    /// frame asks again only when one of those changed.
+    brackets: Option<(BracketKey, Option<(usize, usize)>)>,
+    /// Reused for reading around the cursor when counting brackets.
+    bracket_window: Vec<u8>,
+    /// Characters in the selections, as last counted, with the version and
+    /// selections they were counted for.
+    selected_chars: Option<(u64, Selections, usize)>,
+}
+
+/// The scrollbar as drawn: a track down the right edge of the text and a
+/// thumb showing which part of the text is on screen. Its position is by
+/// byte, not line, so it needs no line count and works on a 4 GB file
+/// before its lines are counted.
+#[derive(Debug, Clone, Copy)]
+struct Scrollbar {
+    /// Left edge of the area that takes clicks (wider than the bar).
+    x: f32,
+    top: f32,
+    h: f32,
+    thumb_top: f32,
+    thumb_h: f32,
+}
+
+/// What a press on the scrollbar hit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScrollbarHit {
+    /// The thumb, this far below its top: dragging keeps that point under
+    /// the pointer.
+    Thumb(f32),
+    /// The track: jump so the thumb is centred there.
+    Track,
 }
 
 /// Everything needed to draw one visual row.
@@ -519,10 +617,6 @@ impl View {
     /// in a huge file before its lines are counted. A scrollbar by bytes
     /// moves unevenly over lines of very different lengths, which is the
     /// price of not counting them.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the scrollbar that drags with it is M8")
-    )]
     pub fn scroll_to_fraction(
         &mut self,
         fraction: f64,
@@ -541,6 +635,112 @@ impl View {
         let at = anchor(byte, t, &mut w);
         self.scroll_px = 0.0;
         self.set_anchor(t, layout, tab_width, at);
+    }
+
+    /// The bracket next to the primary cursor and its partner: from the
+    /// syntax tree when it is up to date, otherwise by counting within
+    /// [`BRACKET_LIMIT`] bytes. Only for a bare cursor. Remembered until
+    /// the text, the cursor or the tree changes, so most frames only
+    /// compare three numbers.
+    fn bracket_pair(&mut self, doc: &Document) -> Option<(usize, usize)> {
+        let sel = doc.selection();
+        if !sel.is_empty() {
+            return None;
+        }
+        let key = (doc.version, sel.head, doc.syntax.rev());
+        if let Some((k, pair)) = self.brackets
+            && k == key
+        {
+            return pair;
+        }
+        let t = &doc.buffer;
+        let pair = doc.syntax.matching_bracket(t, sel.head).unwrap_or_else(|| {
+            nimbus_core::brackets::matching_with(
+                t,
+                sel.head,
+                BRACKET_LIMIT,
+                &mut self.bracket_window,
+            )
+        });
+        self.brackets = Some((key, pair));
+        pair
+    }
+
+    /// How many characters the selections hold, counted again only when
+    /// the text or the selections change.
+    fn selected_chars(&mut self, doc: &Document) -> usize {
+        if let Some((v, sels, n)) = &self.selected_chars
+            && *v == doc.version
+            && *sels == doc.selections
+        {
+            return *n;
+        }
+        let t = &doc.buffer;
+        let n = doc
+            .selections
+            .iter()
+            .map(|s| t.slice(s.range()).chars().count())
+            .sum();
+        self.selected_chars = Some((doc.version, doc.selections.clone(), n));
+        n
+    }
+
+    /// The right side of the status bar for `doc`: the cursor's line and
+    /// column (`~` for a line not counted yet in a huge file), how much is
+    /// selected, the line ending, the encoding, the language and, while a
+    /// huge file's lines are being counted, how far that has got. Built in
+    /// a reused string, so drawing it each frame allocates nothing.
+    pub fn status_info(&mut self, doc: &Document, tab_width: usize) -> &str {
+        // Counting characters reads the selections; past a size where that
+        // costs, bytes say as much.
+        let selected = doc.selected_len();
+        let chars =
+            (selected > 0 && selected <= STATUS_COUNT_LIMIT).then(|| self.selected_chars(doc));
+        let out = &mut self.status;
+        out.clear();
+        let t = &doc.buffer;
+        let sel = doc.selection();
+        let count = doc.selections.count();
+        if count > 1 {
+            let _ = write!(out, "{count} cursors   ");
+        }
+        if selected > 0 {
+            if let Some(n) = chars {
+                let _ = write!(out, "{n} selected   ");
+            } else {
+                write_size(out, selected);
+                out.push_str(" selected   ");
+            }
+        }
+        let head = sel.head;
+        let col = nimbus_core::movement::column_of(t, head, tab_width) + 1;
+        match t.line_number(head) {
+            Some(line) => {
+                let _ = write!(out, "Ln {}, Col {col}", line + 1);
+            }
+            None => {
+                let _ = write!(out, "Ln ~, Col {col}");
+            }
+        }
+        out.push_str("   ");
+        out.push_str(match doc.line_ending {
+            LineEnding::Lf => "LF",
+            LineEnding::CrLf => "CRLF",
+        });
+        if let Some(encoding) = doc.encoding_label() {
+            out.push_str("   ");
+            out.push_str(encoding);
+        }
+        if let Some(name) = doc.language_name() {
+            out.push_str("   ");
+            out.push_str(name);
+        }
+        if doc.counting_lines() {
+            #[expect(clippy::cast_precision_loss, reason = "a percentage for display")]
+            let pct = t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64;
+            let _ = write!(out, "   Counting lines {pct:.0}%");
+        }
+        &self.status
     }
 
     /// Scroll horizontally by `dx` pixels. Does nothing while wrapping.
@@ -662,28 +862,25 @@ impl View {
         let t = &doc.buffer;
         let lh = layout.metrics.line_height;
         let cursor = doc.cursor();
-        let cursor_line = t.line_span(cursor).start;
+        let selections = doc.selections.as_slice();
+        let brackets = self.bracket_pair(doc);
         self.cache.next_frame();
         self.cursor_at = None;
 
-        gpu.begin_frame();
-        gpu.set_background(deco.ui.background);
-        // The text area is its own layer, clipped so rows scrolled under a
-        // bar above or below do not show through it.
-        gpu.begin_layer(Some([
-            layout.left,
-            layout.top,
-            layout.width - layout.left,
-            layout.bottom - layout.top,
-        ]));
+        begin_text(gpu, layout, deco.ui);
 
         let px = self.px();
         let (wrapping, scroll_x) = (self.wrap, self.scroll_x);
         let mut w = wrapper(&mut self.cache, wrapping, layout, tab_width);
         let mut at = anchor(self.scroll_top, t, &mut w);
         let mut next_match = deco.matches.partition_point(|m| m.end <= at.start);
+        // Selections and cursor heads are sorted, so each is found by
+        // walking forward with the rows, as matches are.
+        let first_sel = selections.partition_point(|s| s.range().end < at.start);
+        let mut next_head = selections.partition_point(|s| s.head < at.start);
         // Counted once for the top line, then by one per line while known.
         let mut number = t.line_number(at.start);
+        let mut shown_end = t.len_bytes();
         let spans: &[Span] = if deco.captures.is_empty() {
             &[]
         } else {
@@ -699,7 +896,9 @@ impl View {
             tab_width,
             deco,
             wrapping,
-            sel: doc.selection().range(),
+            sels: selections,
+            next_sel: first_sel,
+            brackets,
             cursor,
             number: &mut self.number,
             spliced: &mut self.spliced,
@@ -710,10 +909,12 @@ impl View {
             let span = t.line_span(at.start);
             let line_start = span.start;
             let has_break = span.next.is_some();
+            // The line number stands out on every line with a cursor.
+            let has_cursor = has_cursor(selections, &mut next_head, span);
             if long_line::is_long(span) {
                 let geom = (scroll_col, width_cols, scroll_x);
                 let row = long_row(t, span, &mut self.long_text, layout, geom, top, tab_width);
-                painter.gutter(number, line_start == cursor_line, top);
+                painter.gutter(number, has_cursor, top);
                 next_match = painter.row(&row, next_match, scroll_col);
                 top += lh;
             } else {
@@ -740,13 +941,14 @@ impl View {
                         left: layout.text_left - shift,
                     };
                     if r == 0 {
-                        painter.gutter(number, line_start == cursor_line, top);
+                        painter.gutter(number, has_cursor, top);
                     }
                     let first = if wrapping { start_col } else { scroll_col };
                     next_match = painter.row(&row, next_match, first);
                     top += lh;
                 }
             }
+            shown_end = span.next.unwrap_or(t.len_bytes());
             let Some(next) = span.next else {
                 break;
             };
@@ -757,6 +959,77 @@ impl View {
             };
         }
         self.cursor_at = painter.cursor_at;
+        self.shown = shown_end.saturating_sub(self.scroll_top);
+    }
+
+    /// Draw the scrollbar for the frame just drawn, or nothing when the
+    /// whole text fits on screen.
+    pub fn draw_scrollbar(&mut self, gpu: &mut Gpu, doc: &Document, layout: &Layout, ui: &Ui) {
+        self.scrollbar = self.scrollbar_geometry(doc.buffer.len_bytes(), layout);
+        let Some(bar) = self.scrollbar else { return };
+        let cell = layout.metrics.cell_width;
+        let w = (cell * if self.scrollbar_hover { 0.9 } else { 0.5 })
+            .round()
+            .max(3.0);
+        let x = layout.width - w - 2.0 * layout.scale;
+        gpu.begin_layer(None);
+        gpu.push_rect([x, bar.thumb_top], [w, bar.thumb_h], ui.scrollbar);
+    }
+
+    /// Where the scrollbar goes for a text of `len` bytes, as last drawn;
+    /// `None` when it all fits on screen. The thumb's height is the share
+    /// of the text on screen (at least three cells), and its place the
+    /// share scrolled past, both by byte.
+    fn scrollbar_geometry(&self, len: usize, layout: &Layout) -> Option<Scrollbar> {
+        let shown = self.shown;
+        if len == 0 || (self.scroll_top == 0 && shown >= len) {
+            return None;
+        }
+        let cell = layout.metrics.cell_width;
+        let (top, h) = (layout.top, layout.bottom - layout.top);
+        let thumb_h = (h * f32_of(shown) / f32_of(len)).clamp((3.0 * cell).min(h), h);
+        let frac = (f32_of(self.scroll_top) / f32_of(len.saturating_sub(shown).max(1))).min(1.0);
+        Some(Scrollbar {
+            x: layout.width - cell,
+            top,
+            h,
+            thumb_top: top + (h - thumb_h) * frac,
+            thumb_h,
+        })
+    }
+
+    /// The scrollbar thumb's height in the last frame (0 when none).
+    #[must_use]
+    pub fn thumb_height(&self) -> f32 {
+        self.scrollbar.map_or(0.0, |b| b.thumb_h)
+    }
+
+    /// What a press at `(x, y)` hits on the scrollbar, if anything.
+    #[must_use]
+    pub fn scrollbar_hit(&self, x: f32, y: f32) -> Option<ScrollbarHit> {
+        let bar = self.scrollbar?;
+        if x < bar.x || y < bar.top || y > bar.top + bar.h {
+            return None;
+        }
+        Some(
+            if (bar.thumb_top..=bar.thumb_top + bar.thumb_h).contains(&y) {
+                ScrollbarHit::Thumb(y - bar.thumb_top)
+            } else {
+                ScrollbarHit::Track
+            },
+        )
+    }
+
+    /// Drag the thumb so that its top is at `y`: scroll by the same
+    /// fraction of the text ([`View::scroll_to_fraction`]).
+    pub fn drag_scrollbar(&mut self, y: f32, doc: &Document, layout: &Layout, tab_width: usize) {
+        let Some(bar) = self.scrollbar else { return };
+        let travel = (bar.h - bar.thumb_h).max(1.0);
+        let frac = f64::from(((y - bar.top) / travel).clamp(0.0, 1.0));
+        let len = doc.buffer.len_bytes();
+        let shown = self.shown;
+        let target = frac * f64_of(len.saturating_sub(shown));
+        self.scroll_to_fraction(target / f64_of(len.max(1)), doc, layout, tab_width);
     }
 }
 
@@ -771,7 +1044,14 @@ struct Painter<'a, 'g> {
     deco: &'a Decorations<'a>,
     /// Soft wrap on: rows never scroll sideways.
     wrapping: bool,
-    sel: Range<usize>,
+    /// Every selection, sorted.
+    sels: &'a [Selection],
+    /// The first selection that may reach the row being drawn.
+    next_sel: usize,
+    /// The bracket at the cursor and its partner, to box.
+    brackets: Option<(usize, usize)>,
+    /// The primary cursor: the input method's composition and the
+    /// candidate window go there.
     cursor: usize,
     number: &'a mut String,
     spliced: &'a mut String,
@@ -812,8 +1092,30 @@ impl Painter<'_, '_> {
             self.layout.metrics.line_height,
         );
         let tab = self.tab_width;
-        if let Some((x0, x1)) = self.selected(row) {
-            self.rect(x0, x1, row.top, self.deco.ui.selection);
+        while self
+            .sels
+            .get(self.next_sel)
+            .is_some_and(|s| s.range().end < row.seg_start)
+        {
+            self.next_sel += 1;
+        }
+        for i in self.next_sel..self.sels.len() {
+            let sel = self.sels[i].range();
+            if sel.start > row.end() {
+                break;
+            }
+            if let Some((x0, x1)) = self.selected(row, &sel) {
+                self.rect(x0, x1, row.top, self.deco.ui.selection);
+            }
+        }
+        if let Some((a, b)) = self.brackets {
+            for at in [a, b] {
+                if row.owns(at) && at < row.end() {
+                    let x0 = row.x_of(at, cell, tab);
+                    let x1 = row.x_of(at + 1, cell, tab);
+                    self.rect(x0, x1, row.top, self.deco.ui.bracket);
+                }
+            }
         }
         let next = self.matches(row, next_match);
         #[expect(
@@ -839,13 +1141,24 @@ impl Painter<'_, '_> {
                 (first, width),
             );
         }
-        if row.owns(self.cursor) {
-            let x = row.x_of(self.cursor, cell, tab);
+        for i in self.next_sel..self.sels.len() {
+            let head = self.sels[i].head;
+            if self.sels[i].range().start > row.end() {
+                break;
+            }
+            if !row.owns(head) {
+                continue;
+            }
+            let x = row.x_of(head, cell, tab);
             // Keep a cursor in hanging spaces at the wrap edge visible.
             let max_x = self.layout.text_left + f(self.layout.wrap_cols) * cell;
             let x = if self.wrapping { x.min(max_x) } else { x };
-            self.cursor_at = Some([x, row.top]);
-            if self.deco.cursor_visible && preedit.is_none() && x >= self.layout.text_left {
+            let primary = head == self.cursor;
+            if primary {
+                self.cursor_at = Some([x, row.top]);
+            }
+            let composing = primary && preedit.is_some();
+            if self.deco.cursor_visible && !composing && x >= self.layout.text_left {
                 let w = (2.0 * self.layout.scale).round().max(1.0);
                 self.gpu
                     .push_rect([x, row.top], [w, lh], self.deco.ui.cursor);
@@ -864,8 +1177,7 @@ impl Painter<'_, '_> {
 
     /// Screen span of the selection on this row. A selection continuing
     /// past the end of a line adds one cell, showing the line break.
-    fn selected(&self, row: &RowGeom<'_>) -> Option<(f32, f32)> {
-        let sel = &self.sel;
+    fn selected(&self, row: &RowGeom<'_>, sel: &Range<usize>) -> Option<(f32, f32)> {
         let (start, end) = (row.seg_start, row.end());
         let outside = sel.is_empty()
             || sel.end <= start
@@ -955,7 +1267,7 @@ impl Painter<'_, '_> {
             if span.start >= range.end {
                 break;
             }
-            let Some(color) = self
+            let Some(look) = self
                 .deco
                 .captures
                 .get(span.capture as usize)
@@ -969,11 +1281,13 @@ impl Painter<'_, '_> {
                 self.runs.push(ColorRun {
                     end: s - range.start,
                     color: text,
+                    style: Style::default(),
                 });
             }
             self.runs.push(ColorRun {
                 end: e - range.start,
-                color,
+                color: look.color.unwrap_or(text),
+                style: look.style,
             });
             pos = e;
         }
@@ -1360,18 +1674,41 @@ pub fn draw_picker(
     }
 }
 
-/// Draw a one-line message at the bottom of the window, as an overlay.
-pub fn draw_message(gpu: &mut Gpu, ui: &Ui, text: &str, layout: &Layout, is_error: bool) {
+/// Draw the status bar along the bottom of the window: `message` (and
+/// whether it is an error) on the left, `info` (cursor position and the
+/// document's details, from [`View::status_info`]) on the right. A long
+/// message is cut short rather than drawn over the details.
+pub fn draw_status(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    message: Option<(&str, bool)>,
+    info: &str,
+) {
     let lh = layout.metrics.line_height;
+    let cell = layout.metrics.cell_width;
     gpu.begin_layer(None);
     gpu.push_rect(
         [0.0, layout.bottom],
         [layout.width, layout.height - layout.bottom],
         ui.bar,
     );
-    let color = if is_error { ui.error } else { ui.text };
     let y = (layout.bottom + (layout.height - layout.bottom - lh) / 2.0).round();
-    gpu.push_text_line([layout.margin, y], text, color);
+    let info_w = f(info.chars().count()) * cell;
+    let info_x = (layout.width - layout.margin - info_w).round();
+    gpu.push_text_line([info_x.max(layout.margin), y], info, ui.gutter);
+    if let Some((text, is_error)) = message {
+        // Columns left for the message, with two between it and the info.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small non-negative column count"
+        )]
+        let room = ((info_x - layout.margin) / cell - 2.0).max(0.0) as usize;
+        let end = text.char_indices().nth(room).map_or(text.len(), |(i, _)| i);
+        let color = if is_error { ui.error } else { ui.text };
+        gpu.push_text_line([layout.margin, y], &text[..end], color);
+    }
 }
 
 /// The selected columns of the first line of a one-line field.
@@ -1495,6 +1832,36 @@ mod tests {
     }
 
     #[test]
+    fn the_status_bar_shows_position_selection_and_file_details() {
+        let mut d = doc("fn main() {\n\tlet é = 1;\n}\n");
+        d.line_ending = LineEnding::CrLf;
+        let mut v = View::default();
+        assert_eq!(v.status_info(&d, 4), "Ln 1, Col 1   CRLF   UTF-8");
+        // Line 2, after the tab (4 columns) and "let ": column 9.
+        d.click(12 + 1 + 4, false);
+        assert_eq!(v.status_info(&d, 4), "Ln 2, Col 9   CRLF   UTF-8");
+        // Selecting "é = 1" counts characters, not bytes.
+        d.select(17..23);
+        assert_eq!(
+            v.status_info(&d, 4),
+            "5 selected   Ln 2, Col 14   CRLF   UTF-8"
+        );
+        d.selections =
+            nimbus_core::Selections::from_vec(vec![Selection::cursor(0), Selection::cursor(12)], 0);
+        assert_eq!(
+            v.status_info(&d, 4),
+            "2 cursors   Ln 1, Col 1   CRLF   UTF-8"
+        );
+        let size = |n| {
+            let mut s = String::new();
+            write_size(&mut s, n);
+            s
+        };
+        assert_eq!(size(512), "512 B");
+        assert_eq!(size(3 * 1024 * 1024 + 400 * 1024), "3.4 MB");
+    }
+
+    #[test]
     fn scrolling_clamps_at_both_ends() {
         let d = doc(&"x\n".repeat(99));
         let l = layout(100);
@@ -1545,6 +1912,45 @@ mod tests {
         assert_eq!(v.scroll_top, text.len(), "clamped to the last line");
         v.scroll_to_fraction(0.0, &d, &l, 4);
         assert_eq!(v.scroll_top, 0);
+    }
+
+    #[test]
+    fn the_scrollbar_thumb_follows_the_scroll_and_drags_it() {
+        // 100 lines of 10 bytes; pretend lines 0..10 are on screen.
+        let d = doc(&"123456789\n".repeat(100));
+        let l = layout(10);
+        let mut v = View {
+            shown: 100,
+            ..View::default()
+        };
+        let bar = v.scrollbar_geometry(1000, &l).unwrap();
+        assert!((bar.thumb_top - l.top).abs() < 1e-3, "at the top");
+        // A tenth of the text shown: a tenth of the track, at least.
+        let h = l.bottom - l.top;
+        assert!(bar.thumb_h >= (h / 10.0).min(30.0) - 1e-3);
+        v.scrollbar = Some(bar);
+        assert_eq!(
+            v.scrollbar_hit(l.width - 2.0, l.top + 1.0),
+            Some(ScrollbarHit::Thumb(1.0))
+        );
+        assert_eq!(
+            v.scrollbar_hit(l.width - 2.0, l.bottom - 1.0),
+            Some(ScrollbarHit::Track)
+        );
+        assert_eq!(v.scrollbar_hit(l.width / 2.0, l.top + 1.0), None);
+
+        // Dragging the thumb to the bottom shows the end; halfway, the middle.
+        v.drag_scrollbar(l.bottom, &d, &l, 4);
+        assert_eq!(v.scroll_top, 900);
+        v.drag_scrollbar(l.top + (h - bar.thumb_h) / 2.0, &d, &l, 4);
+        assert_eq!(v.scroll_top, 450);
+
+        // Everything on screen: no scrollbar.
+        let v = View {
+            shown: 1000,
+            ..View::default()
+        };
+        assert!(v.scrollbar_geometry(1000, &l).is_none());
     }
 
     #[test]

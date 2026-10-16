@@ -27,6 +27,12 @@ pub struct Group {
     pub id: u64,
     /// The edits, in the order they were applied.
     pub edits: Vec<Edit>,
+    /// Where each batch of edits ends in `edits`, for a group recorded with
+    /// [`History::record_batch`]: `edits[..batch_ends[0]]` were applied
+    /// together, at every cursor, then `edits[batch_ends[0]..batch_ends[1]]`,
+    /// and so on. Empty for a group recorded one edit at a time or all at
+    /// once, which is then a single batch.
+    pub batch_ends: Vec<usize>,
     /// Selections before the first edit.
     pub before: Selections,
     /// Selections after the last edit.
@@ -67,14 +73,118 @@ fn descending(edits: &[Edit]) -> bool {
 
 /// Whether `next` continues `prev` without a gap.
 fn contiguous(prev: &Edit, next: &Edit) -> bool {
+    contiguous_at(prev, prev.start, next)
+}
+
+/// [`contiguous`], for a `prev` that starts at `start` in the text `next`
+/// was made in (later edits elsewhere may have moved it).
+fn contiguous_at(prev: &Edit, start: usize, next: &Edit) -> bool {
     match kind(next) {
         // Typing continues where the previous insertion ended.
-        Kind::Typing => next.start == prev.new_range().end,
+        Kind::Typing => next.start == start + prev.inserted.len(),
         // Backspace removes text ending where the last deletion started;
         // Delete removes text starting at the same place.
-        Kind::Deleting => next.old_range().end == prev.start || next.start == prev.start,
+        Kind::Deleting => next.old_range().end == start || next.start == start,
         Kind::Other => false,
     }
+}
+
+/// Whether the batch `next`, made at every cursor in the text after the
+/// batch `last`, continues it at each cursor: same number of cursors, same
+/// kind of edit, and each edit contiguous with that cursor's last one.
+/// Both are in [`crate::Buffer::replace_sorted`] order (last cursor
+/// first), so edit `i` of each belongs to the same cursor; `last[i]` has
+/// moved by the growth of the edits before it in the text, which follow it
+/// in the list.
+fn batch_continues(last: &[Edit], next: &[Edit]) -> bool {
+    if last.len() != next.len() || last.len() < 2 {
+        return false;
+    }
+    let mut shift = 0isize;
+    for (prev, new) in last.iter().zip(next).rev() {
+        let start = prev.start.saturating_add_signed(shift);
+        if kind(new) == Kind::Other || kind(prev) != kind(new) || !contiguous_at(prev, start, new) {
+            return false;
+        }
+        shift += prev.growth();
+    }
+    true
+}
+
+impl Group {
+    /// Where each batch lies in `edits`, in the order they were applied.
+    fn batch_ranges(&self) -> Vec<Range<usize>> {
+        if self.batch_ends.is_empty() {
+            return std::iter::once(0..self.edits.len()).collect();
+        }
+        let mut from = 0;
+        self.batch_ends
+            .iter()
+            .map(|&end| {
+                let r = from..end;
+                from = end;
+                r
+            })
+            .collect()
+    }
+}
+
+/// Undo `edits`, applied in that order: in one [`Buffer::put_sorted`] if
+/// they were made from the end of the text back to the start, otherwise
+/// one at a time, last first. Edits undone before an error stay undone.
+fn undo_edits(
+    buffer: &mut dyn Buffer,
+    edits: &[Edit],
+    on_edit: &mut dyn FnMut(&dyn Text, &Edit),
+) -> Result<(), EditError> {
+    if descending(edits) {
+        // Each edit's place in the text as it is now: shifted by every
+        // edit before it in the text, which were applied after it.
+        let mut shift = 0isize;
+        let items: Vec<(Range<usize>, &Content)> = edits
+            .iter()
+            .rev()
+            .map(|e| {
+                let r = e.new_range();
+                let start = r.start.saturating_add_signed(shift);
+                shift += e.growth();
+                (start..start + r.len(), &e.removed)
+            })
+            .collect();
+        let mut applied = buffer.put_sorted(&items)?;
+        report_sorted(&mut applied, |edit| on_edit(&*buffer, edit));
+        return Ok(());
+    }
+    for edit in edits.iter().rev() {
+        let applied = buffer.put(edit.new_range(), &edit.removed)?;
+        on_edit(&*buffer, &applied);
+    }
+    Ok(())
+}
+
+/// Redo `edits` in the order they were first applied, in one
+/// [`Buffer::put_sorted`] when they allow it, as [`undo_edits`].
+fn redo_edits(
+    buffer: &mut dyn Buffer,
+    edits: &[Edit],
+    on_edit: &mut dyn FnMut(&dyn Text, &Edit),
+) -> Result<(), EditError> {
+    if descending(edits) {
+        // Every edit's old range is in the text before the batch.
+        let items: Vec<(Range<usize>, &Content)> = edits
+            .iter()
+            .rev()
+            .map(|e| (e.old_range(), &e.inserted))
+            .collect();
+        let mut applied = buffer.put_sorted(&items)?;
+        report_sorted(&mut applied, |edit| on_edit(&*buffer, edit));
+        return Ok(());
+    }
+    for edit in edits {
+        let applied = buffer.put(edit.old_range(), &edit.inserted)?;
+        on_edit(&*buffer, &applied);
+    }
+    Ok(())
 }
 
 /// The undo and redo stacks for one document.
@@ -105,6 +215,7 @@ impl History {
             && self
                 .undo
                 .last()
+                .filter(|g| g.batch_ends.is_empty())
                 .and_then(|g| g.edits.last())
                 .is_some_and(|prev| kind(prev) == kind(&edit) && contiguous(prev, &edit));
         let other = kind(&edit) == Kind::Other;
@@ -116,11 +227,62 @@ impl History {
             self.undo.push(Group {
                 id,
                 edits: vec![edit],
+                batch_ends: Vec::new(),
                 before: before.clone(),
                 after: after.clone(),
             });
         }
         // A paste or line break is its own step: nothing joins it.
+        self.open_since = if other { None } else { Some(now) };
+    }
+
+    /// Record a batch of edits just applied together at every cursor, at
+    /// time `now`. `edits` are as [`crate::Buffer::replace_sorted`] returns
+    /// them. Typing and deleting at several cursors coalesce batch by batch,
+    /// under the same rules as [`History::record`] at each cursor; undo
+    /// then puts back one batch at a time, each in one pass. A batch of one
+    /// edit is recorded exactly as [`History::record`] records it.
+    pub fn record_batch(
+        &mut self,
+        mut edits: Vec<Edit>,
+        before: &Selections,
+        after: &Selections,
+        now: Instant,
+    ) {
+        if edits.len() <= 1 {
+            match edits.pop() {
+                Some(edit) => self.record(edit, before, after, now),
+                None => self.seal(),
+            }
+            return;
+        }
+        self.redo.clear();
+        let other = edits.iter().any(|e| kind(e) == Kind::Other);
+        let open = self
+            .open_since
+            .is_some_and(|t| now.duration_since(t) < COALESCE_WINDOW);
+        let top = self.undo.last_mut().filter(|g| {
+            open && !other && {
+                let from = g.batch_ends.iter().rev().nth(1).copied().unwrap_or(0);
+                g.batch_ends.last() == Some(&g.edits.len())
+                    && batch_continues(g.edits.get(from..).unwrap_or_default(), &edits)
+            }
+        });
+        if let Some(group) = top {
+            group.edits.extend(edits);
+            group.batch_ends.push(group.edits.len());
+            group.after.clone_from(after);
+        } else {
+            let id = self.new_id();
+            let len = edits.len();
+            self.undo.push(Group {
+                id,
+                edits,
+                batch_ends: vec![len],
+                before: before.clone(),
+                after: after.clone(),
+            });
+        }
         self.open_since = if other { None } else { Some(now) };
     }
 
@@ -138,6 +300,7 @@ impl History {
         self.undo.push(Group {
             id,
             edits,
+            batch_ends: Vec::new(),
             before: before.clone(),
             after: after.clone(),
         });
@@ -190,7 +353,9 @@ impl History {
     ///
     /// Returns an [`EditError`] if the buffer no longer matches the history,
     /// which means the buffer was edited without recording. The group is
-    /// kept, and edits reversed before the error stay reversed.
+    /// kept; batches of it already reversed are applied again, so the text
+    /// and the history still agree (within a batch put back one edit at a
+    /// time, edits reversed before the error stay reversed).
     pub fn undo(
         &mut self,
         buffer: &mut dyn Buffer,
@@ -200,41 +365,21 @@ impl History {
         let Some(group) = self.undo.pop() else {
             return Ok(None);
         };
-        if descending(&group.edits) {
-            // Each edit's place in the text as it is now: shifted by every
-            // edit before it in the text, which were applied after it.
-            let mut shift = 0isize;
-            let items: Vec<(Range<usize>, &Content)> = group
-                .edits
-                .iter()
-                .rev()
-                .map(|e| {
-                    let r = e.new_range();
-                    let start = r.start.saturating_add_signed(shift);
-                    shift += e.growth();
-                    (start..start + r.len(), &e.removed)
-                })
-                .collect();
-            return match buffer.put_sorted(&items) {
-                Ok(mut applied) => {
-                    report_sorted(&mut applied, |edit| on_edit(&*buffer, edit));
-                    let restore = group.before.clone();
-                    self.redo.push(group);
-                    Ok(Some(restore))
+        // Batches last first; each put back in one pass when it can be.
+        // If one fails, the batches already undone are redone, so the text
+        // still matches the history and the group can be tried again.
+        let ranges = group.batch_ranges();
+        for (k, r) in ranges.iter().enumerate().rev() {
+            let batch = group.edits.get(r.clone()).unwrap_or_default();
+            if let Err(e) = undo_edits(buffer, batch, on_edit) {
+                for done in ranges.get(k + 1..).unwrap_or_default() {
+                    let batch = group.edits.get(done.clone()).unwrap_or_default();
+                    if redo_edits(buffer, batch, on_edit).is_err() {
+                        break;
+                    }
                 }
-                Err(e) => {
-                    self.undo.push(group);
-                    Err(e)
-                }
-            };
-        }
-        for edit in group.edits.iter().rev() {
-            match buffer.put(edit.new_range(), &edit.removed) {
-                Ok(applied) => on_edit(&*buffer, &applied),
-                Err(e) => {
-                    self.undo.push(group);
-                    return Err(e);
-                }
+                self.undo.push(group);
+                return Err(e);
             }
         }
         let restore = group.before.clone();
@@ -257,34 +402,19 @@ impl History {
         let Some(group) = self.redo.pop() else {
             return Ok(None);
         };
-        if descending(&group.edits) {
-            // Every edit's old range is in the text before the group.
-            let items: Vec<(Range<usize>, &Content)> = group
-                .edits
-                .iter()
-                .rev()
-                .map(|e| (e.old_range(), &e.inserted))
-                .collect();
-            return match buffer.put_sorted(&items) {
-                Ok(mut applied) => {
-                    report_sorted(&mut applied, |edit| on_edit(&*buffer, edit));
-                    let restore = group.after.clone();
-                    self.undo.push(group);
-                    Ok(Some(restore))
+        // As undo: a batch that fails rolls back the ones already redone.
+        let ranges = group.batch_ranges();
+        for (k, r) in ranges.iter().enumerate() {
+            let batch = group.edits.get(r.clone()).unwrap_or_default();
+            if let Err(e) = redo_edits(buffer, batch, on_edit) {
+                for done in ranges.get(..k).unwrap_or_default().iter().rev() {
+                    let batch = group.edits.get(done.clone()).unwrap_or_default();
+                    if undo_edits(buffer, batch, on_edit).is_err() {
+                        break;
+                    }
                 }
-                Err(e) => {
-                    self.redo.push(group);
-                    Err(e)
-                }
-            };
-        }
-        for edit in &group.edits {
-            match buffer.put(edit.old_range(), &edit.inserted) {
-                Ok(applied) => on_edit(&*buffer, &applied),
-                Err(e) => {
-                    self.redo.push(group);
-                    return Err(e);
-                }
+                self.redo.push(group);
+                return Err(e);
             }
         }
         let restore = group.after.clone();
@@ -455,6 +585,158 @@ mod tests {
         assert_ne!(d.hist.top_id(), saved);
         d.undo();
         assert_eq!(d.hist.top_id(), saved);
+    }
+
+    /// Type at every cursor in `sels`, as the editor does: one batch.
+    fn type_at(
+        buf: &mut RopeBuffer,
+        hist: &mut History,
+        sels: &mut Selections,
+        text: &str,
+        t: Instant,
+    ) {
+        let before = sels.clone();
+        let mut items: Vec<_> = sels
+            .iter()
+            .map(|s| (s.range(), std::borrow::Cow::Borrowed(text)))
+            .collect();
+        let edits = crate::multi::apply_each(buf, &mut items).unwrap();
+        sels.map_through(&edits, crate::Bias::After, crate::Bias::After);
+        hist.record_batch(edits, &before, sels, t);
+    }
+
+    #[test]
+    fn typing_at_several_cursors_coalesces_and_undoes_in_one_step() {
+        let mut buf = RopeBuffer::from_text("a\nb\nc");
+        let mut hist = History::new();
+        let mut sels = Selections::from_vec(
+            vec![
+                Selection::cursor(1),
+                Selection::cursor(3),
+                Selection::cursor(5),
+            ],
+            0,
+        );
+        let start = sels.clone();
+        let t = Instant::now();
+        for (i, ch) in ["x", "y", "z"].into_iter().enumerate() {
+            let at = t + Duration::from_millis(100 * u64::try_from(i).unwrap());
+            type_at(&mut buf, &mut hist, &mut sels, ch, at);
+        }
+        assert_eq!(buf.slice(0..20), "axyz\nbxyz\ncxyz");
+        assert_eq!(hist.undo.len(), 1, "three keystrokes, one step");
+        assert_eq!(hist.undo[0].batch_ends, vec![3, 6, 9]);
+
+        let restored = hist.undo(&mut buf, &mut |_, _| {}).unwrap().unwrap();
+        assert_eq!(buf.slice(0..20), "a\nb\nc");
+        assert_eq!(restored, start, "every cursor comes back");
+        hist.redo(&mut buf, &mut |_, _| {}).unwrap();
+        assert_eq!(buf.slice(0..20), "axyz\nbxyz\ncxyz");
+
+        // A pause starts a new step; so does a different number of cursors.
+        let later = t + Duration::from_secs(5);
+        type_at(&mut buf, &mut hist, &mut sels, "!", later);
+        assert_eq!(hist.undo.len(), 2);
+        sels.collapse_to_primary();
+        type_at(&mut buf, &mut hist, &mut sels, "?", later);
+        assert_eq!(hist.undo.len(), 3);
+    }
+
+    /// A rope whose `put_sorted` refuses once, on its `fail_at`-th call.
+    struct Flaky {
+        inner: RopeBuffer,
+        calls: usize,
+        fail_at: usize,
+    }
+
+    impl Text for Flaky {
+        fn len_bytes(&self) -> usize {
+            self.inner.len_bytes()
+        }
+        fn len_lines(&self) -> usize {
+            self.inner.len_lines()
+        }
+        fn line(&self, idx: usize) -> std::borrow::Cow<'_, str> {
+            self.inner.line(idx)
+        }
+        fn byte_to_line(&self, byte: usize) -> usize {
+            self.inner.byte_to_line(byte)
+        }
+        fn line_to_byte(&self, line: usize) -> usize {
+            self.inner.line_to_byte(line)
+        }
+        fn slice(&self, range: std::ops::Range<usize>) -> std::borrow::Cow<'_, str> {
+            self.inner.slice(range)
+        }
+        fn is_char_boundary(&self, byte: usize) -> bool {
+            self.inner.is_char_boundary(byte)
+        }
+        fn chunk_at(&self, byte: usize) -> (&[u8], usize) {
+            self.inner.chunk_at(byte)
+        }
+    }
+
+    impl Buffer for Flaky {
+        fn replace(
+            &mut self,
+            range: std::ops::Range<usize>,
+            text: &str,
+        ) -> Result<Edit, EditError> {
+            self.inner.replace(range, text)
+        }
+        fn snapshot(&self) -> Box<dyn crate::Snapshot> {
+            self.inner.snapshot()
+        }
+        fn put_sorted(
+            &mut self,
+            items: &[(std::ops::Range<usize>, &Content)],
+        ) -> Result<Vec<Edit>, EditError> {
+            self.calls += 1;
+            if self.calls == self.fail_at {
+                return Err(EditError::Unsupported);
+            }
+            self.inner.put_sorted(items)
+        }
+    }
+
+    #[test]
+    fn a_batch_that_cannot_be_undone_rolls_back_the_group() {
+        let mut buf = RopeBuffer::from_text("a\nb");
+        let mut hist = History::new();
+        let mut sels = Selections::from_vec(vec![Selection::cursor(1), Selection::cursor(3)], 0);
+        let t = Instant::now();
+        for (i, ch) in ["x", "y", "z"].into_iter().enumerate() {
+            let at = t + Duration::from_millis(100 * u64::try_from(i).unwrap());
+            type_at(&mut buf, &mut hist, &mut sels, ch, at);
+        }
+        let typed = buf.slice(0..20).into_owned();
+        // Undo puts back three batches, last first; the third refuses.
+        let mut flaky = Flaky {
+            inner: buf,
+            calls: 0,
+            fail_at: 3,
+        };
+        assert!(hist.undo(&mut flaky, &mut |_, _| {}).is_err());
+        assert_eq!(
+            flaky.inner.slice(0..20),
+            typed,
+            "the two undone batches are redone"
+        );
+        assert!(hist.can_undo(), "the group is kept");
+        // Now it works, and the whole group goes.
+        hist.undo(&mut flaky, &mut |_, _| {}).unwrap();
+        assert_eq!(flaky.inner.slice(0..20), "a\nb");
+        // Redo the same way: the second batch refuses.
+        flaky.calls = 0;
+        flaky.fail_at = 2;
+        assert!(hist.redo(&mut flaky, &mut |_, _| {}).is_err());
+        assert_eq!(
+            flaky.inner.slice(0..20),
+            "a\nb",
+            "the redone batch is undone"
+        );
+        hist.redo(&mut flaky, &mut |_, _| {}).unwrap();
+        assert_eq!(flaky.inner.slice(0..20), typed);
     }
 
     #[test]

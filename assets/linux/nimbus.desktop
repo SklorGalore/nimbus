@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Nimbus
+Comment=A fast, lightweight text editor
+Exec=nimbus %F
+Icon=nimbus
+Terminal=false
+Categories=Development;TextEditor;
+MimeType=text/plain;

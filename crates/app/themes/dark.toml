@@ -5,6 +5,10 @@
 # Colours are "#rrggbb" or "#rrggbbaa". Syntax keys are tree-sitter capture
 # names; the longest matching prefix wins, so `function` also colours
 # `function.method` unless that has its own entry.
+# A syntax entry can also be a table, to make it bold or italic:
+#   keyword = { color = "#c678dd", bold = true }
+#   comment = { italic = true }
+
 
 [ui]
 background = "#1a1c22"
@@ -14,6 +18,8 @@ current_line_number = "#bfc7d6"
 cursor = "#fabf4c"
 preedit = "#fabf4c"
 selection = "#405c8ca6"
+bracket = "#6b738566"
+scrollbar = "#8a93a6b3"
 find_match = "#8c732673"
 current_match = "#d99e33b2"
 bar = "#24262e"

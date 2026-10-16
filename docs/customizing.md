@@ -45,6 +45,15 @@ Syntax keys are tree-sitter capture names. The longest matching prefix
 wins: `function` also colours `function.method`, unless that has its own
 entry.
 
+A syntax entry can also be bold or italic. Write it as a table; any of the
+three settings can be left out (no `color` keeps the text colour):
+
+```toml
+[syntax]
+keyword = { color = "#ff6ac1", bold = true }
+comment = { italic = true }
+```
+
 ## Which language a file is
 
 Map file names or `*.ext` patterns in `config.toml`:

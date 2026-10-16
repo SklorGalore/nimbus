@@ -317,50 +317,65 @@ impl Keymap {
     }
 }
 
+/// How a shortcut is written in the palette and pickers: as macOS writes
+/// them there (⌃⌥⇧⌘ in that order, then the key: ⇧⌘P), and as words
+/// elsewhere (Ctrl+Shift+P). The symbols come from a system font through
+/// font fallback; the bundled font lacks them.
 fn label(c: Chord) -> String {
-    // The bundled font has no ⌘ ⌥ ⌃ glyphs, so macOS uses words too until
-    // font fallback (M8). Arrows exist in the font and stay symbols.
-    let mac = cfg!(target_os = "macos");
-    let key = match c.key {
+    if cfg!(target_os = "macos") {
+        mac_label(c)
+    } else {
+        word_label(c)
+    }
+}
+
+/// The key's name; arrows are symbols on every platform.
+fn key_name(c: Chord, mac: bool) -> String {
+    match c.key {
         KeyName::Char(ch) => ch.to_ascii_uppercase().to_string(),
         KeyName::Named(n) => {
             let name = NAMES.iter().find(|(_, k)| *k == n).map_or("?", |(s, _)| *s);
-            match name {
-                "Left" => "←".into(),
-                "Right" => "→".into(),
-                "Up" => "↑".into(),
-                "Down" => "↓".into(),
-                "Escape" => "Esc".into(),
-                other => other.into(),
+            match (name, mac) {
+                ("Left", _) => "←".into(),
+                ("Right", _) => "→".into(),
+                ("Up", _) => "↑".into(),
+                ("Down", _) => "↓".into(),
+                ("Escape", true) => "⎋".into(),
+                ("Escape", false) => "Esc".into(),
+                ("Backspace", true) => "⌫".into(),
+                ("Delete", true) => "⌦".into(),
+                ("Enter", true) => "↩".into(),
+                ("Tab", true) => "⇥".into(),
+                (other, _) => other.into(),
             }
         }
-    };
-    let parts: [(u8, &str); 4] = if mac {
-        [
-            (CTRL, "Ctrl+"),
-            (ALT, "Opt+"),
-            (SHIFT, "Shift+"),
-            (META, "Cmd+"),
-        ]
-    } else {
-        [
-            (CTRL, "Ctrl+"),
-            (ALT, "Alt+"),
-            (SHIFT, "Shift+"),
-            (META, "Win+"),
-        ]
-    };
-    let mut out = String::new();
-    // Cmd first on macOS ("Cmd+Shift+P"), Ctrl first elsewhere.
-    if mac && c.mods & META != 0 {
-        out.push_str("Cmd+");
     }
-    for (bit, text) in parts {
-        if c.mods & bit != 0 && !(mac && bit == META) {
+}
+
+fn mac_label(c: Chord) -> String {
+    let mut out = String::new();
+    for (bit, symbol) in [(CTRL, '⌃'), (ALT, '⌥'), (SHIFT, '⇧'), (META, '⌘')] {
+        if c.mods & bit != 0 {
+            out.push(symbol);
+        }
+    }
+    out.push_str(&key_name(c, true));
+    out
+}
+
+fn word_label(c: Chord) -> String {
+    let mut out = String::new();
+    for (bit, text) in [
+        (CTRL, "Ctrl+"),
+        (ALT, "Alt+"),
+        (SHIFT, "Shift+"),
+        (META, "Win+"),
+    ] {
+        if c.mods & bit != 0 {
             out.push_str(text);
         }
     }
-    out.push_str(&key);
+    out.push_str(&key_name(c, false));
     out
 }
 
@@ -447,7 +462,7 @@ mod tests {
         assert_eq!(
             km.label("file.save"),
             if cfg!(target_os = "macos") {
-                "Cmd+Shift+W"
+                "⇧⌘W"
             } else {
                 "Ctrl+Shift+W"
             }
@@ -504,7 +519,8 @@ mod tests {
         let km = defaults();
         let l = km.label("app.palette");
         if cfg!(target_os = "macos") {
-            assert_eq!(l, "Cmd+Shift+P");
+            assert_eq!(l, "⇧⌘P");
+            assert_eq!(km.label("edit.cancel"), "⎋");
         } else {
             assert_eq!(l, "Ctrl+Shift+P");
         }

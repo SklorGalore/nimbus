@@ -1,0 +1,119 @@
+# Release builds (M8): push a tag like v0.8.0 and this makes a draft GitHub
+# release with a build for each platform attached. Check the draft, then
+# publish it on GitHub.
+#
+# Before tagging, set the same version in Cargo.toml ([workspace.package]):
+# the first job refuses a tag that does not match, so the app's --version
+# and the release always agree.
+#
+# Packages:
+#   Nimbus-VERSION-macos.zip          Nimbus.app, one binary for Apple
+#                                     silicon and Intel (joined with lipo);
+#                                     unsigned, see the release notes
+#   nimbus-VERSION-linux-x86_64.tar.gz  the binary, an icon and a .desktop
+#                                     file; built on the oldest supported
+#                                     Ubuntu so it runs on older systems
+#   nimbus-VERSION-windows-x86_64.zip   nimbus.exe (icon embedded) and the
+#                                     icon file
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  draft:
+    name: draft release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag matches Cargo.toml
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "tag $tag, Cargo.toml $version"
+          test "$tag" = "$version"
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --title "Nimbus ${GITHUB_REF_NAME#v}" --notes "Unsigned builds. On macOS, open Nimbus.app the first time with right-click > Open (or run xattr -d com.apple.quarantine Nimbus.app)."
+
+  build:
+    name: ${{ matrix.name }}
+    needs: draft
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            os: macos-latest
+          - name: linux
+            os: ubuntu-22.04
+          - name: windows
+            os: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: macOS app
+        if: matrix.name == 'macos'
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cargo build --release -p nimbus --target aarch64-apple-darwin
+          cargo build --release -p nimbus --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/nimbus \
+            target/aarch64-apple-darwin/release/nimbus \
+            target/x86_64-apple-darwin/release/nimbus
+          lipo -info dist/nimbus
+          zip=$(scripts/bundle-macos.sh dist/nimbus "$version" dist)
+          gh release upload "$GITHUB_REF_NAME" "$zip" --clobber
+
+      - name: Linux tarball
+        if: matrix.name == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev
+          version="${GITHUB_REF_NAME#v}"
+          cargo build --release -p nimbus
+          name="nimbus-$version-linux-x86_64"
+          mkdir -p "dist/$name"
+          cp target/release/nimbus "dist/$name/"
+          cp assets/icon/nimbus-1024.png "dist/$name/nimbus.png"
+          cp assets/linux/nimbus.desktop "dist/$name/"
+          cp LICENSE "dist/$name/"
+          cp crates/render/assets/HackNerdFont-LICENSE.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          gh release upload "$GITHUB_REF_NAME" "dist/$name.tar.gz" --clobber
+
+      - name: Windows zip
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          cargo build --release -p nimbus
+          $name = "nimbus-$version-windows-x86_64"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item target/release/nimbus.exe "dist/$name/"
+          Copy-Item assets/icon/nimbus.ico "dist/$name/"
+          Copy-Item LICENSE "dist/$name/"
+          Copy-Item crates/render/assets/HackNerdFont-LICENSE.md "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          gh release upload $env:GITHUB_REF_NAME "dist/$name.zip" --clobber

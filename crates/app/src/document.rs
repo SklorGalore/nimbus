@@ -1,17 +1,19 @@
 //! One open file: its text, where it lives on disk, the selection, its undo
 //! history, and whether it has unsaved changes.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
 
-use nimbus_core::movement;
+use nimbus_core::search::{self, Literal};
 use nimbus_core::{
-    AnyBuffer, Buffer, Edit, EditError, History, LineEnding, MappedBuffer, Selection, Selections,
-    Source, Text,
+    AnyBuffer, Bias, Buffer, Edit, EditError, History, LineEnding, MappedBuffer, Selection,
+    Selections, Source, Text, report_sorted,
 };
+use nimbus_core::{movement, multi};
 
 use nimbus_syntax::state::SyntaxState;
 
@@ -78,6 +80,43 @@ pub enum DiskChange {
     Failed(String),
 }
 
+/// Most bytes [`Document::add_next_occurrence`] reads per press.
+pub const NEXT_BUDGET: usize = 32 * 1024 * 1024;
+
+/// Longest selection [`Document::add_next_occurrence`] looks for.
+const MAX_NEEDLE: usize = 64 * 1024;
+
+/// What [`Document::add_next_occurrence`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Occurrence {
+    /// The cursor was on a word, which is now selected.
+    SelectedWord,
+    /// The next occurrence was added as a cursor.
+    Added,
+    /// Every occurrence is already selected.
+    AllSelected,
+    /// The selection's text occurs nowhere else.
+    NotFound,
+    /// The cursor is not on a word.
+    NoWord,
+    /// The selection is too long to look for.
+    TooLong,
+    /// None within [`NEXT_BUDGET`] bytes; pressing again goes on from
+    /// there.
+    GaveUp,
+}
+
+/// Lines touched by the byte range `r`. A range ending at the very start of
+/// a line does not include that line.
+fn lines_of(t: &dyn Text, r: Range<usize>) -> Range<usize> {
+    let first = t.byte_to_line(r.start);
+    let mut last = t.byte_to_line(r.end);
+    if last > first && t.line_to_byte(last) == r.end {
+        last -= 1;
+    }
+    first..last + 1
+}
+
 /// Reads a file for a document: [`io::open`], or in tests another way.
 #[cfg(test)]
 type Opener = fn(&Path) -> Result<io::Opened, OpenError>;
@@ -105,6 +144,14 @@ pub struct Document {
     /// Display column that up and down movement aims for, kept across
     /// shorter lines; `None` until the first vertical move.
     pub preferred_column: Option<usize>,
+    /// With several cursors, the column each aims for in the same way, in
+    /// selection order; empty until the first vertical move, and cleared
+    /// when anything else moves or merges cursors.
+    goals: Vec<Option<usize>>,
+    /// Where [`Document::add_next_occurrence`] gave up last time, for the
+    /// next press to go on from: the text's version, the primary it was
+    /// looking from, and the offset reached.
+    next_resume: Option<(u64, Selection, usize)>,
     /// The file had a UTF-8 byte order mark, written back on save.
     pub bom: bool,
     /// Increments on every change to the text. Background work (search,
@@ -117,6 +164,8 @@ pub struct Document {
     pub syntax: SyntaxState,
     /// Key of the detected language (`Detected::key`), if any.
     language: Option<&'static str>,
+    /// Its name for the status bar.
+    language_name: Option<&'static str>,
     /// The file on disk as last read or written; a change event that still
     /// matches it is our own save.
     disk: Option<Stamp>,
@@ -481,6 +530,10 @@ impl Document {
             return;
         }
         self.language = key;
+        self.language_name = detected.map(|d| match d {
+            Detected::Builtin(id) => id.name(),
+            Detected::Simple(name, _) => name,
+        });
         match detected {
             // A mapped file is not in memory for tree-sitter to parse, so
             // it gets the simple rules at any size, even when small.
@@ -490,6 +543,27 @@ impl Document {
             Some(Detected::Builtin(id)) => self.syntax.reset(Some(id), self.buffer.len_bytes()),
             Some(Detected::Simple(_, rules)) => self.syntax.reset_simple(rules),
             None => self.syntax.reset(None, self.buffer.len_bytes()),
+        }
+    }
+
+    /// The detected language's name, for the status bar.
+    #[must_use]
+    pub fn language_name(&self) -> Option<&'static str> {
+        self.language_name
+    }
+
+    /// The encoding, as far as it is known, for the status bar. A rope
+    /// holds only UTF-8. A piece table held in memory holds a small file
+    /// that is not UTF-8. A huge mapped file's bytes are never checked as
+    /// a whole, so nothing is claimed for it.
+    #[must_use]
+    pub fn encoding_label(&self) -> Option<&'static str> {
+        match (self.buffer.is_mapped(), self.mapping.is_some(), self.bom) {
+            (false, _, false) => Some("UTF-8"),
+            (false, _, true) => Some("UTF-8 BOM"),
+            (true, false, _) => Some("Not UTF-8"),
+            (true, true, true) => Some("BOM"),
+            (true, true, false) => None,
         }
     }
 
@@ -746,11 +820,7 @@ impl Document {
         // Every line is counted now: the highlighter's line-based state
         // may change.
         self.syntax.touch();
-        let p = self.selections.primary();
-        self.selections = Selections::single(Selection {
-            anchor: movement::clamp(&self.buffer, p.anchor),
-            head: movement::clamp(&self.buffer, p.head),
-        });
+        self.clamp_selections();
         Ok(old)
     }
 
@@ -921,11 +991,7 @@ impl Document {
             MappedBuffer::with_index(source, index, limits).map_err(std::io::Error::other)?;
         self.buffer = buffer.into();
         self.mapping = Some(mapped);
-        let p = self.selections.primary();
-        self.selections = Selections::single(Selection {
-            anchor: movement::clamp(&self.buffer, p.anchor),
-            head: movement::clamp(&self.buffer, p.head),
-        });
+        self.clamp_selections();
         self.syntax.touch();
         Ok(changed)
     }
@@ -970,7 +1036,7 @@ impl Document {
             self.buffer.is_char_boundary(sel.head),
             "cursor off a char boundary"
         );
-        self.selections.set_primary(sel);
+        self.selections.set_single(sel);
     }
 
     /// Replace `range` with `text`, put the cursor after it, and record the
@@ -1056,13 +1122,14 @@ impl Document {
         result.map(|()| count)
     }
 
-    /// Type `text` at the cursor, replacing any selection.
+    /// Type `text` at every cursor, replacing any selections.
     ///
     /// # Errors
     ///
     /// See [`Document::replace`].
-    pub fn insert(&mut self, text: &str) -> Result<Edit, EditError> {
-        self.replace(self.selection().range(), text)
+    pub fn insert(&mut self, text: &str) -> Result<(), EditError> {
+        let items = self.each(|_, s| Some((s.range(), Cow::Borrowed(text))));
+        self.apply_each(items, (Bias::After, Bias::After)).map(drop)
     }
 
     /// Paste: like typing, but line endings are converted to the file's.
@@ -1070,17 +1137,40 @@ impl Document {
     /// # Errors
     ///
     /// See [`Document::replace`].
-    pub fn paste(&mut self, text: &str) -> Result<Edit, EditError> {
+    ///
+    /// With several cursors, and as many lines on the clipboard as there
+    /// are cursors (as copying from those cursors gives), each cursor gets
+    /// its own line; otherwise each gets the whole text.
+    pub fn paste(&mut self, text: &str) -> Result<(), EditError> {
         let unified = text.replace("\r\n", "\n");
-        let converted = match self.line_ending {
-            LineEnding::Lf => unified,
-            LineEnding::CrLf => unified.replace('\n', "\r\n"),
+        // One line per cursor, as copying from these cursors gives (an
+        // empty last line for a bare last cursor), or, from elsewhere, the
+        // same with one line break at the end.
+        let count = self.selections.count();
+        let mut lines: Vec<&str> = unified.split('\n').collect();
+        if lines.len() == count + 1 && lines.last() == Some(&"") {
+            lines.pop();
+        }
+        let ending = self.line_ending.as_str();
+        let convert = |s: &str| match self.line_ending {
+            LineEnding::Lf => s.to_owned(),
+            LineEnding::CrLf => s.replace('\n', ending),
+        };
+        let items = if count > 1 && lines.len() == count {
+            self.selections
+                .iter()
+                .zip(&lines)
+                .map(|(s, line)| (s.range(), Cow::Owned(convert(line))))
+                .collect()
+        } else {
+            let whole = convert(&unified);
+            self.each(|_, s| Some((s.range(), Cow::Owned(whole.clone()))))
         };
         // A paste is one undo step even when it is a single character.
         self.history.seal();
-        let edit = self.insert(&converted);
+        let result = self.apply_each(items, (Bias::After, Bias::After));
         self.history.seal();
-        edit
+        result.map(drop)
     }
 
     /// Enter: insert the line ending, then the current line's indentation,
@@ -1089,32 +1179,45 @@ impl Document {
     /// # Errors
     ///
     /// See [`Document::replace`].
-    pub fn insert_newline(&mut self) -> Result<Edit, EditError> {
-        let sel = self.selection().range();
-        let line_start = movement::line_start(&self.buffer, sel.start);
-        // Only the indentation before the cursor carries over, so only the
-        // line up to the cursor (and at most a few KB of it) is read.
-        let head = self
-            .buffer
-            .slice(line_start..sel.start.min(line_start + nimbus_core::long_line::NEAR));
-        let indent_len = head.len() - head.trim_start_matches([' ', '\t']).len();
-        let indent = &head[..indent_len];
-        let text = format!("{}{indent}", self.line_ending.as_str());
-        self.insert(&text)
+    pub fn insert_newline(&mut self) -> Result<(), EditError> {
+        let ending = self.line_ending.as_str();
+        let items = self.each(|t, s| {
+            let r = s.range();
+            let line_start = movement::line_start(t, r.start);
+            // Only the indentation before the cursor carries over, so only
+            // the line up to the cursor (and at most a few KB of it) is read.
+            let head = t.slice(line_start..r.start.min(line_start + nimbus_core::long_line::NEAR));
+            let indent_len = head.len() - head.trim_start_matches([' ', '\t']).len();
+            Some((r, Cow::Owned(format!("{ending}{}", &head[..indent_len]))))
+        });
+        self.apply_each(items, (Bias::After, Bias::After)).map(drop)
     }
 
-    /// The selected text, or `None` if the selection is empty or longer
-    /// than [`MAX_COPY_BYTES`].
+    /// How many bytes the selections hold together.
+    #[must_use]
+    pub fn selected_len(&self) -> usize {
+        self.selections.iter().map(|s| s.range().len()).sum()
+    }
+
+    /// The selected text, or `None` if nothing is selected or it is longer
+    /// than [`MAX_COPY_BYTES`]. Several selections are joined with line
+    /// breaks, one line per cursor (an empty one for a bare cursor), so
+    /// pasting at the same number of cursors gives each its own back.
     #[must_use]
     pub fn selected_text(&self) -> Option<String> {
-        let range = self.selection().range();
-        if range.is_empty() || range.len() > MAX_COPY_BYTES {
+        let len = self.selected_len();
+        if len == 0 || len > MAX_COPY_BYTES {
             return None;
         }
         // The raw bytes, not the display string: bytes that are not UTF-8
         // become `�` here rather than the display stand-in.
-        let mut bytes = Vec::with_capacity(range.len());
-        self.buffer.read_into(range, &mut bytes).ok()?;
+        let mut bytes = Vec::with_capacity(len + self.selections.count());
+        for (i, s) in self.selections.iter().enumerate() {
+            if i > 0 {
+                bytes.push(b'\n');
+            }
+            self.buffer.read_into(s.range(), &mut bytes).ok()?;
+        }
         Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -1152,14 +1255,177 @@ impl Document {
         self.preferred_column = None;
     }
 
+    /// Primary+D. With an empty primary, select the word under it. With a
+    /// selection, add the next place its text occurs, after the primary
+    /// and wrapping around, skipping places already selected, as a new
+    /// primary. On a huge file each press reads at most [`NEXT_BUDGET`]
+    /// bytes, so it never stalls; a later press goes on from there.
+    pub fn add_next_occurrence(&mut self) -> Occurrence {
+        let p = self.selection();
+        let t = &self.buffer;
+        if p.is_empty() {
+            let word = movement::word_at(t, p.head);
+            let is_word = !word.is_empty()
+                && t.slice(word.clone())
+                    .chars()
+                    .any(|c| c.is_alphanumeric() || c == '_');
+            if !is_word {
+                return Occurrence::NoWord;
+            }
+            self.selections.replace_primary(Selection {
+                anchor: word.start,
+                head: word.end,
+            });
+            self.history.seal();
+            return Occurrence::SelectedWord;
+        }
+        let r = p.range();
+        if r.len() > MAX_NEEDLE {
+            return Occurrence::TooLong;
+        }
+        let mut needle = Vec::with_capacity(r.len());
+        if t.read_into(r.clone(), &mut needle).is_err() {
+            return Occurrence::NotFound;
+        }
+        // From the primary to the end, then from the start back to it; or
+        // on from where the last press gave up.
+        let len = t.len_bytes();
+        let resume = self
+            .next_resume
+            .take()
+            .filter(|&(v, sel, _)| v == self.version && sel == p)
+            .map(|(_, _, at)| at);
+        let ranges = match resume {
+            Some(at) if at >= r.end => [at..len, 0..r.end],
+            Some(at) => [at..r.end, 0..0],
+            None => [r.end..len, 0..r.end],
+        };
+        let mut budget = NEXT_BUDGET;
+        for range in ranges {
+            let mut from = range.start;
+            loop {
+                match search::find_literal(t, &needle, from..range.end, budget) {
+                    Literal::Found(m) => {
+                        let taken = self.selections.iter().any(|s| {
+                            let sr = s.range();
+                            sr.start < m.end && m.start < sr.end
+                        });
+                        if taken {
+                            budget = budget.saturating_sub(m.end - from);
+                            from = m.start + 1;
+                            continue;
+                        }
+                        let sel = if p.head < p.anchor {
+                            Selection {
+                                anchor: m.end,
+                                head: m.start,
+                            }
+                        } else {
+                            Selection {
+                                anchor: m.start,
+                                head: m.end,
+                            }
+                        };
+                        self.selections.push_primary(sel);
+                        self.goals.clear();
+                        self.history.seal();
+                        return Occurrence::Added;
+                    }
+                    Literal::NotFound => {
+                        budget = budget.saturating_sub(range.end - from);
+                        break;
+                    }
+                    Literal::GaveUp(at) => {
+                        self.next_resume = Some((self.version, p, at));
+                        return Occurrence::GaveUp;
+                    }
+                }
+            }
+        }
+        if self.selections.count() > 1 {
+            Occurrence::AllSelected
+        } else {
+            Occurrence::NotFound
+        }
+    }
+
+    /// Alt+click: add a cursor at `pos`, or remove the cursor already there
+    /// (unless it is the only one). Returns whether a new cursor now sits
+    /// at `pos` as the primary, which a drag may then stretch into a
+    /// selection; not after a removal, nor a click inside a selection,
+    /// which the new cursor merges into.
+    pub fn click_add(&mut self, pos: usize) -> bool {
+        let pos = movement::clamp(&self.buffer, pos);
+        let existing = self.selections.iter().position(|s| s.head == pos);
+        let added = if let Some(i) = existing {
+            if self.selections.count() > 1 {
+                self.selections.remove(i);
+            }
+            false
+        } else {
+            let before = self.selections.count();
+            self.selections.push_primary(Selection::cursor(pos));
+            self.selections.count() > before
+        };
+        self.goals.clear();
+        self.preferred_column = None;
+        self.history.seal();
+        added
+    }
+
+    /// Alt+drag: the selection being dragged out (the primary, added by
+    /// [`Document::click_add`]) runs from `anchor` to `head`; the others stay.
+    pub fn drag_added(&mut self, anchor: usize, head: usize) {
+        let t = &self.buffer;
+        self.selections.replace_primary(Selection {
+            anchor: movement::clamp(t, anchor),
+            head: movement::clamp(t, head),
+        });
+        self.goals.clear();
+    }
+
+    /// Primary+Alt+Up or Down: add a cursor on the line above the topmost
+    /// cursor (`lines` -1) or below the bottommost (1), at the column the
+    /// primary aims for, as the new primary. So pressing it again keeps
+    /// going. Does nothing at the first or last line.
+    pub fn add_cursor_vertical(&mut self, lines: isize, tab_width: usize) {
+        let all = self.selections.as_slice();
+        let edge = if lines < 0 { all.first() } else { all.last() };
+        let Some(&from) = edge else { return };
+        let t = &self.buffer;
+        let goal = self
+            .preferred_column
+            .unwrap_or_else(|| movement::column_of(t, self.selections.primary().head, tab_width));
+        let v = movement::vertical(t, from.head, Some(goal), lines, tab_width);
+        if v.pos == from.head || t.line_span(v.pos).start == t.line_span(from.head).start {
+            return;
+        }
+        self.selections.push_primary(Selection::cursor(v.pos));
+        self.goals.clear();
+        self.preferred_column = Some(v.preferred_col);
+        self.history.seal();
+    }
+
+    /// Escape with several cursors: keep only the primary. Returns whether
+    /// there were several.
+    pub fn collapse_cursors(&mut self) -> bool {
+        if self.selections.count() < 2 {
+            return false;
+        }
+        self.selections.collapse_to_primary();
+        self.goals.clear();
+        true
+    }
+
     /// Select the whole document.
     pub fn select_all(&mut self) {
         self.select(0..self.buffer.len_bytes());
     }
 
-    /// Move the cursor. With `extend` the selection grows or shrinks;
+    /// Move every cursor. With `extend` each selection grows or shrinks;
     /// without it, a selection collapses (Left and Right collapse to the
     /// selection's edge instead of moving). `page_lines` is one screenful.
+    /// Up and Down keep each cursor's own column across shorter lines.
     pub fn move_cursor(
         &mut self,
         motion: Motion,
@@ -1167,50 +1433,37 @@ impl Document {
         tab_width: usize,
         page_lines: usize,
     ) {
-        let sel = self.selection();
-        self.history.seal();
-        if !extend && !sel.is_empty() && matches!(motion, Motion::Left | Motion::Right) {
-            let r = sel.range();
-            let pos = if motion == Motion::Left {
-                r.start
-            } else {
-                r.end
-            };
-            self.set_selection(Selection::cursor(pos));
-            self.preferred_column = None;
-            return;
-        }
-        let t = &self.buffer;
-        let pos = sel.head;
         let page = isize::try_from(page_lines.max(1)).unwrap_or(isize::MAX);
-        let vertical =
-            |lines: isize| movement::vertical(t, pos, self.preferred_column, lines, tab_width);
-        let (new_pos, preferred) = match motion {
-            Motion::Left => (movement::prev_grapheme(t, pos), None),
-            Motion::Right => (movement::next_grapheme(t, pos), None),
-            Motion::WordLeft => (movement::word_left(t, pos), None),
-            Motion::WordRight => (movement::word_right(t, pos), None),
-            Motion::LineStart => (movement::smart_home(t, pos), None),
-            Motion::LineEnd => (movement::line_end(t, pos), None),
-            Motion::DocStart => (0, None),
-            Motion::DocEnd => (t.len_bytes(), None),
-            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {
-                let lines = match motion {
-                    Motion::Up => -1,
-                    Motion::Down => 1,
-                    Motion::PageUp => -page,
-                    _ => page,
-                };
-                let v = vertical(lines);
+        let lines = match motion {
+            Motion::Up => Some(-1),
+            Motion::Down => Some(1),
+            Motion::PageUp => Some(-page),
+            Motion::PageDown => Some(page),
+            _ => None,
+        };
+        self.move_each(motion, extend, |t, pos, goal| match lines {
+            Some(lines) => {
+                let v = movement::vertical(t, pos, goal, lines, tab_width);
                 (v.pos, Some(v.preferred_col))
             }
-        };
-        self.set_selection(sel.moved_to(new_pos, extend));
-        self.preferred_column = preferred;
+            None => (
+                match motion {
+                    Motion::Left => movement::prev_grapheme(t, pos),
+                    Motion::Right => movement::next_grapheme(t, pos),
+                    Motion::WordLeft => movement::word_left(t, pos),
+                    Motion::WordRight => movement::word_right(t, pos),
+                    Motion::LineStart => movement::smart_home(t, pos),
+                    Motion::LineEnd => movement::line_end(t, pos),
+                    Motion::DocStart => 0,
+                    _ => t.len_bytes(),
+                },
+                None,
+            ),
+        });
     }
 
     /// Like [`Document::move_cursor`] with soft wrap on: Up, Down and the
-    /// Page keys move by visual row; `preferred_column` is then a column
+    /// Page keys move by visual row; the column aimed for is then a column
     /// within the row. Other motions are the same as unwrapped.
     pub fn move_cursor_wrapped(
         &mut self,
@@ -1226,49 +1479,111 @@ impl Document {
             Motion::PageDown => isize::try_from(page_lines.max(1)).unwrap_or(isize::MAX),
             _ => return self.move_cursor(motion, extend, w.tab_width(), page_lines),
         };
-        let sel = self.selection();
+        self.move_each(motion, extend, |t, pos, goal| {
+            let v = movement::vertical_rows(t, w, pos, goal, rows);
+            (v.pos, Some(v.preferred_col))
+        });
+    }
+
+    /// Move every selection's head with `step`, which takes the text, the
+    /// head and the column it aims for, and returns where it goes and the column to
+    /// aim for next (`None` for motions that do not keep one). Collapses
+    /// selections for Left and Right without `extend`, then sorts and
+    /// merges. The primary's column is [`Document::preferred_column`].
+    fn move_each(
+        &mut self,
+        motion: Motion,
+        extend: bool,
+        mut step: impl FnMut(&dyn Text, usize, Option<usize>) -> (usize, Option<usize>),
+    ) {
         self.history.seal();
-        let v = movement::vertical_rows(&self.buffer, w, sel.head, self.preferred_column, rows);
-        self.set_selection(sel.moved_to(v.pos, extend));
-        self.preferred_column = Some(v.preferred_col);
+        let count = self.selections.count();
+        let primary = self.selections.primary_index();
+        if self.goals.len() != count {
+            self.goals.clear();
+            self.goals.resize(count, None);
+        }
+        let (goals, preferred) = (&mut self.goals, &mut self.preferred_column);
+        let t = &self.buffer;
+        if let Some(g) = goals.get_mut(primary) {
+            *g = *preferred;
+        }
+        let edge = !extend && matches!(motion, Motion::Left | Motion::Right);
+        self.selections.transform(|i, s| {
+            let goal = goals.get(i).copied().flatten();
+            let (sel, next) = if edge && !s.is_empty() {
+                let r = s.range();
+                let pos = if motion == Motion::Left {
+                    r.start
+                } else {
+                    r.end
+                };
+                (Selection::cursor(pos), None)
+            } else {
+                let (pos, next) = step(t, s.head, goal);
+                (s.moved_to(pos, extend), next)
+            };
+            if let Some(g) = goals.get_mut(i) {
+                *g = next;
+            }
+            if i == primary {
+                *preferred = next;
+            }
+            sel
+        });
+        if self.selections.count() != count {
+            // Cursors merged: which goal belongs to which is lost.
+            self.goals.clear();
+        }
     }
 
-    /// Backspace: delete the selection, or the grapheme before the cursor.
-    /// At the start of a line this joins it to the previous one, removing a
-    /// `\r\n` as one unit. Returns `None` when there is nothing to delete.
+    /// Backspace at every cursor: delete each selection, or the grapheme
+    /// before each cursor. At the start of a line this joins it to the
+    /// previous one, removing a `\r\n` as one unit. Returns whether
+    /// anything was deleted.
     ///
     /// # Errors
     ///
     /// See [`Document::replace`].
-    pub fn delete_back(&mut self) -> Result<Option<Edit>, EditError> {
-        let sel = self.selection();
-        let range = if sel.is_empty() {
-            movement::prev_grapheme(&self.buffer, sel.head)..sel.head
-        } else {
-            sel.range()
-        };
-        if range.is_empty() {
-            return Ok(None);
-        }
-        self.replace(range, "").map(Some)
+    pub fn delete_back(&mut self) -> Result<bool, EditError> {
+        let items = self.each(|t, s| {
+            let r = if s.is_empty() {
+                movement::prev_grapheme(t, s.head)..s.head
+            } else {
+                s.range()
+            };
+            Some((r, Cow::Borrowed("")))
+        });
+        self.apply_each(items, (Bias::After, Bias::After))
     }
 
-    /// Delete key: delete the selection, or the grapheme after the cursor.
+    /// Delete key at every cursor: delete each selection, or the grapheme
+    /// after each cursor. Returns whether anything was deleted.
     ///
     /// # Errors
     ///
     /// See [`Document::replace`].
-    pub fn delete_forward(&mut self) -> Result<Option<Edit>, EditError> {
-        let sel = self.selection();
-        let range = if sel.is_empty() {
-            sel.head..movement::next_grapheme(&self.buffer, sel.head)
-        } else {
-            sel.range()
-        };
-        if range.is_empty() {
-            return Ok(None);
-        }
-        self.replace(range, "").map(Some)
+    pub fn delete_forward(&mut self) -> Result<bool, EditError> {
+        let items = self.each(|t, s| {
+            let r = if s.is_empty() {
+                s.head..movement::next_grapheme(t, s.head)
+            } else {
+                s.range()
+            };
+            Some((r, Cow::Borrowed("")))
+        });
+        self.apply_each(items, (Bias::After, Bias::After))
+    }
+
+    /// Delete only the non-empty selections (Cut): cursors without a
+    /// selection delete nothing. Returns whether anything was deleted.
+    ///
+    /// # Errors
+    ///
+    /// See [`Document::replace`].
+    pub fn delete_selections(&mut self) -> Result<bool, EditError> {
+        let items = self.each(|_, s| (!s.is_empty()).then(|| (s.range(), Cow::Borrowed(""))));
+        self.apply_each(items, (Bias::After, Bias::After))
     }
 
     /// Delete the selection, or from the cursor to where `motion` would move
@@ -1278,78 +1593,88 @@ impl Document {
     /// # Errors
     ///
     /// See [`Document::replace`].
-    pub fn delete_to(&mut self, motion: Motion) -> Result<Option<Edit>, EditError> {
-        let sel = self.selection();
-        let range = if sel.is_empty() {
-            let t = &self.buffer;
-            let target = match motion {
-                Motion::WordLeft => movement::word_left(t, sel.head),
-                Motion::WordRight => movement::word_right(t, sel.head),
-                Motion::LineStart => movement::line_start(t, sel.head),
-                _ => sel.head,
+    pub fn delete_to(&mut self, motion: Motion) -> Result<bool, EditError> {
+        let items = self.each(|t, s| {
+            let r = if s.is_empty() {
+                let target = match motion {
+                    Motion::WordLeft => movement::word_left(t, s.head),
+                    Motion::WordRight => movement::word_right(t, s.head),
+                    Motion::LineStart => movement::line_start(t, s.head),
+                    _ => s.head,
+                };
+                s.head.min(target)..s.head.max(target)
+            } else {
+                s.range()
             };
-            sel.head.min(target)..sel.head.max(target)
-        } else {
-            sel.range()
-        };
-        if range.is_empty() {
-            return Ok(None);
-        }
-        self.replace(range, "").map(Some)
+            Some((r, Cow::Borrowed("")))
+        });
+        self.apply_each(items, (Bias::After, Bias::After))
     }
 
-    /// Lines touched by the selection. A selection ending at the very start
-    /// of a line does not include that line.
-    fn selected_lines(&self) -> Range<usize> {
-        let r = self.selection().range();
-        let first = self.buffer.byte_to_line(r.start);
-        let mut last = self.buffer.byte_to_line(r.end);
-        if last > first && self.buffer.line_to_byte(last) == r.end {
-            last -= 1;
+    /// Each line touched by any selection, once, in order: for indenting,
+    /// where two cursors on one line must not indent it twice.
+    fn touched_lines(&self) -> Vec<usize> {
+        let mut lines: Vec<usize> = Vec::new();
+        for s in self.selections.iter() {
+            for l in lines_of(&self.buffer, s.range()) {
+                if lines.last().is_none_or(|&last| l > last) {
+                    lines.push(l);
+                }
+            }
         }
-        first..last + 1
+        lines
     }
 
-    /// Tab with a multi-line selection: indent every selected line by one
-    /// tab, as one undo step, keeping the lines selected. Returns `false`
-    /// (doing nothing) when the selection is within one line; the caller
-    /// then types a tab instead.
+    /// Tab when a selection spans lines: indent every line touched by any
+    /// selection by one tab, as one undo step, and select those whole
+    /// lines. Returns `false` (doing nothing) when every selection is
+    /// within one line; the caller then types a tab at each cursor.
     ///
     /// # Errors
     ///
-    /// See [`Document::replace_many`].
+    /// See [`Document::replace`].
     pub fn indent_lines(&mut self) -> Result<bool, EditError> {
-        let lines = self.selected_lines();
-        if lines.len() < 2 {
+        let t = &self.buffer;
+        if !self
+            .selections
+            .iter()
+            .any(|s| lines_of(t, s.range()).len() > 1)
+        {
             return Ok(false);
         }
-        let starts: Vec<(Range<usize>, String)> = lines
-            .clone()
+        let items = self
+            .touched_lines()
+            .into_iter()
             .map(|l| {
                 let s = self.buffer.line_to_byte(l);
-                (s..s, "\t".to_owned())
+                (s..s, Cow::Borrowed("\t"))
             })
             .collect();
-        self.replace_many(&starts)?;
-        self.select_lines(lines);
+        self.history.seal();
+        self.apply_each(items, (Bias::Before, Bias::After))?;
+        self.history.seal();
+        self.select_whole_lines();
         Ok(true)
     }
 
     /// Shift+Tab: remove one level of indentation (a tab, or up to
-    /// `tab_width` spaces) from every selected line, as one undo step.
+    /// `tab_width` spaces) from every line touched by any selection, as
+    /// one undo step. A selection spanning lines then covers them whole; a
+    /// cursor or selection within one line keeps its place in the text.
     ///
     /// # Errors
     ///
-    /// See [`Document::replace_many`].
+    /// See [`Document::replace`].
     pub fn outdent_lines(&mut self, tab_width: usize) -> Result<(), EditError> {
-        let lines = self.selected_lines();
-        let ranges: Vec<(Range<usize>, String)> = lines
-            .clone()
+        let items: Vec<_> = self
+            .touched_lines()
+            .into_iter()
             .filter_map(|l| {
-                let s = self.buffer.line_to_byte(l);
+                let t = &self.buffer;
+                let s = t.line_to_byte(l);
                 // Only the start of the line matters.
-                let end = self.buffer.line_span(s).end.min(s + tab_width + 1);
-                let text = self.buffer.slice(s..end);
+                let end = t.line_span(s).end.min(s + tab_width + 1);
+                let text = t.slice(s..end);
                 let n = if text.starts_with('\t') {
                     1
                 } else {
@@ -1358,35 +1683,30 @@ impl Document {
                         .take_while(|b| *b == b' ')
                         .count()
                 };
-                (n > 0).then(|| (s..s + n, String::new()))
+                (n > 0).then(|| (s..s + n, Cow::Borrowed("")))
             })
             .collect();
-        if ranges.is_empty() {
-            return Ok(());
-        }
-        let before = self.selection();
-        self.replace_many(&ranges)?;
-        if lines.len() > 1 {
-            self.select_lines(lines);
-        } else if let Some((removed, _)) = ranges.first() {
-            // One line: keep the cursor (or selection) where it was in the
-            // text, shifted left by the indentation removed before it.
-            let shift = |p: usize| {
-                if p >= removed.end {
-                    p - removed.len()
-                } else {
-                    p.min(removed.start)
-                }
-            };
-            self.select_span(shift(before.anchor), shift(before.head));
-        }
+        self.history.seal();
+        self.apply_each(items, (Bias::Before, Bias::After))?;
+        self.history.seal();
+        self.select_whole_lines();
         Ok(())
     }
 
-    fn select_lines(&mut self, lines: Range<usize>) {
-        let start = self.buffer.line_to_byte(lines.start);
-        let end = movement::line_end(&self.buffer, self.buffer.line_to_byte(lines.end - 1));
-        self.select(start..end);
+    /// Make every selection that spans lines cover those lines whole, from
+    /// the start of the first to the end of the last, as after indenting.
+    fn select_whole_lines(&mut self) {
+        let t = &self.buffer;
+        self.selections.transform(|_, s| {
+            let lines = lines_of(t, s.range());
+            if lines.len() < 2 {
+                return s;
+            }
+            Selection {
+                anchor: t.line_to_byte(lines.start),
+                head: movement::line_end(t, t.line_to_byte(lines.end - 1)),
+            }
+        });
     }
 
     /// Undo the last step. Returns whether anything changed.
@@ -1425,13 +1745,59 @@ impl Document {
     }
 
     fn restore(&mut self, restored: &Selections) {
-        let p = restored.primary();
-        self.selections = Selections::single(Selection {
-            anchor: movement::clamp(&self.buffer, p.anchor),
-            head: movement::clamp(&self.buffer, p.head),
-        });
+        self.selections = restored.clone();
+        self.clamp_selections();
         self.preferred_column = None;
+        self.goals.clear();
         self.version += 1;
+    }
+
+    /// Snap every selection to a valid position in the text as it is now
+    /// (after undo, or after switching to a saved file), merging any that
+    /// now coincide.
+    fn clamp_selections(&mut self) {
+        let t = &self.buffer;
+        self.selections.transform(|_, s| Selection {
+            anchor: movement::clamp(t, s.anchor),
+            head: movement::clamp(t, s.head),
+        });
+    }
+
+    /// Apply one replacement per cursor (`items`, from [`Document::each`])
+    /// as one batch: one pass over the buffer, the syntax tree told of
+    /// every edit, every cursor moved through the edits with the biases
+    /// `bias` (start, end), and one undo batch, which typing coalesces
+    /// with the batch before it. Returns whether anything changed.
+    fn apply_each(
+        &mut self,
+        mut items: Vec<(Range<usize>, Cow<'_, str>)>,
+        bias: (Bias, Bias),
+    ) -> Result<bool, EditError> {
+        let before = self.selections.clone();
+        let mut edits = multi::apply_each(&mut self.buffer, &mut items)?;
+        if edits.is_empty() {
+            return Ok(false);
+        }
+        let (syntax, buffer) = (&mut self.syntax, &self.buffer);
+        report_sorted(&mut edits, |edit| syntax.edit(buffer, edit));
+        self.selections.map_through(&edits, bias.0, bias.1);
+        self.history
+            .record_batch(edits, &before, &self.selections, Instant::now());
+        self.preferred_column = None;
+        self.goals.clear();
+        self.version += 1;
+        Ok(true)
+    }
+
+    /// One replacement per selection: what `f` returns for it, if anything.
+    fn each<'a>(
+        &self,
+        mut f: impl FnMut(&dyn Text, Selection) -> Option<(Range<usize>, Cow<'a, str>)>,
+    ) -> Vec<(Range<usize>, Cow<'a, str>)> {
+        self.selections
+            .iter()
+            .filter_map(|&s| f(&self.buffer, s))
+            .collect()
     }
 }
 
@@ -1560,7 +1926,7 @@ mod tests {
         d.delete_back().unwrap();
         assert_eq!(text(&d), "ab");
         d.move_cursor(Motion::DocStart, false, 4, 10);
-        assert!(d.delete_back().unwrap().is_none());
+        assert!(!d.delete_back().unwrap());
     }
 
     #[test]
@@ -1799,6 +2165,222 @@ mod tests {
         d.save().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"le caf\xe9\n");
         assert!(!d.is_dirty());
+    }
+
+    fn cursors(d: &mut Document, at: &[usize]) {
+        let sels = at.iter().map(|&p| Selection::cursor(p)).collect();
+        d.selections = Selections::from_vec(sels, 0);
+    }
+
+    fn heads(d: &Document) -> Vec<usize> {
+        d.selections.iter().map(|s| s.head).collect()
+    }
+
+    #[test]
+    fn typing_and_deleting_at_several_cursors_undo_as_one_step() {
+        let mut d = doc("ab\ncd\nef");
+        cursors(&mut d, &[2, 5, 8]);
+        let start = d.selections.clone();
+        d.insert("x").unwrap();
+        d.insert("y").unwrap();
+        assert_eq!(text(&d), "abxy\ncdxy\nefxy");
+        assert_eq!(heads(&d), [4, 9, 14]);
+        d.delete_back().unwrap();
+        assert_eq!(text(&d), "abx\ncdx\nefx");
+        // Typing then deleting: two steps. Undo restores every cursor.
+        d.undo().unwrap();
+        assert_eq!(text(&d), "abxy\ncdxy\nefxy");
+        d.undo().unwrap();
+        assert_eq!(text(&d), "ab\ncd\nef");
+        assert_eq!(d.selections, start);
+        d.redo().unwrap();
+        assert_eq!(heads(&d), [4, 9, 14]);
+    }
+
+    #[test]
+    fn enter_indents_each_line_from_its_own_indentation() {
+        let mut d = doc("a\n\tb\n    c");
+        cursors(&mut d, &[1, 4, 10]);
+        d.insert_newline().unwrap();
+        assert_eq!(text(&d), "a\n\n\tb\n\t\n    c\n    ");
+    }
+
+    #[test]
+    fn paste_gives_each_cursor_its_line_when_the_counts_match() {
+        let mut d = doc("a\nb\nc");
+        cursors(&mut d, &[1, 3, 5]);
+        d.paste("1\n2\n3\n").unwrap();
+        assert_eq!(text(&d), "a1\nb2\nc3");
+        // Otherwise the whole text at each.
+        let mut d = doc("a\nb");
+        cursors(&mut d, &[1, 3]);
+        d.paste("x\ny\nz").unwrap();
+        assert_eq!(text(&d), "ax\ny\nz\nbx\ny\nz");
+    }
+
+    #[test]
+    fn a_line_shared_by_two_selections_is_indented_once() {
+        let mut d = doc("one\ntwo\nthree\n");
+        d.selections = Selections::from_vec(
+            vec![
+                Selection { anchor: 0, head: 5 },
+                Selection {
+                    anchor: 6,
+                    head: 10,
+                },
+            ],
+            0,
+        );
+        assert!(d.indent_lines().unwrap());
+        assert_eq!(text(&d), "\tone\n\ttwo\n\tthree\n");
+        d.outdent_lines(4).unwrap();
+        assert_eq!(text(&d), "one\ntwo\nthree\n");
+        d.undo().unwrap();
+        d.undo().unwrap();
+        assert_eq!(text(&d), "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn every_cursor_moves_and_keeps_its_own_column() {
+        // Cursors at column 4 of line 0 and column 1 of line 1; line 2 is
+        // short, line 3 long again.
+        let mut d = doc("abcdef\nxyz\nq\nlonglong\nlonglong");
+        cursors(&mut d, &[4, 8]);
+        d.move_cursor(Motion::Down, false, 4, 10);
+        // Line 1 has 3 columns: the first cursor stops at its end (col 3).
+        assert_eq!(heads(&d), [10, 12]);
+        d.move_cursor(Motion::Down, false, 4, 10);
+        d.move_cursor(Motion::Down, false, 4, 10);
+        // Back at their own columns on the long lines: 4 and 1.
+        assert_eq!(heads(&d), [17, 23]);
+        // Moving to the line start merges cursors that meet.
+        d.move_cursor(Motion::DocStart, false, 4, 10);
+        assert_eq!(heads(&d), [0]);
+    }
+
+    #[test]
+    fn undo_forgets_the_columns_cursors_were_aiming_for() {
+        // Two cursors at columns 4 and 1; type, move down (columns kept),
+        // then undo: the next Down aims from where undo put them.
+        let mut d = doc("abcdef\nabcdef\nabcdef\nabcdef");
+        cursors(&mut d, &[4, 8]);
+        d.insert("x").unwrap();
+        d.move_cursor(Motion::Down, false, 4, 10);
+        d.undo().unwrap();
+        assert_eq!(heads(&d), [4, 8]);
+        d.move_cursor(Motion::Down, false, 4, 10);
+        assert_eq!(heads(&d), [11, 15], "columns 4 and 1 of the next lines");
+    }
+
+    #[test]
+    fn copy_joins_selections_one_line_each() {
+        let mut d = doc("one two three");
+        d.selections = Selections::from_vec(
+            vec![
+                Selection { anchor: 0, head: 3 },
+                Selection::cursor(5),
+                Selection {
+                    anchor: 8,
+                    head: 13,
+                },
+            ],
+            0,
+        );
+        assert_eq!(d.selected_text().as_deref(), Some("one\n\nthree"));
+        assert_eq!(d.selected_len(), 8);
+        // Shift+Right extends each; Right collapses each to its end.
+        d.move_cursor(Motion::Right, true, 4, 10);
+        assert_eq!(heads(&d), [4, 6, 13]);
+        d.move_cursor(Motion::Right, false, 4, 10);
+        assert_eq!(heads(&d), [4, 6, 13]);
+    }
+
+    fn ranges(d: &Document) -> Vec<Range<usize>> {
+        d.selections.iter().map(Selection::range).collect()
+    }
+
+    #[test]
+    fn primary_d_selects_the_word_then_adds_each_next_occurrence() {
+        // Cursor inside the second "foo"; occurrences at 0, 8 and 16.
+        let mut d = doc("foo bar foo baz foo");
+        d.click(9, false);
+        assert_eq!(d.add_next_occurrence(), Occurrence::SelectedWord);
+        assert_eq!((d.selections.count(), d.selection().range()), (1, 8..11));
+        // The next one after it, then wrapping round to the first.
+        assert_eq!(d.add_next_occurrence(), Occurrence::Added);
+        assert_eq!(ranges(&d), [8..11, 16..19]);
+        assert_eq!(d.selection().range(), 16..19, "the newest is primary");
+        assert_eq!(d.add_next_occurrence(), Occurrence::Added);
+        assert_eq!(ranges(&d), [0..3, 8..11, 16..19]);
+        assert_eq!(d.add_next_occurrence(), Occurrence::AllSelected);
+        // Typing replaces all three.
+        d.insert("x").unwrap();
+        assert_eq!(text(&d), "x bar x baz x");
+        // Escape keeps the primary.
+        assert!(d.collapse_cursors());
+        assert_eq!(heads(&d), [1]);
+        assert!(!d.collapse_cursors());
+
+        let mut d = doc("a  b");
+        d.click(2, false);
+        assert_eq!(d.add_next_occurrence(), Occurrence::NoWord);
+        d.select(0..1);
+        assert_eq!(d.add_next_occurrence(), Occurrence::NotFound);
+    }
+
+    #[test]
+    fn alt_click_adds_and_removes_cursors_and_cursors_go_above_and_below() {
+        let mut d = doc("one\ntwo\nthree");
+        d.click(1, false);
+        assert!(d.click_add(5));
+        assert_eq!(heads(&d), [1, 5]);
+        assert!(!d.click_add(1), "a removal is not dragged");
+        assert_eq!(heads(&d), [5], "clicking a cursor removes it");
+        assert!(!d.click_add(5));
+        assert_eq!(heads(&d), [5], "but never the last one");
+        d.select(0..4);
+        assert!(!d.click_add(2), "inside a selection: merged, not dragged");
+        d.click(5, false);
+        d.drag_added(5, 7);
+        assert_eq!((d.selections.count(), d.selection().range()), (1, 5..7));
+
+        d.click(5, false);
+        d.add_cursor_vertical(1, 4);
+        d.add_cursor_vertical(-1, 4);
+        assert_eq!(heads(&d), [1, 5, 9]);
+        d.add_cursor_vertical(-1, 4);
+        assert_eq!(heads(&d), [1, 5, 9], "nothing above the first line");
+        d.add_cursor_vertical(1, 4);
+        assert_eq!(heads(&d), [1, 5, 9], "nor below the last");
+    }
+
+    #[test]
+    fn copy_and_paste_round_trip_with_a_bare_last_cursor() {
+        let mut d = doc("abc\nxyz");
+        d.selections = Selections::from_vec(
+            vec![Selection { anchor: 0, head: 1 }, Selection::cursor(6)],
+            0,
+        );
+        let copied = d.selected_text().unwrap();
+        assert_eq!(copied, "a\n");
+        d.paste(&copied).unwrap();
+        // The first cursor's "a" replaces "a"; the second gets "".
+        assert_eq!(text(&d), "abc\nxyz");
+        // From elsewhere, with a trailing line break: still one each.
+        d.selections = Selections::from_vec(vec![Selection::cursor(0), Selection::cursor(4)], 0);
+        d.paste("1\n2\n").unwrap();
+        assert_eq!(text(&d), "1abc\n2xyz");
+    }
+
+    #[test]
+    fn cut_deletes_only_the_selections() {
+        let mut d = doc("abc def");
+        d.selections = Selections::from_vec(
+            vec![Selection { anchor: 0, head: 3 }, Selection::cursor(5)],
+            0,
+        );
+        assert!(d.delete_selections().unwrap());
+        assert_eq!(text(&d), " def");
     }
 
     #[test]

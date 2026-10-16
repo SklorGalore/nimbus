@@ -5,6 +5,7 @@
 //! (DESIGN.md §4.1).
 
 pub mod any;
+pub mod brackets;
 pub mod buffer;
 pub mod column;
 pub mod line_ending;
@@ -12,6 +13,7 @@ pub mod line_index;
 pub mod long_line;
 pub mod mapped;
 pub mod movement;
+pub mod multi;
 pub mod rope;
 pub mod search;
 pub mod selection;
@@ -26,7 +28,7 @@ pub use buffer::{
 pub use line_ending::LineEnding;
 pub use mapped::{Limits, MappedBuffer, MappedSnapshot, PieceRun};
 pub use rope::RopeBuffer;
-pub use selection::{Selection, Selections};
+pub use selection::{Bias, Selection, Selections};
 pub use source::{Source, VecSource};
 pub use undo::History;
 

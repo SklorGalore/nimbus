@@ -161,9 +161,12 @@ Other `core` responsibilities:
   resolved with `unicode-segmentation` when the cursor moves. Display column
   is computed at render time, not stored. Vertical movement keeps a "sticky"
   preferred column so moving through a short line does not lose your place.
-- **Cursors and selections**: a `Selection` is `{anchor, head}`. The editor
-  holds a `Vec<Selection>`, so multi-cursor (M8) needs no redesign, but
-  M2–M7 use exactly one.
+- **Cursors and selections**: a `Selection` is `{anchor, head}`. Since M8
+  a document holds several (`Selections`: sorted, merged when they
+  overlap, with one primary that the view and the input method follow).
+  An edit at every cursor is worked out per cursor and applied in one
+  `replace_sorted` (`crates/core/src/multi.rs`), so no offset moves before
+  it is used; undo puts back each keystroke's batch in one pass.
 - **Undo**: a linear history of `Edit` records (range, removed text, inserted
   text, selections before and after). Typing coalesces into one record until
   the cursor jumps, the edit kind changes, or 500 ms pass. Branching undo
@@ -466,7 +469,7 @@ introduces and points at the code.
 | 5 | Highlighting | **Done** | Syntax colours for nine languages, two themes | [m5](docs/milestones/m5-highlighting.md) |
 | 6 | File tree | **Done** | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
 | 7 | Huge files | **Done** | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
-| 8 | Polish | Next | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
+| 8 | Polish | In review | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
 | 9 | Compare and merge | Planned | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
@@ -548,4 +551,7 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Replace All and its undo and redo apply in one pass (`replace_sorted`, `put_sorted`) | §4.1 |
 | 2026-10-16 | Files that are not UTF-8 and under the threshold are held in memory, not mapped | §4.1 |
 | 2026-10-16 | Truncation of a dirty mapped file (SIGBUS on macOS and Linux; blocked writers on Windows) accepted as a documented limitation | §4.1, m7 |
-| 2026-10-16 | Dependabot for GitHub Actions (weekly, grouped); cargo crates by hand each milestone | §9 |
+| 2026-10-16 | M8 plan approved: sorted multi-cursor selections applied in one pass; bundle Hack Bold, slant for italic; Linux QA by CI only | m8 |
+| 2026-10-16 | Font fallback copies the smallest suitable system font into memory (no `unsafe`); colour-only emoji fonts skipped | §4.3, m8 |
+| 2026-10-16 | Bundled bold font subset to its text characters (no icons): 2.8 MB to 185 KB | §1, m8 |
+| 2026-10-16 | Release builds: draft GitHub release on a `v*` tag; unsigned; macOS universal binary | §8, m8 |

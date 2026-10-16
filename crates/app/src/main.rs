@@ -7,6 +7,7 @@ mod action;
 mod app;
 mod bmp;
 mod config;
+mod debug;
 mod document;
 mod find;
 mod indexer;
@@ -39,6 +40,10 @@ use crate::document::Document;
 use crate::languages::Languages;
 
 /// Command-line options.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent command-line switches"
+)]
 pub struct Options {
     /// Exit right after the first frame is presented, printing time-to-first-frame.
     /// Used by CI and by `hyperfine` to track the startup budget (DESIGN.md §1).
@@ -71,6 +76,11 @@ pub struct Options {
     /// With `--headless`: count all of a huge file's lines before drawing,
     /// instead of drawing with only the first part counted.
     pub wait_index: bool,
+    /// `--debug-overlay`: start with the debug overlay (F12) showing.
+    pub debug_overlay: bool,
+    /// `--cursors 3,10,20`: with `--headless`, put a cursor at each byte
+    /// offset (the last is the primary), to render several cursors.
+    pub cursors: Vec<usize>,
 }
 
 /// Write a line to stdout. Command-line output such as `--version` and the
@@ -112,6 +122,19 @@ pub fn to_f32(v: f64) -> f32 {
     v as f32
 }
 
+/// What `--help` prints.
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--headless WxH [--wait-index]] [--debug-overlay] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]";
+
+/// A comma-separated list of numbers, such as `3,10,20`; anything that is
+/// not a number is skipped.
+fn numbers(arg: Option<std::ffi::OsString>) -> Vec<usize> {
+    let list = arg.and_then(|a| a.into_string().ok());
+    list.iter()
+        .flat_map(|l| l.split(','))
+        .filter_map(|n| n.trim().parse().ok())
+        .collect()
+}
+
 fn parse_options() -> Options {
     let mut smoke = false;
     let mut screenshot = None;
@@ -123,6 +146,8 @@ fn parse_options() -> Options {
     let mut picker = None;
     let mut theme = None;
     let mut wait_index = false;
+    let mut debug_overlay = false;
+    let mut cursors = Vec::new();
     let mut backend = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -146,6 +171,8 @@ fn parse_options() -> Options {
             }
             Some("--wrap") => wrap = true,
             Some("--wait-index") => wait_index = true,
+            Some("--debug-overlay") => debug_overlay = true,
+            Some("--cursors") => cursors = numbers(args.next()),
             Some("--picker") => picker = args.next().and_then(|p| p.into_string().ok()),
             Some("--theme") => theme = args.next().and_then(|t| t.into_string().ok()),
             Some("--backend") => {
@@ -182,9 +209,7 @@ fn parse_options() -> Options {
                 std::process::exit(0);
             }
             Some("--help" | "-h") => {
-                print_out(
-                    "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--headless WxH [--wait-index]] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]",
-                );
+                print_out(USAGE);
                 std::process::exit(0);
             }
             Some(other) if other.starts_with("--") => {
@@ -206,6 +231,8 @@ fn parse_options() -> Options {
         theme,
         backend,
         wait_index,
+        debug_overlay,
+        cursors,
     }
 }
 

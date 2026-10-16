@@ -2,6 +2,7 @@
 name = "nimbus"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 arboard = { version = "3", default-features = false }
@@ -27,3 +28,6 @@ workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 muda = "0.21"
+
+[build-dependencies]
+embed-resource = "3.0.12"

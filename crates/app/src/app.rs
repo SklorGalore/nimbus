@@ -26,7 +26,8 @@ use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
 use crate::config::{self, Config};
-use crate::document::{DiskChange, Document, MAX_COPY_BYTES};
+use crate::debug::Debug;
+use crate::document::{DiskChange, Document, MAX_COPY_BYTES, Occurrence};
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::input::{self, Command, Motion};
 use crate::io;
@@ -48,6 +49,9 @@ use crate::{Options, effective_scale, print_err, print_out, save_screenshot, to_
 pub enum AppEvent {
     /// Results from a background search.
     Search(SearchBatch),
+    /// A system font for a character the bundled font lacks has been
+    /// loaded: draw again to use it.
+    FontLoaded,
     /// The picker's matcher has new results.
     PickerChanged,
     /// A menu item was chosen; carries its action id.
@@ -273,34 +277,6 @@ impl Blink {
     }
 }
 
-/// Keystroke-to-present latency tracking (DESIGN.md §5). The M8 overlay
-/// shows these values; until then they are logged at debug level.
-#[derive(Default)]
-struct Latency {
-    /// When the oldest input not yet on screen arrived.
-    pending: Option<Instant>,
-    worst: Duration,
-    /// Every sample, kept only during `--bench-typing`.
-    samples: Option<Vec<Duration>>,
-}
-
-impl Latency {
-    fn input(&mut self, now: Instant) {
-        self.pending.get_or_insert(now);
-    }
-
-    fn presented(&mut self) {
-        if let Some(started) = self.pending.take() {
-            let took = started.elapsed();
-            self.worst = self.worst.max(took);
-            log::debug!("keystroke to present: {took:?} (worst {:?})", self.worst);
-            if let Some(samples) = &mut self.samples {
-                samples.push(took);
-            }
-        }
-    }
-}
-
 pub struct App {
     options: Options,
     started: Instant,
@@ -329,7 +305,8 @@ pub struct App {
     active: usize,
     blink: Blink,
     preedit: Option<Preedit>,
-    latency: Latency,
+    /// The debug overlay and the timings it shows.
+    debug: Debug,
     /// Last mouse position in physical pixels; clicks carry no position.
     mouse: PhysicalPosition<f64>,
     /// Last rectangle sent to the IME, to avoid resending it every frame.
@@ -391,6 +368,11 @@ struct Clicks {
     /// extends from it in whole units.
     anchor: std::ops::Range<usize>,
     dragging: bool,
+    /// The press held Alt: it added a cursor, and dragging extends that
+    /// one instead of replacing every selection.
+    adding: bool,
+    /// Dragging the scrollbar's thumb, held this far below its top.
+    scrollbar_grab: Option<f32>,
 }
 
 const MULTI_CLICK: Duration = Duration::from_millis(500);
@@ -422,6 +404,7 @@ impl App {
         proxy: EventLoopProxy<AppEvent>,
         warnings: Vec<String>,
     ) -> Self {
+        let debug_overlay = options.debug_overlay;
         let (keymap, key_warnings) = Keymap::new(&config.keys);
         let (theme, theme_warnings) = Theme::load(&config.theme);
         let ui_state = State::load();
@@ -471,7 +454,7 @@ impl App {
             active: 0,
             blink: Blink::new(started),
             preedit: None,
-            latency: Latency::default(),
+            debug: Debug::new(debug_overlay),
             mouse: PhysicalPosition::new(0.0, 0.0),
             ime_area: None,
             title_key: None,
@@ -526,10 +509,13 @@ impl App {
     fn layout(&self) -> Option<Layout> {
         let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
         let scale = to_f32(effective_scale(window.scale_factor()));
-        Some(
-            layout_for(gpu, scale, self.doc(), &self.find, self.message.is_some())
-                .with_sidebar(self.sidebar.px(scale)),
-        )
+        Some(layout_for(gpu, scale, self.doc(), &self.find).with_sidebar(self.sidebar.px(scale)))
+    }
+
+    /// What the debug overlay reports about the active document and the
+    /// work running for it.
+    fn debug_facts(&self) -> crate::debug::Facts {
+        debug_facts(self.doc(), &self.find)
     }
 
     /// Show a short message at the bottom of the window.
@@ -650,6 +636,10 @@ impl App {
                 self.show_sidebar();
                 self.remember();
             }
+            Command::ToggleDebugOverlay => {
+                self.debug.visible = !self.debug.visible;
+                self.changed(false);
+            }
             Command::ToggleIgnored => {
                 let show = !self.sidebar.tree.show_ignored;
                 let requests = self.sidebar.tree.set_show_ignored(show);
@@ -715,11 +705,24 @@ impl App {
                 self.doc_mut().select_all();
                 Ok(())
             }
+            Command::AddNextOccurrence => {
+                self.add_next_occurrence();
+                Ok(())
+            }
+            Command::AddCursorAbove | Command::AddCursorBelow => {
+                let lines = if cmd == Command::AddCursorAbove {
+                    -1
+                } else {
+                    1
+                };
+                self.doc_mut().add_cursor_vertical(lines, tab_width);
+                Ok(())
+            }
             Command::Copy | Command::Cut | Command::Paste => self.clipboard_command(cmd),
             Command::Escape => {
                 if self.find.open {
                     self.find.close();
-                } else {
+                } else if !self.doc_mut().collapse_cursors() {
                     let head = self.doc().selection().head;
                     self.doc_mut().click(head, false);
                 }
@@ -852,11 +855,8 @@ impl App {
         } else if t.is_fully_indexed() {
             let lines = t.len_lines();
             self.say(format!("{lines} lines"), false);
-        } else {
-            #[expect(clippy::cast_precision_loss, reason = "a percentage for display")]
-            let pct = t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64;
-            self.say(format!("Counting lines… {pct:.0}%"), false);
         }
+        // Progress meanwhile shows in the status bar.
         if let Some(n) = self.pending_line {
             let t = &self.tabs[i].doc.buffer;
             if n <= t.len_lines() || !self.tabs[i].doc.counting_lines() {
@@ -1677,6 +1677,7 @@ impl App {
             | Command::GoToLine
             | Command::FocusSidebar
             | Command::ToggleIgnored
+            | Command::ToggleDebugOverlay
             | Command::ReloadFromDisk
             | Command::KeepMine
             | Command::OpenFile
@@ -1790,6 +1791,18 @@ impl App {
         }
     }
 
+    /// Primary+D, saying when there is nothing more to add.
+    fn add_next_occurrence(&mut self) {
+        let note = match self.doc_mut().add_next_occurrence() {
+            Occurrence::SelectedWord | Occurrence::Added | Occurrence::NoWord => return,
+            Occurrence::AllSelected => "Every occurrence is selected",
+            Occurrence::NotFound => "No other occurrence",
+            Occurrence::TooLong => "The selection is too long to look for",
+            Occurrence::GaveUp => "None in the next 32 MB; press again to look further",
+        };
+        self.say(note, false);
+    }
+
     /// Copy, cut or paste in the editor. Cut and paste are their own undo
     /// steps.
     fn clipboard_command(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
@@ -1799,7 +1812,7 @@ impl App {
                 None => Ok(()),
             };
         }
-        let len = self.doc().selection().range().len();
+        let len = self.doc().selected_len();
         if len > MAX_COPY_BYTES {
             // Refused before reading anything, and Cut deletes nothing.
             self.say(
@@ -1821,7 +1834,7 @@ impl App {
         }
         let doc = self.doc_mut();
         doc.history.seal();
-        let result = doc.delete_back().map(drop);
+        let result = doc.delete_selections().map(drop);
         doc.history.seal();
         result
     }
@@ -1907,10 +1920,32 @@ impl App {
         self.find.focused = false;
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
+        if let Some(hit) = tab.view.scrollbar_hit(x, y) {
+            // Grab the thumb where pressed, or jump to centre it there.
+            let grab = match hit {
+                view::ScrollbarHit::Thumb(offset) => offset,
+                view::ScrollbarHit::Track => {
+                    let half = tab.view.thumb_height() / 2.0;
+                    tab.view
+                        .drag_scrollbar(y - half, &tab.doc, &layout, tab_width);
+                    half
+                }
+            };
+            self.clicks.scrollbar_grab = Some(grab);
+            self.changed(false);
+            return;
+        }
         let pos = tab.view.hit(x, y, &tab.doc, &layout, tab_width);
         let count = self.clicks.press(now, (x, y), layout.metrics.cell_width);
         let doc = &mut tab.doc;
+        self.clicks.adding = count == 1 && self.modifiers.alt_key();
         match count {
+            1 if self.clicks.adding => {
+                // Alt+click: add a cursor, or remove the one there. Only a
+                // new cursor can be dragged out into a selection.
+                self.clicks.adding = doc.click_add(pos);
+                self.clicks.anchor = pos..pos;
+            }
             1 => {
                 doc.click(pos, self.modifiers.shift_key());
                 // Dragging extends from the selection's anchor: the old one
@@ -1929,7 +1964,7 @@ impl App {
                 doc.select(line);
             }
         }
-        self.clicks.dragging = true;
+        self.clicks.dragging = !(count == 1 && self.modifiers.alt_key() && !self.clicks.adding);
         self.blink.reset(now);
         self.changed(false);
     }
@@ -1957,6 +1992,17 @@ impl App {
             tab.view.scroll_x_by(-dx);
         }
         self.changed(false);
+    }
+
+    /// Widen the scrollbar while the pointer is over it.
+    fn update_scrollbar_hover(&mut self) {
+        let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        let view = &mut self.tabs[self.active].view;
+        let hover = self.clicks.scrollbar_grab.is_some() || view.scrollbar_hit(x, y).is_some();
+        if hover != view.scrollbar_hover {
+            view.scrollbar_hover = hover;
+            self.changed(false);
+        }
     }
 
     /// Show the resize cursor over the sidebar's divider, the usual one
@@ -1992,10 +2038,16 @@ impl App {
             _ => nimbus_core::movement::line_range(t, pos),
         };
         let anchor = self.clicks.anchor.clone();
-        if unit.start < anchor.start {
-            tab.doc.select_span(anchor.end, unit.start);
+        let (from, to) = if unit.start < anchor.start {
+            (anchor.end, unit.start)
         } else {
-            tab.doc.select_span(anchor.start, unit.end.max(anchor.end));
+            (anchor.start, unit.end.max(anchor.end))
+        };
+        if self.clicks.adding {
+            // Alt+drag: the added selection grows; the others stay.
+            tab.doc.drag_added(from, to);
+        } else {
+            tab.doc.select_span(from, to);
         }
         self.changed(true);
     }
@@ -2092,6 +2144,8 @@ impl App {
         view::draw_tabs(gpu, &self.theme.ui, layout, &labels, self.active);
         let active = self.tabs[self.active].doc.canonical.as_deref();
         sidebar::draw(gpu, &self.theme.ui, layout, &self.sidebar, active);
+        let facts = self.debug_facts();
+        self.debug.draw(gpu, &self.theme.ui, layout, facts);
         if let Some(p) = &self.picker {
             let ui = &self.theme.ui;
             draw_picker_overlay(gpu, ui, layout, p, &self.keymap, self.blink.visible);
@@ -2099,6 +2153,7 @@ impl App {
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        let frame_started = Instant::now();
         // The first parse runs on a worker while this frame shows the
         // text plain; colours follow when it finishes. Before the layout,
         // which leaves room for any message this adds.
@@ -2162,7 +2217,8 @@ impl App {
                 return;
             }
         }
-        self.latency.presented();
+        self.debug.latency.presented();
+        self.debug.frames.push(frame_started.elapsed());
 
         // Tell the IME where the cursor is, so its candidate window appears
         // next to it. Physical pixels, relative to the window.
@@ -2213,7 +2269,7 @@ impl App {
 
     /// One step of `--bench-typing`: type a character, or report and exit.
     fn bench_step(&mut self, event_loop: &ActiveEventLoop) {
-        let samples = self.latency.samples.get_or_insert_with(Vec::new);
+        let samples = self.debug.latency.samples.get_or_insert_with(Vec::new);
         if samples.len() >= self.options.bench_typing {
             let mut s = std::mem::take(samples);
             s.sort();
@@ -2229,7 +2285,7 @@ impl App {
             return;
         }
         let ch = ["a", "b", "c", " ", "x", "y"][samples.len() % 6];
-        self.latency.input(Instant::now());
+        self.debug.latency.input(Instant::now());
         self.run(Command::Insert(ch), event_loop);
     }
 
@@ -2240,12 +2296,12 @@ impl App {
             Ime::Enabled => {}
             Ime::Preedit(text, cursor) => {
                 self.preedit = (!text.is_empty()).then_some(Preedit { text, cursor });
-                self.latency.input(now);
+                self.debug.latency.input(now);
                 self.changed(false);
             }
             Ime::Commit(text) => {
                 self.preedit = None;
-                self.latency.input(now);
+                self.debug.latency.input(now);
                 // Routed like typing: into the find bar if it has focus.
                 self.run(Command::Insert(&text), event_loop);
             }
@@ -2272,9 +2328,57 @@ fn line_estimate(t: &dyn Text) -> usize {
     usize::try_from(estimate).unwrap_or(usize::MAX).max(lines)
 }
 
-/// Geometry for the window `gpu` draws to, with room for the find bar and
-/// message line when they are shown.
-pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar, message: bool) -> Layout {
+/// `--picker KIND[:QUERY]` with `--headless`: open the palette, file opener
+/// or go-to-line picker with `QUERY` typed, let it settle, and draw it.
+fn draw_headless_picker(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    (spec, root): (&str, &Path),
+    doc: &Document,
+    config: &Config,
+) {
+    // "palette" or "files", optionally followed by ":query".
+    let (kind, query) = spec.split_once(':').unwrap_or((spec, ""));
+    let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+    let mut p = match kind {
+        "files" => Picker::files(root, notify),
+        "line" => Picker::go_to_line(notify, Some(doc.buffer.len_lines())),
+        _ => Picker::palette(notify),
+    };
+    let _ = p.input.insert(query);
+    // Let the walk and matcher finish, up to two seconds.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while p.tick() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (keymap, _) = Keymap::new(&config.keys);
+    draw_picker_overlay(gpu, ui, layout, &p, &keymap, true);
+}
+
+/// What the debug overlay reports about `doc` and the work running for it.
+fn debug_facts(doc: &Document, find: &FindBar) -> crate::debug::Facts {
+    let t = &doc.buffer;
+    crate::debug::Facts {
+        backend: match (t.is_mapped(), doc.saves_on_worker()) {
+            (false, _) => "rope",
+            (true, false) => "bytes in memory",
+            (true, true) => "mapped file",
+        },
+        len: t.len_bytes(),
+        syntax: doc.syntax.phase_name(),
+        searching: find.open && !find.complete,
+        #[expect(clippy::cast_precision_loss, reason = "a percentage for display")]
+        counting: doc
+            .counting_lines()
+            .then(|| t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64),
+        saving: doc.is_saving(),
+    }
+}
+
+/// Geometry for the window `gpu` draws to, with room for the find bar when
+/// it is shown, and the status bar.
+pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar) -> Layout {
     let (w, h) = gpu.size();
     let bar_rows = match (find.open, find.replace_mode) {
         (false, _) => 0,
@@ -2282,7 +2386,7 @@ pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar, message
         (true, true) => 2,
     };
     Layout::new(gpu.metrics(), w, h, scale, line_estimate(&doc.buffer))
-        .with_chrome(true, bar_rows, message)
+        .with_chrome(true, bar_rows, true)
 }
 
 /// Everything one frame shows.
@@ -2298,7 +2402,7 @@ pub struct Scene<'a> {
     tab_width: usize,
 }
 
-/// Queue a whole frame: editor text, then the find bar and message line.
+/// Queue a whole frame: editor text, then the find bar and status bar.
 /// Shared by the window and headless rendering.
 pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     let find = scene.find;
@@ -2306,7 +2410,7 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     let ui = scene.theme.ui;
     let syntax = &scene.doc.syntax;
     let captures = match syntax.capture_names() {
-        Some((key, names)) => scene.theme.capture_colors(key, names),
+        Some((key, names)) => scene.theme.capture_looks(key, names),
         None => &[],
     };
     scene.view.draw(
@@ -2328,12 +2432,13 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
             captures,
         },
     );
+    scene.view.draw_scrollbar(gpu, scene.doc, layout, &ui);
     if find.open {
         view::draw_find_bar(gpu, &ui, find, layout, scene.cursor_visible);
     }
-    if let Some(m) = scene.message {
-        view::draw_message(gpu, &ui, &m.text, layout, m.is_error);
-    }
+    let message = scene.message.map(|m| (m.text.as_str(), m.is_error));
+    let info = scene.view.status_info(scene.doc, scene.tab_width);
+    view::draw_status(gpu, &ui, layout, message, info);
 }
 
 /// `--headless WxH --screenshot FILE`: render the first frame into an
@@ -2381,9 +2486,18 @@ pub fn run_headless(
         index_now(&mut doc);
     }
     let find = headless_find(options.find.as_deref(), &mut doc);
+    if !options.cursors.is_empty() {
+        let t = &doc.buffer;
+        let sels = options
+            .cursors
+            .iter()
+            .map(|&p| nimbus_core::Selection::cursor(nimbus_core::movement::clamp(t, p)))
+            .collect();
+        doc.selections = nimbus_core::Selections::from_vec(sels, options.cursors.len() - 1);
+    }
     let (sidebar, layout) = headless_sidebar(
         &root,
-        layout_for(&gpu, to_f32(scale), &doc, &find, false),
+        layout_for(&gpu, to_f32(scale), &doc, &find),
         doc.canonical.as_deref(),
     );
     view.ensure_cursor_visible(&doc, &layout, config.tab_width);
@@ -2400,47 +2514,41 @@ pub fn run_headless(
         name: doc.display_name(),
         dirty: false,
     };
-    let mut scene = Scene {
-        doc: &doc,
-        view: &mut view,
-        theme: &mut theme,
-        find: &find,
-        message: None,
-        cursor_visible: true,
-        preedit: None,
-        tab_width: config.tab_width,
-    };
-    paint_scene(&mut gpu, &layout, &mut scene);
     let labels = if labels.is_empty() {
         vec![label]
     } else {
         labels
     };
-    view::draw_tabs(&mut gpu, &theme.ui, &layout, &labels, 0);
-    sidebar::draw(
-        &mut gpu,
-        &theme.ui,
-        &layout,
-        &sidebar,
-        doc.canonical.as_deref(),
-    );
-    if let Some(spec) = &options.picker {
-        // "palette" or "files", optionally followed by ":query".
-        let (kind, query) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
-        let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
-        let mut p = match kind {
-            "files" => Picker::files(&root, notify),
-            "line" => Picker::go_to_line(notify, Some(doc.buffer.len_lines())),
-            _ => Picker::palette(notify),
-        };
-        let _ = p.input.insert(query);
-        // Let the walk and matcher finish, up to two seconds.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while p.tick() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
+    // Characters the bundled font lacks are looked for in system fonts on
+    // a worker; with no later frame to show them in, wait for them once
+    // everything has been painted, and paint again if any arrived.
+    for pass in 0..2 {
+        paint_scene(
+            &mut gpu,
+            &layout,
+            &mut Scene {
+                doc: &doc,
+                view: &mut view,
+                theme: &mut theme,
+                find: &find,
+                message: None,
+                cursor_visible: true,
+                preedit: None,
+                tab_width: config.tab_width,
+            },
+        );
+        let ui = &theme.ui;
+        view::draw_tabs(&mut gpu, ui, &layout, &labels, 0);
+        sidebar::draw(&mut gpu, ui, &layout, &sidebar, doc.canonical.as_deref());
+        if options.debug_overlay {
+            Debug::new(true).draw(&mut gpu, ui, &layout, debug_facts(&doc, &find));
         }
-        let (keymap, _) = Keymap::new(&config.keys);
-        draw_picker_overlay(&mut gpu, &theme.ui, &layout, &p, &keymap, true);
+        if let Some(spec) = &options.picker {
+            draw_headless_picker(&mut gpu, ui, &layout, (spec, &root), &doc, config);
+        }
+        if pass == 1 || !gpu.wait_for_fonts(Duration::from_secs(5)) {
+            break;
+        }
     }
     gpu.request_capture();
     if let Err(e) = gpu.render() {
@@ -2655,6 +2763,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.save_event(event, event_loop);
                 self.changed(false);
             }
+            AppEvent::FontLoaded => self.changed(false),
             AppEvent::WatchWarning(warning) => {
                 self.say(warning, true);
                 self.changed(false);
@@ -2727,6 +2836,10 @@ impl ApplicationHandler<AppEvent> for App {
         match Gpu::new(&window, context, font, self.font_px(scale)) {
             Ok(mut gpu) => {
                 gpu.set_tab_width(self.tab_width());
+                let proxy = self.proxy.clone();
+                gpu.set_font_notify(Arc::new(move || {
+                    let _ = proxy.send_event(AppEvent::FontLoaded);
+                }));
                 self.gpu = Some(gpu);
             }
             Err(e) => {
@@ -2871,7 +2984,7 @@ impl ApplicationHandler<AppEvent> for App {
                 );
                 if let Some(cmd) = cmd {
                     self.blink.reset(now);
-                    self.latency.input(now);
+                    self.debug.latency.input(now);
                     self.run(cmd, event_loop);
                 }
             }
@@ -2885,9 +2998,18 @@ impl ApplicationHandler<AppEvent> for App {
                         self.sidebar.drag_to(&layout, to_f32(position.x));
                         self.changed(false);
                     }
+                } else if let Some(grab) = self.clicks.scrollbar_grab {
+                    if let Some(layout) = self.layout() {
+                        let tab_width = self.tab_width();
+                        let tab = &mut self.tabs[self.active];
+                        let y = to_f32(position.y) - grab;
+                        tab.view.drag_scrollbar(y, &tab.doc, &layout, tab_width);
+                        self.changed(false);
+                    }
                 } else if self.clicks.dragging {
                     self.mouse_drag();
                 }
+                self.update_scrollbar_hover();
                 self.update_cursor_icon();
             }
 
@@ -2903,6 +3025,7 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 } else {
                     self.clicks.dragging = false;
+                    self.clicks.scrollbar_grab = None;
                     if self.sidebar.resizing {
                         self.sidebar.resizing = false;
                         self.remember();
