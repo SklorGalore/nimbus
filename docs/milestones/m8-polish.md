@@ -35,8 +35,10 @@ release builds for all three platforms.
 - [x] **Scrollbar** with a draggable thumb (view test of its geometry
       and dragging; headless renders, including the 4 GB log).
 - [ ] **Markdown inline highlighting** (stretch; skip without blocking).
-- [ ] A GPU screenshot smoke test on macOS compares a rendered frame to a
-      reference image with a tolerance.
+- [x] A GPU screenshot smoke test on macOS compares a rendered frame to a
+      reference image with a tolerance (`crates/app/tests/screenshot.rs`:
+      0 pixels differ on a clean run, 48 for one changed letter; at most
+      20 allowed).
 - [ ] `cargo bloat` review recorded; anything over 1 MB justified.
 - [ ] Manual QA checklist run on Linux (Wayland and X11) and Windows,
       results recorded.

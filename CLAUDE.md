@@ -33,6 +33,7 @@ cargo run -- FILE --cursors 4,19,33 --headless 900x300 --screenshot /tmp/m.bmp  
 bench/gen.sh sizes && bench/threshold.sh                    # rope vs mapped open time and memory at 64-512 MB
 cargo test --release -p nimbus-syntax -- --ignored --nocapture --test-threads 1   # keystroke and first-parse cost, tree memory (needs bench/gen.sh)
 cargo test --workspace
+NIMBUS_UPDATE_SCREENSHOT=1 cargo test -p nimbus --test screenshot   # remake the screenshot test's reference after an intended drawing change; look at it before committing
 cargo test -p nimbus-core <test_name>    # single test in one crate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets   # strict lints from Cargo.toml; CI fails on any warning
