@@ -1,6 +1,6 @@
 # M9 — Compare and merge
 
-**Status: in progress** (started 2026-10-17; tasks 1 to 10 landed (6 confirmed; 7 to 10 await the owner's look); left: 2a's long lines, the merge on a worker, task 11; 2a's long-line splitting still open)
+**Status: landed, pending the owner's look** (2026-10-17; every task is in and measured; the owner has confirmed the compare view (task 6) on screen and has yet to look at the merge views and the M6 offers (tasks 7 to 10); long-line splitting, the plan's layer 4, is deferred to the backlog)
 
 ## Goal
 
@@ -77,7 +77,7 @@ views, plus the diff's own:
       three-way merge of the text as last loaded (a snapshot every rope
       document keeps from its last open, reload or save), the unsaved
       edits, and the file as it is now, in place of the tab's document.
-- [ ] Every budget in the table above, measured on the bench files and
+- [x] Every budget in the table above, measured on the bench files and
       recorded in Results; typing in the merge result of two 10 MB files
       measured with `--bench-typing`.
 
@@ -364,13 +364,14 @@ costs. A two-way merge is the three-way machinery with the left text as
 base and ours, so every difference is a `Theirs` chunk and the result
 starts as the left text; a three-way result starts as `Merge::write` with
 conflicts as marker blocks. Taking a side is one `replace` of the
-region's lines, so it undoes like any edit. Deviations: the merge itself
-(two diffs and the walk) runs on the main thread when the tab opens,
-not on a worker as the plan's budget table assumes, so opening a merge
-of two 10 MB files blocks for about a third of a second; moving it to the
-worker as the compare does is left for task 11's measurements. "Merge
-with Base…" and "Merge Files…" put the result in a new untitled tab
-rather than over the active one.
+region's lines, so it undoes like any edit. The merge itself (two
+diffs and the walk) runs on a worker, as the compare's first diff does:
+the tab appears at once with the three texts unaligned and "merging…" in
+the status bar, and edits, takes and saves wait until the result arrives
+(`AppEvent::Merged`); a three-way result starts empty and takes the
+merged text when it comes, with no undo history before it. Deviation:
+"Merge with Base…" and "Merge Files…" put the result in a new untitled
+tab rather than over the active one.
 
 **Tasks 9 and 10: markers in, and the M6 offers.** `core::markers::split`
 reads a conflicted file back into base, ours and theirs (the common text
@@ -392,3 +393,44 @@ indentation heuristic read each line's indent from its first storage
 chunk, and the mapped backend's tiny test pieces split some indents. The
 indent is now gathered across chunks, so the diff depends only on the
 text.
+
+**Task 11: budgets** (2026-10-17, release build, same container; typing
+measured by `compare_typing_bench` and `merge_typing_bench`, ignored
+tests in `crates/app` that open the bench pair, type 300 characters at
+six places with every seventh a newline, and time each keystroke's edit,
+diff or region tracking, and row planning for one screen; drawing needs a
+GPU, and its cost is the ordinary editor's, measured in M3 and M8). The
+three-way merge pairs the bench pair with the old file changed on every
+400th line, so it has conflicts to take.
+
+| What | Budget | 10 MB pair | 100 MB pair |
+|---|---|---|---|
+| Compare: diff plus rows, on the worker | 300 ms / 3 s | 149 ms (295 changes) | 1.05 s (2952 changes) |
+| Three-way merge: two diffs, the walk, the result text, rows | 300 ms / 3 s | 201 ms (936 changes, 98 conflicts) | 2.0 s (9351 changes, 983 conflicts) |
+| Keystroke in the compare's right side, p50 / p99 / max | 8 ms | 19 µs / 72 µs / 112 µs | 63 µs / 0.6 ms / 1.2 ms |
+| Keystroke in the merge result, p50 / p99 / max | 8 ms | 32 µs / 59 µs / 98 µs | 0.3 ms / 1.1 ms / 3.0 ms |
+| Taking a side in the merge (replace, regions, rows) | one frame | 38 µs p50, 86 µs max | 0.3 ms p50, 0.36 ms max |
+| Scrolling, next change | one frame | rows are planned for the screen only (O(visible)); next change is a binary search over the rows | same |
+| First frame of a compare or merge | at once | the texts appear unaligned with "comparing…" or "merging…" until the worker answers; no diff work on the main thread | same |
+| Memory for the diff | about 8 bytes per line per side | 4-byte tokens per line per side plus the interner (task 2, above); rows are O(hunks) | same |
+
+The merge result's keystroke on the 100 MB pair is the one number with
+visible room to shrink: each edit walks the regions after it to shift
+their result lines (about 20,000 regions) and rebuilds the rows' prefix
+sum (77,000 rows), both linear in the number of changes rather than the
+file size, and still a quarter of a frame at a hundred megabytes. A
+segment tree over the regions would make it logarithmic if a merge ever
+needs it.
+
+Startup is unchanged in principle: a bare start does none of this
+(`compare.rs` and `merge_view.rs` run only when a compare or merge is
+opened), so `--smoke` is the owner's to re-measure; this container has no
+GPU. The release binary on Linux is 20.2 MB (19.2 MiB; budget 35 MB), of
+which `imara-diff` is about 60 KB.
+
+**Deferred from the plan**: long-line splitting (layer 4). Minified JSON
+and other one-line files compare as one changed line today; splitting a
+line at content-chosen points for the diff needs the views to show a
+split line's pieces, which is a view design question rather than a diff
+one. It is in `backlog.md` with the other diff options.
+

@@ -578,23 +578,10 @@ impl MergeView {
         &self.status
     }
 
-    /// Queue the merge area: three columns and the scrollbar.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a frame's inputs, as the scene passes them"
-    )]
-    pub fn draw(
-        &mut self,
-        gpu: &mut Gpu,
-        layout: &Layout,
-        doc: &Document,
-        view: &mut View,
-        theme: &mut Theme,
-        tab_width: usize,
-        cursor_visible: bool,
-        preedit: Option<&Preedit>,
-        matches: (&[Range<usize>], Option<Range<usize>>),
-    ) {
+    /// Plan the rows on screen for the three columns: unaligned while the
+    /// merge is pending, else from the aligned rows with each region's
+    /// background.
+    fn plan(&mut self, doc: &Document, layout: &Layout, theme: &Theme) {
         let ui = theme.ui;
         let background = |r: &Row<RegionTag>, c: usize| -> Option<[f32; 4]> {
             let (tag, _) = r.change?;
@@ -623,6 +610,26 @@ impl MergeView {
             self.columns
                 .plan(layout, background, |_: &Row<RegionTag>| [None, None, None]);
         }
+    }
+
+    /// Queue the merge area: three columns and the scrollbar.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a frame's inputs, as the scene passes them"
+    )]
+    pub fn draw(
+        &mut self,
+        gpu: &mut Gpu,
+        layout: &Layout,
+        doc: &Document,
+        view: &mut View,
+        theme: &mut Theme,
+        tab_width: usize,
+        cursor_visible: bool,
+        preedit: Option<&Preedit>,
+        matches: (&[Range<usize>], Option<Range<usize>>),
+    ) {
+        self.plan(doc, layout, theme);
         let [ours_view, theirs_view] = &mut self.views;
         let live = Live {
             cursor_visible,
@@ -774,6 +781,87 @@ mod tests {
         m.take(&mut result, Take::Right).unwrap();
         assert_eq!(text(&result), "a\ny\nc\n");
         assert!(MergeView::from_markers("plain\n", None).unwrap().is_none());
+    }
+
+    /// `NIMBUS_DIFF_FILES=OLD:NEW cargo test --release -p nimbus -- --ignored --nocapture merge_typing_bench`
+    ///
+    /// M9 task 11: how long a three-way merge of the bench pair takes to
+    /// build (base OLD, ours NEW, theirs OLD with every 400th line
+    /// changed), and what a keystroke in its result costs: the edit, the
+    /// region tracking and the row planning for one screen (drawing
+    /// needs a GPU; its cost is the ordinary editor's).
+    #[test]
+    #[ignore = "benchmark: needs NIMBUS_DIFF_FILES and a release build"]
+    fn merge_typing_bench() {
+        use crate::compare::tests::{bench_pair, layout, report, type_at};
+        let Some((old, new)) = bench_pair() else {
+            return;
+        };
+        let base = Document::open(&old).unwrap();
+        let ours = Document::open(&new).unwrap();
+        let mut theirs_text = String::new();
+        for (i, line) in base
+            .buffer
+            .slice(0..base.buffer.len_bytes())
+            .lines()
+            .enumerate()
+        {
+            if i % 400 == 0 {
+                theirs_text.push_str("// theirs changed this line\n");
+            } else {
+                theirs_text.push_str(line);
+                theirs_text.push('\n');
+            }
+        }
+        let theirs = Document::with_text(None, &theirs_text);
+        let t = std::time::Instant::now();
+        let (mut m, mut result) = MergeView::three_way(
+            Inputs {
+                base: Some(base),
+                ours,
+                theirs,
+                names: ("ours".into(), "theirs".into()),
+            },
+            None,
+        )
+        .unwrap();
+        println!(
+            "three-way merge built in {:?}: {} rows, {} changes, {} conflicts",
+            t.elapsed(),
+            m.columns.rows.len(),
+            m.columns.rows.changes(),
+            m.open_conflicts()
+        );
+        let layout = layout();
+        let theme = Theme::default();
+        let len = result.buffer.len_bytes();
+        let mut samples = Vec::new();
+        for (i, at) in type_at(len).enumerate() {
+            let ch = if i % 7 == 6 { "\n" } else { "x" };
+            result.click(at, false);
+            let t = std::time::Instant::now();
+            result.insert(ch).unwrap();
+            m.sync(&mut result);
+            m.plan(&result, &layout, &theme);
+            samples.push(t.elapsed());
+        }
+        report("merge result keystroke (edit + regions + plan)", samples);
+        // Taking a side: one replace of the region's lines, then a sync.
+        let mut samples = Vec::new();
+        for i in 0..m.change_regions.len().min(100) {
+            let Some(r) = m.change_regions.get(i).copied() else {
+                break;
+            };
+            let line = m.regions.all()[r].result.start;
+            result.click(result.buffer.line_to_byte(line), false);
+            let t = std::time::Instant::now();
+            if m.take(&mut result, Take::Right).is_ok() {
+                m.sync(&mut result);
+                m.plan(&result, &layout, &theme);
+                samples.push(t.elapsed());
+            }
+        }
+        report("take right (replace + regions + plan)", samples);
     }
 
     #[test]

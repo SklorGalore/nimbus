@@ -567,6 +567,84 @@ pub(crate) mod tests {
         assert_eq!(ma, Some(0..2), "widened to the character");
     }
 
+    /// The bench pair `NIMBUS_DIFF_FILES=OLD:NEW` names, for the ignored
+    /// benchmarks; `None` (skip) when unset.
+    pub(crate) fn bench_pair() -> Option<(PathBuf, PathBuf)> {
+        let spec = std::env::var("NIMBUS_DIFF_FILES").ok()?;
+        let (a, b) = spec.split_once(':').expect("OLD:NEW");
+        Some((PathBuf::from(a), PathBuf::from(b)))
+    }
+
+    /// 300 keystroke positions spread over a text of `len` bytes: a run of
+    /// 50 at each of six places, so each run types into one place the way
+    /// a person does, and the places cover the file.
+    pub(crate) fn type_at(len: usize) -> impl Iterator<Item = usize> {
+        (0..300).map(move |i| {
+            let place = i / 50;
+            (len / 12)
+                .saturating_mul(2 * place + 1)
+                .min(len.saturating_sub(1))
+        })
+    }
+
+    /// Print `samples` as the typing bench does: p50, p99, max.
+    pub(crate) fn report(label: &str, mut samples: Vec<std::time::Duration>) {
+        samples.sort();
+        let pick = |q: usize| {
+            samples
+                .get((samples.len() * q / 100).min(samples.len().saturating_sub(1)))
+                .copied()
+                .unwrap_or_default()
+        };
+        println!(
+            "{label}: {} samples, p50 {:?}, p99 {:?}, max {:?}",
+            samples.len(),
+            pick(50),
+            pick(99),
+            samples.last().copied().unwrap_or_default()
+        );
+    }
+
+    /// `NIMBUS_DIFF_FILES=OLD:NEW cargo test --release -p nimbus -- --ignored --nocapture compare_typing_bench`
+    ///
+    /// M9 task 11: the compare of the bench pair built on this thread
+    /// (diff plus rows), then what a keystroke in the right side costs:
+    /// the edit, the live diff's local re-diff and the row planning for
+    /// one screen (drawing needs a GPU; its cost is the ordinary
+    /// editor's).
+    #[test]
+    #[ignore = "benchmark: needs NIMBUS_DIFF_FILES and a release build"]
+    fn compare_typing_bench() {
+        let Some((old, new)) = bench_pair() else {
+            return;
+        };
+        let mut doc = Document::open(&new).unwrap();
+        let other = Document::open(&old).unwrap();
+        let t = std::time::Instant::now();
+        let mut c = Compare::start_sync(&mut doc, other, Other::File(old));
+        println!(
+            "compare built in {:?}: {} rows, {} changes",
+            t.elapsed(),
+            c.columns.rows.len(),
+            c.columns.rows.changes()
+        );
+        let layout = layout();
+        let theme = Theme::default();
+        let len = doc.buffer.len_bytes();
+        let mut samples = Vec::new();
+        for (i, at) in type_at(len).enumerate() {
+            let ch = if i % 7 == 6 { "\n" } else { "x" };
+            doc.click(at, false);
+            let t = std::time::Instant::now();
+            doc.insert(ch).unwrap();
+            c.sync(&mut doc);
+            c.plan(&doc, &layout, &theme);
+            samples.push(t.elapsed());
+        }
+        report("compare keystroke (edit + live diff + plan)", samples);
+        println!("after typing: {} changes", c.columns.rows.changes());
+    }
+
     pub(crate) fn layout() -> Layout {
         let metrics = nimbus_render::Metrics {
             size_px: 14.0,

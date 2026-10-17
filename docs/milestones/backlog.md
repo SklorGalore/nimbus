@@ -43,6 +43,7 @@ model comes first, the fold queries second), and M15 last.
 | Linux run by hand (Wayland, X11) | M8 | M15 |
 | Bracket matching misled by strings | M8 known limitation | M14 |
 | Diff options (ignore whitespace), folder compare, git revisions | M9 | Unscheduled, below |
+| Long-line splitting for the diff (minified files) | M9 | Unscheduled, below |
 
 ## Unscheduled
 
@@ -64,6 +65,11 @@ its own later.
 - **Diff options and folder compare** (M9 deferred): ignore whitespace
   and case are flags on the interner; folder compare is M10's walker
   feeding M9's view.
+- **Long-line splitting for the diff** (M9 deferred, the plan's layer 4):
+  cut a line over a few kilobytes at content-chosen points (a rolling
+  hash, so the cuts survive insertions) so minified JSON and similar
+  one-line files get real diffs; needs the compare view to show a split
+  line's pieces as rows of their own.
 - **Autosave of unsaved work** for crash recovery: an owner question in
   M12's scope section, planned only on a yes.
 - **Drag and drop in the tree**, multiple roots, named workspaces (M12

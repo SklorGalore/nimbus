@@ -370,7 +370,10 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
   repeat more than a few dozen times, which most lines of code and logs
   do, and took 19 s where Myers took 0.14 s on a 60 MB pair (M9 doc,
   Results). A full diff covers at most 256 MB per side (`DIFF_LIMIT`,
-  the rope threshold); past that, windows.
+  the rope threshold); past that, windows. A merge's result is followed
+  through edits by tracked regions (line ranges shifted per edit, no
+  re-diff), so taking a side is one undoable `replace`; merges, like
+  compares, are computed on a worker while the tab shows its texts.
 - **Window state**: the sidebar's visibility and width are remembered in
   `state.toml` beside the config. Nimbus never writes the user's
   `config.toml`.
@@ -478,7 +481,7 @@ introduces and points at the code.
 | 6 | File tree | **Done** | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
 | 7 | Huge files | **Done** | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
 | 8 | Polish | **Done** | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
-| 9 | Compare and merge | In progress | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
+| 9 | Compare and merge | Landed, pending the owner's look at the merge views | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
 | 10 | Find in files | Draft | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
 | 11 | Everyday editing | Draft | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
 | 12 | Workspace | Draft | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
@@ -599,3 +602,6 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Built-in themes take the icon's colours: amber is the one accent, selection is a shade of the ink; light theme on warm paper with a burnt-amber cursor | §4.4, m8 |
 | 2026-10-17 | M10–M15 drafted from the items M1–M9 deferred; order and `Proposed` items await the owner (`backlog.md`) | §8, §9 |
 | 2026-10-17 | M9 diff: Myers over histogram after measurement; full diff up to 256 MB per side, windows past that; lines interned by streaming hash, verified by bytes | §4.4, m9 |
+| 2026-10-17 | M9 merge: touching hunks conflict (git's rule); the result is tracked by regions shifted per edit, not re-diffed; conflict markers read back by splitting into base, ours, theirs; a two-way merge is the three-way machinery with the left text as base | §4.4, m9 |
+| 2026-10-17 | M9: merges and compares are built on workers; the tab shows its texts unaligned until the answer arrives, and edits wait on a pending merge | §4.4, m9 |
+| 2026-10-17 | M9 long-line splitting (layer 4) deferred to the backlog: a view question (how a split line's pieces show) before a diff one | m9, backlog |
