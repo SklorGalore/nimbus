@@ -79,7 +79,19 @@ pub enum Pick {
     TheirsThenOurs,
     /// The base's lines: neither change.
     Base,
+    /// Leave the conflict for later, as git does: our lines between
+    /// `<<<<<<<` and `=======`, theirs up to `>>>>>>>`. Saving a merge
+    /// with such blocks keeps it readable by every other tool.
+    Markers,
 }
+
+/// The conflict marker lines [`Pick::Markers`] writes and the merge view
+/// reads back (M9 task 9).
+pub const MARKER_OURS: &str = "<<<<<<< ours";
+/// Separates our lines from theirs in a conflict block.
+pub const MARKER_MIDDLE: &str = "=======";
+/// Ends a conflict block.
+pub const MARKER_THEIRS: &str = ">>>>>>> theirs";
 
 /// A three-way merge: the chunks and the line counts of the three texts.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -218,11 +230,29 @@ impl Merge {
         base: &dyn Text,
         ours: &dyn Text,
         theirs: &dyn Text,
-        mut pick: impl FnMut(usize) -> Pick,
+        pick: impl FnMut(usize) -> Pick,
         out: &mut String,
     ) {
+        self.write_tracked(base, ours, theirs, pick, out, &mut Vec::new());
+    }
+
+    /// [`write`](Merge::write), also recording each chunk's line range in
+    /// the result into `ranges` (one per chunk, in order), for a merge
+    /// view that keeps the result aligned with its inputs.
+    pub fn write_tracked(
+        &self,
+        base: &dyn Text,
+        ours: &dyn Text,
+        theirs: &dyn Text,
+        mut pick: impl FnMut(usize) -> Pick,
+        out: &mut String,
+        ranges: &mut Vec<Range<usize>>,
+    ) {
         let mut conflict = 0;
+        let mut line = 0;
+        ranges.clear();
         for c in &self.chunks {
+            let before = out.len();
             match c.kind {
                 Kind::Same => lines_into(base, c.base.clone(), out),
                 Kind::Ours | Kind::Both => lines_into(ours, c.ours.clone(), out),
@@ -242,10 +272,42 @@ impl Merge {
                             lines_into(ours, c.ours.clone(), out);
                         }
                         Pick::Base => lines_into(base, c.base.clone(), out),
+                        Pick::Markers => {
+                            marker_line(out, MARKER_OURS);
+                            lines_into(ours, c.ours.clone(), out);
+                            marker_line(out, MARKER_MIDDLE);
+                            lines_into(theirs, c.theirs.clone(), out);
+                            marker_line(out, MARKER_THEIRS);
+                        }
                     }
                 }
             }
+            let added = lines_in(&out[before..]);
+            ranges.push(line..line + added);
+            line += added;
         }
+    }
+}
+
+/// Append a marker on a line of its own: a text that does not end with a
+/// newline gets one first, so the marker never joins the line before it.
+fn marker_line(out: &mut String, marker: &str) {
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(marker);
+    out.push('\n');
+}
+
+/// Lines in `text` by the diff's convention: one per newline, plus one for
+/// a final stretch without one.
+#[must_use]
+pub fn lines_in(text: &str) -> usize {
+    let n = text.matches('\n').count();
+    if text.is_empty() || text.ends_with('\n') {
+        n
+    } else {
+        n + 1
     }
 }
 
@@ -338,6 +400,27 @@ mod tests {
         );
         let (_, out) = merge("", "new\n", "");
         assert_eq!(out, "new\n");
+    }
+
+    #[test]
+    fn markers_and_tracked_ranges() {
+        let (b, o, t) = (snap("a\nb\nc\n"), snap("a\nX\nc\n"), snap("a\nY\nc\n"));
+        let m = Merge::new(&b, &o, &t).unwrap();
+        let mut out = String::new();
+        let mut ranges = Vec::new();
+        m.write_tracked(&*b, &*o, &*t, |_| Pick::Markers, &mut out, &mut ranges);
+        assert_eq!(out, "a\n<<<<<<< ours\nX\n=======\nY\n>>>>>>> theirs\nc\n");
+        assert_eq!(ranges, vec![0..1, 1..6, 6..7]);
+        // A side without a final newline still gets its marker on its own
+        // line.
+        let (b, o, t) = (snap("a"), snap("x"), snap("y"));
+        let m = Merge::new(&b, &o, &t).unwrap();
+        let mut out = String::new();
+        m.write(&*b, &*o, &*t, |_| Pick::Markers, &mut out);
+        assert_eq!(out, "<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\n");
+        assert_eq!(lines_in("a\nb"), 2);
+        assert_eq!(lines_in("a\nb\n"), 2);
+        assert_eq!(lines_in(""), 0);
     }
 
     #[test]

@@ -204,6 +204,37 @@ impl Rows<Kind> {
     }
 }
 
+impl<T: Copy> Rows<T> {
+    /// Rows for `columns` columns from a list of segments: `None` tags an
+    /// equal run (the same number of lines in every column, foldable);
+    /// `Some(tag)` a change with the given line range per column. The
+    /// merge views build their rows this way from tracked regions.
+    pub fn from_segments(
+        columns: usize,
+        folding: Folding,
+        segments: impl IntoIterator<Item = (Option<T>, [Range<usize>; MAX_COLUMNS])>,
+    ) -> Self {
+        let mut out = Vec::new();
+        let mut number = 0;
+        for (tag, lines) in segments {
+            match tag {
+                None => {
+                    let len = lines[0].len();
+                    push_equal(&mut out, lines, len, folding);
+                }
+                Some(tag) => {
+                    out.push(Segment {
+                        kind: SegmentKind::Change { tag, number },
+                        lines,
+                    });
+                    number += 1;
+                }
+            }
+        }
+        Self::build(columns.clamp(1, MAX_COLUMNS), folding, out, number, false)
+    }
+}
+
 /// An equal run of `len` lines, folded from the start when long enough.
 fn push_equal<T>(
     segments: &mut Vec<Segment<T>>,

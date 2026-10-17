@@ -11,7 +11,9 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use nimbus_core::live_diff::EditSpan;
 use nimbus_core::merge::{Kind, Merge, Pick, lines_into};
+use nimbus_core::regions::{Regions, Resolution};
 use nimbus_core::{Buffer, RopeBuffer, Snapshot, Text};
 use proptest::prelude::*;
 use proptest::test_runner::Config;
@@ -140,8 +142,80 @@ fn check(base: &str, ours: &str, theirs: &str) -> (Merge, String) {
     (m, out)
 }
 
+/// What the document reports for an edit, computed before applying it.
+fn edit_span(before: &str, start: usize, removed: usize, inserted: &str) -> EditSpan {
+    EditSpan {
+        start,
+        first_line: before[..start].matches('\n').count(),
+        removed_lines: before[start..start + removed].matches('\n').count(),
+        inserted: inserted.len(),
+    }
+}
+
+/// The regions must tile the result exactly, in order, whatever was done.
+fn check_regions(r: &Regions, result: &str) {
+    let lines = nimbus_core::merge::lines_in(result);
+    assert_eq!(r.result_lines(), lines, "{r:?}");
+    let mut at = 0;
+    for region in r.all() {
+        assert_eq!(region.result.start, at, "gap or overlap in {r:?}");
+        assert!(region.result.end >= at);
+        at = region.result.end;
+    }
+    assert_eq!(
+        at, lines,
+        "regions end at {at}, result has {lines} lines: {r:?}"
+    );
+}
+
 proptest! {
     #![proptest_config(Config { cases: 500, ..Config::default() })]
+
+    #[test]
+    fn regions_follow_takes_and_edits(
+        base in text_strategy(), s1 in splices(), s2 in splices(),
+        steps in prop::collection::vec((any::<bool>(), any::<prop::sample::Index>(), any::<prop::sample::Index>(), any::<prop::sample::Index>(), text_strategy()), 0..6),
+    ) {
+        let ours = edited(&base, &s1);
+        let theirs = edited(&base, &s2);
+        let (b, o, t) = (rope(&base), rope(&ours), rope(&theirs));
+        let m = Merge::new(&b, &o, &t).unwrap();
+        let mut result = String::new();
+        let mut ranges = Vec::new();
+        m.write_tracked(&*b, &*o, &*t, |_| Pick::Markers, &mut result, &mut ranges);
+        let mut regions = Regions::new(&m, &ranges);
+        check_regions(&regions, &result);
+        let picks = [Pick::Ours, Pick::Theirs, Pick::OursThenTheirs, Pick::Base, Pick::Markers];
+        for (take, which, a, bb, insert) in steps {
+            let doc = RopeBuffer::from_text(&result);
+            if take && !regions.all().is_empty() {
+                let i = which.index(regions.all().len());
+                let pick = picks[a.index(picks.len())];
+                let mut text = String::new();
+                let lines = regions.take_text(i, pick, (&*b, &*o, &*t), &mut text).unwrap();
+                let (start, end) = (doc.line_to_byte(lines.start), doc.line_to_byte(lines.end));
+                let span = edit_span(&result, start, end - start, &text);
+                result.replace_range(start..end, &text);
+                regions.apply_edit(&RopeBuffer::from_text(&result), span);
+                regions.took(i, pick);
+                prop_assert_eq!(regions.all()[i].resolution, Resolution::Taken(pick));
+            } else {
+                let (start, removed, after) = {
+                    let bounds: Vec<usize> = result.char_indices().map(|(i, _)| i).chain([result.len()]).collect();
+                    let i = bounds[a.index(bounds.len())];
+                    let j = bounds[bb.index(bounds.len())];
+                    let (i, j) = (i.min(j), i.max(j));
+                    let mut s = result.clone();
+                    s.replace_range(i..j, &insert);
+                    (i, j - i, s)
+                };
+                let span = edit_span(&result, start, removed, &insert);
+                result = after;
+                regions.apply_edit(&RopeBuffer::from_text(&result), span);
+            }
+            check_regions(&regions, &result);
+        }
+    }
 
     #[test]
     fn chunks_tile_and_mean_what_they_say(base in text_strategy(), s1 in splices(), s2 in splices()) {
