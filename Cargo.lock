@@ -1727,6 +1727,7 @@ dependencies = [
  "dirs",
  "embed-resource",
  "env_logger",
+ "globset",
  "ignore",
  "log",
  "memmap2",

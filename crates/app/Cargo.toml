@@ -8,6 +8,7 @@ license.workspace = true
 arboard = { version = "3", default-features = false }
 dirs = "7"
 env_logger = "0.11.11"
+globset = "0.4"
 ignore = "0.4"
 log = "0.4.34"
 memmap2 = "0.9"

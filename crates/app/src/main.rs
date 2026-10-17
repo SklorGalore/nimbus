@@ -10,6 +10,7 @@ mod config;
 mod debug;
 mod document;
 mod find;
+mod find_files;
 mod indexer;
 mod input;
 mod io;

@@ -405,13 +405,11 @@ fn search_lines(
             // The match runs into the next line: take what the line alone
             // gives from the same start, which cannot reach a line break.
             let line_end = start + nl;
-            match re.find_at(&hay[..line_end], start) {
-                Some(m) => (start, end) = (m.start(), m.end()),
-                None => {
-                    pos = line_end + 1;
-                    continue;
-                }
-            }
+            let Some(m) = re.find_at(&hay[..line_end], start) else {
+                pos = line_end + 1;
+                continue;
+            };
+            (start, end) = (m.start(), m.end());
         }
         // As the regex crate's own iterator: an empty match moves on by a
         // byte, and none is reported where the previous match ended.
