@@ -128,6 +128,21 @@ pub fn blocks(t: &dyn Text, sels: &Selections, merge_adjacent: bool) -> Vec<(Blo
 }
 
 impl Batch<'_> {
+    /// The batch with its text copied out of the buffer it was read from,
+    /// so the buffer can be edited with it. The copies are bounded by the
+    /// operation's limit ([`Batch::check_size`]).
+    #[must_use]
+    pub fn into_owned(self) -> Batch<'static> {
+        Batch {
+            items: self
+                .items
+                .into_iter()
+                .map(|(r, t)| (r, Cow::Owned(t.into_owned())))
+                .collect(),
+            after: self.after,
+        }
+    }
+
     /// Refuse the operation when the selections' lines hold more than
     /// `limit` bytes together: the app passes 64 MB, the M8 read limit, so a
     /// line operation on a huge file's selection stays within the typing

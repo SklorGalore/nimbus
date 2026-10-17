@@ -359,9 +359,15 @@ mod tests {
         assert!(!c.editor.for_language(Some("python")).auto_pairs);
         assert!(!c.editor.for_language(None).auto_pairs);
         let py = c.indent.for_language(Some("python"));
-        assert_eq!((py.indent.width, py.indent.tabs, py.detect), (4, false, false));
+        assert_eq!(
+            (py.indent.width, py.indent.tabs, py.detect),
+            (4, false, false)
+        );
         let mk = c.indent.for_language(Some("makefile"));
-        assert_eq!((mk.indent.width, mk.indent.tabs, mk.detect), (2, true, true));
+        assert_eq!(
+            (mk.indent.width, mk.indent.tabs, mk.detect),
+            (2, true, true)
+        );
         assert_eq!(c.indent.for_language(None).indent.width, 2);
         // Defaults: auto-pairs for code only; detection on; 4 spaces.
         let d = Config::default();
@@ -369,7 +375,10 @@ mod tests {
         assert!(!d.editor.for_language(Some("markdown")).auto_pairs);
         assert!(!d.editor.for_language(None).auto_pairs);
         let plain = d.indent.for_language(None);
-        assert_eq!((plain.indent.width, plain.indent.tabs, plain.detect), (4, false, true));
+        assert_eq!(
+            (plain.indent.width, plain.indent.tabs, plain.detect),
+            (4, false, true)
+        );
         let (c, w) = Config::parse("[indent]\nwidth = 99\n");
         assert_eq!(w.len(), 1, "{w:?}");
         assert_eq!(c.indent.for_language(None).indent.width, 4);

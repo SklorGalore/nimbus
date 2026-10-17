@@ -146,7 +146,11 @@ mod tests {
         let t = RopeBuffer::from_text("f(a, (b)) {\n  x");
         assert_eq!(opener_before(&t, 14, b'}', 1024), Some(10));
         assert_eq!(opener_before(&t, 14, b')', 1024), None, "both closed");
-        assert_eq!(opener_before(&t, 8, b')', 1024), Some(1), "past the inner pair");
+        assert_eq!(
+            opener_before(&t, 8, b')', 1024),
+            Some(1),
+            "past the inner pair"
+        );
         assert_eq!(opener_before(&t, 14, b'{', 1024), None, "not a closer");
     }
 

@@ -229,7 +229,6 @@ pub enum Lookup {
     None,
 }
 
-
 /// Bindings from chords to actions.
 #[derive(Debug, Default)]
 pub struct Keymap {
@@ -291,7 +290,9 @@ impl Keymap {
         // Labels and menu shortcuts use the first binding an action still
         // owns.
         for (action, list) in &parsed {
-            if let Some((binding, text)) = list.iter().find(|(b, _)| km.owner(*b) == Some(action.id)) {
+            if let Some((binding, text)) =
+                list.iter().find(|(b, _)| km.owner(*b) == Some(action.id))
+            {
                 km.primary.insert(action.id, (*binding, text.clone()));
             }
         }
@@ -379,13 +380,11 @@ impl Keymap {
         // ASCII chord must stay unbound, or Cmd+, would run whatever sits
         // on the US W key; so shifted punctuation only falls back to a
         // punctuation key.
-        let shifted_punct = m & SHIFT != 0
-            && matches!(logical, Some(KeyName::Char(c)) if c.is_ascii_punctuation());
-        let renamed =
-            m & ALT != 0 || matches!(logical, Some(KeyName::Char(c)) if !c.is_ascii());
-        let by_position = physical_char(physical).filter(|c| {
-            renamed || (shifted_punct && c.is_ascii_punctuation())
-        });
+        let shifted_punct =
+            m & SHIFT != 0 && matches!(logical, Some(KeyName::Char(c)) if c.is_ascii_punctuation());
+        let renamed = m & ALT != 0 || matches!(logical, Some(KeyName::Char(c)) if !c.is_ascii());
+        let by_position = physical_char(physical)
+            .filter(|c| renamed || (shifted_punct && c.is_ascii_punctuation()));
         [
             logical.map(|k| Chord { mods: m, key: k }),
             by_position.map(|c| Chord {
@@ -700,7 +699,12 @@ mod tests {
         );
         let bar = Key::Character("|".into());
         assert_eq!(
-            id(&km, &bar, KeyCode::Backslash, primary() | ModifiersState::SHIFT),
+            id(
+                &km,
+                &bar,
+                KeyCode::Backslash,
+                primary() | ModifiersState::SHIFT
+            ),
             Some("cursor.matchingBracket")
         );
         // Shifted punctuation on a letter key (another layout) stays put.
@@ -708,7 +712,10 @@ mod tests {
         o.insert("file.save".to_owned(), vec!["Primary+Shift+W".to_owned()]);
         let (km, _) = Keymap::new(&o);
         let lt = Key::Character("<".into());
-        assert_eq!(id(&km, &lt, KeyCode::KeyW, primary() | ModifiersState::SHIFT), None);
+        assert_eq!(
+            id(&km, &lt, KeyCode::KeyW, primary() | ModifiersState::SHIFT),
+            None
+        );
     }
 
     #[test]
@@ -737,7 +744,12 @@ mod tests {
         assert_eq!(warnings, Vec::<String>::new());
         let k = Key::Character("k".into());
         assert!(matches!(
-            km.lookup(&k, PhysicalKey::Code(KeyCode::KeyK), ModifiersState::CONTROL, false),
+            km.lookup(
+                &k,
+                PhysicalKey::Code(KeyCode::KeyK),
+                ModifiersState::CONTROL,
+                false
+            ),
             Lookup::Prefix(_)
         ));
         assert_eq!(
@@ -751,12 +763,18 @@ mod tests {
         assert_eq!(km.accelerator("edit.toggleLineComment"), None);
         // A chord that is both a binding and a prefix is reported.
         let mut o = HashMap::new();
-        o.insert("edit.toggleLineComment".to_owned(), vec!["Primary+S Ctrl+C".to_owned()]);
+        o.insert(
+            "edit.toggleLineComment".to_owned(),
+            vec!["Primary+S Ctrl+C".to_owned()],
+        );
         let (_, warnings) = Keymap::new(&o);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("file.save"), "{warnings:?}");
         let mut o = HashMap::new();
-        o.insert("edit.toggleLineComment".to_owned(), vec!["Ctrl+K Ctrl+C".to_owned()]);
+        o.insert(
+            "edit.toggleLineComment".to_owned(),
+            vec!["Ctrl+K Ctrl+C".to_owned()],
+        );
         o.insert("file.save".to_owned(), vec!["Ctrl+K".to_owned()]);
         let (_, warnings) = Keymap::new(&o);
         assert_eq!(warnings.len(), 1, "{warnings:?}");

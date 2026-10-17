@@ -462,11 +462,11 @@ mod tests {
             Some(Command::Undo),
             "undo repeats"
         );
-        let unbound = ch("j");
+        let unbound = ch("u");
         assert_eq!(
             resolve(
                 &km,
-                press(&unbound, KeyCode::KeyJ, Some("j"), primary()),
+                press(&unbound, KeyCode::KeyU, Some("u"), primary()),
                 false
             ),
             None
@@ -535,7 +535,10 @@ mod tests {
     #[test]
     fn two_chord_bindings_wait_for_the_second_chord() {
         let mut o = HashMap::new();
-        o.insert("edit.toggleLineComment".to_owned(), vec!["Ctrl+K Ctrl+C".to_owned()]);
+        o.insert(
+            "edit.toggleLineComment".to_owned(),
+            vec!["Ctrl+K Ctrl+C".to_owned()],
+        );
         let (km, warnings) = Keymap::new(&o);
         assert_eq!(warnings, Vec::<String>::new());
         let k = ch("k");

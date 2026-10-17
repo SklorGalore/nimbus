@@ -1108,7 +1108,10 @@ mod comment_token_tests {
         assert_eq!(comment_tokens(LanguageId::Rust).line, Some("//"));
         assert_eq!(comment_tokens(LanguageId::Rust).block, Some(("/*", "*/")));
         assert_eq!(comment_tokens(LanguageId::Markdown).line, None);
-        assert_eq!(comment_tokens(LanguageId::Markdown).block, Some(("<!--", "-->")));
+        assert_eq!(
+            comment_tokens(LanguageId::Markdown).block,
+            Some(("<!--", "-->"))
+        );
         assert_eq!(comment_tokens(LanguageId::Json).line, Some("//"));
     }
 }

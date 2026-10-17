@@ -17,7 +17,7 @@ use nimbus_core::expand::expand;
 use nimbus_core::indent::Indent;
 use nimbus_core::lines::{self, Batch, LineError};
 use nimbus_core::transform::{self, Case, Lines};
-use nimbus_core::{Bias, Buffer, EditError, Selection, Selections, Text, brackets, movement};
+use nimbus_core::{Bias, EditError, Selection, Selections, Text, brackets, movement};
 
 use crate::config::Indenting;
 use crate::document::{Document, MAX_COPY_BYTES};
@@ -127,7 +127,8 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let batch = lines::duplicate(&self.buffer, &self.selections, self.line_ending.as_str());
+        let batch = lines::duplicate(&self.buffer, &self.selections, self.line_ending.as_str())
+            .into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -140,7 +141,7 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let batch = lines::move_lines(&self.buffer, &self.selections, down);
+        let batch = lines::move_lines(&self.buffer, &self.selections, down).into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -153,7 +154,7 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let batch = lines::delete_lines(&self.buffer, &self.selections);
+        let batch = lines::delete_lines(&self.buffer, &self.selections).into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -166,7 +167,7 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let batch = lines::join_lines(&self.buffer, &self.selections);
+        let batch = lines::join_lines(&self.buffer, &self.selections).into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -181,7 +182,8 @@ impl Document {
             &self.selections,
             self.line_ending.as_str(),
             above,
-        );
+        )
+        .into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -205,7 +207,7 @@ impl Document {
         let Some(token) = self.comment_tokens.line else {
             return self.toggle_block_comment();
         };
-        let batch = comment::toggle_line(&self.buffer, &self.selections, token);
+        let batch = comment::toggle_line(&self.buffer, &self.selections, token).into_owned();
         self.apply_batch(batch, (Bias::Before, Bias::After))
     }
 
@@ -221,7 +223,7 @@ impl Document {
         let Some(tokens) = self.comment_tokens.block else {
             return Ok(Outcome::NoComment);
         };
-        let batch = comment::toggle_block(&self.buffer, &self.selections, tokens);
+        let batch = comment::toggle_block(&self.buffer, &self.selections, tokens).into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -309,7 +311,7 @@ impl Document {
         if self.selected_len() > LINE_OP_LIMIT {
             return Ok(Outcome::TooLarge);
         }
-        let batch = transform::change_case(&self.buffer, &self.selections, case);
+        let batch = transform::change_case(&self.buffer, &self.selections, case).into_owned();
         self.apply_batch(batch, (Bias::Before, Bias::After))
     }
 
@@ -323,8 +325,13 @@ impl Document {
         if let Err(o) = self.whole_or_selected_within_limit() {
             return Ok(o);
         }
-        let batch =
-            transform::rewrite_lines(&self.buffer, &self.selections, op, self.line_ending.as_str());
+        let batch = transform::rewrite_lines(
+            &self.buffer,
+            &self.selections,
+            op,
+            self.line_ending.as_str(),
+        )
+        .into_owned();
         self.apply_batch(batch, (Bias::Before, Bias::After))
     }
 
@@ -338,7 +345,7 @@ impl Document {
         if let Err(o) = self.whole_or_selected_within_limit() {
             return Ok(o);
         }
-        let batch = transform::trim_trailing(&self.buffer, &self.selections);
+        let batch = transform::trim_trailing(&self.buffer, &self.selections).into_owned();
         self.apply_batch(batch, (Bias::Before, Bias::Before))
     }
 
@@ -360,7 +367,9 @@ impl Document {
     /// to detect, from the file itself: at open, and again on request.
     /// Returns whether the file decided.
     pub fn configure_indent(&mut self, settings: Indenting) -> bool {
-        if settings.detect && let Some(found) = Indent::detect(&self.buffer) {
+        if settings.detect
+            && let Some(found) = Indent::detect(&self.buffer)
+        {
             self.indent = found;
             return true;
         }
@@ -482,7 +491,9 @@ impl Document {
             let next = t.byte_at(s.head);
             let prev = s.head.checked_sub(1).and_then(|p| t.byte_at(p));
             let next_ok = match next {
-                None | Some(b'\n' | b'\r' | b' ' | b'\t' | b')' | b']' | b'}' | b';' | b',') => true,
+                None | Some(b'\n' | b'\r' | b' ' | b'\t' | b')' | b']' | b'}' | b';' | b',') => {
+                    true
+                }
                 Some(n) => quote && n == close,
             };
             let prev_ok = !quote || prev.is_none_or(|p| !(p.is_ascii_alphanumeric() || p == close));
@@ -511,8 +522,8 @@ impl Document {
     /// still the ones the last typing step left and each closer is still
     /// there.
     fn pairs_valid(&self) -> Option<usize> {
-        let (sels, depth) = self.pairs.as_ref()?;
-        if *depth == 0 || *sels != self.selections {
+        let (recorded, depth) = self.pairs.as_ref()?;
+        if *depth == 0 || *recorded != self.selections {
             return None;
         }
         let t = &self.buffer;
@@ -599,8 +610,11 @@ impl Document {
                 return Ok(false);
             };
             let open_line = t.line_span(open_at);
-            let open_head = t.slice(open_line.start..open_at.min(open_line.start + nimbus_core::long_line::NEAR));
-            let want = &open_head[..open_head.len() - open_head.trim_start_matches([' ', '\t']).len()];
+            let open_head = t.slice(
+                open_line.start..open_at.min(open_line.start + nimbus_core::long_line::NEAR),
+            );
+            let want =
+                &open_head[..open_head.len() - open_head.trim_start_matches([' ', '\t']).len()];
             if want.len() >= before.len() {
                 return Ok(false);
             }
@@ -623,7 +637,9 @@ impl Document {
             let empty_pair = self.selections.iter().all(|s| {
                 let prev = s.head.checked_sub(1).and_then(|p| t.byte_at(p));
                 let next = t.byte_at(s.head);
-                PAIRS.iter().any(|&(o, c)| prev == Some(o) && next == Some(c))
+                PAIRS
+                    .iter()
+                    .any(|&(o, c)| prev == Some(o) && next == Some(c))
             });
             if empty_pair {
                 let items = self.each(|_, s| Some((s.head - 1..s.head + 1, Cow::Borrowed(""))));
@@ -650,7 +666,7 @@ impl Document {
         let t: &dyn Text = &self.buffer;
         let all = Selections::single(Selection::cursor(0));
         let mut batch = if trim {
-            transform::trim_trailing(t, &all)
+            transform::trim_trailing(t, &all).into_owned()
         } else {
             Batch::default()
         };
@@ -660,7 +676,8 @@ impl Document {
                 .items
                 .push((len..len, Cow::Borrowed(self.line_ending.as_str())));
         }
-        self.apply_batch(batch, (Bias::Before, Bias::Before)).map(drop)
+        self.apply_batch(batch, (Bias::Before, Bias::Before))
+            .map(drop)
     }
 }
 
@@ -677,8 +694,10 @@ mod tests {
     }
 
     fn cursors(d: &mut Document, at: &[usize]) {
-        d.selections =
-            Selections::from_vec(at.iter().map(|&p| Selection::cursor(p)).collect(), at.len() - 1);
+        d.selections = Selections::from_vec(
+            at.iter().map(|&p| Selection::cursor(p)).collect(),
+            at.len() - 1,
+        );
     }
 
     fn heads(d: &Document) -> Vec<usize> {
@@ -702,11 +721,24 @@ mod tests {
         assert_eq!(text(&d), "a\nb\nc\nb\nd");
         assert_eq!(d.delete_lines().unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a\nb\nc\nd");
+        assert_eq!(
+            d.cursor(),
+            6,
+            "on the line that took the deleted one's place"
+        );
+        assert_eq!(d.join_lines().unwrap(), Outcome::Nothing, "last line");
+        d.click(4, false);
         assert_eq!(d.join_lines().unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a\nb\nc d");
         assert_eq!(d.insert_line(false).unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a\nb\nc d\n");
-        for expected in ["a\nb\nc d", "a\nb\nc\nd", "a\nb\nc\nb\nd", "a\nb\nb\nc\nd", "a\nb\nc\nd"] {
+        for expected in [
+            "a\nb\nc d",
+            "a\nb\nc\nd",
+            "a\nb\nc\nb\nd",
+            "a\nb\nb\nc\nd",
+            "a\nb\nc\nd",
+        ] {
             assert!(d.undo().unwrap());
             assert_eq!(text(&d), expected);
         }
@@ -717,7 +749,11 @@ mod tests {
         assert!(d.undo().unwrap());
         assert_eq!(text(&d), "a\nb\nc\nd");
         cursors(&mut d, &[0]);
-        assert_eq!(d.move_lines(false).unwrap(), Outcome::Nothing, "top line stays");
+        assert_eq!(
+            d.move_lines(false).unwrap(),
+            Outcome::Nothing,
+            "top line stays"
+        );
         d.select_line();
         assert_eq!(d.selection(), Selection { anchor: 0, head: 2 });
         d.select_line();
@@ -764,7 +800,11 @@ mod tests {
         assert_eq!(d.shrink_selection(), Outcome::Done);
         assert_eq!(d.selection().range(), 2..3);
         d.click(0, false);
-        assert_eq!(d.shrink_selection(), Outcome::Nothing, "moved: the stack is gone");
+        assert_eq!(
+            d.shrink_selection(),
+            Outcome::Nothing,
+            "moved: the stack is gone"
+        );
         d.click(1, false);
         assert_eq!(d.matching_bracket(false), Outcome::Done);
         assert_eq!(d.cursor(), 6);
@@ -778,21 +818,25 @@ mod tests {
 
     #[test]
     fn transforms_and_limits() {
-        let mut d = doc("b \na\nb");
+        let mut d = doc("c\na \nb\nb");
+        cursors(&mut d, &[0]);
+        // No selection: the whole text.
+        assert_eq!(d.rewrite_lines(Lines::Sort).unwrap(), Outcome::Done);
+        assert_eq!(text(&d), "a \nb\nb\nc");
+        assert_eq!(d.rewrite_lines(Lines::Dedupe).unwrap(), Outcome::Done);
+        assert_eq!(text(&d), "a \nb\nc");
+        assert_eq!(d.trim_whitespace().unwrap(), Outcome::Done);
+        assert_eq!(text(&d), "a\nb\nc");
+        assert_eq!(d.trim_whitespace().unwrap(), Outcome::Nothing);
         cursors(&mut d, &[0]);
         assert_eq!(d.change_case(Case::Upper).unwrap(), Outcome::Done);
-        assert_eq!(text(&d), "B \na\nb");
-        assert_eq!(d.rewrite_lines(Lines::Sort).unwrap(), Outcome::Done);
-        assert_eq!(text(&d), "B \na\nb");
-        assert_eq!(d.rewrite_lines(Lines::Dedupe).unwrap(), Outcome::Done);
-        assert_eq!(text(&d), "B \na\nb");
-        assert_eq!(d.trim_whitespace().unwrap(), Outcome::Done);
-        assert_eq!(text(&d), "B\na\nb");
-        assert_eq!(d.trim_whitespace().unwrap(), Outcome::Nothing);
+        assert_eq!(text(&d), "A\nb\nc");
         cursors(&mut d, &[0, 2, 4]);
         assert_eq!(d.change_case(Case::Upper).unwrap(), Outcome::Done);
-        assert_eq!(text(&d), "B\nA\nB");
+        assert_eq!(text(&d), "A\nB\nC");
         assert_eq!(heads(&d), [0, 2, 4]);
+        assert!(d.undo().unwrap());
+        assert_eq!(text(&d), "A\nb\nc", "one step for three cursors");
     }
 
     #[test]
@@ -812,7 +856,11 @@ mod tests {
         d.insert_newline().unwrap();
         assert_eq!(text(&d), "fn f() {\n    x\n    \n}");
         d.type_text("}", true).unwrap();
-        assert_eq!(text(&d), "fn f() {\n    x\n}\n}", "the closer lines up with its opener");
+        assert_eq!(
+            text(&d),
+            "fn f() {\n    x\n}\n}",
+            "the closer lines up with its opener"
+        );
         // Tab goes to the next stop.
         let mut d = doc("abc");
         d.indent = Indent {
