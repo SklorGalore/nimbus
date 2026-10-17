@@ -285,7 +285,11 @@ fn file_flag(
             o.diff = Some((a, b));
         }
         "--find" => {
-            o.find = value(args, flag, "a pattern").into_string().ok();
+            let Ok(pattern) = value(args, flag, "a pattern").into_string() else {
+                print_err("nimbus: --find needs a UTF-8 pattern");
+                std::process::exit(2);
+            };
+            o.find = Some(pattern);
         }
         "--version" | "-V" => {
             print_out(&format!("nimbus {}", nimbus_core::VERSION));

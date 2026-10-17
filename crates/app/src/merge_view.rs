@@ -25,7 +25,7 @@ use nimbus_core::regions::{RegionTag, Regions, Resolution};
 use nimbus_core::{Buffer, Snapshot, Text};
 use nimbus_render::Gpu;
 
-use crate::columns::{Click, Columns, Live, lines_of};
+use crate::columns::{Click, Columns, Live};
 use crate::document::Document;
 use crate::theme::Theme;
 use crate::view::{Layout, Preedit, View};
@@ -400,8 +400,8 @@ impl MergeView {
         if spans.is_empty() {
             return true;
         }
-        for span in spans.into_iter().flatten() {
-            self.regions.apply_edit(&doc.buffer, span);
+        for (span, after) in spans.into_iter().flatten() {
+            self.regions.apply_edit(&*after, span);
         }
         self.rebuild_rows();
         true
@@ -410,7 +410,7 @@ impl MergeView {
     /// The region under the result's cursor.
     fn region_at_cursor(&self, doc: &Document) -> Option<usize> {
         let line = doc.buffer.byte_to_line(doc.cursor());
-        self.regions.at_result_line(line)
+        self.regions.change_at_result_line(line)
     }
 
     /// Take a side for the change under the cursor: one undoable edit of
@@ -449,17 +449,16 @@ impl MergeView {
             .replace(start..end, &text)
             .map(|_| ())
             .map_err(|e| e.to_string());
-        self.scratch = text;
-        // The replace was noted like any edit; apply it now, then record
-        // the pick over the "edited" mark it left.
-        let (spans, _) = doc.take_edits();
-        for span in spans.into_iter().flatten() {
-            self.regions.apply_edit(&doc.buffer, span);
-        }
+        // The replace was noted like any edit, but the regions learn of it
+        // from the take itself, which knows its region where a span at a
+        // line start would not (an empty region there, or the holder).
+        let _ = doc.take_edits();
         if outcome.is_ok() {
-            self.regions.took(i, pick);
+            self.regions
+                .took(i, pick, nimbus_core::merge::lines_in(&text));
             doc.click(start, false);
         }
+        self.scratch = text;
         self.rebuild_rows();
         outcome
     }
@@ -600,9 +599,9 @@ impl MergeView {
         };
         if self.columns.rows.is_empty() {
             let lines = [
-                lines_of(&self.ours.buffer),
-                lines_of(&doc.buffer),
-                lines_of(&self.theirs.buffer),
+                nimbus_core::diff_lines(&self.ours.buffer),
+                nimbus_core::diff_lines(&doc.buffer),
+                nimbus_core::diff_lines(&self.theirs.buffer),
             ];
             self.columns.plan_unaligned(layout, &lines);
         } else {
@@ -739,6 +738,36 @@ mod tests {
         assert!(m.sync(&mut result));
         assert_eq!(text(&result), "a\nB\nc\n");
         assert_eq!(m.columns.rows.changes(), 2);
+    }
+
+    /// Lines the right side adds in the middle have no result line to put
+    /// the cursor on; Next Change lands on the line after them, and taking
+    /// there inserts them.
+    #[test]
+    fn right_only_lines_in_the_middle_can_be_taken() {
+        let (mut m, mut result) =
+            MergeView::two_way(inputs(None, "a\nb\nc\n", "a\nX\nb\nc\n"), None).unwrap();
+        assert_eq!(m.columns.rows.changes(), 1);
+        let layout = layout();
+        result.click(0, false);
+        let pos = m.step_change(true, &result, &layout).unwrap();
+        result.click(pos, false);
+        assert_eq!(result.buffer.byte_to_line(pos), 1);
+        m.take(&mut result, Take::Right).unwrap();
+        assert_eq!(text(&result), "a\nX\nb\nc\n");
+        assert!(m.status(&result, "").contains("(right taken)"));
+        // The equal run after it followed: typing on its last line is an
+        // edit of that run, not of the take.
+        result.click(result.buffer.line_to_byte(3), false);
+        result.insert("!").unwrap();
+        assert!(m.sync(&mut result));
+        assert_eq!(text(&result), "a\nX\nb\n!c\n");
+        assert!(matches!(
+            m.regions.all()[1].resolution,
+            Resolution::Taken(_)
+        ));
+        assert_eq!(m.regions.all()[1].result, 1..2);
+        assert_eq!(m.columns.rows.changes(), 2, "the take, and the edited run");
     }
 
     #[test]

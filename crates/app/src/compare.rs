@@ -36,7 +36,7 @@ use nimbus_core::live_diff::{LiveDiff, Side};
 use nimbus_core::{Buffer, Snapshot, Text};
 use nimbus_render::Gpu;
 
-use crate::columns::{Click, Columns, Live, lines_of};
+use crate::columns::{Click, Columns, Live};
 use crate::document::Document;
 use crate::theme::Theme;
 use crate::view::{Layout, Preedit, View};
@@ -100,6 +100,11 @@ const REDIFF_BUDGET_LINES: usize = 20_000;
 
 /// Typing pauses this long before an over-the-limit pair is recompared.
 const RECOMPARE_AFTER: Duration = Duration::from_millis(300);
+
+/// Text versions a live diff may keep alive (one per edit followed) before
+/// it is redone from scratch at the next pause: bounds the memory a long
+/// typing session pins.
+const MAX_PINNED_TEXTS: usize = 512;
 
 /// Changed-word marks are worked out for line pairs up to this long.
 const MARK_LIMIT: usize = 4096;
@@ -246,7 +251,8 @@ impl Compare {
             return;
         }
         if spans.is_empty() {
-            if let (State::Fixed { .. }, Some(since)) = (&self.state, self.dirty_since)
+            if let (State::Fixed { .. } | State::Live(_), Some(since)) =
+                (&self.state, self.dirty_since)
                 && since.elapsed() >= RECOMPARE_AFTER
             {
                 self.restart(doc);
@@ -255,10 +261,9 @@ impl Compare {
         }
         match &mut self.state {
             State::Live(live) => {
-                let after: Arc<dyn Snapshot> = doc.buffer.snapshot().into();
                 let mut restart = false;
                 for span in spans {
-                    let Some(span) = span else {
+                    let Some((span, after)) = span else {
                         restart = true;
                         break;
                     };
@@ -275,6 +280,11 @@ impl Compare {
                 if restart {
                     self.restart(doc);
                 } else {
+                    if live.pinned_texts() > MAX_PINNED_TEXTS {
+                        // Every edit pins its text version in the interner;
+                        // a fresh diff at the next pause lets them go.
+                        self.dirty_since.get_or_insert_with(Instant::now);
+                    }
                     self.version = doc.version;
                     self.rebuild_rows();
                 }
@@ -431,7 +441,10 @@ impl Compare {
     fn plan(&mut self, doc: &Document, layout: &Layout, theme: &Theme) -> f32 {
         if self.columns.rows.is_empty() {
             // Nothing known yet: both texts from the top, unaligned.
-            let lines = [lines_of(&self.other.buffer), lines_of(&doc.buffer)];
+            let lines = [
+                nimbus_core::diff_lines(&self.other.buffer),
+                nimbus_core::diff_lines(&doc.buffer),
+            ];
             return self.columns.plan_unaligned(layout, &lines);
         }
         let ui = theme.ui;
@@ -685,6 +698,40 @@ pub(crate) mod tests {
         assert_eq!(c.columns.rows.len(), 4);
     }
 
+    /// Several edits in one frame (here an undo of typed lines, which
+    /// history replays batch by batch) each come with their own text, so
+    /// the live diff re-reads the right lines for each. Before, every span
+    /// was read against the final text and the diff drifted.
+    #[test]
+    fn many_edits_in_one_frame_keep_the_live_diff_right() {
+        let base: String = (0..40).fold(String::new(), |mut s, i| {
+            use std::fmt::Write as _;
+            let _ = writeln!(s, "line {i}");
+            s
+        });
+        let mut doc = Document::from_text(&base);
+        let other = Document::from_text(&base);
+        let mut c = Compare::start_sync(&mut doc, other, Other::Saved);
+        assert_eq!(c.columns.rows.changes(), 0);
+        doc.click(doc.buffer.line_to_byte(10), false);
+        for i in 0..10 {
+            doc.insert(&format!("typed {i}\n")).unwrap();
+        }
+        c.sync(&mut doc);
+        assert_eq!(c.columns.rows.changes(), 1);
+        while doc.undo().unwrap() && doc.is_dirty() {}
+        assert_eq!(doc.buffer.slice(0..doc.buffer.len_bytes()), base);
+        c.sync(&mut doc);
+        let (hunks, old_lines, new_lines) = c.hunks().unwrap();
+        assert_eq!((hunks, old_lines, new_lines), (&[][..], 40, 40));
+        assert_eq!(c.columns.rows.changes(), 0);
+        // And the same the other way: redo everything in one frame.
+        while doc.redo().unwrap() {}
+        c.sync(&mut doc);
+        assert_eq!(c.columns.rows.changes(), 1);
+        assert_eq!(c.hunks().unwrap().2, 50);
+    }
+
     #[test]
     fn plans_cover_the_screen_with_fillers_and_backgrounds() {
         let mut doc = Document::from_text("a\nx\ny\nb\n");
@@ -707,8 +754,14 @@ pub(crate) mod tests {
 
     #[test]
     fn line_counts_follow_the_diff_convention() {
-        assert_eq!(lines_of(&Document::from_text("a\nb\n").buffer), 2);
-        assert_eq!(lines_of(&Document::from_text("a\nb").buffer), 2);
-        assert_eq!(lines_of(&Document::from_text("").buffer), 0);
+        assert_eq!(
+            nimbus_core::diff_lines(&Document::from_text("a\nb\n").buffer),
+            2
+        );
+        assert_eq!(
+            nimbus_core::diff_lines(&Document::from_text("a\nb").buffer),
+            2
+        );
+        assert_eq!(nimbus_core::diff_lines(&Document::from_text("").buffer), 0);
     }
 }

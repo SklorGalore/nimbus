@@ -164,9 +164,29 @@ impl Regions {
         Some(i)
     }
 
+    /// The change the cursor on result line `line` acts on: the region
+    /// holding the line when it is a change, else a change with no lines
+    /// in the result (lines only on another side) starting at that line,
+    /// which has no line of its own to put the cursor on.
+    #[must_use]
+    pub fn change_at_result_line(&self, line: usize) -> Option<usize> {
+        let i = self.at_result_line(line)?;
+        if self.regions[i].tag().is_some() {
+            return Some(i);
+        }
+        (0..i)
+            .rev()
+            .take_while(|&j| {
+                self.regions[j].result.is_empty() && self.regions[j].result.start == line
+            })
+            .find(|&j| self.regions[j].tag().is_some())
+    }
+
     /// Follow an edit to the result, already applied, whose text is now
-    /// `after`: `span` as the document reports it. Regions the edit
-    /// touched join into one, marked edited; the rest move.
+    /// `after` (the text right after this edit, not after later ones:
+    /// the line count is read from it): `span` as the document reports
+    /// it. Regions the edit touched join into one, marked edited; the
+    /// rest move.
     pub fn apply_edit(&mut self, after: &dyn Text, span: EditSpan) {
         // The new line count comes from the text itself: newline arithmetic
         // alone misses a final line without a newline appearing or going.
@@ -272,13 +292,25 @@ impl Regions {
         Some(r.result.clone())
     }
 
-    /// Region `i` was replaced by a take of `pick` (through
-    /// [`apply_edit`](Regions::apply_edit), which marked it edited):
-    /// record the pick instead.
-    pub fn took(&mut self, i: usize, pick: Pick) {
-        if let Some(r) = self.regions.get_mut(i) {
-            r.resolution = Resolution::Taken(pick);
+    /// Region `i`'s result lines were replaced by the `lines` lines of a
+    /// take of `pick`: record the pick and the new extent, and move the
+    /// regions after it. This stands in for [`apply_edit`] for a take,
+    /// which knows its region; an edit at a line start could belong to
+    /// an empty region there or to the one holding the line.
+    ///
+    /// [`apply_edit`]: Regions::apply_edit
+    pub fn took(&mut self, i: usize, pick: Pick, lines: usize) {
+        let Some(r) = self.regions.get_mut(i) else {
+            return;
+        };
+        r.resolution = Resolution::Taken(pick);
+        let delta = lines.cast_signed() - r.result.len().cast_signed();
+        r.result.end = r.result.start + lines;
+        for r in &mut self.regions[i + 1..] {
+            r.result.start = r.result.start.saturating_add_signed(delta);
+            r.result.end = r.result.end.saturating_add_signed(delta);
         }
+        self.result_lines = self.result_lines.saturating_add_signed(delta);
     }
 
     /// The segments for [`crate::align::Rows::from_segments`], with the
@@ -306,7 +338,11 @@ fn stronger(a: Kind, b: Kind) -> Kind {
 
 /// Lines of `t` by the diff's convention: no empty line after a final
 /// newline.
-fn diff_lines(t: &dyn Text) -> usize {
+/// Lines of `t` by the diff's convention: the text after a final newline
+/// is not a line, so `"a\n"` has one line and `"a"` has one too, while
+/// [`Text::len_lines`] counts two for the first.
+#[must_use]
+pub fn diff_lines(t: &dyn Text) -> usize {
     let n = t.len_lines();
     let len = t.len_bytes();
     if n > 0 && (len == 0 || t.byte_at(len - 1) == Some(b'\n')) {
@@ -388,15 +424,47 @@ mod tests {
             .unwrap();
         assert_eq!(lines, 1..2);
         assert_eq!(out, "B1\nB2\n");
-        let before = text(&result);
         let (start, end) = (result.line_to_byte(1), result.line_to_byte(2));
         result.replace(start..end, &out).unwrap();
-        r.apply_edit(&result, span(&before, start, end - start, &out));
-        r.took(1, Pick::Theirs);
+        r.took(1, Pick::Theirs, crate::merge::lines_in(&out));
         assert_eq!(text(&result), "a\nB1\nB2\nc\n");
         assert_eq!(r.all()[1].result, 1..3);
         assert_eq!(r.all()[1].resolution, Resolution::Taken(Pick::Theirs));
         assert_eq!(r.all()[2].result, 3..4, "the equal run after moved down");
+        assert_eq!(r.result_lines(), 4);
+    }
+
+    /// Lines only on the other side sit in a region with no result lines,
+    /// between two equal runs; the cursor on the line after it acts on
+    /// it, and taking it inserts there.
+    #[test]
+    fn an_insertion_in_the_middle_is_found_and_taken() {
+        let (mut r, mut result, _) = setup("a\nb\nc\n", "a\nb\nc\n", "a\nX\nb\nc\n", None);
+        let kinds: Vec<_> = r.all().iter().map(|x| (x.kind, x.result.clone())).collect();
+        assert_eq!(
+            kinds,
+            vec![(Kind::Same, 0..1), (Kind::Theirs, 1..1), (Kind::Same, 1..3)]
+        );
+        assert_eq!(r.at_result_line(1), Some(2), "the holder, for edits");
+        assert_eq!(
+            r.change_at_result_line(1),
+            Some(1),
+            "the insertion, for takes"
+        );
+        assert_eq!(r.change_at_result_line(0), None);
+        assert_eq!(r.change_at_result_line(2), None);
+        let (base, ours, theirs) = (snap("a\nb\nc\n"), snap("a\nb\nc\n"), snap("a\nX\nb\nc\n"));
+        let mut out = String::new();
+        let lines = r
+            .take_text(1, Pick::Theirs, (&*base, &*ours, &*theirs), &mut out)
+            .unwrap();
+        assert_eq!((lines, out.as_str()), (1..1, "X\n"));
+        let at = result.line_to_byte(1);
+        result.replace(at..at, &out).unwrap();
+        r.took(1, Pick::Theirs, crate::merge::lines_in(&out));
+        assert_eq!(text(&result), "a\nX\nb\nc\n");
+        assert_eq!(r.all()[1].result, 1..2);
+        assert_eq!(r.all()[2].result, 2..4);
         assert_eq!(r.result_lines(), 4);
     }
 

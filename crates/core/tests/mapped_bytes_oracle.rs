@@ -325,7 +325,7 @@ fn check(t: &dyn Text, bytes: &[u8]) {
 
 /// A callback for undo and redo that applies each edit they report to
 /// `oracle`.
-fn replay(oracle: &mut Vec<u8>) -> impl FnMut(&dyn Text, &Edit) + '_ {
+fn replay(oracle: &mut Vec<u8>) -> impl FnMut(&dyn Buffer, &Edit) + '_ {
     move |after, edit| {
         oracle.splice(edit.old_range(), bytes_of(&edit.inserted));
         assert_eq!(after.len_bytes(), oracle.len(), "reported edit");

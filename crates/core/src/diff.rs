@@ -155,6 +155,15 @@ impl Interner {
         self.reps.len()
     }
 
+    /// How many texts the interner keeps alive: one per call to
+    /// [`intern_range`](Interner::intern_range), since a line's bytes are
+    /// checked against the text it was first seen in. A live diff grows
+    /// this by one per edit, so its owner starts over past a bound.
+    #[must_use]
+    pub fn pinned_texts(&self) -> usize {
+        self.texts.len()
+    }
+
     /// Turn every line of `text` into a token. Reads the text once, in
     /// storage order, without copying any line.
     ///

@@ -194,10 +194,8 @@ proptest! {
                 let mut text = String::new();
                 let lines = regions.take_text(i, pick, (&*b, &*o, &*t), &mut text).unwrap();
                 let (start, end) = (doc.line_to_byte(lines.start), doc.line_to_byte(lines.end));
-                let span = edit_span(&result, start, end - start, &text);
                 result.replace_range(start..end, &text);
-                regions.apply_edit(&RopeBuffer::from_text(&result), span);
-                regions.took(i, pick);
+                regions.took(i, pick, nimbus_core::merge::lines_in(&text));
                 prop_assert_eq!(regions.all()[i].resolution, Resolution::Taken(pick));
             } else {
                 let (start, removed, after) = {

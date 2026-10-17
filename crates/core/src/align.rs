@@ -125,6 +125,8 @@ pub struct Rows<T> {
     /// First row of each segment, plus the total at the end.
     starts: Vec<usize>,
     changes: usize,
+    /// The segment of each change, by change number.
+    change_index: Vec<usize>,
 }
 
 impl Rows<Change> {
@@ -267,6 +269,7 @@ impl<T: Copy> Rows<T> {
             segments,
             starts: Vec::new(),
             changes,
+            change_index: Vec::new(),
         };
         rows.reindex();
         rows
@@ -281,6 +284,15 @@ impl<T: Copy> Rows<T> {
             row += self.segment_rows(s);
         }
         self.starts.push(row);
+        self.change_index.clear();
+        self.change_index.resize(self.changes, 0);
+        for (i, s) in self.segments.iter().enumerate() {
+            if let SegmentKind::Change { number, .. } = &s.kind
+                && let Some(slot) = self.change_index.get_mut(*number)
+            {
+                *slot = i;
+            }
+        }
     }
 
     fn segment_rows(&self, s: &Segment<T>) -> usize {
@@ -412,6 +424,9 @@ impl<T: Copy> Rows<T> {
         let row_off = match &s.kind {
             SegmentKind::Equal { len, folded: true } => {
                 let ctx = self.folding.context;
+                // A line past the segment (rows older than the text, as
+                // between an edit and the next sync) lands on its last row.
+                let off = off.min(len.saturating_sub(1));
                 if off < ctx {
                     off
                 } else if off >= len - ctx {
@@ -463,24 +478,7 @@ impl<T: Copy> Rows<T> {
     /// First row of change number `n` (from 0), if it exists.
     #[must_use]
     pub fn change_row(&self, n: usize) -> Option<usize> {
-        if n >= self.changes {
-            return None;
-        }
-        // Change segments are in order; the n-th is found by a binary
-        // search over the segments' change numbers.
-        let i = self.segments.partition_point(|s| match &s.kind {
-            SegmentKind::Change { number, .. } => *number < n,
-            SegmentKind::Equal { .. } => true,
-        });
-        // `partition_point` lands on the first segment that is a change
-        // with number >= n, but equal runs count as "before", so step
-        // over any equal run.
-        let mut i = i;
-        while i < self.segments.len() && matches!(self.segments[i].kind, SegmentKind::Equal { .. })
-        {
-            i += 1;
-        }
-        (i < self.segments.len()).then(|| self.starts[i])
+        self.change_index.get(n).map(|&i| self.starts[i])
     }
 
     /// The change number on or after `row`, and its first row.
@@ -750,6 +748,39 @@ mod tests {
         assert_eq!(rows.row_of(1, 2), 3);
         assert_eq!(rows.row_of(0, 1), 1);
         assert_eq!(rows.row_of(0, 2), 4);
+    }
+
+    /// Each change's first row, with equal runs before, between and after
+    /// (an earlier binary search answered the last change for all).
+    #[test]
+    fn change_row_finds_each_change() {
+        let h = |a: usize, b: usize| Hunk {
+            old: a..a + 1,
+            new: b..b + 1,
+        };
+        let rows = two(&[h(0, 0), h(2, 2), h(4, 4)], 6, 6);
+        let found: Vec<_> = (0..4).map(|n| rows.change_row(n)).collect();
+        assert_eq!(found, [Some(0), Some(2), Some(4), None]);
+        let rows = two(&[h(1, 1), h(3, 3), h(5, 5), h(7, 7)], 9, 9);
+        let found: Vec<_> = (0..4).map(|n| rows.change_row(n)).collect();
+        assert_eq!(found, [Some(1), Some(3), Some(5), Some(7)]);
+        // Folding moves the rows but not the order.
+        let rows = Rows::two_way(&[h(0, 0), h(20, 20)], 30, 30, Folding::default());
+        assert_eq!(rows.change_row(0), Some(0));
+        assert_eq!(rows.change_row(1), Some(1 + 2 * 3 + 1));
+    }
+
+    /// A line past the rows' text (the rows are older than the text,
+    /// between an edit and the next sync) lands on the last row of its
+    /// segment, folded or not: never an overflow.
+    #[test]
+    fn row_of_past_the_end_is_clamped() {
+        let rows = Rows::two_way(&[], 20, 20, Folding::default());
+        assert_eq!(rows.len(), 7);
+        assert_eq!(rows.row_of(1, 22), 6);
+        assert_eq!(rows.row_of(0, 19), 6);
+        let rows = two(&[], 5, 5);
+        assert_eq!(rows.row_of(0, 9), 4);
     }
 
     #[test]

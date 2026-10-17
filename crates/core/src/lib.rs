@@ -39,7 +39,7 @@ pub use line_ending::LineEnding;
 pub use live_diff::{EditSpan, LiveDiff, Region, Side};
 pub use mapped::{Limits, MappedBuffer, MappedSnapshot, PieceRun};
 pub use merge::{Chunk, Kind, Merge, Pick};
-pub use regions::{RegionTag, Regions, Resolution};
+pub use regions::{RegionTag, Regions, Resolution, diff_lines};
 pub use rope::RopeBuffer;
 pub use selection::{Bias, Selection, Selections};
 pub use source::{Source, VecSource};

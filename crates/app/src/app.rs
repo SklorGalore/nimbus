@@ -2466,7 +2466,11 @@ impl App {
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
         if tab.compare.is_some() || tab.merge.is_some() {
-            self.columns_click(&layout, (x, y), now);
+            if let Some(hit) = self.columns_scrollbar_hit(&layout, x, y) {
+                self.grab_columns_scrollbar(hit, y, &layout);
+            } else {
+                self.columns_click(&layout, (x, y), now);
+            }
             return;
         }
         if let Some(hit) = tab.view.scrollbar_hit(x, y) {
@@ -2536,6 +2540,65 @@ impl App {
         self.changed(false);
     }
 
+    /// What a press at `(x, y)` hits on the active compare or merge tab's
+    /// scrollbar, if anything.
+    fn columns_scrollbar_hit(&self, layout: &Layout, x: f32, y: f32) -> Option<view::ScrollbarHit> {
+        let tab = &self.tabs[self.active];
+        match (tab.compare.as_ref(), tab.merge.as_ref()) {
+            (Some(c), _) => c.columns.scrollbar_hit(layout, x, y),
+            (None, Some(m)) => m.columns.scrollbar_hit(layout, x, y),
+            (None, None) => None,
+        }
+    }
+
+    /// Start dragging the compare or merge tab's scrollbar, as
+    /// [`grab_scrollbar`](Self::grab_scrollbar) does for one document.
+    fn grab_columns_scrollbar(&mut self, hit: view::ScrollbarHit, y: f32, layout: &Layout) {
+        let grab = match hit {
+            view::ScrollbarHit::Thumb(offset) => offset,
+            view::ScrollbarHit::Track => {
+                let half = self.columns_thumb_height(layout) / 2.0;
+                self.drag_columns_scrollbar(y - half, layout);
+                half
+            }
+        };
+        self.clicks.scrollbar_grab = Some(grab);
+        self.changed(false);
+    }
+
+    fn columns_thumb_height(&self, layout: &Layout) -> f32 {
+        let tab = &self.tabs[self.active];
+        match (tab.compare.as_ref(), tab.merge.as_ref()) {
+            (Some(c), _) => c.columns.thumb_height(layout),
+            (None, Some(m)) => m.columns.thumb_height(layout),
+            (None, None) => 0.0,
+        }
+    }
+
+    /// The pointer moved with a scrollbar grabbed: put the thumb's top at
+    /// `y`, on whichever scrollbar the active tab shows.
+    fn drag_scrollbar_to(&mut self, y: f32) {
+        let Some(layout) = self.layout() else { return };
+        let tab_width = self.tab_width();
+        let tab = &mut self.tabs[self.active];
+        if tab.compare.is_some() || tab.merge.is_some() {
+            self.drag_columns_scrollbar(y, &layout);
+        } else {
+            tab.view.drag_scrollbar(y, &tab.doc, &layout, tab_width);
+        }
+        self.changed(false);
+    }
+
+    /// Put the compare or merge tab's thumb at `y`.
+    fn drag_columns_scrollbar(&mut self, y: f32, layout: &Layout) {
+        let tab = &mut self.tabs[self.active];
+        match (tab.compare.as_mut(), tab.merge.as_mut()) {
+            (Some(c), _) => c.columns.drag_scrollbar(y, layout),
+            (None, Some(m)) => m.columns.drag_scrollbar(y, layout),
+            (None, None) => {}
+        }
+    }
+
     /// A click on a compare view: a fold toggles, a line places the cursor.
     fn columns_click(&mut self, layout: &Layout, (x, y): (f32, f32), now: Instant) {
         let tab_width = self.tab_width();
@@ -2587,8 +2650,13 @@ impl App {
     /// Widen the scrollbar while the pointer is over it.
     fn update_scrollbar_hover(&mut self) {
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        let on_columns = self
+            .layout()
+            .is_some_and(|l| self.columns_scrollbar_hit(&l, x, y).is_some());
         let view = &mut self.tabs[self.active].view;
-        let hover = self.clicks.scrollbar_grab.is_some() || view.scrollbar_hit(x, y).is_some();
+        let hover = self.clicks.scrollbar_grab.is_some()
+            || on_columns
+            || view.scrollbar_hit(x, y).is_some();
         if hover != view.scrollbar_hover {
             view.scrollbar_hover = hover;
             self.changed(false);
@@ -3837,13 +3905,7 @@ impl ApplicationHandler<AppEvent> for App {
                         self.changed(false);
                     }
                 } else if let Some(grab) = self.clicks.scrollbar_grab {
-                    if let Some(layout) = self.layout() {
-                        let tab_width = self.tab_width();
-                        let tab = &mut self.tabs[self.active];
-                        let y = to_f32(position.y) - grab;
-                        tab.view.drag_scrollbar(y, &tab.doc, &layout, tab_width);
-                        self.changed(false);
-                    }
+                    self.drag_scrollbar_to(to_f32(position.y) - grab);
                 } else if self.clicks.dragging {
                     self.mouse_drag();
                 }

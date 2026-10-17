@@ -19,7 +19,7 @@ use nimbus_render::Gpu;
 
 use crate::document::Document;
 use crate::theme::{Color, Theme, Ui};
-use crate::view::{Decorations, Layout, Preedit, RowPlan, View};
+use crate::view::{Decorations, Layout, Preedit, RowPlan, ScrollbarHit, View};
 
 /// What a click on the columns means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,7 +289,11 @@ impl<T: Copy> Columns<T> {
         let Some(r) = self.rows.at(row) else {
             return Click::None;
         };
-        if let Cell::Fold { first, .. } = r.cells[column.min(MAX_COLUMNS - 1)] {
+        if matches!(r.cells[column.min(MAX_COLUMNS - 1)], Cell::Fold { .. })
+            && let Cell::Fold { first, .. } = r.cells[0]
+        {
+            // `unfolded` is keyed by the first column's line, whichever
+            // column was clicked.
             if !self.unfolded.remove(&first) {
                 self.unfolded.insert(first);
             }
@@ -433,12 +437,13 @@ impl<T: Copy> Columns<T> {
         self.draw_scrollbar(gpu, layout, &ui);
     }
 
-    /// A scrollbar over the rows, at the right edge of the area.
-    fn draw_scrollbar(&self, gpu: &mut Gpu, layout: &Layout, ui: &Ui) {
+    /// The scrollbar's thumb (its top and height) when the rows overflow
+    /// the screen, from the same sums the ordinary view uses.
+    fn thumb(&self, layout: &Layout) -> Option<(f32, f32)> {
         let total = self.rows.len().max(1);
         let visible = Self::visible_rows(layout);
         if visible >= total {
-            return;
+            return None;
         }
         let track = layout.bottom - layout.top;
         let (total, visible, scrolled) = (f(total), f(visible), f(self.scroll_row));
@@ -446,6 +451,57 @@ impl<T: Copy> Columns<T> {
             .max(2.0 * layout.metrics.line_height)
             .min(track);
         let y = layout.top + (track - h) * (scrolled / (total - visible).max(1.0));
+        Some((y, h))
+    }
+
+    /// Where the scrollbar begins, in x: a press right of it is a press on
+    /// the bar, as in the ordinary view.
+    fn scrollbar_x(layout: &Layout) -> f32 {
+        layout.width - (6.0 * layout.scale).round() - 2.0 * layout.scale - 4.0 * layout.scale
+    }
+
+    /// What a press at `(x, y)` on the scrollbar hits, if it is on it.
+    #[must_use]
+    pub fn scrollbar_hit(&self, layout: &Layout, x: f32, y: f32) -> Option<ScrollbarHit> {
+        let (top, h) = self.thumb(layout)?;
+        if x < Self::scrollbar_x(layout) || y < layout.top || y >= layout.bottom {
+            return None;
+        }
+        Some(if (top..top + h).contains(&y) {
+            ScrollbarHit::Thumb(y - top)
+        } else {
+            ScrollbarHit::Track
+        })
+    }
+
+    /// The thumb's height, for centring it on a track press.
+    #[must_use]
+    pub fn thumb_height(&self, layout: &Layout) -> f32 {
+        self.thumb(layout).map_or(0.0, |(_, h)| h)
+    }
+
+    /// Put the thumb's top at `y`: scroll to the matching row.
+    pub fn drag_scrollbar(&mut self, y: f32, layout: &Layout) {
+        let Some((_, h)) = self.thumb(layout) else {
+            return;
+        };
+        let travel = (layout.bottom - layout.top - h).max(1.0);
+        let frac = ((y - layout.top) / travel).clamp(0.0, 1.0);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a row index within the rows' count"
+        )]
+        let row = (frac * f(self.max_scroll_row(layout))).round() as usize;
+        self.scroll_row = row.min(self.max_scroll_row(layout));
+        self.scroll_px = 0.0;
+    }
+
+    /// A scrollbar over the rows, at the right edge of the area.
+    fn draw_scrollbar(&self, gpu: &mut Gpu, layout: &Layout, ui: &Ui) {
+        let Some((y, h)) = self.thumb(layout) else {
+            return;
+        };
         let w = (6.0 * layout.scale).round();
         gpu.begin_layer(None);
         gpu.push_rect(
@@ -463,18 +519,6 @@ impl<T: Copy> Columns<T> {
 )]
 fn f(n: usize) -> f32 {
     n as f32
-}
-
-/// Lines of `t` by the diff's convention: no empty line after a final
-/// newline.
-#[must_use]
-pub fn lines_of(t: &dyn Text) -> usize {
-    let n = t.len_lines();
-    if n > 0 && (t.len_bytes() == 0 || t.byte_at(t.len_bytes() - 1) == Some(b'\n')) {
-        n - 1
-    } else {
-        n
-    }
 }
 
 fn plan_of(cell: Cell, background: Option<Color>) -> RowPlan {

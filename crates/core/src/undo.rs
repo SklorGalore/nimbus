@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use std::ops::Range;
 
-use crate::buffer::{Buffer, Content, Edit, EditError, Text, report_sorted};
+use crate::buffer::{Buffer, Content, Edit, EditError, report_sorted};
 use crate::selection::Selections;
 
 /// Pause after which typing starts a new undo step.
@@ -135,7 +135,7 @@ impl Group {
 fn undo_edits(
     buffer: &mut dyn Buffer,
     edits: &[Edit],
-    on_edit: &mut dyn FnMut(&dyn Text, &Edit),
+    on_edit: &mut dyn FnMut(&dyn Buffer, &Edit),
 ) -> Result<(), EditError> {
     if descending(edits) {
         // Each edit's place in the text as it is now: shifted by every
@@ -167,7 +167,7 @@ fn undo_edits(
 fn redo_edits(
     buffer: &mut dyn Buffer,
     edits: &[Edit],
-    on_edit: &mut dyn FnMut(&dyn Text, &Edit),
+    on_edit: &mut dyn FnMut(&dyn Buffer, &Edit),
 ) -> Result<(), EditError> {
     if descending(edits) {
         // Every edit's old range is in the text before the batch.
@@ -359,7 +359,7 @@ impl History {
     pub fn undo(
         &mut self,
         buffer: &mut dyn Buffer,
-        on_edit: &mut dyn FnMut(&dyn Text, &Edit),
+        on_edit: &mut dyn FnMut(&dyn Buffer, &Edit),
     ) -> Result<Option<Selections>, EditError> {
         self.seal();
         let Some(group) = self.undo.pop() else {
@@ -396,7 +396,7 @@ impl History {
     pub fn redo(
         &mut self,
         buffer: &mut dyn Buffer,
-        on_edit: &mut dyn FnMut(&dyn Text, &Edit),
+        on_edit: &mut dyn FnMut(&dyn Buffer, &Edit),
     ) -> Result<Option<Selections>, EditError> {
         self.seal();
         let Some(group) = self.redo.pop() else {

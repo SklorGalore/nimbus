@@ -219,23 +219,42 @@ impl std::fmt::Debug for DiskText {
     }
 }
 
+/// One edit an observer follows: its span and the text right after it.
+pub type NotedEdit = (EditSpan, Arc<dyn Snapshot>);
+
 /// Edits noted for an observer, such as the compare view's live diff,
 /// which needs every change in order, undo and redo included. Off until
 /// something asks; drained each frame while on.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct EditLog {
     on: bool,
-    /// One entry per edit, in application order; `None` for an edit whose
-    /// span could not be worked out (the observer then starts over).
-    spans: Vec<Option<EditSpan>>,
+    /// One entry per edit, in application order, with the text as it was
+    /// right after that edit (a rope snapshot shares storage, so this is
+    /// cheap): an observer following several edits from one frame needs
+    /// each one's own text, as spans name lines of the text they were
+    /// made in. `None` for an edit whose span could not be worked out
+    /// (the observer then starts over).
+    spans: Vec<Option<NotedEdit>>,
     /// The text was replaced wholesale (a reload), with no edit records.
     reset: bool,
 }
 
+impl std::fmt::Debug for EditLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The snapshots are whole texts; show what the log holds, not them.
+        f.debug_struct("EditLog")
+            .field("on", &self.on)
+            .field("spans", &self.spans.len())
+            .field("reset", &self.reset)
+            .finish()
+    }
+}
+
 impl EditLog {
-    fn note(&mut self, text: &dyn Text, edit: &Edit) {
+    fn note(&mut self, buffer: &dyn Buffer, edit: &Edit) {
         if self.on {
-            self.spans.push(EditSpan::after(text, edit));
+            let entry = EditSpan::after(buffer, edit).map(|span| (span, buffer.snapshot().into()));
+            self.spans.push(entry);
         }
     }
 }
@@ -693,9 +712,10 @@ impl Document {
         self.edits.reset = false;
     }
 
-    /// The edits noted since the last call, in order, and whether the text
-    /// was replaced wholesale in between (then the spans are moot).
-    pub fn take_edits(&mut self) -> (Vec<Option<EditSpan>>, bool) {
+    /// The edits noted since the last call, in order, each with the text
+    /// right after it, and whether the text was replaced wholesale in
+    /// between (then the spans are moot).
+    pub fn take_edits(&mut self) -> (Vec<Option<NotedEdit>>, bool) {
         let reset = std::mem::take(&mut self.edits.reset);
         (std::mem::take(&mut self.edits.spans), reset)
     }

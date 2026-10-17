@@ -135,7 +135,7 @@ fn bytes_of(content: &Content) -> Vec<u8> {
 /// and checks the inserted text against the buffer after the edit, as the
 /// syntax tree would read it.
 #[expect(clippy::unwrap_used, reason = "test helper")]
-fn replay_into(mirror: &mut String) -> impl FnMut(&dyn Text, &Edit) + '_ {
+fn replay_into(mirror: &mut String) -> impl FnMut(&dyn Buffer, &Edit) + '_ {
     |after, edit| {
         let bytes = bytes_of(&edit.inserted);
         let inserted = std::str::from_utf8(&bytes).unwrap();

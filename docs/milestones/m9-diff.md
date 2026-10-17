@@ -428,6 +428,30 @@ opened), so `--smoke` is the owner's to re-measure; this container has no
 GPU. The release binary on Linux is 20.2 MB (19.2 MiB; budget 35 MB), of
 which `imara-diff` is about 60 KB.
 
+**End-of-milestone review** (2026-10-17). The review found ten things,
+all fixed the same day, four of them real bugs in the merge and compare
+paths: several edits arriving in one frame (an undo of typed lines, a
+multi-cursor edit) were all read against the final text, so the live diff
+and the merge regions drifted; the edit log now keeps the text right after
+each edit (a rope snapshot, which shares storage), and each span is
+followed in its own text. Lines the other side adds in the middle of the
+result have no result line of their own and could not be taken (the lookup
+preferred the equal run holding the cursor's line); a take now finds the
+empty change starting at the cursor's line and records its own extent
+instead of guessing from the span. `change_row` binary-searched a list
+that interleaves equal runs and changes, which is not a partition, so
+"next conflict" could scroll to the last change; the rows keep an index
+by change number. A fold lookup for a line past the rows' text (the rows
+are older than the text between an edit and the next sync) could
+underflow; it is clamped. Smaller: the compare's scrollbar could not be
+grabbed (the press went to the row under it), the interner pinned one
+text version per keystroke for the life of a compare (bounded now: the
+diff is redone at the next pause past 512 versions), a fold clicked in
+the right column was remembered under the wrong key, the line-count rule
+existed three times, and `--find` swallowed a pattern that was not UTF-8.
+The typing numbers above were re-measured after the fixes and are the
+same within noise.
+
 **Deferred from the plan**: long-line splitting (layer 4). Minified JSON
 and other one-line files compare as one changed line today; splitting a
 line at content-chosen points for the diff needs the views to show a

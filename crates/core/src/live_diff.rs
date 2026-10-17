@@ -178,6 +178,13 @@ impl LiveDiff {
         self.sides[side.index()].len()
     }
 
+    /// How many text versions the interner keeps alive (one per edit
+    /// followed); see [`Interner::pinned_texts`].
+    #[must_use]
+    pub fn pinned_texts(&self) -> usize {
+        self.interner.pinned_texts()
+    }
+
     /// The region waiting for [`rediff`](LiveDiff::rediff), if any.
     #[must_use]
     pub fn pending(&self) -> Option<&Region> {
