@@ -1,6 +1,6 @@
 # M9 — Compare and merge
 
-**Status: in progress** (started 2026-10-17; task 1 landed, task 2 measuring)
+**Status: in progress** (started 2026-10-17; tasks 1 and 2 landed)
 
 ## Goal
 
@@ -76,11 +76,13 @@ inputs.
 **Diff engine** (`crates/core/src/diff.rs`, pure, no I/O). Each line is
 turned into a small integer token by an interner that maps equal lines to
 the same token, read from the buffer's chunks without copying the text.
-The token sequences are diffed with the histogram algorithm (readable
-hunks on code, close to linear time in practice). Candidate crate:
-`imara-diff`, chosen for speed on large inputs; `similar` is the fallback.
-Task 2 measures both on the bench files and on binary size. Whichever is
-used, the output is our own type, so views never see the crate:
+The token sequences are diffed with Myers' algorithm from `imara-diff`
+(**changed in task 2**: the plan said histogram, for readable hunks on
+code, but histogram ignores lines that occur more than 63 times as
+anchors, and in source files and logs most lines do; see Results for the
+numbers, including `similar`). Hunks are then slid to indentation-friendly
+positions with imara's heuristic, which recovers most of what histogram
+is liked for. The output is our own type, so views never see the crate:
 
 ```rust
 pub struct Hunk { pub old: Range<usize>, pub new: Range<usize> }   // line ranges
@@ -215,4 +217,48 @@ building, checked by the keymap conflict test.
 
 ## Results
 
-_Fill in when done._
+_In progress; filled in as tasks land._
+
+**Task 2: algorithm and crate** (2026-10-17, release build, Linux
+container; the owner's machine is likely faster). Two inputs: the
+owner's bench pair (`bench/out/src-10mb.rs`, the project's sources
+repeated, and a copy with one edit per thousand lines) and a synthetic
+source-like text with a long tail of distinct lines. Interning is the
+same for every algorithm; the table shows the diff step.
+
+| Pair | Lines | Intern | imara Myers | imara Histogram | `similar` Myers |
+|---|---|---|---|---|---|
+| bench 10 MB + edited | 295k | 84 ms | 10 ms, 291 hunks | 16 ms, **83 hunks** (coarse) | — |
+| bench 100 MB + edited | 2.95M | 848 ms | 115 ms, 3146 hunks | 229 ms, 3146 hunks | — |
+| synthetic 6 MB + 200 edits | 250k | 78 ms | 12 ms | 114 ms | 48 ms |
+| synthetic 60 MB + 2000 edits | 2.5M | 1.18 s | 144 ms | **19.3 s** | 47 ms |
+| unrelated 6 MB pair (worst case) | 250k | 46 ms | 560 ms, 66k hunks | 294 ms, 9k hunks | — |
+
+Histogram is out: it either falls apart (19 s) or gives coarse hunks on
+repetitive text, and nearly every real input is repetitive. Between the
+two crates, `similar`'s Myers is faster on the synthetic pair but its
+binary cost is higher (a minimal release binary grew 145 KB with
+`similar` against 24 KB with `imara-diff`, both with fat LTO), it has no
+token-slice entry point without copying our tokens into its types, and
+`imara-diff` ships the indentation slider that makes hunks land on
+function boundaries. `imara-diff` 0.2 with `Algorithm::Myers`, then.
+
+Budgets: two 10 MB files diff in about 95 ms (budget 300 ms); two 100 MB
+files in about 0.96 s (budget 3 s). The diff limit (`DIFF_LIMIT`) is
+256 MB per side after trimming, set by memory, not time: tokens are
+4 bytes per line per side and the interner about 40 bytes per distinct
+line (more than the plan's 16 to 24: each entry keeps where a copy of the
+line lives, for comparing on hash collision, so a collision can never
+produce a wrong diff).
+
+Interning dominates the time: about 230 MB/s, mostly the hash-table
+lookup and the byte comparison that confirms each repeated line. One
+chunk lookup per line was removed in task 2 (20% faster); a faster hash
+table is the next step if it ever matters.
+
+Surprise: the two buffer backends at first produced different hunks for
+the same texts, caught by the oracle's `backends_agree` property. The
+indentation heuristic read each line's indent from its first storage
+chunk, and the mapped backend's tiny test pieces split some indents. The
+indent is now gathered across chunks, so the diff depends only on the
+text.

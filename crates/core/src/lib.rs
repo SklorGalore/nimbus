@@ -26,7 +26,7 @@ pub use any::AnyBuffer;
 pub use buffer::{
     Buffer, Content, Edit, EditError, LineSpan, SUBSTITUTE, Snapshot, Text, report_sorted,
 };
-pub use diff::{DiffError, Hunk, Interner, Lines};
+pub use diff::{DIFF_LIMIT, DiffError, Hunk, Interner, Lines};
 pub use line_ending::LineEnding;
 pub use mapped::{Limits, MappedBuffer, MappedSnapshot, PieceRun};
 pub use rope::RopeBuffer;

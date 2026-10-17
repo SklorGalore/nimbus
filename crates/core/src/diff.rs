@@ -36,6 +36,17 @@ use imara_diff::{Algorithm, Diff, IndentHeuristic, IndentLevel, Token};
 
 use crate::{Snapshot, Text};
 
+/// The most text, per side, that gets a full line diff: 256 MB, the same
+/// as the rope threshold (DESIGN.md §4.1). Above it the layered diff (M9
+/// task 2a) works in bounded windows instead. Set from measurement (M9
+/// doc, Results): time is fine well past this (interning runs at about
+/// 230 MB/s and Myers at over 20 million lines per second on similar
+/// texts), so memory sets the limit: tokens cost 4 bytes per line per side
+/// and the interner about 40 bytes per distinct line, which for a log of
+/// unique 80-byte lines is about 150 MB at this size, and would be 2.5 GB
+/// for a 4 GB log.
+pub const DIFF_LIMIT: usize = 256 << 20;
+
 /// A run of lines that differ: lines `old` of the old text were replaced by
 /// lines `new` of the new text. Either range may be empty (a pure insertion
 /// or deletion), not both. Hunks come sorted and never touch or overlap.
@@ -156,7 +167,7 @@ impl Interner {
         let mut tokens = Vec::with_capacity(len / 32);
         let mut hash = LineHash::default();
         let mut line_start = 0;
-        let mut indent = None;
+        let mut head = LineHead::default();
         let mut pos = 0;
         while pos < len {
             let (chunk, base) = text.chunk_at(pos);
@@ -170,11 +181,13 @@ impl Interner {
             while let Some(i) = memchr::memchr(b'\n', &bytes[off..]) {
                 let end = off + i + 1;
                 let piece = &bytes[off..end];
-                let indent = indent
-                    .take()
-                    .unwrap_or_else(|| IndentLevel::for_ascii_line(piece.iter().copied(), 8));
+                head.write(piece);
+                let indent = head.indent();
+                head = LineHead::default();
                 hash.write(piece);
                 let line_end = pos + end;
+                // The whole line is in this chunk when it started here.
+                let contiguous = (line_start >= pos).then_some(piece);
                 let token = self.token_for(
                     hash.finish(),
                     Rep {
@@ -184,6 +197,7 @@ impl Interner {
                     },
                     indent,
                     &*text,
+                    contiguous,
                 )?;
                 tokens.push(token);
                 hash = LineHash::default();
@@ -192,9 +206,7 @@ impl Interner {
             }
             let rest = &bytes[off..];
             if !rest.is_empty() {
-                if indent.is_none() {
-                    indent = Some(IndentLevel::for_ascii_line(rest.iter().copied(), 8));
-                }
+                head.write(rest);
                 hash.write(rest);
             }
             pos = base + chunk.len();
@@ -207,8 +219,9 @@ impl Interner {
                     start: line_start,
                     len: len - line_start,
                 },
-                indent.unwrap_or_else(|| IndentLevel::for_ascii_line(std::iter::empty(), 8)),
+                head.indent(),
                 &*text,
+                None,
             )?;
             tokens.push(token);
         }
@@ -217,22 +230,25 @@ impl Interner {
 
     /// The token for the line at `rep` in `text`, which hashes to `hash`:
     /// an existing one when a line with the same bytes was seen, else new.
+    /// `bytes` is the line itself when it sits in one storage chunk, which
+    /// saves looking it up again for the comparison.
     fn token_for(
         &mut self,
         hash: u64,
         rep: Rep,
         indent: IndentLevel,
         text: &dyn Text,
+        bytes: Option<&[u8]>,
     ) -> Result<Token, DiffError> {
         let candidate = self.table.get(&hash).copied();
         let mut new_hash = true;
         if let Some(token) = candidate {
             new_hash = false;
-            if self.same_bytes(token, rep, text) {
+            if self.same_bytes(token, rep, text, bytes) {
                 return Ok(token);
             }
             for &(h, token) in &self.overflow {
-                if h == hash && self.same_bytes(token, rep, text) {
+                if h == hash && self.same_bytes(token, rep, text, bytes) {
                     return Ok(token);
                 }
             }
@@ -254,7 +270,7 @@ impl Interner {
     /// Whether the line at `rep` in `text` has the same bytes as `token`'s
     /// representative. `text` is `self.texts[rep.text]`, passed separately
     /// so the caller's borrow of it does not conflict with `&mut self`.
-    fn same_bytes(&self, token: Token, rep: Rep, text: &dyn Text) -> bool {
+    fn same_bytes(&self, token: Token, rep: Rep, text: &dyn Text, bytes: Option<&[u8]>) -> bool {
         let Some(known) = self.reps.get(token.0 as usize) else {
             return false;
         };
@@ -264,16 +280,29 @@ impl Interner {
         let Some(other) = self.texts.get(known.text as usize) else {
             return false;
         };
-        bytes_equal(&**other, known.start, text, rep.start, rep.len)
+        match bytes {
+            Some(bytes) => slice_equal(&**other, known.start, bytes),
+            None => bytes_equal(&**other, known.start, text, rep.start, rep.len),
+        }
     }
 
     /// The hunks that turn `old` into `new`. Both must come from this
-    /// interner. Costs about O((old + new) lines) on typical text; the
-    /// histogram algorithm's worst case is quadratic in the number of
-    /// lines that repeat many times.
+    /// interner.
+    ///
+    /// Uses Myers' algorithm with `imara-diff`'s cut-offs for large inputs,
+    /// then slides hunks to indentation-friendly positions. The M9 plan
+    /// expected histogram diff, but measurement (M9 doc, Results) showed
+    /// its weakness on text where most lines repeat, which is exactly
+    /// what source code and logs are: on a synthetic 60 MB pair it took
+    /// 19 s against 0.19 s for Myers, and on the 10 MB bench file (the
+    /// project's sources repeated) it merged 291 edits into 83 coarse
+    /// hunks where Myers found each one. Time is close to linear in the
+    /// number of lines when the texts are similar; the cut-offs keep
+    /// unrelated texts from going quadratic at the cost of a coarser
+    /// result.
     #[must_use]
     pub fn diff(&self, old: &Lines, new: &Lines) -> Vec<Hunk> {
-        self.diff_with(Algorithm::Histogram, old, new)
+        self.diff_with(Algorithm::Myers, old, new)
     }
 
     fn diff_with(&self, algorithm: Algorithm, old: &Lines, new: &Lines) -> Vec<Hunk> {
@@ -298,6 +327,23 @@ impl Interner {
     }
 }
 
+/// Compare the bytes of `a` from `pa` with `bytes`, chunk by chunk.
+fn slice_equal(a: &dyn Text, mut pa: usize, mut bytes: &[u8]) -> bool {
+    while !bytes.is_empty() {
+        let (chunk, start) = a.chunk_at(pa);
+        let Some(chunk) = chunk.get(pa - start..) else {
+            return false;
+        };
+        let k = bytes.len().min(chunk.len());
+        if k == 0 || chunk[..k] != bytes[..k] {
+            return false;
+        }
+        pa += k;
+        bytes = &bytes[k..];
+    }
+    true
+}
+
 /// Compare `n` bytes of `a` from `pa` with `n` bytes of `b` from `pb`,
 /// chunk by chunk, without copying either.
 fn bytes_equal(a: &dyn Text, mut pa: usize, b: &dyn Text, mut pb: usize, mut n: usize) -> bool {
@@ -316,6 +362,37 @@ fn bytes_equal(a: &dyn Text, mut pa: usize, b: &dyn Text, mut pb: usize, mut n: 
         n -= k;
     }
     true
+}
+
+/// The first bytes of a line, gathered across chunks, for its indentation.
+/// Enough for any indentation the slider heuristic distinguishes (it caps
+/// at 200 columns); the result depends only on the line's content, never
+/// on where chunk boundaries fell, so both buffer backends diff alike.
+struct LineHead {
+    bytes: [u8; 64],
+    len: usize,
+}
+
+impl Default for LineHead {
+    fn default() -> Self {
+        Self {
+            bytes: [0; 64],
+            len: 0,
+        }
+    }
+}
+
+impl LineHead {
+    fn write(&mut self, bytes: &[u8]) {
+        let room = self.bytes.len() - self.len;
+        let n = bytes.len().min(room);
+        self.bytes[self.len..self.len + n].copy_from_slice(&bytes[..n]);
+        self.len += n;
+    }
+
+    fn indent(&self) -> IndentLevel {
+        IndentLevel::for_ascii_line(self.bytes[..self.len].iter().copied(), 8)
+    }
 }
 
 /// A streaming hash over a line's bytes, fed in any pieces: the result
@@ -546,7 +623,13 @@ mod tests {
         };
         i.texts.push(Arc::clone(&text));
         let tok = i
-            .token_for(hash, rep, IndentLevel::for_ascii_line(*b"q\n", 8), &*text)
+            .token_for(
+                hash,
+                rep,
+                IndentLevel::for_ascii_line(*b"q\n", 8),
+                &*text,
+                None,
+            )
             .unwrap();
         assert_eq!(tok, b.tokens[0]);
         assert_ne!(tok, a.tokens[0]);
@@ -617,23 +700,34 @@ mod tests {
     #[test]
     #[ignore = "benchmark: run in release with --nocapture (M9 task 2)"]
     fn diff_bench() {
-        let pairs: Vec<(String, String, String)> = match std::env::var("NIMBUS_DIFF_FILES") {
-            Ok(spec) => {
-                let (a, b) = spec.split_once(':').expect("OLD:NEW");
-                vec![(
-                    spec.clone(),
-                    std::fs::read_to_string(a).expect("read OLD"),
-                    std::fs::read_to_string(b).expect("read NEW"),
-                )]
+        let pairs: Vec<(String, String, String)> = if let Ok(spec) =
+            std::env::var("NIMBUS_DIFF_FILES")
+        {
+            let (a, b) = spec.split_once(':').expect("OLD:NEW");
+            vec![(
+                spec.clone(),
+                std::fs::read_to_string(a).expect("read OLD"),
+                std::fs::read_to_string(b).expect("read NEW"),
+            )]
+        } else {
+            {
+                let mut pairs: Vec<(String, String, String)> = [(250_000, 200), (2_500_000, 2_000)]
+                    .into_iter()
+                    .map(|(lines, edits)| {
+                        let old = synthetic(lines, 7);
+                        let new = edited(&old, edits, 11);
+                        (format!("synthetic {lines} lines"), old, new)
+                    })
+                    .collect();
+                // Two texts with nothing in common but the short repeated
+                // lines: the worst case for an edit-distance algorithm.
+                pairs.push((
+                    "unrelated 250000 lines".to_owned(),
+                    synthetic(250_000, 7),
+                    synthetic(250_000, 99),
+                ));
+                pairs
             }
-            Err(_) => [(250_000, 200), (2_500_000, 2_000)]
-                .into_iter()
-                .map(|(lines, edits)| {
-                    let old = synthetic(lines, 7);
-                    let new = edited(&old, edits, 11);
-                    (format!("synthetic {lines} lines"), old, new)
-                })
-                .collect(),
         };
         for (name, old, new) in pairs {
             let (os, ns) = (snap(&old), snap(&new));
@@ -650,7 +744,7 @@ mod tests {
                 nl.len(),
                 i.num_tokens(),
             );
-            for algorithm in [Algorithm::Histogram, Algorithm::Myers] {
+            for algorithm in [Algorithm::Myers, Algorithm::Histogram] {
                 let t = std::time::Instant::now();
                 let hunks = i.diff_with(algorithm, &ol, &nl);
                 println!(

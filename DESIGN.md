@@ -364,7 +364,13 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
   interned line tokens, runs on workers, and is re-done locally around
   each edit, so diff views keep the editor's typing budget at any file
   size. Columns are ordinary `View`s on rows aligned through a prefix sum
-  over the hunks.
+  over the hunks. The algorithm is Myers (`imara-diff`, with its cut-offs
+  for large inputs and an indentation heuristic for placing hunks), chosen
+  over histogram by measurement: histogram cannot anchor on lines that
+  repeat more than a few dozen times, which most lines of code and logs
+  do, and took 19 s where Myers took 0.14 s on a 60 MB pair (M9 doc,
+  Results). A full diff covers at most 256 MB per side (`DIFF_LIMIT`,
+  the rope threshold); past that, windows.
 - **Window state**: the sidebar's visibility and width are remembered in
   `state.toml` beside the config. Nimbus never writes the user's
   `config.toml`.
@@ -453,6 +459,7 @@ it.
 | `notify` | latest at M6 | file watching | M6 |
 | `memmap2`, `memchr` | 0.9, 2 | mapped buffer, newline scanning | M7 |
 | `fontdb` | 0.24 | system font discovery and fallback | M8 |
+| `imara-diff` | 0.2 | line diff (Myers) over our own tokens | M9 |
 
 ## 8. Milestones
 
@@ -591,3 +598,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | App icon redrawn: white cloud and dark I-beam on an amber tile, on Apple's icon grid; solid shapes so it reads at 16 px | m8 |
 | 2026-10-16 | Built-in themes take the icon's colours: amber is the one accent, selection is a shade of the ink; light theme on warm paper with a burnt-amber cursor | §4.4, m8 |
 | 2026-10-17 | M10–M15 drafted from the items M1–M9 deferred; order and `Proposed` items await the owner (`backlog.md`) | §8, §9 |
+| 2026-10-17 | M9 diff: Myers over histogram after measurement; full diff up to 256 MB per side, windows past that; lines interned by streaming hash, verified by bytes | §4.4, m9 |
