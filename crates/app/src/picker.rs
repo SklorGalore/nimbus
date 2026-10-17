@@ -39,6 +39,8 @@ pub enum Item {
     /// A definition in the file: its name, kind and line (from 1), and
     /// the byte to put the cursor at.
     Symbol(Symbol, Option<usize>),
+    /// An open tab to compare with (M9): its index and name.
+    Tab(usize, String),
 }
 
 /// Which picker is open.
@@ -52,6 +54,8 @@ pub enum Kind {
     Line,
     /// Go to symbol: the file's definitions.
     Symbols,
+    /// Choosing another tab to compare with.
+    Tabs,
 }
 
 /// One row to draw.
@@ -219,6 +223,21 @@ impl Picker {
         picker
     }
 
+    /// Open a list of tabs, `(index, name)`, to pick one to compare with.
+    pub fn tabs(names: Vec<(usize, String)>, notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let picker = Self::new(Kind::Tabs, Config::DEFAULT, notify, PathBuf::new());
+        let injector = picker.matcher.injector();
+        for (i, name) in names {
+            injector.push(Item::Tab(i, name), |item, cols| {
+                if let Item::Tab(_, name) = item {
+                    cols[0] = name.as_str().into();
+                }
+            });
+        }
+        picker.walk_done.store(true, Ordering::Relaxed);
+        picker
+    }
+
     /// The line number typed, counting from 1; a leading `:` is allowed, as
     /// some editors write it.
     fn line_target(&self) -> Option<usize> {
@@ -338,6 +357,10 @@ impl Picker {
                         Some(n) => format!("{}, line {n}", s.kind.label()),
                         None => s.kind.label().to_owned(),
                     },
+                },
+                Item::Tab(_, name) => Row {
+                    text: name.clone(),
+                    detail: String::new(),
                 },
                 Item::File(p) => Row {
                     text: p
