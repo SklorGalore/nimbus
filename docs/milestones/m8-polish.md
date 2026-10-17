@@ -73,9 +73,10 @@ runs. **Owner** items need a person at the keyboard; each says what to try.
       the palette shows ⇧⌘P-style shortcuts.
 - [x] **Owner, both, confirmed:** Shift+Alt+drag (⇧⌥ on macOS) down over lines of
       different lengths and type: every line long enough gets the text.
-- [ ] A tag push builds release artifacts in GitHub Actions: a macOS `.app`
-      in a zip, a Linux tarball, a Windows zip. Workflow, bundle script
-      (tested locally) and icon are in; **owner**: push a tag to run it.
+- [x] A tag push builds release artifacts in GitHub Actions: a macOS `.app`
+      in a zip, a Linux tarball, a Windows zip. `v0.1.0` ran it on the
+      first try: universal macOS app (x86_64 and arm64, reports 0.1.0),
+      Linux tarball, Windows zip and SHA256SUMS, all checksums verified.
 
 ## Scope
 
