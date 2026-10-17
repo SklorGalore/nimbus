@@ -1,6 +1,6 @@
 # M9 — Compare and merge
 
-**Status: planned**
+**Status: in progress** (started 2026-10-17; task 1 landed, task 2 measuring)
 
 ## Goal
 

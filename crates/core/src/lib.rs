@@ -1,4 +1,4 @@
-//! Nimbus editor core: text buffers, edits, undo, cursors and search.
+//! Nimbus editor core: text buffers, edits, undo, cursors, search and diff.
 //!
 //! This crate has no I/O and no GPU dependencies so that everything in it can
 //! be unit-tested without a window. All positions are byte offsets into UTF-8
@@ -8,6 +8,7 @@ pub mod any;
 pub mod brackets;
 pub mod buffer;
 pub mod column;
+pub mod diff;
 pub mod line_ending;
 pub mod line_index;
 pub mod long_line;
@@ -25,6 +26,7 @@ pub use any::AnyBuffer;
 pub use buffer::{
     Buffer, Content, Edit, EditError, LineSpan, SUBSTITUTE, Snapshot, Text, report_sorted,
 };
+pub use diff::{DiffError, Hunk, Interner, Lines};
 pub use line_ending::LineEnding;
 pub use mapped::{Limits, MappedBuffer, MappedSnapshot, PieceRun};
 pub use rope::RopeBuffer;

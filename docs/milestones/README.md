@@ -36,7 +36,7 @@ repeated in each file:
 | 6 | [File tree](m6-file-tree.md) | Done |
 | 7 | [Huge files](m7-huge-files.md) | Done |
 | 8 | [Polish](m8-polish.md) | Done |
-| 9 | [Compare and merge](m9-diff.md) | Next |
+| 9 | [Compare and merge](m9-diff.md) | In progress |
 | 10 | [Find in files](m10-find-in-files.md) | Draft |
 | 11 | [Everyday editing](m11-everyday-editing.md) | Draft |
 | 12 | [Workspace](m12-workspace.md) | Draft |

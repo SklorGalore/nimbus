@@ -1,0 +1,664 @@
+//! Line diffs for compare and merge (M9).
+//!
+//! A diff is computed in two steps. First an [`Interner`] turns every line
+//! of each text into a small integer, giving equal lines the same integer,
+//! so comparing two lines is comparing two numbers. Then the diff algorithm
+//! (histogram, from `imara-diff`) works on those integer sequences and
+//! reports [`Hunk`]s: runs of lines on one side that were replaced by runs
+//! on the other.
+//!
+//! Lines are read straight from the text's storage chunks
+//! ([`Text::chunk_at`]) and hashed as they stream past, so no line is ever
+//! copied, however long it is, and the mapped backend's file is read in
+//! order. Two lines with the same hash are compared byte by byte before
+//! they share a token, so a hash collision can only cost time, never a
+//! wrong diff.
+//!
+//! A line's token covers its ending too (`\n` or `\r\n`), so a change of
+//! line ending shows as a change, and applying the hunks to the old text
+//! reproduces the new text exactly, which the oracle tests in
+//! `tests/diff_oracle.rs` check. A text that ends with a newline has no
+//! extra empty line after it; a text that does not has a last line without
+//! an ending. Line numbers agree with [`Text::line_to_byte`] either way.
+//!
+//! Memory: 4 bytes per line per side for the tokens, and about 40 bytes
+//! per *distinct* line in the interner (where a copy of it lives, its
+//! hash, its indentation). The texts are kept as snapshots, which share
+//! storage with the live document, for the comparisons on collision.
+
+use std::collections::HashMap;
+use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
+use std::ops::Range;
+use std::sync::Arc;
+
+use imara_diff::{Algorithm, Diff, IndentHeuristic, IndentLevel, Token};
+
+use crate::{Snapshot, Text};
+
+/// A run of lines that differ: lines `old` of the old text were replaced by
+/// lines `new` of the new text. Either range may be empty (a pure insertion
+/// or deletion), not both. Hunks come sorted and never touch or overlap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hunk {
+    /// Line range in the old text.
+    pub old: Range<usize>,
+    /// Line range in the new text.
+    pub new: Range<usize>,
+}
+
+/// Why a text could not be interned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffError {
+    /// More distinct lines than the token type can number (over four
+    /// billion); the diff algorithm works in `u32`.
+    TooManyLines,
+}
+
+impl fmt::Display for DiffError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooManyLines => f.write_str("too many distinct lines to diff"),
+        }
+    }
+}
+
+impl std::error::Error for DiffError {}
+
+/// The lines of one text as tokens, produced by [`Interner::intern`] and
+/// only meaningful with the interner that made them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lines {
+    tokens: Vec<Token>,
+}
+
+impl Lines {
+    /// How many lines the text has, by the convention in the module
+    /// documentation.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// The text had no lines at all (it was empty).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+}
+
+/// Where a copy of a token's line can be read, for comparing on collision.
+#[derive(Debug, Clone, Copy)]
+struct Rep {
+    text: u32,
+    start: usize,
+    len: usize,
+}
+
+/// Maps equal lines to equal tokens across any number of texts.
+///
+/// Create one, [`intern`](Interner::intern) each text, then
+/// [`diff`](Interner::diff) any two of the results. A three-way merge
+/// interns three texts and diffs two pairs; a local re-diff after an edit
+/// interns the new text and keeps the old tokens.
+#[derive(Default)]
+pub struct Interner {
+    /// Every interned text, kept alive so representatives stay readable.
+    texts: Vec<Arc<dyn Snapshot>>,
+    /// Hash of a line to its token. The key is already a hash, so the map
+    /// uses it as is.
+    table: HashMap<u64, Token, BuildHasherDefault<Identity>>,
+    /// Lines whose hash another, different line already had. Practically
+    /// always empty; checked only when a hash matches but the bytes differ.
+    overflow: Vec<(u64, Token)>,
+    /// A representative line per token.
+    reps: Vec<Rep>,
+    /// Indentation per token, for sliding hunks to readable positions.
+    indents: Vec<IndentLevel>,
+}
+
+impl fmt::Debug for Interner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Interner")
+            .field("texts", &self.texts.len())
+            .field("tokens", &self.reps.len())
+            .field("overflow", &self.overflow.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Interner {
+    /// An interner with no lines yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many distinct lines have been seen.
+    #[must_use]
+    pub fn num_tokens(&self) -> usize {
+        self.reps.len()
+    }
+
+    /// Turn every line of `text` into a token. Reads the text once, in
+    /// storage order, without copying any line.
+    ///
+    /// # Errors
+    ///
+    /// [`DiffError::TooManyLines`] when distinct lines run past `u32`.
+    pub fn intern(&mut self, text: &Arc<dyn Snapshot>) -> Result<Lines, DiffError> {
+        let Ok(text_idx) = u32::try_from(self.texts.len()) else {
+            return Err(DiffError::TooManyLines);
+        };
+        self.texts.push(Arc::clone(text));
+        let text = Arc::clone(text);
+        let len = text.len_bytes();
+        let mut tokens = Vec::with_capacity(len / 32);
+        let mut hash = LineHash::default();
+        let mut line_start = 0;
+        let mut indent = None;
+        let mut pos = 0;
+        while pos < len {
+            let (chunk, base) = text.chunk_at(pos);
+            let Some(bytes) = chunk.get(pos - base..) else {
+                break;
+            };
+            if bytes.is_empty() {
+                break;
+            }
+            let mut off = 0;
+            while let Some(i) = memchr::memchr(b'\n', &bytes[off..]) {
+                let end = off + i + 1;
+                let piece = &bytes[off..end];
+                let indent = indent
+                    .take()
+                    .unwrap_or_else(|| IndentLevel::for_ascii_line(piece.iter().copied(), 8));
+                hash.write(piece);
+                let line_end = pos + end;
+                let token = self.token_for(
+                    hash.finish(),
+                    Rep {
+                        text: text_idx,
+                        start: line_start,
+                        len: line_end - line_start,
+                    },
+                    indent,
+                    &*text,
+                )?;
+                tokens.push(token);
+                hash = LineHash::default();
+                line_start = line_end;
+                off = end;
+            }
+            let rest = &bytes[off..];
+            if !rest.is_empty() {
+                if indent.is_none() {
+                    indent = Some(IndentLevel::for_ascii_line(rest.iter().copied(), 8));
+                }
+                hash.write(rest);
+            }
+            pos = base + chunk.len();
+        }
+        if line_start < len {
+            let token = self.token_for(
+                hash.finish(),
+                Rep {
+                    text: text_idx,
+                    start: line_start,
+                    len: len - line_start,
+                },
+                indent.unwrap_or_else(|| IndentLevel::for_ascii_line(std::iter::empty(), 8)),
+                &*text,
+            )?;
+            tokens.push(token);
+        }
+        Ok(Lines { tokens })
+    }
+
+    /// The token for the line at `rep` in `text`, which hashes to `hash`:
+    /// an existing one when a line with the same bytes was seen, else new.
+    fn token_for(
+        &mut self,
+        hash: u64,
+        rep: Rep,
+        indent: IndentLevel,
+        text: &dyn Text,
+    ) -> Result<Token, DiffError> {
+        let candidate = self.table.get(&hash).copied();
+        let mut new_hash = true;
+        if let Some(token) = candidate {
+            new_hash = false;
+            if self.same_bytes(token, rep, text) {
+                return Ok(token);
+            }
+            for &(h, token) in &self.overflow {
+                if h == hash && self.same_bytes(token, rep, text) {
+                    return Ok(token);
+                }
+            }
+        }
+        let Ok(id) = u32::try_from(self.reps.len()) else {
+            return Err(DiffError::TooManyLines);
+        };
+        let token = Token(id);
+        self.reps.push(rep);
+        self.indents.push(indent);
+        if new_hash {
+            self.table.insert(hash, token);
+        } else {
+            self.overflow.push((hash, token));
+        }
+        Ok(token)
+    }
+
+    /// Whether the line at `rep` in `text` has the same bytes as `token`'s
+    /// representative. `text` is `self.texts[rep.text]`, passed separately
+    /// so the caller's borrow of it does not conflict with `&mut self`.
+    fn same_bytes(&self, token: Token, rep: Rep, text: &dyn Text) -> bool {
+        let Some(known) = self.reps.get(token.0 as usize) else {
+            return false;
+        };
+        if known.len != rep.len {
+            return false;
+        }
+        let Some(other) = self.texts.get(known.text as usize) else {
+            return false;
+        };
+        bytes_equal(&**other, known.start, text, rep.start, rep.len)
+    }
+
+    /// The hunks that turn `old` into `new`. Both must come from this
+    /// interner. Costs about O((old + new) lines) on typical text; the
+    /// histogram algorithm's worst case is quadratic in the number of
+    /// lines that repeat many times.
+    #[must_use]
+    pub fn diff(&self, old: &Lines, new: &Lines) -> Vec<Hunk> {
+        self.diff_with(Algorithm::Histogram, old, new)
+    }
+
+    fn diff_with(&self, algorithm: Algorithm, old: &Lines, new: &Lines) -> Vec<Hunk> {
+        let Ok(num_tokens) = u32::try_from(self.reps.len()) else {
+            return Vec::new();
+        };
+        let mut diff = Diff::default();
+        diff.compute_with(algorithm, &old.tokens, &new.tokens, num_tokens);
+        let indent_of = |token: Token| {
+            self.indents
+                .get(token.0 as usize)
+                .copied()
+                .unwrap_or_else(|| IndentLevel::for_ascii_line(std::iter::empty(), 8))
+        };
+        diff.postprocess_with(&old.tokens, &new.tokens, IndentHeuristic::new(indent_of));
+        diff.hunks()
+            .map(|h| Hunk {
+                old: h.before.start as usize..h.before.end as usize,
+                new: h.after.start as usize..h.after.end as usize,
+            })
+            .collect()
+    }
+}
+
+/// Compare `n` bytes of `a` from `pa` with `n` bytes of `b` from `pb`,
+/// chunk by chunk, without copying either.
+fn bytes_equal(a: &dyn Text, mut pa: usize, b: &dyn Text, mut pb: usize, mut n: usize) -> bool {
+    while n > 0 {
+        let (ca, sa) = a.chunk_at(pa);
+        let (cb, sb) = b.chunk_at(pb);
+        let (Some(ca), Some(cb)) = (ca.get(pa - sa..), cb.get(pb - sb..)) else {
+            return false;
+        };
+        let k = n.min(ca.len()).min(cb.len());
+        if k == 0 || ca[..k] != cb[..k] {
+            return false;
+        }
+        pa += k;
+        pb += k;
+        n -= k;
+    }
+    true
+}
+
+/// A streaming hash over a line's bytes, fed in any pieces: the result
+/// depends only on the byte sequence, not on where the chunk boundaries
+/// fell. Fast and weak on purpose: equal hashes are always confirmed by
+/// comparing bytes, so a collision costs a comparison, nothing more.
+#[derive(Default)]
+struct LineHash {
+    state: u64,
+    /// Bytes not yet mixed in, little-endian in the low `pending_len * 8`
+    /// bits.
+    pending: u64,
+    pending_len: u32,
+    total: u64,
+}
+
+impl LineHash {
+    const MUL: u64 = 0x9E37_79B9_7F4A_7C15;
+
+    fn mix(&mut self, word: u64) {
+        self.state = (self.state.rotate_left(27) ^ word).wrapping_mul(Self::MUL);
+    }
+
+    fn write(&mut self, mut bytes: &[u8]) {
+        self.total += bytes.len() as u64;
+        while self.pending_len > 0 && !bytes.is_empty() {
+            self.push_byte(bytes[0]);
+            bytes = &bytes[1..];
+        }
+        let mut words = bytes.chunks_exact(8);
+        for w in &mut words {
+            // `w` is exactly 8 bytes, so the conversion cannot fail; the
+            // fallback never runs.
+            let word = u64::from_le_bytes(w.try_into().unwrap_or([0; 8]));
+            self.mix(word);
+        }
+        for &b in words.remainder() {
+            self.push_byte(b);
+        }
+    }
+
+    fn push_byte(&mut self, b: u8) {
+        self.pending |= u64::from(b) << (8 * self.pending_len);
+        self.pending_len += 1;
+        if self.pending_len == 8 {
+            let word = self.pending;
+            self.pending = 0;
+            self.pending_len = 0;
+            self.mix(word);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        let mut h = self.state;
+        if self.pending_len > 0 {
+            h = (h.rotate_left(27) ^ self.pending).wrapping_mul(Self::MUL);
+        }
+        h ^= self.total;
+        // Final avalanche so the high bits, which the hash table's control
+        // bytes come from, depend on every input bit.
+        h ^= h >> 32;
+        h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+        h ^= h >> 32;
+        h
+    }
+}
+
+/// Hasher for keys that are already hashes: returns the `u64` as is.
+#[derive(Default)]
+struct Identity(u64);
+
+impl Hasher for Identity {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(b);
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Buffer, RopeBuffer};
+
+    fn snap(text: &str) -> Arc<dyn Snapshot> {
+        RopeBuffer::from_text(text).snapshot().into()
+    }
+
+    fn hunks(old: &str, new: &str) -> (Interner, Lines, Lines, Vec<Hunk>) {
+        let mut interner = Interner::new();
+        let a = interner.intern(&snap(old)).unwrap();
+        let b = interner.intern(&snap(new)).unwrap();
+        let hunks = interner.diff(&a, &b);
+        (interner, a, b, hunks)
+    }
+
+    #[test]
+    fn line_counts_follow_the_convention() {
+        let mut i = Interner::new();
+        assert_eq!(i.intern(&snap("")).unwrap().len(), 0);
+        assert_eq!(i.intern(&snap("a")).unwrap().len(), 1);
+        assert_eq!(i.intern(&snap("a\n")).unwrap().len(), 1);
+        assert_eq!(i.intern(&snap("a\nb")).unwrap().len(), 2);
+        assert_eq!(i.intern(&snap("\n\n")).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn equal_lines_share_tokens_across_texts() {
+        let mut i = Interner::new();
+        let a = i.intern(&snap("x\ny\nx\n")).unwrap();
+        let b = i.intern(&snap("y\nx\n")).unwrap();
+        assert_eq!(a.tokens[0], a.tokens[2]);
+        assert_eq!(a.tokens[1], b.tokens[0]);
+        assert_eq!(a.tokens[0], b.tokens[1]);
+        assert_eq!(i.num_tokens(), 2);
+    }
+
+    #[test]
+    fn line_endings_are_part_of_the_line() {
+        let (i, ..) = hunks("a\n", "a\r\n");
+        assert_eq!(i.num_tokens(), 2);
+        let (_, _, _, h) = hunks("a\n", "a\r\n");
+        assert_eq!(
+            h,
+            vec![Hunk {
+                old: 0..1,
+                new: 0..1
+            }]
+        );
+        let (_, _, _, h) = hunks("a\nb", "a\nb\n");
+        assert_eq!(
+            h,
+            vec![Hunk {
+                old: 1..2,
+                new: 1..2
+            }]
+        );
+    }
+
+    #[test]
+    fn identical_texts_have_no_hunks() {
+        let (_, _, _, h) = hunks("a\nb\nc\n", "a\nb\nc\n");
+        assert!(h.is_empty());
+        let (_, _, _, h) = hunks("", "");
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn insert_delete_and_change() {
+        let (_, _, _, h) = hunks("a\nb\nc\n", "a\nx\nb\nc\n");
+        assert_eq!(
+            h,
+            vec![Hunk {
+                old: 1..1,
+                new: 1..2
+            }]
+        );
+        let (_, _, _, h) = hunks("a\nb\nc\n", "a\nc\n");
+        assert_eq!(
+            h,
+            vec![Hunk {
+                old: 1..2,
+                new: 1..1
+            }]
+        );
+        let (_, _, _, h) = hunks("a\nb\nc\n", "a\nB\nc\n");
+        assert_eq!(
+            h,
+            vec![Hunk {
+                old: 1..2,
+                new: 1..2
+            }]
+        );
+        let (_, _, _, h) = hunks("a\nb\nc\n", "");
+        assert_eq!(
+            h,
+            vec![Hunk {
+                old: 0..3,
+                new: 0..0
+            }]
+        );
+    }
+
+    #[test]
+    fn hash_is_independent_of_chunking() {
+        let data: Vec<u8> = (0..100u8).collect();
+        let mut whole = LineHash::default();
+        whole.write(&data);
+        for split in [0, 1, 3, 7, 8, 9, 16, 50, 99, 100] {
+            let mut parts = LineHash::default();
+            parts.write(&data[..split]);
+            parts.write(&data[split..]);
+            assert_eq!(parts.finish(), whole.finish(), "split at {split}");
+        }
+        let mut bytewise = LineHash::default();
+        for b in &data {
+            bytewise.write(std::slice::from_ref(b));
+        }
+        assert_eq!(bytewise.finish(), whole.finish());
+    }
+
+    #[test]
+    fn collisions_are_told_apart_by_bytes() {
+        // Force every line onto one hash by faking the table: intern two
+        // different lines, then check that a third equal to the first gets
+        // the first's token even when the second shares its hash.
+        let mut i = Interner::new();
+        let a = i.intern(&snap("p\n")).unwrap();
+        let hash = *i.table.keys().next().unwrap();
+        let b = i.intern(&snap("q\n")).unwrap();
+        // Move `q` under `p`'s hash as if they had collided.
+        let q_hash = *i.table.keys().find(|&&h| h != hash).unwrap();
+        let q_tok = i.table.remove(&q_hash).unwrap();
+        i.overflow.push((hash, q_tok));
+        let text = snap("q\n");
+        let rep = Rep {
+            text: 2,
+            start: 0,
+            len: 2,
+        };
+        i.texts.push(Arc::clone(&text));
+        let tok = i
+            .token_for(hash, rep, IndentLevel::for_ascii_line(*b"q\n", 8), &*text)
+            .unwrap();
+        assert_eq!(tok, b.tokens[0]);
+        assert_ne!(tok, a.tokens[0]);
+        assert_eq!(i.num_tokens(), 2);
+    }
+
+    /// Synthetic source-like text: `lines` lines drawn from a vocabulary
+    /// with a long tail, so most lines repeat and some are unique, as in
+    /// real code. Deterministic.
+    fn synthetic(lines: usize, seed: u64) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(lines * 40);
+        let mut x = seed | 1;
+        for i in 0..lines {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let kind = x % 10;
+            match kind {
+                0 => s.push_str("}\n"),
+                1 => s.push_str("    }\n"),
+                2 => s.push('\n'),
+                3 => s.push_str("        return Ok(());\n"),
+                4 => s.push_str("    // comment about the next block\n"),
+                _ => {
+                    let _ = writeln!(
+                        s,
+                        "    let value_{} = compute({}, {});",
+                        x % 5000,
+                        i % 97,
+                        x % 13
+                    );
+                }
+            }
+        }
+        s
+    }
+
+    /// Edit `text` in `edits` places: replace a few lines with new ones.
+    fn edited(text: &str, edits: usize, seed: u64) -> String {
+        use std::fmt::Write as _;
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let mut out = String::with_capacity(text.len());
+        let mut x = seed | 1;
+        let mut next_edit = lines.len() / (edits + 1);
+        for (i, line) in lines.iter().enumerate() {
+            if i == next_edit {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let _ = writeln!(out, "    let changed_{} = other();", x % 1000);
+                if !x.is_multiple_of(3) {
+                    out.push_str(line);
+                }
+                next_edit += lines.len() / (edits + 1);
+            } else {
+                out.push_str(line);
+            }
+        }
+        out
+    }
+
+    /// `cargo test --release -p nimbus-core -- --ignored --nocapture diff_bench`
+    ///
+    /// Synthetic pairs by default; `NIMBUS_DIFF_FILES=OLD:NEW` diffs two
+    /// files instead (for example `bench/out/src-10mb.rs` and an edited
+    /// copy).
+    #[test]
+    #[ignore = "benchmark: run in release with --nocapture (M9 task 2)"]
+    fn diff_bench() {
+        let pairs: Vec<(String, String, String)> = match std::env::var("NIMBUS_DIFF_FILES") {
+            Ok(spec) => {
+                let (a, b) = spec.split_once(':').expect("OLD:NEW");
+                vec![(
+                    spec.clone(),
+                    std::fs::read_to_string(a).expect("read OLD"),
+                    std::fs::read_to_string(b).expect("read NEW"),
+                )]
+            }
+            Err(_) => [(250_000, 200), (2_500_000, 2_000)]
+                .into_iter()
+                .map(|(lines, edits)| {
+                    let old = synthetic(lines, 7);
+                    let new = edited(&old, edits, 11);
+                    (format!("synthetic {lines} lines"), old, new)
+                })
+                .collect(),
+        };
+        for (name, old, new) in pairs {
+            let (os, ns) = (snap(&old), snap(&new));
+            let t = std::time::Instant::now();
+            let mut i = Interner::new();
+            let ol = i.intern(&os).unwrap();
+            let nl = i.intern(&ns).unwrap();
+            let interned = t.elapsed();
+            println!(
+                "{name}: {} MB + {} MB, {} + {} lines, {} distinct; intern {interned:?}",
+                old.len() >> 20,
+                new.len() >> 20,
+                ol.len(),
+                nl.len(),
+                i.num_tokens(),
+            );
+            for algorithm in [Algorithm::Histogram, Algorithm::Myers] {
+                let t = std::time::Instant::now();
+                let hunks = i.diff_with(algorithm, &ol, &nl);
+                println!(
+                    "  {algorithm:?}: {} hunks in {:?}",
+                    hunks.len(),
+                    t.elapsed()
+                );
+            }
+        }
+    }
+}
