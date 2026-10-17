@@ -459,7 +459,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::float_cmp, reason = "exact values by construction")]
     fn user_themes_override_their_base_and_warn_on_mistakes() {
         let light = Theme::built_in("light").unwrap();
         let (t, w) = Theme::parse(
