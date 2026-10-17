@@ -64,12 +64,16 @@ pub enum DiffError {
     /// More distinct lines than the token type can number (over four
     /// billion); the diff algorithm works in `u32`.
     TooManyLines,
+    /// A text is over [`DIFF_LIMIT`], so a live diff (which holds a token
+    /// per line) is refused; [`crate::compare`] handles it in layers.
+    TooLarge,
 }
 
 impl fmt::Display for DiffError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooManyLines => f.write_str("too many distinct lines to diff"),
+            Self::TooLarge => f.write_str("text too large for a live diff"),
         }
     }
 }
@@ -80,7 +84,7 @@ impl std::error::Error for DiffError {}
 /// only meaningful with the interner that made them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lines {
-    tokens: Vec<Token>,
+    pub(crate) tokens: Vec<Token>,
 }
 
 impl Lines {
@@ -325,18 +329,28 @@ impl Interner {
     }
 
     fn diff_with(&self, algorithm: Algorithm, old: &Lines, new: &Lines) -> Vec<Hunk> {
+        self.diff_tokens_with(algorithm, &old.tokens, &new.tokens)
+    }
+
+    /// [`diff`](Interner::diff) over slices of token sequences: the live
+    /// diff re-diffs the region around an edit this way.
+    pub(crate) fn diff_tokens(&self, old: &[Token], new: &[Token]) -> Vec<Hunk> {
+        self.diff_tokens_with(Algorithm::Myers, old, new)
+    }
+
+    fn diff_tokens_with(&self, algorithm: Algorithm, old: &[Token], new: &[Token]) -> Vec<Hunk> {
         let Ok(num_tokens) = u32::try_from(self.reps.len()) else {
             return Vec::new();
         };
         let mut diff = Diff::default();
-        diff.compute_with(algorithm, &old.tokens, &new.tokens, num_tokens);
+        diff.compute_with(algorithm, old, new, num_tokens);
         let indent_of = |token: Token| {
             self.indents
                 .get(token.0 as usize)
                 .copied()
                 .unwrap_or_else(|| IndentLevel::for_ascii_line(std::iter::empty(), 8))
         };
-        diff.postprocess_with(&old.tokens, &new.tokens, IndentHeuristic::new(indent_of));
+        diff.postprocess_with(old, new, IndentHeuristic::new(indent_of));
         diff.hunks()
             .map(|h| Hunk {
                 old: h.before.start as usize..h.before.end as usize,

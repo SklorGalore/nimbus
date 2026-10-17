@@ -12,10 +12,12 @@
 //! trailing newline. The new text is the old one with a few random splices
 //! and a few whole-line moves, so hunks of every shape come up.
 
+use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::Arc;
 
 use nimbus_core::compare::{Options, compare};
+use nimbus_core::live_diff::{EditSpan, LiveDiff, Side};
 use nimbus_core::{
     Buffer, Hunk, Interner, Limits, MappedBuffer, RopeBuffer, Snapshot, Text, VecSource,
 };
@@ -245,6 +247,81 @@ fn check_compare(
     c.hunks
 }
 
+/// A random edit of `text`: a splice at char boundaries.
+fn splice_strategy() -> impl Strategy<Value = (prop::sample::Index, prop::sample::Index, String)> {
+    (
+        any::<prop::sample::Index>(),
+        any::<prop::sample::Index>(),
+        text_strategy(),
+    )
+}
+
+fn splice(
+    text: &str,
+    a: prop::sample::Index,
+    b: prop::sample::Index,
+    insert: &str,
+) -> (usize, usize, String) {
+    let bounds: Vec<usize> = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain([text.len()])
+        .collect();
+    let i = bounds[a.index(bounds.len())];
+    let j = bounds[b.index(bounds.len())];
+    let (i, j) = (i.min(j), i.max(j));
+    let mut out = text.to_owned();
+    out.replace_range(i..j, insert);
+    (i, j - i, out)
+}
+
+/// What the app computes from the document before applying an edit.
+fn edit_span(before: &str, start: usize, removed: usize, inserted: &str) -> EditSpan {
+    EditSpan {
+        start,
+        first_line: before[..start].matches('\n').count(),
+        removed_lines: before[start..start + removed].matches('\n').count(),
+        inserted: inserted.len(),
+    }
+}
+
+/// The live diff's hunks must describe the current texts exactly.
+fn check_live(live: &LiveDiff, old: &str, new: &str, log: &str) {
+    let (os, ns) = (rope(old), rope(new));
+    assert_eq!(live.lines(Side::Old), old.split_inclusive('\n').count());
+    assert_eq!(live.lines(Side::New), new.split_inclusive('\n').count());
+    let (mut prev_old, mut prev_new) = (0, 0);
+    for (i, h) in live.hunks().iter().enumerate() {
+        assert!(
+            h.old.start <= h.old.end && h.old.end <= live.lines(Side::Old),
+            "old range {h:?}"
+        );
+        assert!(
+            h.new.start <= h.new.end && h.new.end <= live.lines(Side::New),
+            "new range {h:?}"
+        );
+        assert!(!(h.old.is_empty() && h.new.is_empty()), "empty hunk {h:?}");
+        assert!(
+            h.old.start >= prev_old && h.new.start >= prev_new,
+            "unsorted {:?}\n{log}",
+            live.hunks()
+        );
+        assert!(
+            i == 0 || h.old.start > prev_old || h.new.start > prev_new,
+            "touching {:?}\n{log}",
+            live.hunks()
+        );
+        prev_old = h.old.end;
+        prev_new = h.new.end;
+    }
+    assert_eq!(
+        apply(&*os, live.lines(Side::Old), &*ns, live.hunks()),
+        new,
+        "hunks {:?} for {old:?} -> {new:?}",
+        live.hunks()
+    );
+}
+
 /// Every layer on a few bytes: a full diff only under 12 bytes a side,
 /// then 8-byte windows, which the widening and the one-block fallback
 /// both hit on these texts.
@@ -268,6 +345,49 @@ proptest! {
             check_compare(&old, &new, rope, TINY_OPTIONS),
             check_compare(&old, &new, mapped, TINY_OPTIONS)
         );
+    }
+
+    #[test]
+    fn live_diff_follows_edits(
+        (old0, new0) in pair_strategy(),
+        edits in prop::collection::vec((any::<bool>(), splice_strategy(), any::<bool>()), 1..8),
+    ) {
+        let mut live = LiveDiff::new(&rope(&old0), &rope(&new0)).unwrap();
+        let mut log = String::new();
+        let _ = writeln!(log, "start old={old0:?} new={new0:?} hunks={:?}", live.hunks());
+        check_live(&live, &old0, &new0, &log);
+        let (mut old, mut new) = (old0, new0);
+        let mut pending = None;
+        for (on_old, (a, b, insert), defer) in edits {
+            let side = if on_old { Side::Old } else { Side::New };
+            let text = if on_old { &mut old } else { &mut new };
+            let (start, removed, after) = splice(text, a, b, &insert);
+            let span = edit_span(text, start, removed, &insert);
+            *text = after;
+            let region = live.edit(side, &rope(text), span).unwrap();
+            let _ = writeln!(log, "edit {side:?} {span:?} -> {text:?}; region {region:?}; hunks {:?}; defer {defer}", live.hunks());
+            prop_assert!(region.lines() <= live.lines(Side::Old) + live.lines(Side::New));
+            if defer {
+                // Leave it pending; the next edit must merge into it.
+                pending = Some(region);
+            } else {
+                live.rediff(&region);
+                let _ = writeln!(log, "rediff -> {:?}", live.hunks());
+                prop_assert!(live.pending().is_none());
+                check_live(&live, &old, &new, &log);
+                pending = None;
+            }
+        }
+        if let Some(region) = pending {
+            // A stale region is ignored; the current one finishes the job.
+            live.rediff(&region);
+            let current = live.pending().cloned();
+            if let Some(current) = current {
+                live.rediff(&current);
+            }
+            let _ = writeln!(log, "final rediff -> {:?}", live.hunks());
+            check_live(&live, &old, &new, &log);
+        }
     }
 
     #[test]

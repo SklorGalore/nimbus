@@ -1,6 +1,6 @@
 # M9 — Compare and merge
 
-**Status: in progress** (started 2026-10-17; tasks 1, 2 and 2a landed; 2a's long-line splitting waits for task 6)
+**Status: in progress** (started 2026-10-17; tasks 1, 2, 2a and 3 landed; 2a's long-line splitting waits for task 6)
 
 ## Goal
 
@@ -272,6 +272,25 @@ mapped file that is the file's read speed. The windowed layer costs
 memory proportional to one window pair, not the file. Long-line
 splitting (the plan's layer 4) is left for task 6, where the views
 decide what a split line looks like.
+
+**Task 3: local re-diff** (`crates/core/src/live_diff.rs`). A `LiveDiff`
+keeps both texts' tokens and the hunks. `edit` replaces the tokens of the
+lines an edit touched, shifts the hunks after them, takes out the hunks
+they meet (plus three lines of context either side, absorbing any hunk
+the context reaches), and returns the region to re-diff, with the other
+side's range found by counting from the texts' ends through the hunks
+that remain; `rediff` diffs that region alone and splices the result in.
+The two steps are separate so the app can run the diff in place when the
+region is small and defer it when a rewrite makes it the whole file; a
+second edit before the re-diff widens the pending region. Hunks are
+always sorted, apart and in current line numbers: a pending region has
+no hunks in the list, and the ones it took out ride along in
+`Region::stale` for a view that wants to keep showing them. The oracle
+property applies one to seven random edits to either side, some left
+pending, and checks the hunks reproduce the texts after each re-diff. It
+caught two design slips: stale hunks left in the list were shifted a
+second time by the next edit, and the other side's region end was
+computed with saturating arithmetic that silently clamped.
 
 Interning dominates the time: about 230 MB/s, mostly the hash-table
 lookup and the byte comparison that confirms each repeated line. One

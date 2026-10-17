@@ -12,6 +12,7 @@ pub mod compare;
 pub mod diff;
 pub mod line_ending;
 pub mod line_index;
+pub mod live_diff;
 pub mod long_line;
 pub mod mapped;
 pub mod movement;
@@ -30,6 +31,7 @@ pub use buffer::{
 pub use compare::{Comparison, compare};
 pub use diff::{DIFF_LIMIT, DiffError, Hunk, Interner, Lines};
 pub use line_ending::LineEnding;
+pub use live_diff::{EditSpan, LiveDiff, Region, Side};
 pub use mapped::{Limits, MappedBuffer, MappedSnapshot, PieceRun};
 pub use rope::RopeBuffer;
 pub use selection::{Bias, Selection, Selections};
