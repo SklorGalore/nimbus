@@ -1,0 +1,8 @@
+# winget version manifest. The release workflow fills in @VERSION@; the
+# three files together are one manifest, submitted as a pull request to
+# microsoft/winget-pkgs under manifests/s/SklorGalore/Nimbus/@VERSION@/.
+PackageIdentifier: SklorGalore.Nimbus
+PackageVersion: @VERSION@
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0
