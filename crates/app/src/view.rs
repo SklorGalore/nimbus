@@ -533,6 +533,9 @@ pub struct View {
     runs: Vec<ColorRun>,
     /// Reused for the right side of the status bar.
     status: String,
+    /// The character columns of the indentation item ("Spaces: 4") within
+    /// `status`, so a click on it can be told apart.
+    status_indent: Range<usize>,
     /// How many bytes of text the last frame showed, for the scrollbar's
     /// thumb. Kept as a count rather than an end, so it stays right while
     /// a drag moves the scroll before the next frame.
@@ -772,6 +775,10 @@ impl View {
             }
         }
         out.push_str("   ");
+        let from = out.chars().count();
+        out.push_str(&doc.indent.label());
+        self.status_indent = from..out.chars().count();
+        out.push_str("   ");
         out.push_str(match doc.line_ending {
             LineEnding::Lf => "LF",
             LineEnding::CrLf => "CRLF",
@@ -790,6 +797,19 @@ impl View {
             let _ = write!(out, "   Counting lines {pct:.0}%");
         }
         &self.status
+    }
+
+    /// Whether `x` is over the indentation item of the status bar as last
+    /// built by [`View::status_info`], which [`draw_status`] right-aligns.
+    #[must_use]
+    pub fn indent_item_hit(&self, layout: &Layout, x: f32) -> bool {
+        let cell = layout.metrics.cell_width;
+        let info_w = f(self.status.chars().count()) * cell;
+        let info_x = (layout.width - layout.margin - info_w)
+            .round()
+            .max(layout.margin);
+        let col = (x - info_x) / cell;
+        col >= f(self.status_indent.start) && col < f(self.status_indent.end)
     }
 
     /// Scroll horizontally by `dx` pixels. Does nothing while wrapping.
@@ -2183,21 +2203,37 @@ mod tests {
         let mut d = doc("fn main() {\n\tlet é = 1;\n}\n");
         d.line_ending = LineEnding::CrLf;
         let mut v = View::default();
-        assert_eq!(v.status_info(&d, 4), "Ln 1, Col 1   CRLF   UTF-8");
+        assert_eq!(
+            v.status_info(&d, 4),
+            "Ln 1, Col 1   Spaces: 4   CRLF   UTF-8"
+        );
+        d.indent = nimbus_core::indent::Indent {
+            width: 4,
+            tabs: true,
+        };
+        assert_eq!(v.status_info(&d, 4), "Ln 1, Col 1   Tabs   CRLF   UTF-8");
+        // "Tabs" sits at columns 14..18 of the right-aligned info.
+        let l = layout(3);
+        let cell = l.metrics.cell_width;
+        let info_x = (l.width - l.margin - 33.0 * cell).round();
+        assert!(v.indent_item_hit(&l, info_x + 14.5 * cell));
+        assert!(v.indent_item_hit(&l, info_x + 17.5 * cell));
+        assert!(!v.indent_item_hit(&l, info_x + 2.0 * cell));
+        assert!(!v.indent_item_hit(&l, info_x + 18.5 * cell));
         // Line 2, after the tab (4 columns) and "let ": column 9.
         d.click(12 + 1 + 4, false);
-        assert_eq!(v.status_info(&d, 4), "Ln 2, Col 9   CRLF   UTF-8");
+        assert_eq!(v.status_info(&d, 4), "Ln 2, Col 9   Tabs   CRLF   UTF-8");
         // Selecting "é = 1" counts characters, not bytes.
         d.select(17..23);
         assert_eq!(
             v.status_info(&d, 4),
-            "5 selected   Ln 2, Col 14   CRLF   UTF-8"
+            "5 selected   Ln 2, Col 14   Tabs   CRLF   UTF-8"
         );
         d.selections =
             nimbus_core::Selections::from_vec(vec![Selection::cursor(0), Selection::cursor(12)], 0);
         assert_eq!(
             v.status_info(&d, 4),
-            "2 cursors   Ln 1, Col 1   CRLF   UTF-8"
+            "2 cursors   Ln 1, Col 1   Tabs   CRLF   UTF-8"
         );
         let size = |n| {
             let mut s = String::new();

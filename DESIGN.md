@@ -483,7 +483,7 @@ introduces and points at the code.
 | 8 | Polish | **Done** | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
 | 9 | Compare and merge | **Done** | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
 | 10 | Find in files | **Next** | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
-| 11 | Everyday editing | Planned | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
+| 11 | Everyday editing | **Done** | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
 | 12 | Workspace | Planned | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
 | 13 | Split views and folding | Planned | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
 | 14 | Languages, second pass | Planned | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
