@@ -139,7 +139,6 @@ impl Merge {
                     ours: o_pos..o_pos + n,
                     theirs: t_pos..t_pos + n,
                 });
-                b_pos = start;
                 o_pos += n;
                 t_pos += n;
             }
