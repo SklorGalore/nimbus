@@ -18,7 +18,9 @@ RUST_LOG=nimbus=debug ./target/release/nimbus --smoke       # same, with per-pha
 cargo run -- --screenshot /tmp/frame.bmp                    # save the first frame; convert with `sips -s format png`
 NIMBUS_SCALE=1 cargo run -- --screenshot /tmp/1x.bmp         # debug builds: render at another scale factor
 ./target/release/nimbus FILE --bench-typing 300            # type 300 chars through the edit path; prints latency percentiles
-bench/gen.sh                                                # 10 MB / 100 MB test files in bench/out (also: logs, longline)
+bench/gen.sh                                                # 10 MB / 100 MB test files in bench/out (also: logs, longline, sizes, diff, difflogs)
+bench/gen.sh diff && cargo run --release -- --diff bench/out/src-10mb.rs bench/out/src-10mb-edited.rs   # the compare view on the 10 MB bench pair
+NIMBUS_DIFF_FILES=$PWD/bench/out/src-10mb.rs:$PWD/bench/out/src-10mb-edited.rs cargo test --release -p nimbus-core -- --ignored --nocapture compare_bench   # time a comparison
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp   # render with no window (works with the screen locked)
 cargo run -- FILE --wrap --find PATTERN                     # start with soft wrap on and the find bar searching
 cargo run -- FILE --theme light --headless 1600x1000 --screenshot /tmp/l.bmp   # override the config's theme

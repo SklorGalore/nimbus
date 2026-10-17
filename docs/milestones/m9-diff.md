@@ -228,31 +228,33 @@ building, checked by the keymap conflict test.
 _In progress; filled in as tasks land._
 
 **Task 2: algorithm and crate** (2026-10-17, release build, Linux
-container; the owner's machine is likely faster). Two inputs: the
-owner's bench pair (`bench/out/src-10mb.rs`, the project's sources
-repeated, and a copy with one edit per thousand lines) and a synthetic
-source-like text with a long tail of distinct lines. Interning is the
-same for every algorithm; the table shows the diff step.
+container with a shared, noisy CPU; the owner's machine is likely faster
+and steadier). Two inputs: the bench pairs from `bench/gen.sh diff`
+(`src-10mb.rs`, the project's sources repeated, and `src-10mb-edited.rs`,
+a copy with one change every thousand lines, cycling through a changed, a
+deleted and an inserted line; likewise at 100 MB) and a synthetic
+source-like text with a long tail of distinct lines (in `diff_bench`).
+Interning is the same for every algorithm; the table shows the diff step.
 
 | Pair | Lines | Intern | imara Myers | imara Histogram | `similar` Myers |
 |---|---|---|---|---|---|
-| bench 10 MB + edited | 295k | 84 ms | 10 ms, 291 hunks | 16 ms, **83 hunks** (coarse) | — |
-| bench 100 MB + edited | 2.95M | 848 ms | 115 ms, 3146 hunks | 229 ms, 3146 hunks | — |
+| bench 10 MB + edited | 295k | 123 ms | 34 ms, 295 hunks | 43 ms, **186 hunks** (coarse) | — |
+| bench 100 MB + edited | 2.95M | 1.26 s | 348 ms, 2952 hunks | 403 ms, 2952 hunks | — |
 | synthetic 6 MB + 200 edits | 250k | 78 ms | 12 ms | 114 ms | 48 ms |
 | synthetic 60 MB + 2000 edits | 2.5M | 1.18 s | 144 ms | **19.3 s** | 47 ms |
 | unrelated 6 MB pair (worst case) | 250k | 46 ms | 560 ms, 66k hunks | 294 ms, 9k hunks | — |
 
 Histogram is out: it either falls apart (19 s) or gives coarse hunks on
-repetitive text, and nearly every real input is repetitive. Between the
-two crates, `similar`'s Myers is faster on the synthetic pair but its
+repetitive text (186 hunks for 295 edits on the 10 MB pair), and nearly
+every real input is repetitive. Between the two crates, `similar`'s Myers is faster on the synthetic pair but its
 binary cost is higher (a minimal release binary grew 145 KB with
 `similar` against 24 KB with `imara-diff`, both with fat LTO), it has no
 token-slice entry point without copying our tokens into its types, and
 `imara-diff` ships the indentation slider that makes hunks land on
 function boundaries. `imara-diff` 0.2 with `Algorithm::Myers`, then.
 
-Budgets: two 10 MB files diff in about 95 ms (budget 300 ms); two 100 MB
-files in about 0.96 s (budget 3 s). The diff limit (`DIFF_LIMIT`) is
+Budgets: two 10 MB files diff in about 110 ms (budget 300 ms); two 100 MB
+files in about 1.5 s (budget 3 s). The diff limit (`DIFF_LIMIT`) is
 256 MB per side after trimming, set by memory, not time: tokens are
 4 bytes per line per side and the interner about 40 bytes per distinct
 line (more than the plan's 16 to 24: each entry keeps where a copy of the
@@ -265,15 +267,17 @@ gets a full diff within `DIFF_LIMIT` (256 MB per side), and past that it
 is walked in 32 MB windows, each diffed on its own and kept up to the
 last change not touching the window's end, where the next window starts;
 a window pair with nothing in common is doubled three times, then
-reported as one block. Measured with `compare_bench` (ropes in memory,
-so the loaded size is in the peak):
+reported as one block. Measured with `compare_bench` on the pairs from
+`bench/gen.sh diff` and `bench/gen.sh difflogs` (the 1 GB log with one
+edit every 100,000 lines, the 4 GB log with 100,000 lines appended);
+ropes in memory, so the loaded size is in the peak:
 
 | Pair | Compared in | Hunks | Lines through the diff | Exact | Peak RSS |
 |---|---|---|---|---|---|
-| bench 10 MB + edited | 100 ms | 291 | all (edits span the file) | yes | — |
-| bench 100 MB + edited | 0.99 s | 3146 | all | yes | — |
-| 1 GB log + 164 scattered edits | 8.4 s | 164, all found | all, in 33 windows | no (windowed) | 2.4 GB, of which 2.2 GB the two ropes |
-| 4 GB log + 100,000 lines appended | 3.65 s | 1 | 100,000 (the rest trimmed) | yes | 9.2 GB, the two ropes; the app maps files this size |
+| bench 10 MB + edited | 110 ms | 295 | all (edits span the file) | yes | — |
+| bench 100 MB + edited | 1.5 s | 2952 | all | yes | — |
+| 1 GB log + 164 scattered edits | 9.7 s | 164, all found | all, in 33 windows | no (windowed) | 2.4 GB, of which 2.2 GB the two ropes |
+| 4 GB log + 100,000 lines appended | 4.0 s | 1 | 100,000 (the rest trimmed) | yes | 9.2 GB, the two ropes; the app maps files this size |
 
 The trim reads both texts once, about 2.3 GB/s through rope chunks; on a
 mapped file that is the file's read speed. The windowed layer costs
