@@ -292,6 +292,16 @@ caught two design slips: stale hunks left in the list were shifted a
 second time by the next edit, and the other side's region end was
 computed with saturating arithmetic that silently clamped.
 
+**Task 5: aligned rows** (`crates/core/src/align.rs`). `Rows` describes
+two or three columns as segments: an equal run (one row per line, or
+`2 × context + 1` rows when folded) or a change (as many rows as its
+longest side, filler in the others). A prefix sum of segment rows and a
+binary search take a row to its cells and a line to its row in
+O(log segments); memory is O(segments); folding toggles re-sum. Change
+navigation ("3 of 12", next, previous) reads the same list. Generic over
+the change tag, so the merge view's three columns use the same model
+with `merge::Kind`.
+
 Interning dominates the time: about 230 MB/s, mostly the hash-table
 lookup and the byte comparison that confirms each repeated line. One
 chunk lookup per line was removed in task 2 (20% faster); a faster hash

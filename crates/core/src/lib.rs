@@ -4,6 +4,7 @@
 //! be unit-tested without a window. All positions are byte offsets into UTF-8
 //! (DESIGN.md §4.1).
 
+pub mod align;
 pub mod any;
 pub mod brackets;
 pub mod buffer;
@@ -25,6 +26,7 @@ pub mod source;
 pub mod undo;
 pub mod wrap;
 
+pub use align::{Cell, Change, Folding, Row, Rows};
 pub use any::AnyBuffer;
 pub use buffer::{
     Buffer, Content, Edit, EditError, LineSpan, SUBSTITUTE, Snapshot, Text, report_sorted,
