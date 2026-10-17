@@ -43,7 +43,8 @@ after a rebuild, in each milestone's Results.
 - Bidirectional and right-to-left text. Decided at approval; the renderer
   assumes left-to-right runs.
 - Multiple windows. One window with tabs.
-- Session restore. Reopening the last files is a nice-to-have after M8.
+- Session restore, until M12 (drafted): reopening the last files is a
+  nice-to-have after M9.
 - Native menu bar on Linux (§4.4).
 
 ## 3. Platform
@@ -471,6 +472,17 @@ introduces and points at the code.
 | 7 | Huge files | **Done** | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
 | 8 | Polish | **Done** | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
 | 9 | Compare and merge | Next | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
+| 10 | Find in files | Draft | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
+| 11 | Everyday editing | Draft | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
+| 12 | Workspace | Draft | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
+| 13 | Split views and folding | Draft | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
+| 14 | Languages, second pass | Draft | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
+| 15 | Distribution | Draft | Signed, notarised, installable builds; an update check | [m15](docs/milestones/m15-distribution.md) |
+
+M10–M15 are drafts, written after M8 from the items earlier plans
+deferred; `docs/milestones/backlog.md` maps each item to its draft and
+proposes the order. A draft becomes Next when the owner approves it and
+answers its open questions (§9).
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -479,7 +491,28 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-None open.
+Raised by the drafts of M10–M15 (2026-10-17); each is marked **Proposed**
+in its plan with a recommended answer, and none blocks M9.
+
+- Order: M10 (find in files) before M11 (everyday editing), or the other
+  way round? M13 must precede M14, and M15 is last (`backlog.md`).
+- M10: the search panel as a second mode of the sidebar rather than a
+  bottom panel; a 10,000-match cap; a 64 MB budget for undoing a replace
+  across files.
+- M11: auto-pairs on by default for code and off for prose; a 64 MB limit
+  on line operations; the chord timeout.
+- M12: `nimbus` with no arguments reopens the last session; deleting from
+  the tree goes to the system trash via a new crate; and whether to
+  autosave unsaved work for crash recovery at all (it writes the user's
+  text somewhere they did not choose).
+- M13: at most three editor groups side by side, no nesting; the same
+  file may be open in two groups (which forces the document-and-pane
+  split in that plan).
+- M14: which grammars to add (C, Go, HTML, CSS, TSX are the candidates,
+  each measured against the 35 MB budget); the Go to Symbol key.
+- M15: whether to pay for an Apple Developer account (signing and
+  notarisation need it) and a Windows certificate; an automatic update
+  check off by default; `minisign` for signed checksums.
 
 Resolved before M8: Dependabot updates GitHub Actions weekly
 (`.github/dependabot.yml`); cargo crates are updated by hand at each
@@ -557,3 +590,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Release builds: draft GitHub release on a `v*` tag; unsigned; macOS universal binary | §8, m8 |
 | 2026-10-16 | App icon redrawn: white cloud and dark I-beam on an amber tile, on Apple's icon grid; solid shapes so it reads at 16 px | m8 |
 | 2026-10-16 | Built-in themes take the icon's colours: amber is the one accent, selection is a shade of the ink; light theme on warm paper with a burnt-amber cursor | §4.4, m8 |
+| 2026-10-17 | M10–M15 drafted from the items M1–M9 deferred; order and `Proposed` items await the owner (`backlog.md`) | §8, §9 |
