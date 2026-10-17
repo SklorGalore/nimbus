@@ -183,6 +183,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(clippy::float_cmp, reason = "exact values by construction")]
     fn keys_bucket_subpixel_offsets() {
         assert_eq!(GlyphKey::new(5, 14.0, 0.0).subpx, 0);
         assert_eq!(GlyphKey::new(5, 14.0, 0.24).subpx, 0);
