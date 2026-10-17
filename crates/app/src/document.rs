@@ -344,10 +344,27 @@ impl Document {
     #[cfg(test)]
     #[must_use]
     pub fn from_text(text: &str) -> Self {
-        Self {
+        Self::with_text(None, text)
+    }
+
+    /// A document holding `text` that saves to `path` (none: untitled), as
+    /// a merge result starts (M9): not yet on disk, so saving writes it
+    /// whole, and dirty from the start when it has a path, since the file
+    /// does not hold this text yet.
+    #[must_use]
+    pub fn with_text(path: Option<PathBuf>, text: &str) -> Self {
+        let mut doc = Self {
             buffer: nimbus_core::RopeBuffer::from_text(text).into(),
+            canonical: path.as_deref().map(io::canonical),
+            path,
             ..Self::default()
+        };
+        if doc.path.is_some() {
+            // Not what the file holds: `saved_at` points at no history
+            // entry, so the tab shows dirty until the first save.
+            doc.saved_at = u64::MAX;
         }
+        doc
     }
 
     /// Open `path`. A path that does not exist yet gives an empty document

@@ -6,6 +6,7 @@
 mod action;
 mod app;
 mod bmp;
+mod columns;
 mod compare;
 mod config;
 mod debug;
@@ -18,6 +19,7 @@ mod keymap;
 mod languages;
 mod mapping;
 mod menu;
+mod merge_view;
 mod picker;
 mod saver;
 mod sidebar;
@@ -45,6 +47,7 @@ use crate::languages::Languages;
     clippy::struct_excessive_bools,
     reason = "independent command-line switches"
 )]
+#[derive(Debug, Default)]
 pub struct Options {
     /// Exit right after the first frame is presented, printing time-to-first-frame.
     /// Used by CI and by `hyperfine` to track the startup budget (DESIGN.md §1).
@@ -84,6 +87,24 @@ pub struct Options {
     pub cursors: Vec<usize>,
     /// `--diff A B`: compare `B` (opened as a tab) with `A`.
     pub diff: Option<(PathBuf, PathBuf)>,
+    /// `--merge BASE LOCAL REMOTE -o RESULT`: a three-way merge tab whose
+    /// result saves to `RESULT`; the exit code says whether it was saved
+    /// with no conflicts left.
+    pub merge: Option<MergeArgs>,
+}
+
+/// The files of `--merge`.
+#[derive(Debug, Clone)]
+pub struct MergeArgs {
+    /// The common ancestor.
+    pub base: PathBuf,
+    /// Our version.
+    pub local: PathBuf,
+    /// Their version.
+    pub remote: PathBuf,
+    /// Where the result saves (`-o`); the local file when not given, as
+    /// git's mergetool expects.
+    pub out: PathBuf,
 }
 
 /// Write a line to stdout. Command-line output such as `--version` and the
@@ -152,10 +173,7 @@ fn parse_size(arg: Option<std::ffi::OsString>) -> (u32, u32) {
 }
 
 /// The two paths after an option, or exit with a usage error.
-fn two_paths(
-    args: &mut impl Iterator<Item = std::ffi::OsString>,
-    option: &str,
-) -> (PathBuf, PathBuf) {
+fn two_paths(args: &mut Args, option: &str) -> (PathBuf, PathBuf) {
     let (Some(a), Some(b)) = (args.next(), args.next()) else {
         print_err(&format!("nimbus: {option} needs two files"));
         std::process::exit(2);
@@ -164,100 +182,122 @@ fn two_paths(
 }
 
 fn parse_options() -> Options {
-    let mut smoke = false;
-    let mut screenshot = None;
-    let mut files = Vec::new();
-    let mut bench_typing = 0;
-    let mut find = None;
-    let mut diff = None;
-    let mut wrap = false;
-    let mut headless = None;
-    let mut picker = None;
-    let mut theme = None;
-    let mut wait_index = false;
-    let mut debug_overlay = false;
-    let mut cursors = Vec::new();
-    let mut backend = None;
+    let mut o = Options::default();
+    let mut merge = None;
+    let mut merge_out = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
-        match arg.to_str() {
-            Some("--smoke") => smoke = true,
-            Some("--screenshot") => {
-                let Some(path) = args.next() else {
-                    print_err("nimbus: --screenshot needs a file path");
-                    std::process::exit(2);
-                };
-                screenshot = Some(PathBuf::from(path));
-            }
-            Some("--bench-typing") => {
-                bench_typing = args
-                    .next()
-                    .and_then(|n| n.to_str().and_then(|n| n.parse().ok()))
-                    .unwrap_or_else(|| {
-                        print_err("nimbus: --bench-typing needs a count");
-                        std::process::exit(2);
-                    });
-            }
-            Some("--wrap") => wrap = true,
-            Some("--wait-index") => wait_index = true,
-            Some("--debug-overlay") => debug_overlay = true,
-            Some("--cursors") => cursors = numbers(args.next()),
-            Some("--picker") => picker = args.next().and_then(|p| p.into_string().ok()),
-            Some("--theme") => theme = args.next().and_then(|t| t.into_string().ok()),
-            Some("--backend") => {
-                let Some(b) = args
-                    .next()
-                    .and_then(|b| b.to_str().and_then(io::Backend::parse))
-                else {
-                    print_err("nimbus: --backend needs rope or mapped");
-                    std::process::exit(2);
-                };
-                backend = Some(b);
-            }
-            Some("--headless") => headless = Some(parse_size(args.next())),
-            Some("--diff") => {
-                let (a, b) = two_paths(&mut args, "--diff");
-                files.push(b.clone());
-                diff = Some((a, b));
-            }
-            Some("--find") => {
-                let Some(pattern) = args.next().and_then(|p| p.into_string().ok()) else {
-                    print_err("nimbus: --find needs a pattern");
-                    std::process::exit(2);
-                };
-                find = Some(pattern);
-            }
-            Some("--version" | "-V") => {
-                print_out(&format!("nimbus {}", nimbus_core::VERSION));
-                std::process::exit(0);
-            }
-            Some("--help" | "-h") => {
-                print_out(USAGE);
-                std::process::exit(0);
-            }
-            Some(other) if other.starts_with("--") => {
-                print_err(&format!("nimbus: unknown option {other:?}"));
-                std::process::exit(2);
-            }
-            _ => files.push(PathBuf::from(arg)),
+        let flag = arg.to_str().unwrap_or("");
+        if run_flag(&mut o, flag, &mut args)
+            || file_flag(&mut o, flag, &mut args, (&mut merge, &mut merge_out))
+        {
+            continue;
         }
+        if flag.starts_with("--") {
+            print_err(&format!("nimbus: unknown option {flag:?}"));
+            std::process::exit(2);
+        }
+        o.files.push(PathBuf::from(arg));
     }
-    Options {
-        smoke,
-        screenshot,
-        files,
-        bench_typing,
-        find,
-        wrap,
-        headless,
-        picker,
-        theme,
-        backend,
-        wait_index,
-        debug_overlay,
-        cursors,
-        diff,
+    o.merge = merge.map(|(base, local, remote)| MergeArgs {
+        out: merge_out.unwrap_or_else(|| local.clone()),
+        base,
+        local,
+        remote,
+    });
+    o
+}
+
+type Args = std::iter::Skip<std::env::ArgsOs>;
+
+/// The value after an option, or exit with `needs`.
+fn value(args: &mut Args, option: &str, needs: &str) -> std::ffi::OsString {
+    args.next().unwrap_or_else(|| {
+        print_err(&format!("nimbus: {option} needs {needs}"));
+        std::process::exit(2);
+    })
+}
+
+/// Options about how the window runs. `true` when `flag` was one.
+fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
+    match flag {
+        "--smoke" => o.smoke = true,
+        "--screenshot" => {
+            o.screenshot = Some(PathBuf::from(value(args, flag, "a file path")));
+        }
+        "--bench-typing" => {
+            o.bench_typing = value(args, flag, "a count")
+                .to_str()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| {
+                    print_err("nimbus: --bench-typing needs a count");
+                    std::process::exit(2);
+                });
+        }
+        "--wrap" => o.wrap = true,
+        "--wait-index" => o.wait_index = true,
+        "--debug-overlay" => o.debug_overlay = true,
+        "--cursors" => o.cursors = numbers(args.next()),
+        "--picker" => o.picker = args.next().and_then(|p| p.into_string().ok()),
+        "--theme" => o.theme = args.next().and_then(|t| t.into_string().ok()),
+        "--backend" => {
+            let Some(b) = args
+                .next()
+                .and_then(|b| b.to_str().and_then(io::Backend::parse))
+            else {
+                print_err("nimbus: --backend needs rope or mapped");
+                std::process::exit(2);
+            };
+            o.backend = Some(b);
+        }
+        "--headless" => o.headless = Some(parse_size(args.next())),
+        _ => return false,
     }
+    true
+}
+
+/// Options about files and what to do with them. `true` when `flag` was
+/// one. `--merge` and `-o` collect into `merge` until the end.
+fn file_flag(
+    o: &mut Options,
+    flag: &str,
+    args: &mut Args,
+    (merge, merge_out): (
+        &mut Option<(PathBuf, PathBuf, PathBuf)>,
+        &mut Option<PathBuf>,
+    ),
+) -> bool {
+    match flag {
+        "--merge" => {
+            let base = value(args, flag, "BASE LOCAL REMOTE");
+            let local = value(args, flag, "BASE LOCAL REMOTE");
+            let remote = value(args, flag, "BASE LOCAL REMOTE");
+            *merge = Some((
+                PathBuf::from(base),
+                PathBuf::from(local),
+                PathBuf::from(remote),
+            ));
+        }
+        "-o" | "--output" => *merge_out = Some(PathBuf::from(value(args, flag, "a file"))),
+        "--diff" => {
+            let (a, b) = two_paths(args, "--diff");
+            o.files.push(b.clone());
+            o.diff = Some((a, b));
+        }
+        "--find" => {
+            o.find = value(args, flag, "a pattern").into_string().ok();
+        }
+        "--version" | "-V" => {
+            print_out(&format!("nimbus {}", nimbus_core::VERSION));
+            std::process::exit(0);
+        }
+        "--help" | "-h" => {
+            print_out(USAGE);
+            std::process::exit(0);
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// Write a captured frame to `path` as BMP. Returns whether it was saved;

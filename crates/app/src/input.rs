@@ -153,6 +153,22 @@ pub enum Command<'a> {
     DiffUnified,
     /// Leave the compare, keeping the tab.
     DiffClose,
+    /// Merge two files into a new tab (M9).
+    MergeFiles,
+    /// Merge the active tab with another file, given their common base.
+    MergeWithBase,
+    /// In a merge: take the left column's lines for the change at the cursor.
+    TakeLeft,
+    /// In a merge: take the right column's lines.
+    TakeRight,
+    /// In a merge: take both, left first.
+    TakeBoth,
+    /// In a merge: take both, right first.
+    TakeBothReversed,
+    /// In a merge: go to the next open conflict.
+    NextConflict,
+    /// In a merge: go to the previous open conflict.
+    PrevConflict,
     Close,
 }
 

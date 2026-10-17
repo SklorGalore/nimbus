@@ -1,6 +1,6 @@
 # M9 — Compare and merge
 
-**Status: in progress** (started 2026-10-17; tasks 1 to 6 landed and confirmed; 2a's long-line splitting still open)
+**Status: in progress** (started 2026-10-17; tasks 1 to 8 landed (6 confirmed; 7 and 8 await the owner's look); 2a's long-line splitting still open)
 
 ## Goal
 
@@ -50,15 +50,22 @@ views, plus the diff's own:
       bar keeps its place); long unchanged runs fold to "··· N unchanged
       lines ···" with three lines of context, and a click on the fold
       opens it.
-- [ ] Two-way merge: "Merge Files…" opens two sides and a result column
-      (starting as a copy of the left side); on each change, "Take Left",
-      "Take Right" or "Take Both" edits the result as one undoable step.
-- [ ] Three-way merge: `--merge BASE LOCAL REMOTE -o RESULT` and "Merge
-      with Base…". Changes made on only one side are applied
-      automatically; overlapping changes are conflicts, shown in the
-      result and listed with a counter. Each conflict resolves by taking
-      local, remote, both (in either order), or by editing the result by
-      hand. Saving with conflicts left asks first.
+- [x] Two-way merge: "Merge Files…" opens the left and right files with
+      the result between them (a copy of the left) in a new tab; "Take
+      Left", "Take Right", "Take Both" and "Take Both, Right First" edit
+      the result as one undoable step for the change under the cursor;
+      the status bar says which side a change took, or that it was edited.
+      **Owner to confirm on screen** (built and tested headlessly).
+- [x] Three-way merge: `--merge BASE LOCAL REMOTE -o RESULT` and "Merge
+      with Base…" (the active tab is ours; the base and theirs are
+      picked; the result opens in a new tab). Changes made on only one
+      side are applied; overlapping changes are conflicts, written into
+      the result as git-style marker blocks and counted ("2 conflicts
+      left"); `F8` / `Shift+F8` step through them. Each resolves by taking
+      left, right, both in either order, or by editing by hand. Saving
+      with conflicts left asks first; `--merge` exits 0 when the result
+      was saved with none left, 1 otherwise. **Owner to confirm on
+      screen.**
 - [ ] Opening a file with conflict markers offers "Resolve Conflicts",
       which opens the three-way view (with the base, when the markers are
       in diff3 style).
@@ -337,6 +344,27 @@ is off while comparing. `Compare::start_sync` runs the diff in place for
 text lives in the status bar; "Compare with Tab…" compares with a copy
 of the other tab's text (edits there are not followed); drag selection
 in a compare is off for now (click and keyboard selection work).
+
+**Tasks 7 and 8: the merge views** (`crates/app/src/merge_view.rs`, on
+`columns.rs`, which the compare view now shares: scrolling, folds, row
+plans, drawing and clicks for two or three columns). A merge tab's
+document is the result; the inputs are read-only beside it, ours on the
+left and theirs on the right (the base of a three-way merge is not
+shown). The result is never diffed again: `core::regions` keeps each
+chunk's line range in the result through every edit the document reports
+(typing, undo, redo), joining regions an edit spans and recording which
+side a take put there, so typing in the result costs what typing anywhere
+costs. A two-way merge is the three-way machinery with the left text as
+base and ours, so every difference is a `Theirs` chunk and the result
+starts as the left text; a three-way result starts as `Merge::write` with
+conflicts as marker blocks. Taking a side is one `replace` of the
+region's lines, so it undoes like any edit. Deviations: the merge itself
+(two diffs and the walk) runs on the main thread when the tab opens,
+not on a worker as the plan's budget table assumes, so opening a merge
+of two 10 MB files blocks for about a third of a second; moving it to the
+worker as the compare does is left for task 11's measurements. "Merge
+with Base…" and "Merge Files…" put the result in a new untitled tab
+rather than over the active one.
 
 Interning dominates the time: about 230 MB/s, mostly the hash-table
 lookup and the byte comparison that confirms each repeated line. One

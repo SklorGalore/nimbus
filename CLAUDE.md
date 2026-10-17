@@ -21,6 +21,7 @@ NIMBUS_SCALE=1 cargo run -- --screenshot /tmp/1x.bmp         # debug builds: ren
 bench/gen.sh                                                # 10 MB / 100 MB test files in bench/out (also: logs, longline, sizes, diff, difflogs)
 bench/gen.sh diff && cargo run --release -- --diff bench/out/src-10mb.rs bench/out/src-10mb-edited.rs   # the compare view on the 10 MB bench pair
 NIMBUS_DIFF_FILES=$PWD/bench/out/src-10mb.rs:$PWD/bench/out/src-10mb-edited.rs cargo test --release -p nimbus-core -- --ignored --nocapture compare_bench   # time a comparison
+cargo run -- --merge BASE LOCAL REMOTE -o OUT --headless 1600x900 --screenshot /tmp/m.bmp   # render a three-way merge (exit code 0 only when OUT is saved with no conflicts)
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp   # render with no window (works with the screen locked)
 cargo run -- FILE --wrap --find PATTERN                     # start with soft wrap on and the find bar searching
 cargo run -- FILE --theme light --headless 1600x1000 --screenshot /tmp/l.bmp   # override the config's theme

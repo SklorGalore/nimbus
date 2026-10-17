@@ -26,7 +26,8 @@ use nimbus_core::{Buffer, Text};
 use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
-use crate::compare::{Click, Compare, DiffResult, Other};
+use crate::columns::Click;
+use crate::compare::{Compare, DiffResult, Other};
 use crate::config::{self, Config};
 use crate::debug::Debug;
 use crate::document::{DiskChange, Document, MAX_COPY_BYTES, Occurrence};
@@ -36,6 +37,7 @@ use crate::io;
 use crate::keymap::Keymap;
 use crate::languages::Languages;
 use crate::menu::{self, MenuBar};
+use crate::merge_view::{Inputs, MergeView, Shape, Take};
 use crate::picker::{self, Item, Kind, Picker};
 use crate::saver::{self, ReplacePolicy, SaveEvent, SaveStep};
 use crate::sidebar::{self, Sidebar};
@@ -44,7 +46,7 @@ use crate::theme::{Theme, Ui};
 use crate::tree::{self, Entry, ListRequest};
 use crate::view::{self, Decorations, Layout, PickerView, Preedit, TabLabel, View};
 use crate::watch::{Change, Watch};
-use crate::{Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
+use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
 
 /// Events sent to the event loop from other threads.
 #[derive(Debug)]
@@ -160,6 +162,9 @@ pub struct Tab {
     discard_at: Option<u64>,
     /// A compare view on this tab (M9): the other side and the diff.
     pub compare: Option<Box<Compare>>,
+    /// A merge view on this tab (M9): the inputs and the regions of the
+    /// result, which is this tab's document.
+    pub merge: Option<Box<MergeView>>,
 }
 
 impl Tab {
@@ -175,6 +180,7 @@ impl Tab {
             after_save: AfterSave::default(),
             discard_at: None,
             compare: None,
+            merge: None,
         }
     }
 }
@@ -307,6 +313,9 @@ pub struct App {
     /// Process exit status once the event loop ends; non-zero when a
     /// requested `--screenshot` could not be saved.
     pub exit_code: i32,
+    /// `--merge`: whether the merge's result has been saved with no
+    /// conflicts left, which decides the exit code (0 then, else 1).
+    merge_saved_clean: Option<bool>,
     frames: u64,
     tabs: Vec<Tab>,
     active: usize,
@@ -459,6 +468,7 @@ impl App {
             menu_bar: None,
             modifiers: ModifiersState::empty(),
             exit_code: 0,
+            merge_saved_clean: None,
             frames: 0,
             tabs,
             active: 0,
@@ -524,6 +534,11 @@ impl App {
         if let Some(c) = &tab.compare {
             lines = lines.max(line_estimate(&c.other.buffer));
         }
+        if let Some(m) = &tab.merge {
+            lines = lines
+                .max(line_estimate(&m.ours.buffer))
+                .max(line_estimate(&m.theirs.buffer));
+        }
         Some(layout_for_lines(gpu, scale, lines, &self.find).with_sidebar(self.sidebar.px(scale)))
     }
 
@@ -559,9 +574,10 @@ impl App {
         if keep_cursor_visible && let Some(layout) = self.layout() {
             let tab_width = self.tab_width();
             let tab = &mut self.tabs[self.active];
-            match tab.compare.as_mut() {
-                Some(c) => c.ensure_cursor_visible(&tab.doc, &layout),
-                None => tab.view.ensure_cursor_visible(&tab.doc, &layout, tab_width),
+            match (tab.compare.as_mut(), tab.merge.as_mut()) {
+                (Some(c), _) => c.ensure_cursor_visible(&tab.doc, &layout),
+                (None, Some(m)) => m.ensure_cursor_visible(&tab.doc, &layout),
+                (None, None) => tab.view.ensure_cursor_visible(&tab.doc, &layout, tab_width),
             }
         }
         self.update_title();
@@ -715,11 +731,154 @@ impl App {
                 if let Some(c) = tab.compare.take() {
                     c.finish(&mut tab.doc);
                 }
+                if let Some(m) = tab.merge.take() {
+                    m.finish(&mut tab.doc);
+                }
             }
+            Command::MergeFiles => self.merge_files(),
+            Command::MergeWithBase => self.merge_with_base(),
+            Command::TakeLeft => self.merge_take(Take::Left),
+            Command::TakeRight => self.merge_take(Take::Right),
+            Command::TakeBoth => self.merge_take(Take::Both),
+            Command::TakeBothReversed => self.merge_take(Take::BothReversed),
+            Command::NextConflict => self.conflict_step(true),
+            Command::PrevConflict => self.conflict_step(false),
             _ => return false,
         }
         self.changed(false);
         true
+    }
+
+    /// A file picked in a dialog titled `title`, opened as a document.
+    fn pick_document(&mut self, title: &str) -> Option<(Document, PathBuf)> {
+        let mut dialog = FileDialog::new().set_title(title).set_directory(&self.root);
+        if let Some(window) = &self.window {
+            dialog = dialog.set_parent(window.as_ref());
+        }
+        let path = dialog.pick_file()?;
+        match Document::open(&path) {
+            Ok(mut doc) => {
+                doc.detect_language(&self.languages);
+                Some((doc, path))
+            }
+            Err(e) => {
+                self.say(format!("Cannot read {}: {e}", path.display()), true);
+                None
+            }
+        }
+    }
+
+    /// "Merge Files…": the left and right files, merged into a new tab.
+    fn merge_files(&mut self) {
+        let Some((ours, left)) = self.pick_document("Merge: the left file") else {
+            return;
+        };
+        let Some((theirs, right)) = self.pick_document("Merge: the right file") else {
+            return;
+        };
+        let inputs = Inputs {
+            base: None,
+            ours,
+            theirs,
+            names: (short_name(&left), short_name(&right)),
+        };
+        self.start_merge(Shape::TwoWay, inputs, None, false);
+    }
+
+    /// "Merge with Base…": the active tab is ours; the base and theirs
+    /// are picked. The result opens in a new tab.
+    fn merge_with_base(&mut self) {
+        let Some(ours) = self.doc().copy_of() else {
+            self.say("This tab is too large to merge here", true);
+            return;
+        };
+        let our_name = self.doc().display_name();
+        let Some((base, _)) = self.pick_document("Merge: the common base") else {
+            return;
+        };
+        let Some((theirs, their_path)) = self.pick_document("Merge: their version") else {
+            return;
+        };
+        let inputs = Inputs {
+            base: Some(base),
+            ours,
+            theirs,
+            names: (our_name, short_name(&their_path)),
+        };
+        self.start_merge(Shape::ThreeWay, inputs, None, false);
+    }
+
+    /// Open a merge tab for `inputs`; `out` is where its result saves, and
+    /// `reports` whether `--merge` asked for the exit code.
+    fn start_merge(&mut self, shape: Shape, inputs: Inputs, out: Option<PathBuf>, reports: bool) {
+        let built = match shape {
+            Shape::TwoWay => MergeView::two_way(inputs, out),
+            Shape::ThreeWay => MergeView::three_way(inputs, out),
+        };
+        let (mut merge, mut result) = match built {
+            Ok(x) => x,
+            Err(e) => {
+                self.say(format!("Cannot merge: {e}"), true);
+                return;
+            }
+        };
+        result.detect_language(&self.languages);
+        for doc in merge.inputs_mut() {
+            if let Some(job) = doc.syntax.take_job(&doc.buffer) {
+                spawn_syntax(&self.proxy, job);
+            }
+        }
+        merge.reports_exit = reports;
+        if reports {
+            self.merge_saved_clean = Some(false);
+        }
+        let mut tab = Tab::new(result, false);
+        tab.merge = Some(Box::new(merge));
+        // An untouched empty tab, the one a bare start makes, gives way.
+        let only_blank = self.tabs.len() == 1
+            && self.tabs[0].doc.path.is_none()
+            && !self.tabs[0].doc.is_dirty()
+            && self.tabs[0].doc.buffer.len_bytes() == 0;
+        if only_blank {
+            self.tabs[0] = tab;
+            self.active = 0;
+        } else {
+            self.tabs.push(tab);
+            self.active = self.tabs.len() - 1;
+        }
+        self.start_syntax();
+        self.title_key = None;
+        self.changed(true);
+    }
+
+    /// Take a side for the change under the cursor of the active merge.
+    fn merge_take(&mut self, take: Take) {
+        let tab = &mut self.tabs[self.active];
+        let Some(m) = tab.merge.as_mut() else {
+            self.say("Not merging; run Merge Files… first", false);
+            return;
+        };
+        if let Err(e) = m.take(&mut tab.doc, take) {
+            self.say(e, false);
+        }
+        self.changed(true);
+    }
+
+    /// Move to the next or previous open conflict of the active merge.
+    fn conflict_step(&mut self, forward: bool) {
+        let Some(layout) = self.layout() else { return };
+        let tab = &mut self.tabs[self.active];
+        let Some(m) = tab.merge.as_mut() else {
+            self.say("Not merging", false);
+            return;
+        };
+        match m.step_conflict(forward, &tab.doc, &layout) {
+            Some(p) => {
+                tab.doc.click(p, false);
+                self.changed(true);
+            }
+            None => self.say("No more conflicts that way", false),
+        }
     }
 
     /// A compare's worker finished: hand the diff to the compare it is for.
@@ -738,15 +897,21 @@ impl App {
     /// A parse finished: if a compare's left side was waiting for it, that
     /// side takes it and the frame is redrawn; otherwise it is handed back.
     fn other_side_parsed(&mut self, result: JobResult) -> Option<JobResult> {
-        let Some(c) = self
-            .tabs
-            .iter_mut()
-            .filter_map(|t| t.compare.as_deref_mut())
-            .find(|c| c.other.syntax.waiting_for(result.id()))
-        else {
+        let id = result.id();
+        let Some(other) = self.tabs.iter_mut().find_map(|t| {
+            if let Some(c) = t.compare.as_deref_mut()
+                && c.other.syntax.waiting_for(id)
+            {
+                return Some(&mut c.other);
+            }
+            t.merge.as_deref_mut().and_then(|m| {
+                m.inputs_mut()
+                    .into_iter()
+                    .find(|d| d.syntax.waiting_for(id))
+            })
+        }) else {
             return Some(result);
         };
-        let other = &mut c.other;
         if let Some(job) = other.syntax.finish(result, &other.buffer, SYNTAX_BUDGET) {
             spawn_syntax(&self.proxy, job);
         }
@@ -832,14 +997,14 @@ impl App {
     fn diff_step(&mut self, forward: bool) {
         let Some(layout) = self.layout() else { return };
         let tab = &mut self.tabs[self.active];
-        let Some(c) = tab.compare.as_mut() else {
-            self.say("Not comparing; run Compare with Saved first", false);
-            return;
-        };
-        let pos = if forward {
-            c.next_change(&tab.doc, &layout)
-        } else {
-            c.prev_change(&tab.doc, &layout)
+        let pos = match (tab.compare.as_mut(), tab.merge.as_mut()) {
+            (Some(c), _) if forward => c.next_change(&tab.doc, &layout),
+            (Some(c), _) => c.prev_change(&tab.doc, &layout),
+            (None, Some(m)) => m.step_change(forward, &tab.doc, &layout),
+            (None, None) => {
+                self.say("Not comparing; run Compare with Saved first", false);
+                return;
+            }
         };
         match pos {
             Some(p) => {
@@ -1265,6 +1430,9 @@ impl App {
     /// saves on a worker: this starts it and returns [`Saved::Started`],
     /// and [`App::save_ended`] finishes.
     fn save(&mut self, i: usize) -> Saved {
+        if !self.confirm_conflicts(i) {
+            return Saved::No;
+        }
         if self.tabs[i].doc.path.is_none() {
             return self.save_as(i);
         }
@@ -1280,6 +1448,7 @@ impl App {
                 let name = self.tabs[i].doc.display_name();
                 log::info!("saved {name}");
                 self.title_key = None;
+                self.note_merge_saved(i);
                 self.say(format!("Saved {name}"), false);
                 Saved::Yes
             }
@@ -1288,6 +1457,37 @@ impl App {
                 self.dialog(MessageLevel::Error, "Could not save", &e.to_string());
                 Saved::No
             }
+        }
+    }
+
+    /// Saving a merge with conflicts left asks first. `true` to go on.
+    fn confirm_conflicts(&mut self, i: usize) -> bool {
+        let Some(open) = self.tabs[i].merge.as_ref().map(|m| m.open_conflicts()) else {
+            return true;
+        };
+        if open == 0 || self.options.smoke || self.options.screenshot.is_some() {
+            return true;
+        }
+        let noun = if open == 1 { "conflict" } else { "conflicts" };
+        let mut dialog = MessageDialog::new()
+            .set_level(MessageLevel::Warning)
+            .set_title("Conflicts left")
+            .set_description(format!(
+                "{open} {noun} not resolved. Save anyway, with conflict markers?"
+            ))
+            .set_buttons(MessageButtons::YesNo);
+        if let Some(window) = &self.window {
+            dialog = dialog.set_parent(window.as_ref());
+        }
+        matches!(dialog.show(), MessageDialogResult::Yes)
+    }
+
+    /// A `--merge` tab was saved: the exit code follows its conflicts.
+    fn note_merge_saved(&mut self, i: usize) {
+        if let Some(m) = self.tabs[i].merge.as_ref()
+            && m.reports_exit
+        {
+            self.merge_saved_clean = Some(m.open_conflicts() == 0);
         }
     }
 
@@ -1620,6 +1820,10 @@ impl App {
                 }
             }
         }
+        if let Some(clean) = self.merge_saved_clean {
+            // `--merge`: git's mergetool reads the exit code.
+            self.exit_code = i32::from(!clean);
+        }
         event_loop.exit();
     }
 
@@ -1877,7 +2081,15 @@ impl App {
             | Command::DiffNext
             | Command::DiffPrev
             | Command::DiffUnified
-            | Command::DiffClose => return false,
+            | Command::DiffClose
+            | Command::MergeFiles
+            | Command::MergeWithBase
+            | Command::TakeLeft
+            | Command::TakeRight
+            | Command::TakeBoth
+            | Command::TakeBothReversed
+            | Command::NextConflict
+            | Command::PrevConflict => return false,
             _ => {
                 let paste = (cmd == Command::Paste)
                     .then(|| self.clipboard_get())
@@ -2109,8 +2321,8 @@ impl App {
         self.find.focused = false;
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
-        if tab.compare.is_some() {
-            self.compare_click(&layout, (x, y), now);
+        if tab.compare.is_some() || tab.merge.is_some() {
+            self.columns_click(&layout, (x, y), now);
             return;
         }
         if let Some(hit) = tab.view.scrollbar_hit(x, y) {
@@ -2181,14 +2393,16 @@ impl App {
     }
 
     /// A click on a compare view: a fold toggles, a line places the cursor.
-    fn compare_click(&mut self, layout: &Layout, (x, y): (f32, f32), now: Instant) {
+    fn columns_click(&mut self, layout: &Layout, (x, y): (f32, f32), now: Instant) {
         let tab_width = self.tab_width();
         let shift = self.modifiers.shift_key();
         let tab = &mut self.tabs[self.active];
-        let Some(c) = tab.compare.as_mut() else {
-            return;
+        let click = match (tab.compare.as_mut(), tab.merge.as_mut()) {
+            (Some(c), _) => c.click(&tab.doc, &mut tab.view, layout, tab_width, x, y),
+            (None, Some(m)) => m.click(&tab.doc, &mut tab.view, layout, tab_width, x, y),
+            (None, None) => return,
         };
-        match c.click(&tab.doc, &mut tab.view, layout, tab_width, x, y) {
+        match click {
             Click::Cursor(pos) => tab.doc.click(pos, shift),
             Click::Toggled | Click::None => {}
         }
@@ -2216,9 +2430,10 @@ impl App {
         } else {
             let tab_width = self.tab_width();
             let tab = &mut self.tabs[self.active];
-            match tab.compare.as_mut() {
-                Some(c) => c.scroll_by(-dy, &layout),
-                None => tab.view.scroll_by(-dy, &tab.doc, &layout, tab_width),
+            match (tab.compare.as_mut(), tab.merge.as_mut()) {
+                (Some(c), _) => c.scroll_by(-dy, &layout),
+                (None, Some(m)) => m.scroll_by(-dy, &layout),
+                (None, None) => tab.view.scroll_by(-dy, &tab.doc, &layout, tab_width),
             }
             tab.view.scroll_x_by(-dx);
         }
@@ -2261,7 +2476,7 @@ impl App {
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
-        if tab.compare.is_some() {
+        if tab.compare.is_some() || tab.merge.is_some() {
             return;
         }
         if let Some(from) = self.clicks.column {
@@ -2372,6 +2587,26 @@ impl App {
                 spawn_syntax(&self.proxy, job);
             }
         }
+        if let Some(m) = tab.merge.as_mut() {
+            if m.sync(&mut tab.doc) {
+                for doc in m.inputs_mut() {
+                    if let Some(job) = doc.syntax.refresh(&doc.buffer, SYNTAX_BUDGET) {
+                        spawn_syntax(&self.proxy, job);
+                    }
+                }
+            } else {
+                // The result was reloaded from disk: the regions no longer
+                // describe it.
+                if let Some(m) = tab.merge.take() {
+                    m.finish(&mut tab.doc);
+                }
+                self.message = Some(Message {
+                    text: "Merge ended: the file was reloaded".into(),
+                    is_error: false,
+                    until: Instant::now() + MESSAGE_TIME,
+                });
+            }
+        }
         paint_scene(
             gpu,
             layout,
@@ -2379,6 +2614,7 @@ impl App {
                 doc: &tab.doc,
                 view: &mut tab.view,
                 compare: tab.compare.as_deref_mut(),
+                merge: tab.merge.as_deref_mut(),
                 theme: &mut self.theme,
                 find: &self.find,
                 message: self.message.as_ref(),
@@ -2675,6 +2911,8 @@ pub struct Scene<'a> {
     view: &'a mut View,
     /// A compare on the tab: two columns instead of the view alone.
     compare: Option<&'a mut Compare>,
+    /// A merge on the tab: three columns, the result in the middle.
+    merge: Option<&'a mut MergeView>,
     theme: &'a mut Theme,
     find: &'a FindBar,
     message: Option<&'a Message>,
@@ -2700,6 +2938,19 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     if let Some(c) = scene.compare.as_deref_mut() {
         view::begin_frame(gpu, &ui);
         c.draw(
+            gpu,
+            layout,
+            scene.doc,
+            scene.view,
+            scene.theme,
+            scene.tab_width,
+            scene.cursor_visible && !find.focused,
+            scene.preedit,
+            (matches, current),
+        );
+    } else if let Some(m) = scene.merge.as_deref_mut() {
+        view::begin_frame(gpu, &ui);
+        m.draw(
             gpu,
             layout,
             scene.doc,
@@ -2736,9 +2987,10 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     }
     let message = scene.message.map(|m| (m.text.as_str(), m.is_error));
     let info = scene.view.status_info(scene.doc, scene.tab_width);
-    let info = match scene.compare.as_deref_mut() {
-        Some(c) => c.status(info),
-        None => info,
+    let info = match (scene.compare.as_deref_mut(), scene.merge.as_deref_mut()) {
+        (Some(c), _) => c.status(info),
+        (None, Some(m)) => m.status(scene.doc, info),
+        (None, None) => info,
     };
     view::draw_status(gpu, &ui, layout, message, info);
 }
@@ -2756,6 +3008,7 @@ pub fn run_headless(
     let labels = headless_labels(&docs);
     let mut doc = docs.into_iter().next().unwrap_or_else(Document::untitled);
     let mut compare = headless_compare(options, config, &mut doc);
+    let mut merge = headless_merge(options, config, &mut doc);
     let Some(path) = &options.screenshot else {
         print_err("nimbus: --headless needs --screenshot FILE.bmp");
         return 2;
@@ -2819,6 +3072,7 @@ pub fn run_headless(
                 doc: &doc,
                 view: &mut view,
                 compare: compare.as_deref_mut(),
+                merge: merge.as_deref_mut(),
                 theme: &mut theme,
                 find: &find,
                 message: None,
@@ -2895,6 +3149,61 @@ fn headless_compare(
             None
         }
     }
+}
+
+/// `--merge` headless: the merge tab's view, with `doc` replaced by the
+/// result.
+fn headless_merge(
+    options: &Options,
+    config: &Config,
+    doc: &mut Document,
+) -> Option<Box<MergeView>> {
+    let args = options.merge.as_ref()?;
+    let languages = Languages::load(&config.languages).0;
+    match open_merge_inputs(args, &languages) {
+        Ok(inputs) => match MergeView::three_way(inputs, Some(args.out.clone())) {
+            Ok((mut merge, mut result)) => {
+                result.detect_language(&languages);
+                result.syntax.parse_now(&result.buffer);
+                for d in merge.inputs_mut() {
+                    d.syntax.parse_now(&d.buffer);
+                }
+                *doc = result;
+                Some(Box::new(merge))
+            }
+            Err(e) => {
+                print_err(&format!("nimbus: cannot merge: {e}"));
+                None
+            }
+        },
+        Err(e) => {
+            print_err(&format!("nimbus: {e}"));
+            None
+        }
+    }
+}
+
+/// The three documents of `--merge`.
+fn open_merge_inputs(args: &MergeArgs, languages: &Languages) -> Result<Inputs, String> {
+    let open = |p: &Path| -> Result<Document, String> {
+        let mut d = Document::open(p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
+        d.detect_language(languages);
+        Ok(d)
+    };
+    Ok(Inputs {
+        base: Some(open(&args.base)?),
+        ours: open(&args.local)?,
+        theirs: open(&args.remote)?,
+        names: (short_name(&args.local), short_name(&args.remote)),
+    })
+}
+
+/// A path's file name for the status line.
+fn short_name(p: &Path) -> String {
+    p.file_name().map_or_else(
+        || p.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// `--wait-index`: count all of a huge file's lines on this thread.
@@ -3213,6 +3522,14 @@ impl ApplicationHandler<AppEvent> for App {
             self.open_find(false);
             let _ = self.find.find.insert(&pattern);
             self.search(true);
+        }
+        if let Some(args) = self.options.merge.clone() {
+            match open_merge_inputs(&args, &self.languages) {
+                Ok(inputs) => {
+                    self.start_merge(Shape::ThreeWay, inputs, Some(args.out.clone()), true);
+                }
+                Err(e) => self.say(e, true),
+            }
         }
         if let Some((a, b)) = self.options.diff.clone() {
             let b = io::canonical(&b);

@@ -287,9 +287,47 @@ pub const ACTIONS: &[ActionInfo] = &[
     ),
     act(
         "diff.close",
-        "Close Compare",
+        "Close Compare or Merge",
         Command::DiffClose,
         Keys::NONE,
+    ),
+    act(
+        "merge.files",
+        "Merge Files…",
+        Command::MergeFiles,
+        Keys::NONE,
+    ),
+    act(
+        "merge.withBase",
+        "Merge with Base…",
+        Command::MergeWithBase,
+        Keys::NONE,
+    ),
+    act("merge.takeLeft", "Take Left", Command::TakeLeft, Keys::NONE),
+    act(
+        "merge.takeRight",
+        "Take Right",
+        Command::TakeRight,
+        Keys::NONE,
+    ),
+    act("merge.takeBoth", "Take Both", Command::TakeBoth, Keys::NONE),
+    act(
+        "merge.takeBothReversed",
+        "Take Both, Right First",
+        Command::TakeBothReversed,
+        Keys::NONE,
+    ),
+    act(
+        "merge.nextConflict",
+        "Next Conflict",
+        Command::NextConflict,
+        Keys::all(&["F8"]),
+    ),
+    act(
+        "merge.previousConflict",
+        "Previous Conflict",
+        Command::PrevConflict,
+        Keys::all(&["Shift+F8"]),
     ),
     // Editing.
     act(

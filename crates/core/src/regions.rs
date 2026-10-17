@@ -172,7 +172,9 @@ impl Regions {
         // alone misses a final line without a newline appearing or going.
         let new_total = diff_lines(after);
         let delta = new_total.cast_signed() - self.result_lines.cast_signed();
-        let first_line = span.first_line.min(self.result_lines.saturating_sub(1));
+        // An edit at the very end names the line after the last newline;
+        // the lookup below maps that to the region ending there.
+        let first_line = span.first_line;
         // The lines touched run from the one holding the start to the one
         // holding the byte after the removed text. When the new text ends
         // at a line start (it ends with a newline, or nothing was inserted
@@ -183,7 +185,6 @@ impl Regions {
         if joins_at_line_start && last_line > first_line {
             last_line -= 1;
         }
-        let last_line = last_line.min(self.result_lines.saturating_sub(1));
         self.result_lines = new_total;
         if self.regions.is_empty() {
             // Nothing to merge (every text was empty): what is typed is a
