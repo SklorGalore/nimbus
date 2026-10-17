@@ -45,7 +45,8 @@ pub use selection::{Bias, Selection, Selections};
 pub use source::{Source, VecSource};
 pub use undo::History;
 
-/// Crate version, surfaced in the window title and the debug overlay.
+/// Version of the `nimbus-core` crate. This is not the app's version: crates
+/// are versioned separately, and `nimbus --version` prints the app's own.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]

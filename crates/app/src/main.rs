@@ -292,7 +292,7 @@ fn file_flag(
             o.find = Some(pattern);
         }
         "--version" | "-V" => {
-            print_out(&format!("nimbus {}", nimbus_core::VERSION));
+            print_out(&format!("nimbus {}", env!("CARGO_PKG_VERSION")));
             std::process::exit(0);
         }
         "--help" | "-h" => {
