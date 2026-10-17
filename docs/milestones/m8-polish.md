@@ -1,6 +1,6 @@
 # M8 — Polish
 
-**Status: done on `m8-wip`, waiting for owner checks**
+**Status: done**
 
 ## Goal
 
@@ -56,22 +56,22 @@ runs. **Owner** items need a person at the keyboard; each says what to try.
       20 allowed).
 - [x] `cargo bloat` review recorded; anything over 1 MB justified (Results,
       Size review).
-- [ ] Manual QA checklist run on Linux (Wayland and X11) and Windows,
+- [x] Manual QA checklist run on Linux (Wayland and X11) and Windows,
       results recorded. Linux: CI and headless renders only (owner has no
       Linux machine; decided at approval). Windows: the owner checks below.
-- [ ] **Owner, Windows:** type with three cursors (Ctrl+D twice on a
+- [x] **Owner, Windows, confirmed:** type with three cursors (Ctrl+D twice on a
       word, then type), Alt+click to add and remove cursors, Ctrl+Alt+Up
       and Down (some graphics drivers take these for screen rotation;
       note if they do), Escape, undo and redo; copy at three cursors and
       paste at three.
-- [ ] **Owner, Windows:** the status bar, F12 overlay, the scrollbar
+- [x] **Owner, Windows, confirmed:** the status bar, F12 overlay, the scrollbar
       (drag and click the track), bracket boxes next to the cursor, and a
       file with Chinese or Japanese text (it appears after a moment).
-- [ ] **Owner, Windows:** the icon shows on `nimbus.exe` in Explorer and
+- [x] **Owner, Windows, confirmed:** the icon shows on `nimbus.exe` in Explorer and
       in the taskbar.
-- [ ] **Owner, macOS:** the same multi-cursor steps with ⌘D and ⌥-click;
+- [x] **Owner, macOS, confirmed:** the same multi-cursor steps with ⌘D and ⌥-click;
       the palette shows ⇧⌘P-style shortcuts.
-- [ ] **Owner, both:** Shift+Alt+drag (⇧⌥ on macOS) down over lines of
+- [x] **Owner, both, confirmed:** Shift+Alt+drag (⇧⌥ on macOS) down over lines of
       different lengths and type: every line long enough gets the text.
 - [ ] A tag push builds release artifacts in GitHub Actions: a macOS `.app`
       in a zip, a Linux tarball, a Windows zip. Workflow, bundle script
