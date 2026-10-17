@@ -373,6 +373,9 @@ struct Clicks {
     adding: bool,
     /// Dragging the scrollbar's thumb, held this far below its top.
     scrollbar_grab: Option<f32>,
+    /// A Shift+Alt press started a column selection here: the line's first
+    /// byte and the display column.
+    column: Option<(usize, usize)>,
 }
 
 const MULTI_CLICK: Duration = Duration::from_millis(500);
@@ -1937,6 +1940,17 @@ impl App {
         }
         let pos = tab.view.hit(x, y, &tab.doc, &layout, tab_width);
         let count = self.clicks.press(now, (x, y), layout.metrics.cell_width);
+        // Shift+Alt+press: a column selection, grown by dragging.
+        self.clicks.column = (count == 1 && self.modifiers.alt_key() && self.modifiers.shift_key())
+            .then(|| tab.view.hit_column(x, y, &tab.doc, &layout, tab_width));
+        if let Some(at) = self.clicks.column {
+            tab.doc.column_select(at, at, tab_width);
+            self.clicks.adding = false;
+            self.clicks.dragging = true;
+            self.blink.reset(now);
+            self.changed(false);
+            return;
+        }
         let doc = &mut tab.doc;
         self.clicks.adding = count == 1 && self.modifiers.alt_key();
         match count {
@@ -2030,6 +2044,12 @@ impl App {
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
+        if let Some(from) = self.clicks.column {
+            let to = tab.view.hit_column(x, y, &tab.doc, &layout, tab_width);
+            tab.doc.column_select(from, to, tab_width);
+            self.changed(true);
+            return;
+        }
         let pos = tab.view.hit(x, y, &tab.doc, &layout, tab_width);
         let t = &tab.doc.buffer;
         let unit = match self.clicks.count {
