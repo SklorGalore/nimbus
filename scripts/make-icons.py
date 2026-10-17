@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Draw the Nimbus app icon and write it in the sizes each platform needs.
 
-The icon is a cloud outline in the editor's cursor amber, with a text
-cursor inside, on a dark rounded square: the editor's own colours. It is
-drawn here from simple shapes (circles and rectangles), so it needs nothing
-beyond the Python standard library; edges are smoothed by taking several
-samples per pixel.
+The icon is a white cloud with a dark text cursor (an I-beam, the shape
+the mouse pointer takes over text) drawn over it, on a rounded square in
+the editor's cursor amber. Each shape is filled with a gentle
+top-to-bottom gradient. Solid shapes rather than outlines, because the
+icon is mostly seen at 16 and 32 pixels, where thin strokes blur away; the
+I-beam's caps are what make the bar read as a cursor and not a seam.
+
+It is drawn here from simple shapes (circles and rounded rectangles), so it
+needs nothing beyond the Python standard library; edges are smoothed by
+taking several samples per pixel.
 
 Writes, into assets/icon/:
   nimbus-1024.png             the master image
@@ -24,19 +29,25 @@ import sys
 import tempfile
 import zlib
 
-BACKGROUND = (0x1A, 0x1C, 0x22)
-BORDER = (0x2C, 0x30, 0x3A)
-AMBER = (0xFA, 0xBF, 0x4C)
-CURSOR = (0xD9, 0xDE, 0xE8)
+# Each fill is a vertical gradient: (colour at the top, colour at the bottom).
+TILE = ((0xFF, 0xCF, 0x66), (0xF0, 0x9A, 0x2E))
+CLOUD = ((0xFF, 0xFF, 0xFF), (0xFB, 0xE9, 0xCF))
+BEAM = ((0x2B, 0x2F, 0x3B), (0x1A, 0x1C, 0x22))
 
-# Shapes on a 1024-pixel canvas.
-SQUARE = (64, 64, 960, 960, 200)  # x0, y0, x1, y1, corner radius
-BORDER_WIDTH = 8
-DOWN = 30  # the cloud and cursor sit this far below their drawn position
-CLOUD_CIRCLES = [(300, 575, 100), (440, 490, 130), (590, 455, 165), (730, 575, 100)]
-CLOUD_BODY = (300, 500, 730, 675)  # fills the cloud between the circles
-STROKE = 48
-CURSOR_BAR = (496, 455, 528, 635, 12)
+# Shapes on a 1024-pixel canvas. The square follows Apple's icon grid (an
+# 824-pixel square with a 100-pixel margin), so the icon is the same size
+# as its neighbours in the Dock; Windows and Linux show it the same way.
+SQUARE = (100, 100, 924, 924, 185)  # x0, y0, x1, y1, corner radius
+CLOUD_CIRCLES = [(301, 605, 104), (425, 514, 128), (596, 481, 166), (733, 605, 104)]
+CLOUD_BODY = (301, 552, 733, 709)  # fills the cloud between the circles
+# The I-beam: a stem with a cap at each end. The caps sit clear of the
+# cloud, 23 pixels above its highest point and below its base, so they
+# read as the cursor's ends rather than cutting into the cloud's outline;
+# the cloud and I-beam together are centred in the square.
+BEAM_X = 560  # centre of the stem, a little right of centre, like a cursor mid-word
+BEAM_TOP, BEAM_BOTTOM = 254, 770
+STEM_WIDTH = 42
+CAP_HEIGHT, CAP_WIDTH = 38, 162
 
 
 def rounded_rect_sd(x, y, rect):
@@ -51,30 +62,43 @@ def rounded_rect_sd(x, y, rect):
 
 def cloud_sd(x, y):
     """Signed distance to the cloud, as the union of its shapes."""
-    y -= DOWN
     d = min(math.hypot(x - cx, y - cy) - r for cx, cy, r in CLOUD_CIRCLES)
     # The body's sides run through the side circles' centres, hidden
-    # inside them, so only its top and bottom count; otherwise the stroke
-    # would show notches where its sides meet the circles.
+    # inside them, so only its top and bottom count.
     x0, y0, x1, y1 = CLOUD_BODY
     if x0 <= x <= x1:
         d = min(d, max(y - y1, y0 - y))
     return d
 
 
+def beam_sd(x, y):
+    """Signed distance to the I-beam: its stem and two caps."""
+    half_stem, half_cap = STEM_WIDTH / 2, CAP_WIDTH / 2
+    stem = (BEAM_X - half_stem, BEAM_TOP, BEAM_X + half_stem, BEAM_BOTTOM, half_stem)
+    top = (BEAM_X - half_cap, BEAM_TOP, BEAM_X + half_cap, BEAM_TOP + CAP_HEIGHT, CAP_HEIGHT / 2)
+    bottom = (BEAM_X - half_cap, BEAM_BOTTOM - CAP_HEIGHT, BEAM_X + half_cap, BEAM_BOTTOM,
+              CAP_HEIGHT / 2)
+    return min(rounded_rect_sd(x, y, r) for r in (stem, top, bottom))
+
+
+def gradient(fill, y, top, bottom):
+    """The colour of a vertical gradient `fill` at height `y`."""
+    t = max(0.0, min(1.0, (y - top) / (bottom - top)))
+    a, b = fill
+    return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
 def colour_at(x, y):
-    """The colour and coverage (0 or 1) of one sample."""
-    square = rounded_rect_sd(x, y, SQUARE)
-    if square > 0:
+    """The colour of one sample, or None outside the icon."""
+    if rounded_rect_sd(x, y, SQUARE) > 0:
         return None
-    if abs(cloud_sd(x, y)) <= STROKE / 2:
-        return AMBER
-    x0, y0, x1, y1, r = CURSOR_BAR
-    if rounded_rect_sd(x, y - DOWN, (x0, y0, x1, y1, r)) <= 0:
-        return CURSOR
-    if square > -BORDER_WIDTH:
-        return BORDER
-    return BACKGROUND
+    tile = gradient(TILE, y, SQUARE[1], SQUARE[3])
+    if beam_sd(x, y) <= 0:
+        return gradient(BEAM, y, BEAM_TOP, BEAM_BOTTOM)
+    if cloud_sd(x, y) <= 0:
+        top = min(cy - r for _, cy, r in CLOUD_CIRCLES)
+        return gradient(CLOUD, y, top, CLOUD_BODY[3])
+    return tile
 
 
 def render(size, samples=3):

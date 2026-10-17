@@ -364,7 +364,9 @@ mod tests {
     }
 
     #[test]
-    fn dark_matches_the_old_constants_to_eight_bits() {
+    fn dark_keeps_the_icon_colours_to_eight_bits() {
+        // The dark theme's background is the icon's ink and its cursor the
+        // icon's amber; changing either changes the brand, not just the theme.
         let ui = Theme::built_in("dark").unwrap().ui;
         let close = |a: Color, b: Color| {
             a.iter()
@@ -373,8 +375,8 @@ mod tests {
         };
         assert!(close(ui.background, [0.102, 0.110, 0.133, 1.0]));
         assert!(close(ui.text, [0.85, 0.87, 0.91, 1.0]));
-        assert!(close(ui.selection, [0.25, 0.36, 0.55, 0.65]));
-        assert!(close(ui.picker_selected, [0.25, 0.36, 0.55, 0.85]));
+        assert!(close(ui.cursor, [0.98, 0.749, 0.298, 1.0]));
+        assert!(close(ui.tab_accent, ui.cursor));
     }
 
     #[test]

@@ -555,3 +555,5 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Font fallback copies the smallest suitable system font into memory (no `unsafe`); colour-only emoji fonts skipped | §4.3, m8 |
 | 2026-10-16 | Bundled bold font subset to its text characters (no icons): 2.8 MB to 185 KB | §1, m8 |
 | 2026-10-16 | Release builds: draft GitHub release on a `v*` tag; unsigned; macOS universal binary | §8, m8 |
+| 2026-10-16 | App icon redrawn: white cloud and dark I-beam on an amber tile, on Apple's icon grid; solid shapes so it reads at 16 px | m8 |
+| 2026-10-16 | Built-in themes take the icon's colours: amber is the one accent, selection is a shade of the ink; light theme on warm paper with a burnt-amber cursor | §4.4, m8 |

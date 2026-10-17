@@ -1,28 +1,31 @@
-# Nimbus light theme. See dark.toml for the format.
+# Nimbus light theme. See dark.toml for the format. Like the dark theme,
+# amber is the one accent, here a deeper burnt amber so a thin cursor
+# stays visible on a light background (3.8:1); the background and chrome
+# are a warm paper, the cream of the icon's cloud.
 
 [ui]
-background = "#fafafa"
+background = "#fbf9f4"
 text = "#383a42"
-gutter = "#9da5b4"
+gutter = "#8f897d"
 current_line_number = "#383a42"
-cursor = "#526fff"
-preedit = "#526fff"
-selection = "#3e6fd040"
-bracket = "#8c95a640"
+cursor = "#b86e00"
+preedit = "#b86e00"
+selection = "#2b2f3b24"
+bracket = "#8f897d40"
 scrollbar = "#6b7385b3"
 find_match = "#f0c04070"
 current_match = "#e0a020b0"
-bar = "#ececed"
+bar = "#efebe3"
 field = "#ffffff"
-field_focus = "#526fff"
-toggle_on = "#a8b8ff"
+field_focus = "#b86e00"
+toggle_on = "#f6d18a"
 error = "#d43c3c"
-tab_bar = "#e6e6e7"
-tab_active = "#fafafa"
-tab_accent = "#526fff"
-picker = "#f0f0f1"
-picker_border = "#c8c9cc"
-picker_selected = "#3e6fd033"
+tab_bar = "#e8e3d9"
+tab_active = "#fbf9f4"
+tab_accent = "#b86e00"
+picker = "#f4f1ea"
+picker_border = "#d3ccbe"
+picker_selected = "#2b2f3b1f"
 
 [syntax]
 attribute = "#0184bc"

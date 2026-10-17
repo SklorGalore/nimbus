@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Nimbus
-Comment=A fast, lightweight text editor
+Comment=A fast, lightweight, modeless text editor
 Exec=nimbus %F
 Icon=nimbus
 Terminal=false
