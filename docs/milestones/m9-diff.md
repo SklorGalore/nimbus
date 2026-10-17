@@ -1,6 +1,6 @@
 # M9 — Compare and merge
 
-**Status: in progress** (started 2026-10-17; tasks 1 to 6 landed, 6 awaiting the owner's look on screen; 2a's long-line splitting still open)
+**Status: in progress** (started 2026-10-17; tasks 1 to 6 landed and confirmed; 2a's long-line splitting still open)
 
 ## Goal
 
@@ -41,9 +41,9 @@ views, plus the diff's own:
       changed lines coloured, the changed words within a line marked more
       strongly; both sides keep syntax colours. "Toggle Unified Compare"
       stacks each change's old lines over its new ones in one column.
-      **Owner to confirm on screen**: built and tested headlessly here
-      (no GPU in the build container), so the colours and alignment need a
-      look on a real display.
+      **Owner confirmed on screen** (2026-10-17): built and tested
+      headlessly here (no GPU in the build container), then checked on a
+      real display.
 - [x] Navigation: `F7` / `Shift+F7` step through the changes; the status
       bar shows "Compare with saved · change 3 of 12" (the plan's diff
       bar became part of the status bar: no layout change, and the find
