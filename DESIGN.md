@@ -189,8 +189,12 @@ JavaScript, TypeScript, Bash. Each grammar sits behind a cargo feature so a
 grammar that costs too much binary size can be dropped. M5 measured each
 (macOS release binary): TypeScript 1.42 MB, Bash 1.37 MB, Python 0.46 MB,
 Markdown 0.38 MB, YAML 0.18 MB; the tree-sitter runtime plus Rust about
-1.8 MB. TSX is not included: it would add about 1.5 MB. If the binary
-budget is ever tight, Bash goes first, then TypeScript.
+1.8 MB. M14 added C, Go, HTML, CSS and TSX (Linux release binary, stripped:
+TSX 1.39 MB, C 0.60 MB, Go 0.22 MB, CSS 0.12 MB, HTML 0.03 MB; all five
+together 2.3 MB, taking Linux from 19.1 MB to 21.4 MB of the 35 MB
+budget). TSX shares the TypeScript crate, so it is a second compiled
+grammar for one set of queries. If the binary budget is ever tight, TSX
+goes first, then Bash, then TypeScript.
 
 Highlighting runs our own query loop rather than `tree-sitter-highlight`:
 that crate wants the whole document as one `&[u8]`, and our text lives in a
@@ -250,9 +254,50 @@ grammars still need a rebuild: loading compiled grammars at runtime means
 `unsafe` code and per-platform libraries, and WebAssembly grammars a
 runtime of 10 MB or more.
 
-Markdown needs a second, inline grammar injected into each paragraph. M5
-ships block-level Markdown highlighting; inline emphasis and code spans are
-an M8 stretch item.
+**Injections** (`crates/syntax/src/inject.rs`, M14). A grammar's
+`injections.scm` names regions of a tree that belong to another language:
+Markdown's block grammar marks each paragraph for the inline grammar
+(`tree_sitter_md::INLINE_LANGUAGE`, in the binary already) and each fenced
+block for the language its fence names; HTML marks `<script>` and
+`<style>`; JavaScript and TypeScript mark tagged template strings
+(`html\`…\``, `css\`…\``) with the tag as the language name. Rust's query is deliberately not used: it would parse every `format!` and
+`vec!` argument as a second Rust tree for no visible gain. The host tree
+is queried for regions over the visible range plus one screen each side,
+and each region gets a child tree parsed with `set_included_ranges` over
+those bytes only, through the same `Text::chunk_at` callback as the host.
+Children are kept in a map keyed by the host node's `id()` (stable across
+incremental reparses), nest one level further (a code span inside a
+paragraph), take `Tree::edit` for every edit the host sees, and are
+dropped when scrolled out of the kept range. Parsing new or edited
+children shares the frame's 2 ms budget: at least one child is parsed per
+frame, the rest wait and the host's colours show meanwhile, and the app
+keeps requesting frames while `injections_pending()`. An inline Markdown
+parse costs about 0.3 ms per paragraph, so a screen settles over a few
+frames and a frame with no edit and no scroll returns the cached spans in
+under a microsecond. Each loaded grammar is a **capture table**: a span
+carries the table and the capture index, the theme resolves every table
+it has seen, and the inner language's capture wins over the host's where
+they overlap, so a Rust keyword in a fenced block takes the keyword
+colour.
+
+**Wide trees** (`crates/syntax/src/split.rs`). A Markdown document is one
+node with thousands of blocks under it, and tree-sitter's query cursor
+walks the children of every node it enters, so querying the root for one
+screen cost the whole file. Queries now descend to the nodes covering the
+range, and a node with more than 64 children is queried child by child
+over the range with the node itself queried alone, so a frame's query cost
+follows what is on screen.
+
+**Beyond colour** (M14). The tree also gives: Go to Symbol
+(`symbols.rs`, a `tags.scm`-style query over the whole tree listing
+functions, types, constants and Markdown headings, run on first use);
+structural selection (`structure::expand`, the smallest named node
+larger than the selection; wired into M11's Expand Selection when that
+lands); fold regions (`structure::fold_regions`, a `folds.scm` per
+language over the visible range, for M13's fold model); and bracket
+matching that skips strings and comments (`SyntaxState::matching_bracket`).
+Each query kind can be replaced or extended by a user file
+(`docs/customizing.md`).
 
 The `app` crate maps capture names to colours via the theme, with
 longest-prefix matching (`keyword.control` falls back to `keyword`),
@@ -486,7 +531,7 @@ introduces and points at the code.
 | 11 | Everyday editing | Planned | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
 | 12 | Workspace | Planned | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
 | 13 | Split views and folding | Planned | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
-| 14 | Languages, second pass | Planned | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
+| 14 | Languages, second pass | In progress | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
 | 15 | Distribution | Planned | Signed, notarised, installable builds; an update check | [m15](docs/milestones/m15-distribution.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
@@ -616,3 +661,6 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-17 | Up to three editor columns, no nesting; one file may be open in two columns, so documents and panes are split | §9, m13 |
 | 2026-10-17 | Grammars to add: C, Go, HTML, CSS, TSX, each measured against the 35 MB budget; Go to Symbol is `Primary+Shift+R` | §9, m14 |
 | 2026-10-17 | No signing accounts: builds stay unsigned and the README keeps its `xattr` step; update check off unless `check_updates = true`; checksums signed with `minisign` | §9, m15 |
+| 2026-10-17 | M14 grammars all kept: C, Go, HTML, CSS and TSX add 2.3 MB on Linux (21.4 MB of 35); drop order is now TSX, Bash, TypeScript | §4.2, m14 |
+| 2026-10-17 | Injections: child trees keyed by host node id, kept one screen either side of the view, parsed within the frame's 2 ms budget at one child per frame at least; Rust's injection query not used | §4.2, m14 |
+| 2026-10-17 | Spans carry a capture table per grammar so the inner language's colours win inside injections; wide nodes are queried child by child | §4.2, m14 |

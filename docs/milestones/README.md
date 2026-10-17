@@ -41,7 +41,7 @@ repeated in each file:
 | 11 | [Everyday editing](m11-everyday-editing.md) | Planned |
 | 12 | [Workspace](m12-workspace.md) | Planned |
 | 13 | [Split views and folding](m13-splits-and-folding.md) | Planned |
-| 14 | [Languages, second pass](m14-languages.md) | Planned |
+| 14 | [Languages, second pass](m14-languages.md) | In progress |
 | 15 | [Distribution](m15-distribution.md) | Planned |
 
 **Next** is the milestone to start; **Planned** plans are approved and
