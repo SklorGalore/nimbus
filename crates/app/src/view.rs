@@ -18,7 +18,7 @@ use nimbus_syntax::highlight::{Highlighter, Span};
 
 use crate::document::Document;
 use crate::find::{Field, FindBar};
-use crate::theme::{Look, Ui};
+use crate::theme::{Color, Look, Ui};
 
 #[expect(
     clippy::cast_precision_loss,
@@ -186,13 +186,37 @@ impl Layout {
     }
 
     /// Top of the find bar area, just below the tab bar.
-    fn find_top(&self) -> f32 {
+    pub(crate) fn find_top(&self) -> f32 {
         self.tabs_h
     }
 
     /// Height of the find bar area, if any rows are reserved for it.
-    fn bar_height(&self) -> f32 {
+    pub(crate) fn bar_height(&self) -> f32 {
         (self.top - self.margin - self.tabs_h).max(0.0)
+    }
+
+    /// This layout narrowed to one column of the editor area, from `left`
+    /// to `right` in physical pixels, keeping the gutter width and the
+    /// vertical geometry. The compare view (M9) draws each side with one
+    /// of these; everything that treats `width` as the right edge then
+    /// stops at the column's edge.
+    #[must_use]
+    pub fn column(&self, left: f32, right: f32) -> Self {
+        let mut l = *self;
+        let gutter = self.text_left - self.left;
+        l.left = left;
+        l.width = right;
+        l.text_left = left + gutter;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small non-negative column count"
+        )]
+        let wrap_cols = ((l.width - l.text_left - l.margin) / l.metrics.cell_width)
+            .floor()
+            .max(1.0) as usize;
+        l.wrap_cols = wrap_cols;
+        l
     }
 
     /// Lines that fit entirely in the window: one "page" for Page Up/Down.
@@ -294,14 +318,39 @@ fn f32_of(n: usize) -> f32 {
 /// Start a frame with the text area as its own layer, clipped so rows
 /// scrolled under a bar above or below do not show through it.
 fn begin_text(gpu: &mut Gpu, layout: &Layout, ui: &Ui) {
+    begin_frame(gpu, ui);
+    begin_column(gpu, layout);
+}
+
+/// Start a frame: everything queued before is dropped. The compare view
+/// calls this once, then [`begin_column`] per column through
+/// [`View::draw_rows`].
+pub fn begin_frame(gpu: &mut Gpu, ui: &Ui) {
     gpu.begin_frame();
     gpu.set_background(ui.background);
+}
+
+/// A layer clipped to `layout`'s text area (its column, between the bars).
+fn begin_column(gpu: &mut Gpu, layout: &Layout) {
     gpu.begin_layer(Some([
         layout.left,
         layout.top,
         layout.width - layout.left,
         layout.bottom - layout.top,
     ]));
+}
+
+/// One screen row of a compare view's column, for [`View::draw_rows`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowPlan {
+    /// The line shown, or `None` for a filler or fold row.
+    pub line: Option<usize>,
+    /// A fold row instead of a line: how many lines it hides.
+    pub fold: Option<usize>,
+    /// A background over the row's text area (a change's colour).
+    pub background: Option<Color>,
+    /// Bytes of the line drawn over a stronger colour: the changed words.
+    pub mark: Option<Range<usize>>,
 }
 
 /// What a remembered bracket pair was worked out for: the text's version,
@@ -808,9 +857,27 @@ impl View {
             reason = "a row count within the window"
         )]
         let rows_down = rows_down as isize;
+        let at = {
+            let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
+            let anchor = anchor(self.scroll_top, t, &mut w);
+            wrap::step_rows(t, &mut w, anchor, rows_down).0
+        };
+        self.byte_at_x(x, at, doc, layout, tab_width)
+    }
+
+    /// The byte under window x `x` on the line starting at `at.start`,
+    /// wrapped row `at.row` of it. The compare view (M9) uses this with a
+    /// line it chose from its row plan.
+    pub fn byte_at_x(
+        &mut self,
+        x: f32,
+        at: RowPos,
+        doc: &Document,
+        layout: &Layout,
+        tab_width: usize,
+    ) -> usize {
+        let t = &doc.buffer;
         let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
-        let anchor = anchor(self.scroll_top, t, &mut w);
-        let (at, _) = wrap::step_rows(t, &mut w, anchor, rows_down);
         let span = t.line_span(at.start);
         let long = long_line::is_long(span);
         // Wrapped rows do not scroll sideways; long lines and unwrapped
@@ -906,7 +973,6 @@ impl View {
         deco: &Decorations<'_>,
     ) {
         let t = &doc.buffer;
-        let lh = layout.metrics.line_height;
         let cursor = doc.cursor();
         let selections = doc.selections.as_slice();
         let brackets = self.bracket_pair(doc);
@@ -950,50 +1016,32 @@ impl View {
             spliced: &mut self.spliced,
             cursor_at: None,
         };
-        let (scroll_col, width_cols) = columns_on_screen(layout, scroll_x);
+        let geom = (
+            scroll_col_of(layout, scroll_x),
+            width_cols_of(layout, scroll_x),
+            scroll_x,
+        );
         while top < layout.bottom {
             let span = t.line_span(at.start);
-            let line_start = span.start;
-            let has_break = span.next.is_some();
             // The line number stands out on every line with a cursor.
             let has_cursor = has_cursor(selections, &mut next_head, span);
-            if long_line::is_long(span) {
-                let geom = (scroll_col, width_cols, scroll_x);
-                let row = long_row(t, span, &mut self.long_text, layout, geom, top, tab_width);
-                painter.gutter(number, has_cursor, top);
-                next_match = painter.row(&row, next_match, scroll_col);
-                top += lh;
-            } else {
-                let text = t.slice(span.start..span.end);
-                let rows: &[RowStart] = w.rows(&text);
-                for r in at.row..rows.len() {
-                    if top >= layout.bottom {
-                        break;
-                    }
-                    let range = wrap::row_range(rows, r, text.len());
-                    let start_col = rows[r].col;
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "a normal line is under 64 KB of columns"
-                    )]
-                    let shift = if wrapping { 0.0 } else { scroll_x as f32 };
-                    let row = RowGeom {
-                        seg: text.get(range.clone()).unwrap_or(""),
-                        seg_start: line_start + range.start,
-                        start_col,
-                        last_row: r + 1 == rows.len(),
-                        has_break,
-                        top,
-                        left: layout.text_left - shift,
-                    };
-                    if r == 0 {
-                        painter.gutter(number, has_cursor, top);
-                    }
-                    let first = if wrapping { start_col } else { scroll_col };
-                    next_match = painter.row(&row, next_match, first);
-                    top += lh;
-                }
-            }
+            let line = LineDraw {
+                span,
+                first_row: at.row,
+                number,
+                has_cursor,
+                mark: None,
+            };
+            next_match = draw_line(
+                &mut painter,
+                t,
+                &line,
+                &mut w,
+                &mut self.long_text,
+                geom,
+                &mut top,
+                next_match,
+            );
             shown_end = span.next.unwrap_or(t.len_bytes());
             let Some(next) = span.next else {
                 break;
@@ -1006,6 +1054,120 @@ impl View {
         }
         self.cursor_at = painter.cursor_at;
         self.shown = shown_end.saturating_sub(self.scroll_top);
+    }
+
+    /// Queue the rows of one column of a compare view: each entry of
+    /// `plans` is one screen row, a line of `doc`, a filler, or a fold
+    /// label. Soft wrap is off in compare views, so a line is one row.
+    /// `px` is how far the first row is scrolled up out of view. The
+    /// caller started the frame with [`begin_frame`]; this begins the
+    /// column's own clipped layer.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a frame's inputs, as `draw` takes them, plus the row plan"
+    )]
+    pub fn draw_rows(
+        &mut self,
+        gpu: &mut Gpu,
+        doc: &Document,
+        layout: &Layout,
+        tab_width: usize,
+        deco: &Decorations<'_>,
+        plans: &[RowPlan],
+        px: f32,
+        mark_color: Color,
+    ) {
+        let t = &doc.buffer;
+        let lh = layout.metrics.line_height;
+        let cursor = doc.cursor();
+        let selections = doc.selections.as_slice();
+        let brackets = self.bracket_pair(doc);
+        self.cache.next_frame();
+        self.cursor_at = None;
+        self.wrap = false;
+
+        begin_column(gpu, layout);
+
+        let scroll_x = self.scroll_x;
+        let mut w = wrapper(&mut self.cache, false, layout, tab_width);
+        planned_ranges(t, plans, &mut self.hl_ranges);
+        let spans: &[Span] = if deco.captures.is_empty() {
+            &[]
+        } else {
+            self.highlighter.spans(&doc.syntax, t, &self.hl_ranges)
+        };
+        let first_line_start = plans
+            .iter()
+            .find_map(|p| p.line)
+            .map_or(0, |l| t.line_to_byte(l));
+        let mut next_match = deco.matches.partition_point(|m| m.end <= first_line_start);
+        let first_sel = selections.partition_point(|s| s.range().end < first_line_start);
+        let mut next_head = selections.partition_point(|s| s.head < first_line_start);
+        let mut painter = Painter {
+            spans,
+            runs: &mut self.runs,
+            gpu,
+            layout,
+            tab_width,
+            deco,
+            wrapping: false,
+            sels: selections,
+            next_sel: first_sel,
+            brackets,
+            cursor,
+            number: &mut self.number,
+            spliced: &mut self.spliced,
+            cursor_at: None,
+        };
+        let geom = (
+            scroll_col_of(layout, scroll_x),
+            width_cols_of(layout, scroll_x),
+            scroll_x,
+        );
+        let mut top = layout.top - px;
+        let mut shown = (usize::MAX, 0);
+        for plan in plans {
+            if top >= layout.bottom {
+                break;
+            }
+            if let Some(bg) = plan.background {
+                painter.rect(layout.text_left, layout.width, top, bg);
+            }
+            match (plan.line, plan.fold) {
+                (Some(line), _) => {
+                    let span = t.line_span(t.line_to_byte(line));
+                    shown = (shown.0.min(span.start), span.next.unwrap_or(t.len_bytes()));
+                    let has_cursor = has_cursor(selections, &mut next_head, span);
+                    let draw = LineDraw {
+                        span,
+                        first_row: 0,
+                        number: Some(line),
+                        has_cursor,
+                        mark: plan.mark.clone().map(|m| (m, mark_color)),
+                    };
+                    next_match = draw_line(
+                        &mut painter,
+                        t,
+                        &draw,
+                        &mut w,
+                        &mut self.long_text,
+                        geom,
+                        &mut top,
+                        next_match,
+                    );
+                }
+                (None, Some(hidden)) => {
+                    painter.fold_row(hidden, top);
+                    top += lh;
+                }
+                (None, None) => top += lh,
+            }
+        }
+        self.cursor_at = painter.cursor_at;
+        if shown.0 != usize::MAX {
+            self.scroll_top = shown.0;
+            self.shown = shown.1.saturating_sub(shown.0);
+        }
     }
 
     /// Draw the scrollbar for the frame just drawn, or nothing when the
@@ -1080,6 +1242,119 @@ impl View {
 }
 
 /// Draws rows for one frame; holds what every row needs.
+/// The bytes to highlight for the lines in `plans`, into `out`: each line
+/// capped so a monster line costs a bounded amount (the rest of such a
+/// line stays plain), and near ranges merged.
+fn planned_ranges(t: &dyn Text, plans: &[RowPlan], out: &mut Vec<Range<usize>>) {
+    out.clear();
+    for plan in plans {
+        let Some(line) = plan.line else { continue };
+        let span = t.line_span(t.line_to_byte(line));
+        let end = span
+            .next
+            .unwrap_or(t.len_bytes())
+            .min(span.start + WHOLE_LINES_LIMIT);
+        match out.last_mut() {
+            Some(last) if span.start <= last.end + MERGE_GAP => last.end = last.end.max(end),
+            _ => out.push(span.start..end),
+        }
+    }
+}
+
+/// The leftmost visible column of a line, from the horizontal scroll.
+fn scroll_col_of(layout: &Layout, scroll_x: f64) -> usize {
+    columns_on_screen(layout, scroll_x).0
+}
+
+/// How many columns fit on screen.
+fn width_cols_of(layout: &Layout, scroll_x: f64) -> usize {
+    columns_on_screen(layout, scroll_x).1
+}
+
+/// One logical line to draw, for [`draw_line`].
+struct LineDraw {
+    span: nimbus_core::LineSpan,
+    /// The first wrapped row of the line to draw (rows above are scrolled
+    /// off); 0 when wrap is off.
+    first_row: usize,
+    /// Its line number, or `None` when not known yet.
+    number: Option<usize>,
+    /// A cursor is on it: the number stands out.
+    has_cursor: bool,
+    /// Bytes to draw over a stronger background (a compare view's changed
+    /// words), with that colour.
+    mark: Option<(Range<usize>, Color)>,
+}
+
+/// Draw one logical line from row `first_row` down, advancing `top` per
+/// row drawn. Shared by [`View::draw`] and [`View::draw_rows`]. Returns the
+/// index of the first find match not finished on the last row.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the per-frame state `draw` threads through its loop"
+)]
+fn draw_line(
+    painter: &mut Painter<'_, '_>,
+    t: &dyn Text,
+    line: &LineDraw,
+    w: &mut WrapView<'_>,
+    long_text: &mut String,
+    (scroll_col, width_cols, scroll_x): (usize, usize, f64),
+    top: &mut f32,
+    mut next_match: usize,
+) -> usize {
+    let layout = painter.layout;
+    let lh = layout.metrics.line_height;
+    let tab_width = painter.tab_width;
+    let wrapping = painter.wrapping;
+    let span = line.span;
+    let has_break = span.next.is_some();
+    if long_line::is_long(span) {
+        let geom = (scroll_col, width_cols, scroll_x);
+        let row = long_row(t, span, long_text, layout, geom, *top, tab_width);
+        painter.gutter(line.number, line.has_cursor, *top);
+        if let Some((m, color)) = &line.mark {
+            painter.mark(&row, m, *color);
+        }
+        next_match = painter.row(&row, next_match, scroll_col);
+        *top += lh;
+    } else {
+        let text = t.slice(span.start..span.end);
+        let rows: &[RowStart] = w.rows(&text);
+        for r in line.first_row..rows.len() {
+            if *top >= layout.bottom {
+                break;
+            }
+            let range = wrap::row_range(rows, r, text.len());
+            let start_col = rows[r].col;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a normal line is under 64 KB of columns"
+            )]
+            let shift = if wrapping { 0.0 } else { scroll_x as f32 };
+            let row = RowGeom {
+                seg: text.get(range.clone()).unwrap_or(""),
+                seg_start: span.start + range.start,
+                start_col,
+                last_row: r + 1 == rows.len(),
+                has_break,
+                top: *top,
+                left: layout.text_left - shift,
+            };
+            if r == 0 {
+                painter.gutter(line.number, line.has_cursor, *top);
+            }
+            if let Some((m, color)) = &line.mark {
+                painter.mark(&row, m, *color);
+            }
+            let first = if wrapping { start_col } else { scroll_col };
+            next_match = painter.row(&row, next_match, first);
+            *top += lh;
+        }
+    }
+    next_match
+}
+
 struct Painter<'a, 'g> {
     gpu: &'g mut Gpu,
     /// Syntax spans covering the visible lines, sorted.
@@ -1219,6 +1494,32 @@ impl Painter<'_, '_> {
             self.gpu
                 .push_rect([x0, top], [x1 - x0, self.layout.metrics.line_height], color);
         }
+    }
+
+    /// A stronger background under bytes `m` of this row (changed words
+    /// in a compare view), where they fall on it.
+    fn mark(&mut self, row: &RowGeom<'_>, m: &Range<usize>, color: Color) {
+        let (start, end) = (row.seg_start, row.end());
+        if m.end <= start || m.start >= end.max(start + 1) {
+            return;
+        }
+        let cell = self.layout.metrics.cell_width;
+        let x0 = row.x_of(m.start.max(start), cell, self.tab_width);
+        let x1 = row
+            .x_of(m.end.min(end), cell, self.tab_width)
+            .max(x0 + cell);
+        self.rect(x0, x1, row.top, color);
+    }
+
+    /// A fold row: how many unchanged lines are hidden here.
+    fn fold_row(&mut self, hidden: usize, top: f32) {
+        self.number.clear();
+        let _ = write!(self.number, "··· {hidden} unchanged lines ···");
+        self.gpu.push_text_line(
+            [self.layout.text_left, top],
+            self.number,
+            self.deco.ui.gutter,
+        );
     }
 
     /// Screen span of the selection on this row. A selection continuing

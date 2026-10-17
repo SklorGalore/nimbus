@@ -8,10 +8,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
 
+use nimbus_core::live_diff::EditSpan;
 use nimbus_core::search::{self, Literal};
 use nimbus_core::{
     AnyBuffer, Bias, Buffer, Edit, EditError, History, LineEnding, MappedBuffer, Selection,
-    Selections, Source, Text, report_sorted,
+    Selections, Snapshot, Source, Text, report_sorted,
 };
 use nimbus_core::{long_line, movement, multi};
 
@@ -195,6 +196,67 @@ pub struct Document {
     /// A save of this mapped document under way ([`crate::saver`]). Edits
     /// wait while it is set.
     saving: Option<Saving>,
+    /// Edits since a compare view (M9) last looked, so it can follow them.
+    edits: EditLog,
+    /// The text as the file held it when last opened, reloaded or saved,
+    /// for merging with a changed file (M9 task 10). A rope snapshot
+    /// shares storage with the buffer until edits part them, so this costs
+    /// little; mapped documents keep none.
+    disk_text: DiskText,
+}
+
+/// A snapshot of the text as the file held it, or none; a wrapper only
+/// because a snapshot has no `Debug`.
+#[derive(Default, Clone)]
+struct DiskText(Option<Arc<dyn Snapshot>>);
+
+impl std::fmt::Debug for DiskText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(t) => write!(f, "DiskText({} bytes)", t.len_bytes()),
+            None => f.write_str("DiskText(none)"),
+        }
+    }
+}
+
+/// One edit an observer follows: its span and the text right after it.
+pub type NotedEdit = (EditSpan, Arc<dyn Snapshot>);
+
+/// Edits noted for an observer, such as the compare view's live diff,
+/// which needs every change in order, undo and redo included. Off until
+/// something asks; drained each frame while on.
+#[derive(Default)]
+pub struct EditLog {
+    on: bool,
+    /// One entry per edit, in application order, with the text as it was
+    /// right after that edit (a rope snapshot shares storage, so this is
+    /// cheap): an observer following several edits from one frame needs
+    /// each one's own text, as spans name lines of the text they were
+    /// made in. `None` for an edit whose span could not be worked out
+    /// (the observer then starts over).
+    spans: Vec<Option<NotedEdit>>,
+    /// The text was replaced wholesale (a reload), with no edit records.
+    reset: bool,
+}
+
+impl std::fmt::Debug for EditLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The snapshots are whole texts; show what the log holds, not them.
+        f.debug_struct("EditLog")
+            .field("on", &self.on)
+            .field("spans", &self.spans.len())
+            .field("reset", &self.reset)
+            .finish()
+    }
+}
+
+impl EditLog {
+    fn note(&mut self, buffer: &dyn Buffer, edit: &Edit) {
+        if self.on {
+            let entry = EditSpan::after(buffer, edit).map(|span| (span, buffer.snapshot().into()));
+            self.spans.push(entry);
+        }
+    }
 }
 
 /// Stops a worker when dropped: when its document closes, reloads or goes
@@ -320,10 +382,27 @@ impl Document {
     #[cfg(test)]
     #[must_use]
     pub fn from_text(text: &str) -> Self {
-        Self {
+        Self::with_text(None, text)
+    }
+
+    /// A document holding `text` that saves to `path` (none: untitled), as
+    /// a merge result starts (M9): not yet on disk, so saving writes it
+    /// whole, and dirty from the start when it has a path, since the file
+    /// does not hold this text yet.
+    #[must_use]
+    pub fn with_text(path: Option<PathBuf>, text: &str) -> Self {
+        let mut doc = Self {
             buffer: nimbus_core::RopeBuffer::from_text(text).into(),
+            canonical: path.as_deref().map(io::canonical),
+            path,
             ..Self::default()
+        };
+        if doc.path.is_some() {
+            // Not what the file holds: `saved_at` points at no history
+            // entry, so the tab shows dirty until the first save.
+            doc.saved_at = NOT_SAVED;
         }
+        doc
     }
 
     /// Open `path`. A path that does not exist yet gives an empty document
@@ -376,7 +455,42 @@ impl Document {
             ..Self::default()
         };
         doc.adopt_indexing(opened.indexing);
+        doc.remember_disk_text();
         Ok(doc)
+    }
+
+    /// Replace the whole text with `text`, as a merge result arriving from
+    /// its worker does: a fresh rope, no undo history, the language to be
+    /// detected again by the caller (so the syntax state sees the new
+    /// text), and dirty when the document has a path.
+    pub fn set_text(&mut self, text: &str) {
+        self.buffer = nimbus_core::RopeBuffer::from_text(text).into();
+        self.history = History::default();
+        self.selections = Selections::default();
+        self.preferred_column = None;
+        self.goals.clear();
+        self.language = None;
+        self.saved_at = if self.path.is_some() {
+            NOT_SAVED
+        } else {
+            self.history.top_id()
+        };
+        self.edits.reset = true;
+        self.version += 1;
+    }
+
+    /// Keep a snapshot of the text as the file holds it now (rope documents
+    /// only; a mapped file's bytes are the file itself).
+    fn remember_disk_text(&mut self) {
+        self.disk_text =
+            DiskText((!self.buffer.is_mapped()).then(|| self.buffer.snapshot().into()));
+    }
+
+    /// The text as the file held it when last opened, reloaded or saved,
+    /// when known: the base for merging edits with a changed file.
+    #[must_use]
+    pub fn disk_text(&self) -> Option<&Arc<dyn Snapshot>> {
+        self.disk_text.0.as_ref()
     }
 
     /// The file changed on disk (a watcher said so): work out what to do.
@@ -493,7 +607,9 @@ impl Document {
         self.saved_at = self.history.top_id();
         self.deleted = false;
         self.conflict = false;
+        self.edits.reset = true;
         self.version += 1;
+        self.remember_disk_text();
         let pos = match place {
             Some((line, col)) => {
                 let line = line.min(self.buffer.len_lines().saturating_sub(1));
@@ -570,6 +686,40 @@ impl Document {
         }
     }
 
+    /// A separate document holding a copy of this one's text, for the
+    /// compare view's read-only side when comparing two tabs. `None` for
+    /// a text too large to copy (over the diff limit) or held as pieces of
+    /// a mapped file; the caller compares with the file instead.
+    #[must_use]
+    pub fn copy_of(&self) -> Option<Self> {
+        if self.buffer.len_bytes() > nimbus_core::DIFF_LIMIT || self.buffer.is_mapped() {
+            return None;
+        }
+        let text = self.buffer.slice(0..self.buffer.len_bytes());
+        Some(Self {
+            buffer: nimbus_core::RopeBuffer::from_text(&text).into(),
+            path: self.path.clone(),
+            line_ending: self.line_ending,
+            ..Self::default()
+        })
+    }
+
+    /// Start or stop noting edits for an observer ([`Document::take_edits`]).
+    /// Starting clears anything noted before.
+    pub fn watch_edits(&mut self, on: bool) {
+        self.edits.on = on;
+        self.edits.spans.clear();
+        self.edits.reset = false;
+    }
+
+    /// The edits noted since the last call, in order, each with the text
+    /// right after it, and whether the text was replaced wholesale in
+    /// between (then the spans are moot).
+    pub fn take_edits(&mut self) -> (Vec<Option<NotedEdit>>, bool) {
+        let reset = std::mem::take(&mut self.edits.reset);
+        (std::mem::take(&mut self.edits.spans), reset)
+    }
+
     /// Whether there are unsaved changes.
     #[must_use]
     pub fn is_dirty(&self) -> bool {
@@ -621,6 +771,7 @@ impl Document {
         // the saved step and the document would look clean.
         self.history.seal();
         self.saved_at = self.history.top_id();
+        self.remember_disk_text();
     }
 
     /// Whether saving goes through [`Document::begin_save`] on a worker:
@@ -1052,6 +1203,7 @@ impl Document {
     pub fn replace(&mut self, range: Range<usize>, text: &str) -> Result<Edit, EditError> {
         let before = self.selections.clone();
         let edit = self.buffer.replace(range, text)?;
+        self.edits.note(&self.buffer, &edit);
         self.syntax.edit(&self.buffer, &edit);
         self.set_selection(Selection::cursor(edit.new_range().end));
         self.history
@@ -1084,8 +1236,11 @@ impl Document {
                 Ok(done) => edits = done,
                 Err(e) => result = Err(e),
             }
-            let (syntax, buffer) = (&mut self.syntax, &self.buffer);
-            nimbus_core::report_sorted(&mut edits, |edit| syntax.edit(buffer, edit));
+            let (syntax, log, buffer) = (&mut self.syntax, &mut self.edits, &self.buffer);
+            nimbus_core::report_sorted(&mut edits, |edit| {
+                log.note(buffer, edit);
+                syntax.edit(buffer, edit);
+            });
         } else {
             // Apply from the end so earlier offsets stay valid; record in
             // application order, which is what undo reverses. Each edit is
@@ -1093,6 +1248,7 @@ impl Document {
             for (range, text) in items.iter().rev() {
                 match self.buffer.replace(range.clone(), text) {
                     Ok(edit) => {
+                        self.edits.note(&self.buffer, &edit);
                         self.syntax.edit(&self.buffer, &edit);
                         edits.push(edit);
                     }
@@ -1768,10 +1924,11 @@ impl Document {
     /// Returns an [`EditError`] if the history no longer matches the text,
     /// which would be a bug.
     pub fn undo(&mut self) -> Result<bool, EditError> {
-        let syntax = &mut self.syntax;
-        let Some(restored) = self
-            .history
-            .undo(&mut self.buffer, &mut |text, edit| syntax.edit(text, edit))?
+        let (syntax, log) = (&mut self.syntax, &mut self.edits);
+        let Some(restored) = self.history.undo(&mut self.buffer, &mut |text, edit| {
+            log.note(text, edit);
+            syntax.edit(text, edit);
+        })?
         else {
             return Ok(false);
         };
@@ -1785,10 +1942,11 @@ impl Document {
     ///
     /// As for [`Document::undo`].
     pub fn redo(&mut self) -> Result<bool, EditError> {
-        let syntax = &mut self.syntax;
-        let Some(restored) = self
-            .history
-            .redo(&mut self.buffer, &mut |text, edit| syntax.edit(text, edit))?
+        let (syntax, log) = (&mut self.syntax, &mut self.edits);
+        let Some(restored) = self.history.redo(&mut self.buffer, &mut |text, edit| {
+            log.note(text, edit);
+            syntax.edit(text, edit);
+        })?
         else {
             return Ok(false);
         };
@@ -1830,8 +1988,11 @@ impl Document {
         if edits.is_empty() {
             return Ok(false);
         }
-        let (syntax, buffer) = (&mut self.syntax, &self.buffer);
-        report_sorted(&mut edits, |edit| syntax.edit(buffer, edit));
+        let (syntax, log, buffer) = (&mut self.syntax, &mut self.edits, &self.buffer);
+        report_sorted(&mut edits, |edit| {
+            log.note(buffer, edit);
+            syntax.edit(buffer, edit);
+        });
         self.selections.map_through(&edits, bias.0, bias.1);
         self.history
             .record_batch(edits, &before, &self.selections, Instant::now());

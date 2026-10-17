@@ -113,6 +113,18 @@ ui_colors! {
     search_match,
     /// A file's row in the find-in-files results.
     search_file,
+    /// Compare view: lines only in the new text.
+    diff_added,
+    /// Compare view: lines only in the old text.
+    diff_removed,
+    /// Compare view: lines changed on both sides.
+    diff_changed,
+    /// Compare view: the changed words within a changed line.
+    diff_word,
+    /// Compare view: filler rows where the other side has more lines.
+    diff_filler,
+    /// Merge view: a conflict.
+    merge_conflict,
 }
 
 /// A loaded theme.

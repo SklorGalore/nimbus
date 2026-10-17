@@ -54,6 +54,11 @@ keyword = { color = "#ff6ac1", bold = true }
 comment = { italic = true }
 ```
 
+The compare view (M9) has its own `[ui]` keys: `diff_added`,
+`diff_removed` and `diff_changed` for the row backgrounds, `diff_word` for
+the changed words within a line, `diff_filler` for the rows one side has
+no line for, and `merge_conflict` for the merge view.
+
 ## Which language a file is
 
 Map file names or `*.ext` patterns in `config.toml`:

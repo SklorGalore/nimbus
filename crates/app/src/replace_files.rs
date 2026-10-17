@@ -352,13 +352,13 @@ mod tests {
         assert_eq!(report.saved.len(), 1);
         let (restored, failed) = undo(&report.saved);
         assert_eq!(restored, vec![a.clone()]);
-        assert!(failed.is_empty());
+        assert_eq!(failed, vec![]);
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "foo and foo\n");
         // Changed after the replace: left alone.
         let report = run(&rep("foo", "qux", false), &jobs[..1]);
         std::fs::write(&a, "edited meanwhile\n").unwrap();
         let (restored, failed) = undo(&report.saved);
-        assert!(restored.is_empty());
+        assert_eq!(restored, Vec::<PathBuf>::new());
         assert_eq!(failed[0].1, "changed since");
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "edited meanwhile\n");
     }

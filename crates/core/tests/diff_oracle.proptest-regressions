@@ -1,0 +1,14 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f261b058dcd74ede693d3f42efcaf2a6bcce8912622251a174988b7179884a3c # shrinks to (old, new) = ("    x\né\na\n    x\n", "é\na\n    x\n    x\n")
+cc 221be9d853adfe26fecfd837421761f9735efce79d1068529610e146e713979b # shrinks to (old, new) = ("a\n\n", "\na\n")
+cc 34515217ecab8babd3577fa0fa9d55e9561245f996929a59f6f8931cd33fcf84 # shrinks to (old, new) = ("\n", "x\n")
+cc 0999be8d3253ba7be33093a0b1670409cd0f0b874c26f4f6f1100aa7012dc5dd # shrinks to (old, new) = ("a\na\n}\na\n", "\ta\n"), pad = 1
+cc f7ce19786a08c0371e446fe6c0267472f2e90a59833a9ed128b616637f73375b # shrinks to (old, new) = ("x", "x")
+cc 23341bc8e052b8be1dc1747fbfa762e92cd79542cc42f3af751e134d95303174 # shrinks to (old, new) = ("x", "x")
+cc c8fa395e43044548277f433ea104f60521ebd9cb332b480948ef38b5a2cef1e7 # shrinks to (old0, new0) = ("fn f() {\nfn f() {\nxé\na\na\na\n", "fn f() {\na\na\na\na\na\né\na\né\na\na\na\na\na\n {\nfn f() {\nxé\na\na\na\na\n"), edits = [(false, (Index(3439223471369577420), Index(0), "fn f() {\né\né\na\na\na\na\nfn f() {\na\na\na\n"), false), (true, (Index(9882184325201545509), Index(0), ""), false), (false, (Index(13176245766935394012), Index(0), ""), true), (false, (Index(0), Index(0), ""), false)]
+cc 3ad3674f9f3a1963ba68def95152bc13b956c169ff0cadd83ad61ca98abb145e # shrinks to (old0, new0) = ("é\n", "é\na\né\n"), edits = [(true, (Index(0), Index(0), "a\na\na\n🙂\n🙂\né\na\nx"), false), (true, (Index(12297829382473034411), Index(12297829382473034411), "a\nfn f() {\né\nfn f() {\na\n"), false), (true, (Index(0), Index(0), ""), false)]

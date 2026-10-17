@@ -27,7 +27,7 @@ use nimbus_core::line_index::{LineIndex, Spacing};
 use nimbus_core::undo::COALESCE_WINDOW;
 use nimbus_core::{
     Buffer, Content, Edit, EditError, History, Limits, MappedBuffer, RopeBuffer, Selection,
-    Selections, Text, VecSource,
+    Selections, VecSource,
 };
 use proptest::prelude::*;
 use proptest::sample::Index;
@@ -224,7 +224,7 @@ fn any_op() -> BoxedStrategy<Op> {
 /// pieces is read from the buffer's storage; either way it must be what
 /// the buffer now holds at the edit's new range.
 #[expect(clippy::unwrap_used, reason = "test helper")]
-fn replay_into(mirror: &mut String) -> impl FnMut(&dyn Text, &Edit) + '_ {
+fn replay_into(mirror: &mut String) -> impl FnMut(&dyn Buffer, &Edit) + '_ {
     |after, edit| {
         let bytes = bytes_of(&edit.inserted);
         let inserted = std::str::from_utf8(&bytes).unwrap();

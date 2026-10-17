@@ -43,7 +43,8 @@ after a rebuild, in each milestone's Results.
 - Bidirectional and right-to-left text. Decided at approval; the renderer
   assumes left-to-right runs.
 - Multiple windows. One window with tabs.
-- Session restore. Reopening the last files is a nice-to-have after M8.
+- Session restore, until M12 (drafted): reopening the last files is a
+  nice-to-have after M9.
 - Native menu bar on Linux (§4.4).
 
 ## 3. Platform
@@ -363,7 +364,16 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
   interned line tokens, runs on workers, and is re-done locally around
   each edit, so diff views keep the editor's typing budget at any file
   size. Columns are ordinary `View`s on rows aligned through a prefix sum
-  over the hunks.
+  over the hunks. The algorithm is Myers (`imara-diff`, with its cut-offs
+  for large inputs and an indentation heuristic for placing hunks), chosen
+  over histogram by measurement: histogram cannot anchor on lines that
+  repeat more than a few dozen times, which most lines of code and logs
+  do, and took 19 s where Myers took 0.14 s on a 60 MB pair (M9 doc,
+  Results). A full diff covers at most 256 MB per side (`DIFF_LIMIT`,
+  the rope threshold); past that, windows. A merge's result is followed
+  through edits by tracked regions (line ranges shifted per edit, no
+  re-diff), so taking a side is one undoable `replace`; merges, like
+  compares, are computed on a worker while the tab shows its texts.
 - **Window state**: the sidebar's visibility and width are remembered in
   `state.toml` beside the config. Nimbus never writes the user's
   `config.toml`.
@@ -452,6 +462,7 @@ it.
 | `notify` | latest at M6 | file watching | M6 |
 | `memmap2`, `memchr` | 0.9, 2 | mapped buffer, newline scanning | M7 |
 | `fontdb` | 0.24 | system font discovery and fallback | M8 |
+| `imara-diff` | 0.2 | line diff (Myers) over our own tokens | M9 |
 
 ## 8. Milestones
 
@@ -470,7 +481,18 @@ introduces and points at the code.
 | 6 | File tree | **Done** | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
 | 7 | Huge files | **Done** | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
 | 8 | Polish | **Done** | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
-| 9 | Compare and merge | Next | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
+| 9 | Compare and merge | **Done** | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
+| 10 | Find in files | **Next** | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
+| 11 | Everyday editing | Planned | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
+| 12 | Workspace | Planned | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
+| 13 | Split views and folding | Planned | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
+| 14 | Languages, second pass | Planned | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
+| 15 | Distribution | Planned | Signed, notarised, installable builds; an update check | [m15](docs/milestones/m15-distribution.md) |
+
+M10–M15 were drafted after M8 from the items earlier plans deferred;
+`docs/milestones/backlog.md` maps each item to its plan. The owner
+approved the six plans and their order on 2026-10-17 and answered their
+open questions (§9, §10): M10 is Next, and M11–M15 follow in that order.
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -479,7 +501,32 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-None open.
+None open. The questions the drafts of M10–M15 raised were answered on
+2026-10-17, when the owner approved the six plans and their order:
+
+- Order: M10 (find in files), then M11 (everyday editing), then M12 to
+  M15 as drafted. M10 is Next.
+- M10: the search panel is a second mode of the sidebar, beside Files;
+  results cap at 10,000 matches; undoing a replace across files keeps up
+  to 64 MB of old contents.
+- M11: auto-pairs on by default for code, off for Markdown and plain
+  text; line operations refuse selections over 64 MB; the chord timeout
+  is a fixed two seconds.
+- M12: `nimbus` with no arguments reopens the last session, and
+  `--no-session` skips it; deleting from the tree goes to the system
+  trash through the `trash` crate, measured for binary size; autosave of
+  unsaved work for crash recovery is not planned (it would write the
+  user's text somewhere they did not choose) and stays unscheduled in
+  `backlog.md`.
+- M13: up to three editor columns, no nesting or stacking; the same file
+  may be open in two columns, so the document-and-pane refactor is in
+  scope.
+- M14: add C, Go, HTML, CSS and TSX, each measured against the 35 MB
+  budget before it stays; Go to Symbol is `Primary+Shift+R`.
+- M15: no Apple Developer account and no Windows certificate, so builds
+  ship unsigned and the README keeps its `xattr` step; the startup
+  update check is off unless `check_updates = true`; `SHA256SUMS` is
+  signed with `minisign`.
 
 Resolved before M8: Dependabot updates GitHub Actions weekly
 (`.github/dependabot.yml`); cargo crates are updated by hand at each
@@ -557,3 +604,15 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-16 | Release builds: draft GitHub release on a `v*` tag; unsigned; macOS universal binary | §8, m8 |
 | 2026-10-16 | App icon redrawn: white cloud and dark I-beam on an amber tile, on Apple's icon grid; solid shapes so it reads at 16 px | m8 |
 | 2026-10-16 | Built-in themes take the icon's colours: amber is the one accent, selection is a shade of the ink; light theme on warm paper with a burnt-amber cursor | §4.4, m8 |
+| 2026-10-17 | M10–M15 drafted from the items M1–M9 deferred; order and `Proposed` items await the owner (`backlog.md`) | §8, §9 |
+| 2026-10-17 | M9 diff: Myers over histogram after measurement; full diff up to 256 MB per side, windows past that; lines interned by streaming hash, verified by bytes | §4.4, m9 |
+| 2026-10-17 | M9 merge: touching hunks conflict (git's rule); the result is tracked by regions shifted per edit, not re-diffed; conflict markers read back by splitting into base, ours, theirs; a two-way merge is the three-way machinery with the left text as base | §4.4, m9 |
+| 2026-10-17 | M9: merges and compares are built on workers; the tab shows its texts unaligned until the answer arrives, and edits wait on a pending merge | §4.4, m9 |
+| 2026-10-17 | M9 long-line splitting (layer 4) deferred to the backlog: a view question (how a split line's pieces show) before a diff one | m9, backlog |
+| 2026-10-17 | M10–M15 approved in that order; M10 (find in files) is Next | §8, §9, backlog |
+| 2026-10-17 | Find in files lives in the sidebar as a Search mode; 10,000-match cap; 64 MB undo budget for replace across files | §9, m10 |
+| 2026-10-17 | Auto-pairs on for code, off for Markdown and plain text; line operations refuse selections over 64 MB; chord timeout fixed at two seconds | §9, m11 |
+| 2026-10-17 | `nimbus` alone reopens the last session (`--no-session` skips); tree delete uses the `trash` crate; no autosave for crash recovery | §9, m12 |
+| 2026-10-17 | Up to three editor columns, no nesting; one file may be open in two columns, so documents and panes are split | §9, m13 |
+| 2026-10-17 | Grammars to add: C, Go, HTML, CSS, TSX, each measured against the 35 MB budget; Go to Symbol is `Primary+Shift+R` | §9, m14 |
+| 2026-10-17 | No signing accounts: builds stay unsigned and the README keeps its `xattr` step; update check off unless `check_updates = true`; checksums signed with `minisign` | §9, m15 |

@@ -159,10 +159,63 @@ pub enum Command<'a> {
     /// Open the config file in a tab, creating it if needed.
     OpenConfig,
     /// Quit (asking about unsaved changes first).
+    /// Compare the active tab with its file on disk (M9).
+    CompareSaved,
+    /// Compare the active tab with a file chosen in a dialog.
+    CompareFile,
+    /// Compare the active tab with another open tab.
+    CompareTab,
+    /// Go to the next change in a compare.
+    DiffNext,
+    /// Go to the previous change in a compare.
+    DiffPrev,
+    /// Switch a compare between two columns and one.
+    DiffUnified,
+    /// Leave the compare, keeping the tab.
+    DiffClose,
+    /// Merge two files into a new tab (M9).
+    MergeFiles,
+    /// Merge the active tab with another file, given their common base.
+    MergeWithBase,
+    /// In a merge: take the left column's lines for the change at the cursor.
+    TakeLeft,
+    /// In a merge: take the right column's lines.
+    TakeRight,
+    /// In a merge: take both, left first.
+    TakeBoth,
+    /// In a merge: take both, right first.
+    TakeBothReversed,
+    /// In a merge: go to the next open conflict.
+    NextConflict,
+    /// In a merge: go to the previous open conflict.
+    PrevConflict,
+    /// Open the three-way merge view on a file with conflict markers.
+    ResolveMarkers,
+    /// Merge unsaved edits with the file as it changed on disk.
+    MergeWithDisk,
     Close,
 }
 
 impl Command<'_> {
+    /// Whether the command belongs to find in files (the sidebar's Search
+    /// panel), which runs the same wherever the keyboard is.
+    #[must_use]
+    pub fn is_find_in_files(self) -> bool {
+        matches!(
+            self,
+            Command::FindInFiles
+                | Command::ReplaceInFiles
+                | Command::NextResult
+                | Command::PrevResult
+                | Command::SearchToggleCase
+                | Command::SearchToggleRegex
+                | Command::SearchToggleWord
+                | Command::ReplaceInFilesAll
+                | Command::UndoReplaceInFiles
+                | Command::ClearSearch
+        )
+    }
+
     /// Whether the command changes the document's text when the editor
     /// has focus. Such commands wait while the document is being saved.
     /// (Replace and Replace All change it too; they run from the find bar,
