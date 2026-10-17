@@ -394,7 +394,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::float_cmp, reason = "exact values by construction")]
     fn clicks_select_rows_and_the_divider_resizes() {
         let l = layout();
         let mut s = sidebar();

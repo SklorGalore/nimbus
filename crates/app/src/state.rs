@@ -70,7 +70,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[expect(clippy::float_cmp, reason = "exact values by construction")]
     fn round_trips_and_tolerates_partial_files() {
         let s = State {
             sidebar_visible: false,

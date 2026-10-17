@@ -180,7 +180,7 @@ fn check(old: &str, new: &str, make: fn(&str) -> Arc<dyn Snapshot>) -> Vec<Hunk>
         "hunks {hunks:?} from {old:?}"
     );
     if old == new {
-        assert!(hunks.is_empty());
+        assert!(hunks.is_empty(), "{hunks:?}");
     }
     hunks
 }
@@ -238,7 +238,7 @@ fn check_compare(
         c.hunks
     );
     if old == new {
-        assert!(c.hunks.is_empty());
+        assert!(c.hunks.is_empty(), "{:?}", c.hunks);
         assert_eq!(c.lines_diffed, 0);
     }
     if options.limit >= old.len().max(new.len()) {

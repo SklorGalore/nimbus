@@ -252,7 +252,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[expect(clippy::float_cmp, reason = "exact values by construction")]
     fn slot_uvs_cover_exactly_the_rect() {
         let slot = slot_for(Rect {
             x: 1024,

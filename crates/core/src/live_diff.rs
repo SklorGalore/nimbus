@@ -476,7 +476,7 @@ mod tests {
     fn typing_inside_a_line_rediffs_that_line_only() {
         let old = "a\nb\nc\nd\ne\n";
         let mut live = LiveDiff::new(&snap(old), &snap(old)).unwrap();
-        assert!(live.hunks().is_empty());
+        assert!(live.hunks().is_empty(), "{:?}", live.hunks());
         let new = edited(old, 4, 0, "X");
         let region = live
             .edit_now(Side::New, &snap(&new), span(old, 4, 0, "X"))
@@ -510,7 +510,7 @@ mod tests {
             .unwrap();
         // Before the re-diff the later hunk has moved, and the region
         // took it (it is within the context) out of the list.
-        assert!(live.hunks().is_empty());
+        assert!(live.hunks().is_empty(), "{:?}", live.hunks());
         assert_eq!(
             region.stale,
             vec![Hunk {

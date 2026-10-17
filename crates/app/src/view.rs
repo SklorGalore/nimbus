@@ -2338,7 +2338,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::float_cmp, reason = "exact values by construction")]
     fn toggling_wrap_keeps_the_top_line() {
         // The top is mid-line (row 1 of a wrapped line); unwrapped, the row
         // containing it is the whole line, so the line stays at the top.

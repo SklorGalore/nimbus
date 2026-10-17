@@ -464,14 +464,12 @@ impl LineHash {
             self.push_byte(bytes[0]);
             bytes = &bytes[1..];
         }
-        let mut words = bytes.chunks_exact(8);
-        for w in &mut words {
-            // `w` is exactly 8 bytes, so the conversion cannot fail; the
-            // fallback never runs.
-            let word = u64::from_le_bytes(w.try_into().unwrap_or([0; 8]));
-            self.mix(word);
+        // Whole 8-byte words first, then the bytes left over.
+        let (words, rest) = bytes.as_chunks::<8>();
+        for word in words {
+            self.mix(u64::from_le_bytes(*word));
         }
-        for &b in words.remainder() {
+        for &b in rest {
             self.push_byte(b);
         }
     }
@@ -585,9 +583,9 @@ mod tests {
     #[test]
     fn identical_texts_have_no_hunks() {
         let (_, _, _, h) = hunks("a\nb\nc\n", "a\nb\nc\n");
-        assert!(h.is_empty());
+        assert!(h.is_empty(), "{h:?}");
         let (_, _, _, h) = hunks("", "");
-        assert!(h.is_empty());
+        assert!(h.is_empty(), "{h:?}");
     }
 
     #[test]
