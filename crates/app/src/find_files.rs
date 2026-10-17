@@ -694,6 +694,66 @@ mod tests {
         v
     }
 
+    /// Measure a search over a real tree: `NIMBUS_BENCH_ROOT` names the
+    /// folder and `NIMBUS_BENCH_PATTERN` the pattern (default `e`). Prints
+    /// the time to the first batch, the time to the end, the counts, and
+    /// an estimate of what the results occupy in memory (M10 task 9).
+    #[test]
+    #[ignore = "benchmark; run explicitly in release mode"]
+    fn search_tree_benchmark() {
+        let Ok(root) = std::env::var("NIMBUS_BENCH_ROOT") else {
+            eprintln!("set NIMBUS_BENCH_ROOT to the folder to search");
+            return;
+        };
+        let pattern = std::env::var("NIMBUS_BENCH_PATTERN").unwrap_or_else(|_| "e".into());
+        // A relative root is taken from the crate folder, where cargo runs
+        // tests; the app always searches under a canonical root.
+        let root = std::fs::canonicalize(&root).unwrap();
+        let p = params(&root, &pattern);
+        let generation = Arc::new(Generation::default());
+        let (tx, rx) = mpsc::channel();
+        let started = Instant::now();
+        let g = start(&p, Snapshots::new(), &generation, move |b| {
+            tx.send(b).is_ok()
+        })
+        .unwrap();
+        let mut results = Results::new(g, p.root.clone());
+        let mut first = None;
+        while !results.done {
+            assert!(results.receive(rx.recv().unwrap()));
+            if first.is_none() && results.hits > 0 {
+                first = Some(started.elapsed());
+            }
+        }
+        let total = started.elapsed();
+        let bytes = results.previews.capacity()
+            + results.files.capacity() * std::mem::size_of::<FileHits>()
+            + results
+                .files
+                .iter()
+                .map(|f| {
+                    f.path.as_os_str().len()
+                        + f.rel.capacity()
+                        + f.hits.capacity() * std::mem::size_of::<Hit>()
+                })
+                .sum::<usize>()
+            + results.index.capacity() * (std::mem::size_of::<(PathBuf, usize)>() + 16);
+        eprintln!(
+            "pattern {pattern:?} under {}: first batch after {:?}, done after {total:?}; \
+             {} hits in {} files, {} searched, {} skipped, {} errors, capped {}; \
+             results hold about {} KB",
+            root.display(),
+            first.unwrap_or(total),
+            results.hits,
+            results.files.len(),
+            results.searched,
+            results.skipped,
+            results.errors,
+            results.capped,
+            bytes / 1024
+        );
+    }
+
     #[test]
     fn searches_a_tree_with_line_numbers_and_previews() {
         let dir = tree();
