@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
 
+use nimbus_core::live_diff::EditSpan;
 use nimbus_core::search::{self, Literal};
 use nimbus_core::{
     AnyBuffer, Bias, Buffer, Edit, EditError, History, LineEnding, MappedBuffer, Selection,
@@ -195,6 +196,29 @@ pub struct Document {
     /// A save of this mapped document under way ([`crate::saver`]). Edits
     /// wait while it is set.
     saving: Option<Saving>,
+    /// Edits since a compare view (M9) last looked, so it can follow them.
+    edits: EditLog,
+}
+
+/// Edits noted for an observer, such as the compare view's live diff,
+/// which needs every change in order, undo and redo included. Off until
+/// something asks; drained each frame while on.
+#[derive(Debug, Default)]
+pub struct EditLog {
+    on: bool,
+    /// One entry per edit, in application order; `None` for an edit whose
+    /// span could not be worked out (the observer then starts over).
+    spans: Vec<Option<EditSpan>>,
+    /// The text was replaced wholesale (a reload), with no edit records.
+    reset: bool,
+}
+
+impl EditLog {
+    fn note(&mut self, text: &dyn Text, edit: &Edit) {
+        if self.on {
+            self.spans.push(EditSpan::after(text, edit));
+        }
+    }
 }
 
 /// Stops a worker when dropped: when its document closes, reloads or goes
@@ -493,6 +517,7 @@ impl Document {
         self.saved_at = self.history.top_id();
         self.deleted = false;
         self.conflict = false;
+        self.edits.reset = true;
         self.version += 1;
         let pos = match place {
             Some((line, col)) => {
@@ -568,6 +593,39 @@ impl Document {
             (true, true, true) => Some("BOM"),
             (true, true, false) => None,
         }
+    }
+
+    /// A separate document holding a copy of this one's text, for the
+    /// compare view's read-only side when comparing two tabs. `None` for
+    /// a text too large to copy (over the diff limit) or held as pieces of
+    /// a mapped file; the caller compares with the file instead.
+    #[must_use]
+    pub fn copy_of(&self) -> Option<Self> {
+        if self.buffer.len_bytes() > nimbus_core::DIFF_LIMIT || self.buffer.is_mapped() {
+            return None;
+        }
+        let text = self.buffer.slice(0..self.buffer.len_bytes());
+        Some(Self {
+            buffer: nimbus_core::RopeBuffer::from_text(&text).into(),
+            path: self.path.clone(),
+            line_ending: self.line_ending,
+            ..Self::default()
+        })
+    }
+
+    /// Start or stop noting edits for an observer ([`Document::take_edits`]).
+    /// Starting clears anything noted before.
+    pub fn watch_edits(&mut self, on: bool) {
+        self.edits.on = on;
+        self.edits.spans.clear();
+        self.edits.reset = false;
+    }
+
+    /// The edits noted since the last call, in order, and whether the text
+    /// was replaced wholesale in between (then the spans are moot).
+    pub fn take_edits(&mut self) -> (Vec<Option<EditSpan>>, bool) {
+        let reset = std::mem::take(&mut self.edits.reset);
+        (std::mem::take(&mut self.edits.spans), reset)
     }
 
     /// Whether there are unsaved changes.
@@ -1052,6 +1110,7 @@ impl Document {
     pub fn replace(&mut self, range: Range<usize>, text: &str) -> Result<Edit, EditError> {
         let before = self.selections.clone();
         let edit = self.buffer.replace(range, text)?;
+        self.edits.note(&self.buffer, &edit);
         self.syntax.edit(&self.buffer, &edit);
         self.set_selection(Selection::cursor(edit.new_range().end));
         self.history
@@ -1084,8 +1143,11 @@ impl Document {
                 Ok(done) => edits = done,
                 Err(e) => result = Err(e),
             }
-            let (syntax, buffer) = (&mut self.syntax, &self.buffer);
-            nimbus_core::report_sorted(&mut edits, |edit| syntax.edit(buffer, edit));
+            let (syntax, log, buffer) = (&mut self.syntax, &mut self.edits, &self.buffer);
+            nimbus_core::report_sorted(&mut edits, |edit| {
+                log.note(buffer, edit);
+                syntax.edit(buffer, edit);
+            });
         } else {
             // Apply from the end so earlier offsets stay valid; record in
             // application order, which is what undo reverses. Each edit is
@@ -1093,6 +1155,7 @@ impl Document {
             for (range, text) in items.iter().rev() {
                 match self.buffer.replace(range.clone(), text) {
                     Ok(edit) => {
+                        self.edits.note(&self.buffer, &edit);
                         self.syntax.edit(&self.buffer, &edit);
                         edits.push(edit);
                     }
@@ -1768,10 +1831,11 @@ impl Document {
     /// Returns an [`EditError`] if the history no longer matches the text,
     /// which would be a bug.
     pub fn undo(&mut self) -> Result<bool, EditError> {
-        let syntax = &mut self.syntax;
-        let Some(restored) = self
-            .history
-            .undo(&mut self.buffer, &mut |text, edit| syntax.edit(text, edit))?
+        let (syntax, log) = (&mut self.syntax, &mut self.edits);
+        let Some(restored) = self.history.undo(&mut self.buffer, &mut |text, edit| {
+            log.note(text, edit);
+            syntax.edit(text, edit);
+        })?
         else {
             return Ok(false);
         };
@@ -1785,10 +1849,11 @@ impl Document {
     ///
     /// As for [`Document::undo`].
     pub fn redo(&mut self) -> Result<bool, EditError> {
-        let syntax = &mut self.syntax;
-        let Some(restored) = self
-            .history
-            .redo(&mut self.buffer, &mut |text, edit| syntax.edit(text, edit))?
+        let (syntax, log) = (&mut self.syntax, &mut self.edits);
+        let Some(restored) = self.history.redo(&mut self.buffer, &mut |text, edit| {
+            log.note(text, edit);
+            syntax.edit(text, edit);
+        })?
         else {
             return Ok(false);
         };
@@ -1830,8 +1895,11 @@ impl Document {
         if edits.is_empty() {
             return Ok(false);
         }
-        let (syntax, buffer) = (&mut self.syntax, &self.buffer);
-        report_sorted(&mut edits, |edit| syntax.edit(buffer, edit));
+        let (syntax, log, buffer) = (&mut self.syntax, &mut self.edits, &self.buffer);
+        report_sorted(&mut edits, |edit| {
+            log.note(buffer, edit);
+            syntax.edit(buffer, edit);
+        });
         self.selections.map_through(&edits, bias.0, bias.1);
         self.history
             .record_batch(edits, &before, &self.selections, Instant::now());

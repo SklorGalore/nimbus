@@ -248,6 +248,49 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::OpenConfig,
         Keys::NONE,
     ),
+    // Compare (M9).
+    act(
+        "diff.compareSaved",
+        "Compare with Saved",
+        Command::CompareSaved,
+        Keys::NONE,
+    ),
+    act(
+        "diff.compareFile",
+        "Compare with File…",
+        Command::CompareFile,
+        Keys::NONE,
+    ),
+    act(
+        "diff.compareTab",
+        "Compare with Tab…",
+        Command::CompareTab,
+        Keys::NONE,
+    ),
+    act(
+        "diff.next",
+        "Next Change",
+        Command::DiffNext,
+        Keys::all(&["F7"]),
+    ),
+    act(
+        "diff.previous",
+        "Previous Change",
+        Command::DiffPrev,
+        Keys::all(&["Shift+F7"]),
+    ),
+    act(
+        "diff.toggleUnified",
+        "Toggle Unified Compare",
+        Command::DiffUnified,
+        Keys::NONE,
+    ),
+    act(
+        "diff.close",
+        "Close Compare",
+        Command::DiffClose,
+        Keys::NONE,
+    ),
     // Editing.
     act(
         "edit.undo",

@@ -7,6 +7,7 @@
 //! short retries), so an idle editor uses no CPU.
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -25,6 +26,7 @@ use nimbus_core::{Buffer, Text};
 use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
+use crate::compare::{Click, Compare, DiffResult, Other};
 use crate::config::{self, Config};
 use crate::debug::Debug;
 use crate::document::{DiskChange, Document, MAX_COPY_BYTES, Occurrence};
@@ -70,6 +72,8 @@ pub enum AppEvent {
     Index(u64, IndexChunk, Option<String>),
     /// Progress or the end of saving a huge file ([`crate::saver`]).
     Save(SaveEvent),
+    /// A compare's diff finished on a worker (M9).
+    Diff(DiffResult),
 }
 
 /// List a folder for the sidebar on its own thread.
@@ -154,6 +158,8 @@ pub struct Tab {
     /// tab's save: the history's top id then, so the question is not asked
     /// again when the quit goes on, unless the text changed since.
     discard_at: Option<u64>,
+    /// A compare view on this tab (M9): the other side and the diff.
+    pub compare: Option<Box<Compare>>,
 }
 
 impl Tab {
@@ -168,6 +174,7 @@ impl Tab {
             noted_size: false,
             after_save: AfterSave::default(),
             discard_at: None,
+            compare: None,
         }
     }
 }
@@ -512,7 +519,12 @@ impl App {
     fn layout(&self) -> Option<Layout> {
         let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
         let scale = to_f32(effective_scale(window.scale_factor()));
-        Some(layout_for(gpu, scale, self.doc(), &self.find).with_sidebar(self.sidebar.px(scale)))
+        let tab = &self.tabs[self.active];
+        let mut lines = line_estimate(&tab.doc.buffer);
+        if let Some(c) = &tab.compare {
+            lines = lines.max(line_estimate(&c.other.buffer));
+        }
+        Some(layout_for_lines(gpu, scale, lines, &self.find).with_sidebar(self.sidebar.px(scale)))
     }
 
     /// What the debug overlay reports about the active document and the
@@ -547,7 +559,10 @@ impl App {
         if keep_cursor_visible && let Some(layout) = self.layout() {
             let tab_width = self.tab_width();
             let tab = &mut self.tabs[self.active];
-            tab.view.ensure_cursor_visible(&tab.doc, &layout, tab_width);
+            match tab.compare.as_mut() {
+                Some(c) => c.ensure_cursor_visible(&tab.doc, &layout),
+                None => tab.view.ensure_cursor_visible(&tab.doc, &layout, tab_width),
+            }
         }
         self.update_title();
         if let Some(window) = &self.window {
@@ -676,10 +691,163 @@ impl App {
                 self.quit(event_loop);
                 return true;
             }
+            _ => return self.run_compare_command(cmd),
+        }
+        self.changed(false);
+        true
+    }
+
+    /// The compare view's commands (M9). Returns `false` for any other.
+    fn run_compare_command(&mut self, cmd: Command<'_>) -> bool {
+        match cmd {
+            Command::CompareSaved => self.compare_with_saved(),
+            Command::CompareFile => self.compare_with_file(),
+            Command::CompareTab => self.compare_with_tab(),
+            Command::DiffNext => self.diff_step(true),
+            Command::DiffPrev => self.diff_step(false),
+            Command::DiffUnified => {
+                if let Some(c) = self.tabs[self.active].compare.as_mut() {
+                    c.toggle_unified();
+                }
+            }
+            Command::DiffClose => {
+                let tab = &mut self.tabs[self.active];
+                if let Some(c) = tab.compare.take() {
+                    c.finish(&mut tab.doc);
+                }
+            }
             _ => return false,
         }
         self.changed(false);
         true
+    }
+
+    /// A compare's worker finished: hand the diff to the compare it is for.
+    fn diff_arrived(&mut self, result: DiffResult) {
+        for tab in &mut self.tabs {
+            if let Some(c) = tab.compare.as_mut()
+                && c.wants(&result)
+            {
+                c.receive(&tab.doc, result);
+                self.changed(false);
+                return;
+            }
+        }
+    }
+
+    /// A parse finished: if a compare's left side was waiting for it, that
+    /// side takes it and the frame is redrawn; otherwise it is handed back.
+    fn other_side_parsed(&mut self, result: JobResult) -> Option<JobResult> {
+        let Some(c) = self
+            .tabs
+            .iter_mut()
+            .filter_map(|t| t.compare.as_deref_mut())
+            .find(|c| c.other.syntax.waiting_for(result.id()))
+        else {
+            return Some(result);
+        };
+        let other = &mut c.other;
+        if let Some(job) = other.syntax.finish(result, &other.buffer, SYNTAX_BUDGET) {
+            spawn_syntax(&self.proxy, job);
+        }
+        self.changed(false);
+        None
+    }
+
+    /// The sender a compare's worker reports through.
+    fn diff_sender(&self) -> crate::compare::Send {
+        let proxy = self.proxy.clone();
+        Arc::new(move |r| proxy.send_event(AppEvent::Diff(r)).is_ok())
+    }
+
+    /// Put the active tab side by side with `other`.
+    fn start_compare(&mut self, mut other: Document, what: Other) {
+        let send = self.diff_sender();
+        other.detect_language(&self.languages);
+        if let Some(job) = other.syntax.take_job(&other.buffer) {
+            spawn_syntax(&self.proxy, job);
+        }
+        let tab = &mut self.tabs[self.active];
+        if let Some(old) = tab.compare.take() {
+            old.finish(&mut tab.doc);
+        }
+        tab.view.set_wrap(false);
+        tab.compare = Some(Box::new(Compare::start(&mut tab.doc, other, what, send)));
+        self.changed(true);
+    }
+
+    fn compare_with_saved(&mut self) {
+        let Some(path) = self.doc().path.clone() else {
+            self.say("This tab has no file on disk to compare with", true);
+            return;
+        };
+        match Document::open(&path) {
+            Ok(other) => self.start_compare(other, Other::Saved),
+            Err(e) => self.say(format!("Cannot read {}: {e}", path.display()), true),
+        }
+    }
+
+    fn compare_with_file(&mut self) {
+        let mut dialog = FileDialog::new().set_directory(&self.root);
+        if let Some(window) = &self.window {
+            dialog = dialog.set_parent(window.as_ref());
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        match Document::open(&path) {
+            Ok(other) => self.start_compare(other, Other::File(path)),
+            Err(e) => self.say(format!("Cannot read {}: {e}", path.display()), true),
+        }
+    }
+
+    /// Compare with another tab: the only other one, or one picked.
+    fn compare_with_tab(&mut self) {
+        let others: Vec<usize> = (0..self.tabs.len()).filter(|&i| i != self.active).collect();
+        match others.as_slice() {
+            [] => self.say("No other tab to compare with", true),
+            [only] => self.compare_with_tab_index(*only),
+            _ => self.open_picker(Kind::Tabs),
+        }
+    }
+
+    /// Compare with tab `i`: a copy of its text as it is now.
+    fn compare_with_tab_index(&mut self, i: usize) {
+        if i == self.active || i >= self.tabs.len() {
+            return;
+        }
+        let src = &self.tabs[i].doc;
+        let name = src.display_name();
+        match (src.copy_of(), src.path.clone()) {
+            (Some(copy), _) => self.start_compare(copy, Other::Tab(name)),
+            (None, Some(path)) => match Document::open(&path) {
+                Ok(other) => self.start_compare(other, Other::File(path)),
+                Err(e) => self.say(format!("Cannot read {}: {e}", path.display()), true),
+            },
+            (None, None) => self.say("That tab is too large to copy for comparing", true),
+        }
+    }
+
+    /// Move to the next or previous change of the active compare.
+    fn diff_step(&mut self, forward: bool) {
+        let Some(layout) = self.layout() else { return };
+        let tab = &mut self.tabs[self.active];
+        let Some(c) = tab.compare.as_mut() else {
+            self.say("Not comparing; run Compare with Saved first", false);
+            return;
+        };
+        let pos = if forward {
+            c.next_change(&tab.doc, &layout)
+        } else {
+            c.prev_change(&tab.doc, &layout)
+        };
+        match pos {
+            Some(p) => {
+                tab.doc.click(p, false);
+                self.changed(true);
+            }
+            None => self.say("No more changes", false),
+        }
     }
 
     /// Editing, movement and find commands on the active tab.
@@ -1526,6 +1694,16 @@ impl App {
                 let t = &self.doc().buffer;
                 Picker::go_to_line(notify, t.is_fully_indexed().then(|| t.len_lines()))
             }
+            Kind::Tabs => {
+                let names = self
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != self.active)
+                    .map(|(i, t)| (i, t.doc.display_name()))
+                    .collect();
+                Picker::tabs(names, notify)
+            }
         });
         self.find.focused = false;
         self.tick_picker();
@@ -1564,6 +1742,7 @@ impl App {
                     Some(Item::Action(a)) => self.run(a.command, event_loop),
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
                     Some(Item::Line(n)) => self.go_to_line(n),
+                    Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
                     None => {}
                 }
             }
@@ -1691,7 +1870,14 @@ impl App {
             | Command::QuickOpen
             | Command::Palette
             | Command::ReloadConfig
-            | Command::OpenConfig => return false,
+            | Command::OpenConfig
+            | Command::CompareSaved
+            | Command::CompareFile
+            | Command::CompareTab
+            | Command::DiffNext
+            | Command::DiffPrev
+            | Command::DiffUnified
+            | Command::DiffClose => return false,
             _ => {
                 let paste = (cmd == Command::Paste)
                     .then(|| self.clipboard_get())
@@ -1923,19 +2109,12 @@ impl App {
         self.find.focused = false;
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
+        if tab.compare.is_some() {
+            self.compare_click(&layout, (x, y), now);
+            return;
+        }
         if let Some(hit) = tab.view.scrollbar_hit(x, y) {
-            // Grab the thumb where pressed, or jump to centre it there.
-            let grab = match hit {
-                view::ScrollbarHit::Thumb(offset) => offset,
-                view::ScrollbarHit::Track => {
-                    let half = tab.view.thumb_height() / 2.0;
-                    tab.view
-                        .drag_scrollbar(y - half, &tab.doc, &layout, tab_width);
-                    half
-                }
-            };
-            self.clicks.scrollbar_grab = Some(grab);
-            self.changed(false);
+            self.grab_scrollbar(hit, y, &layout);
             return;
         }
         let pos = tab.view.hit(x, y, &tab.doc, &layout, tab_width);
@@ -1983,6 +2162,41 @@ impl App {
         self.changed(false);
     }
 
+    /// A press on the scrollbar: grab the thumb where pressed, or jump to
+    /// centre it there.
+    fn grab_scrollbar(&mut self, hit: view::ScrollbarHit, y: f32, layout: &Layout) {
+        let tab_width = self.tab_width();
+        let tab = &mut self.tabs[self.active];
+        let grab = match hit {
+            view::ScrollbarHit::Thumb(offset) => offset,
+            view::ScrollbarHit::Track => {
+                let half = tab.view.thumb_height() / 2.0;
+                tab.view
+                    .drag_scrollbar(y - half, &tab.doc, layout, tab_width);
+                half
+            }
+        };
+        self.clicks.scrollbar_grab = Some(grab);
+        self.changed(false);
+    }
+
+    /// A click on a compare view: a fold toggles, a line places the cursor.
+    fn compare_click(&mut self, layout: &Layout, (x, y): (f32, f32), now: Instant) {
+        let tab_width = self.tab_width();
+        let shift = self.modifiers.shift_key();
+        let tab = &mut self.tabs[self.active];
+        let Some(c) = tab.compare.as_mut() else {
+            return;
+        };
+        match c.click(&tab.doc, &mut tab.view, layout, tab_width, x, y) {
+            Click::Cursor(pos) => tab.doc.click(pos, shift),
+            Click::Toggled | Click::None => {}
+        }
+        self.clicks.dragging = false;
+        self.blink.reset(now);
+        self.changed(false);
+    }
+
     /// Scroll the sidebar or the text under the pointer.
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
         let Some(layout) = self.layout() else { return };
@@ -2002,7 +2216,10 @@ impl App {
         } else {
             let tab_width = self.tab_width();
             let tab = &mut self.tabs[self.active];
-            tab.view.scroll_by(-dy, &tab.doc, &layout, tab_width);
+            match tab.compare.as_mut() {
+                Some(c) => c.scroll_by(-dy, &layout),
+                None => tab.view.scroll_by(-dy, &tab.doc, &layout, tab_width),
+            }
             tab.view.scroll_x_by(-dx);
         }
         self.changed(false);
@@ -2044,6 +2261,9 @@ impl App {
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
+        if tab.compare.is_some() {
+            return;
+        }
         if let Some(from) = self.clicks.column {
             let to = tab.view.hit_column(x, y, &tab.doc, &layout, tab_width);
             tab.doc.column_select(from, to, tab_width);
@@ -2109,6 +2329,7 @@ impl App {
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
                     Some(Item::Action(a)) => self.pending_action = Some(a.command),
                     Some(Item::Line(n)) => self.go_to_line(n),
+                    Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
                     None => {}
                 }
             }
@@ -2145,12 +2366,19 @@ impl App {
         if let Some(job) = tab.doc.syntax.refresh(&tab.doc.buffer, SYNTAX_BUDGET) {
             spawn_syntax(&self.proxy, job);
         }
+        if let Some(c) = tab.compare.as_mut() {
+            c.sync(&mut tab.doc);
+            if let Some(job) = c.other.syntax.refresh(&c.other.buffer, SYNTAX_BUDGET) {
+                spawn_syntax(&self.proxy, job);
+            }
+        }
         paint_scene(
             gpu,
             layout,
             &mut Scene {
                 doc: &tab.doc,
                 view: &mut tab.view,
+                compare: tab.compare.as_deref_mut(),
                 theme: &mut self.theme,
                 find: &self.find,
                 message: self.message.as_ref(),
@@ -2427,20 +2655,26 @@ fn debug_facts(doc: &Document, find: &FindBar) -> crate::debug::Facts {
 /// Geometry for the window `gpu` draws to, with room for the find bar when
 /// it is shown, and the status bar.
 pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar) -> Layout {
+    layout_for_lines(gpu, scale, line_estimate(&doc.buffer), find)
+}
+
+/// As [`layout_for`], for a gutter wide enough for `lines` lines.
+pub fn layout_for_lines(gpu: &Gpu, scale: f32, lines: usize, find: &FindBar) -> Layout {
     let (w, h) = gpu.size();
     let bar_rows = match (find.open, find.replace_mode) {
         (false, _) => 0,
         (true, false) => 1,
         (true, true) => 2,
     };
-    Layout::new(gpu.metrics(), w, h, scale, line_estimate(&doc.buffer))
-        .with_chrome(true, bar_rows, true)
+    Layout::new(gpu.metrics(), w, h, scale, lines).with_chrome(true, bar_rows, true)
 }
 
 /// Everything one frame shows.
 pub struct Scene<'a> {
     doc: &'a Document,
     view: &'a mut View,
+    /// A compare on the tab: two columns instead of the view alone.
+    compare: Option<&'a mut Compare>,
     theme: &'a mut Theme,
     find: &'a FindBar,
     message: Option<&'a Message>,
@@ -2457,35 +2691,55 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     let current = find.current.and_then(|i| find.matches.get(i)).cloned();
     let ui = scene.theme.ui;
     let syntax = &scene.doc.syntax;
-    let captures = match syntax.capture_names() {
-        Some((key, names)) => scene.theme.capture_looks(key, names),
-        None => &[],
+    // Hide highlights from before an edit until the search reruns.
+    let matches: &[Range<usize>] = if find.open && find.version == scene.doc.version {
+        &find.matches
+    } else {
+        &[]
     };
-    scene.view.draw(
-        gpu,
-        scene.doc,
-        layout,
-        scene.tab_width,
-        &Decorations {
-            cursor_visible: scene.cursor_visible && !find.focused,
-            preedit: scene.preedit,
-            // Hide highlights from before an edit until the search reruns.
-            matches: if find.open && find.version == scene.doc.version {
-                &find.matches
-            } else {
-                &[]
+    if let Some(c) = scene.compare.as_deref_mut() {
+        view::begin_frame(gpu, &ui);
+        c.draw(
+            gpu,
+            layout,
+            scene.doc,
+            scene.view,
+            scene.theme,
+            scene.tab_width,
+            scene.cursor_visible && !find.focused,
+            scene.preedit,
+            (matches, current),
+        );
+    } else {
+        let captures = match syntax.capture_names() {
+            Some((key, names)) => scene.theme.capture_looks(key, names),
+            None => &[],
+        };
+        scene.view.draw(
+            gpu,
+            scene.doc,
+            layout,
+            scene.tab_width,
+            &Decorations {
+                cursor_visible: scene.cursor_visible && !find.focused,
+                preedit: scene.preedit,
+                matches,
+                current,
+                ui: &ui,
+                captures,
             },
-            current,
-            ui: &ui,
-            captures,
-        },
-    );
-    scene.view.draw_scrollbar(gpu, scene.doc, layout, &ui);
+        );
+        scene.view.draw_scrollbar(gpu, scene.doc, layout, &ui);
+    }
     if find.open {
         view::draw_find_bar(gpu, &ui, find, layout, scene.cursor_visible);
     }
     let message = scene.message.map(|m| (m.text.as_str(), m.is_error));
     let info = scene.view.status_info(scene.doc, scene.tab_width);
+    let info = match scene.compare.as_deref_mut() {
+        Some(c) => c.status(info),
+        None => info,
+    };
     view::draw_status(gpu, &ui, layout, message, info);
 }
 
@@ -2499,14 +2753,9 @@ pub fn run_headless(
     size: (u32, u32),
     context: GpuContext,
 ) -> i32 {
-    let labels: Vec<TabLabel> = docs
-        .iter()
-        .map(|d| TabLabel {
-            name: d.display_name(),
-            dirty: false,
-        })
-        .collect();
+    let labels = headless_labels(&docs);
     let mut doc = docs.into_iter().next().unwrap_or_else(Document::untitled);
+    let mut compare = headless_compare(options, config, &mut doc);
     let Some(path) = &options.screenshot else {
         print_err("nimbus: --headless needs --screenshot FILE.bmp");
         return 2;
@@ -2534,15 +2783,7 @@ pub fn run_headless(
         index_now(&mut doc);
     }
     let find = headless_find(options.find.as_deref(), &mut doc);
-    if !options.cursors.is_empty() {
-        let t = &doc.buffer;
-        let sels = options
-            .cursors
-            .iter()
-            .map(|&p| nimbus_core::Selection::cursor(nimbus_core::movement::clamp(t, p)))
-            .collect();
-        doc.selections = nimbus_core::Selections::from_vec(sels, options.cursors.len() - 1);
-    }
+    headless_cursors(options, &mut doc);
     let (sidebar, layout) = headless_sidebar(
         &root,
         layout_for(&gpu, to_f32(scale), &doc, &find),
@@ -2577,6 +2818,7 @@ pub fn run_headless(
             &mut Scene {
                 doc: &doc,
                 view: &mut view,
+                compare: compare.as_deref_mut(),
                 theme: &mut theme,
                 find: &find,
                 message: None,
@@ -2604,6 +2846,55 @@ pub fn run_headless(
         return 1;
     }
     i32::from(!save_screenshot(path, gpu.take_capture().as_ref()))
+}
+
+/// Tab labels for the headless frame: one per document opened.
+fn headless_labels(docs: &[Document]) -> Vec<TabLabel> {
+    docs.iter()
+        .map(|d| TabLabel {
+            name: d.display_name(),
+            dirty: false,
+        })
+        .collect()
+}
+
+/// `--cursors a,b,c`: several cursors at those byte offsets, the last
+/// primary.
+fn headless_cursors(options: &Options, doc: &mut Document) {
+    if options.cursors.is_empty() {
+        return;
+    }
+    let t = &doc.buffer;
+    let sels = options
+        .cursors
+        .iter()
+        .map(|&p| nimbus_core::Selection::cursor(nimbus_core::movement::clamp(t, p)))
+        .collect();
+    doc.selections = nimbus_core::Selections::from_vec(sels, options.cursors.len() - 1);
+}
+
+/// `--diff A B` headless: the compare, diffed on this thread.
+fn headless_compare(
+    options: &Options,
+    config: &Config,
+    doc: &mut Document,
+) -> Option<Box<Compare>> {
+    let (a, _) = options.diff.as_ref()?;
+    match Document::open(a) {
+        Ok(mut other) => {
+            other.detect_language(&Languages::load(&config.languages).0);
+            other.syntax.parse_now(&other.buffer);
+            Some(Box::new(Compare::start_sync(
+                doc,
+                other,
+                Other::File(a.clone()),
+            )))
+        }
+        Err(e) => {
+            print_err(&format!("nimbus: cannot read {}: {e}", a.display()));
+            None
+        }
+    }
 }
 
 /// `--wait-index`: count all of a huge file's lines on this thread.
@@ -2677,6 +2968,8 @@ fn draw_picker_overlay(
         (Kind::Files, true) => "file",
         (Kind::Files, false) => "files",
         (Kind::Line, _) => "",
+        (Kind::Tabs, true) => "tab",
+        (Kind::Tabs, false) => "tabs",
     };
     let more = if p.loading() { "…" } else { "" };
     let status = if p.kind == Kind::Line {
@@ -2688,6 +2981,7 @@ fn draw_picker_overlay(
         Kind::Palette => "Type a command",
         Kind::Files => "Type a file name",
         Kind::Line => "Type a line number",
+        Kind::Tabs => "Type a tab name",
     };
     let pv = PickerView {
         input: &p.input,
@@ -2766,7 +3060,11 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 self.run(action.command, event_loop);
             }
+            AppEvent::Diff(result) => self.diff_arrived(result),
             AppEvent::Syntax(result) => {
+                let Some(result) = self.other_side_parsed(result) else {
+                    return;
+                };
                 let Some(i) = self
                     .tabs
                     .iter()
@@ -2916,6 +3214,20 @@ impl ApplicationHandler<AppEvent> for App {
             let _ = self.find.find.insert(&pattern);
             self.search(true);
         }
+        if let Some((a, b)) = self.options.diff.clone() {
+            let b = io::canonical(&b);
+            let found = self
+                .tabs
+                .iter()
+                .position(|t| t.doc.canonical.as_deref() == Some(b.as_path()));
+            if let Some(i) = found {
+                self.switch_to(i);
+                match Document::open(&a) {
+                    Ok(other) => self.start_compare(other, Other::File(a)),
+                    Err(e) => self.say(format!("Cannot read {}: {e}", a.display()), true),
+                }
+            }
+        }
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: StartCause) {
@@ -2926,6 +3238,14 @@ impl ApplicationHandler<AppEvent> for App {
             self.poll_saves(event_loop);
         }
         let blink_changed = self.blink.tick(now);
+        if self.tabs[self.active]
+            .compare
+            .as_ref()
+            .and_then(|c| c.wake_at())
+            .is_some_and(|t| now >= t)
+        {
+            self.changed(false);
+        }
         let retry_due = self.hidden_retry.is_some_and(|(at, _)| now >= at);
         if self.research_at.is_some_and(|t| now >= t) {
             self.research_at = None;
@@ -2997,6 +3317,10 @@ impl ApplicationHandler<AppEvent> for App {
             self.research_at,
             self.recheck_at,
             self.saves.poll_at,
+            self.tabs[self.active]
+                .compare
+                .as_ref()
+                .and_then(|c| c.wake_at()),
             (unattended && self.frames == 0).then_some(deadline),
         ]
         .into_iter()

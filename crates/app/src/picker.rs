@@ -35,6 +35,8 @@ pub enum Item {
     File(PathBuf),
     /// A line to go to, counting from 1.
     Line(usize),
+    /// An open tab to compare with (M9): its index and name.
+    Tab(usize, String),
 }
 
 /// Which picker is open.
@@ -46,6 +48,8 @@ pub enum Kind {
     Files,
     /// Go to line: the query is a line number.
     Line,
+    /// Choosing another tab to compare with.
+    Tabs,
 }
 
 /// One row to draw.
@@ -194,6 +198,21 @@ impl Picker {
         picker
     }
 
+    /// Open a list of tabs, `(index, name)`, to pick one to compare with.
+    pub fn tabs(names: Vec<(usize, String)>, notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let picker = Self::new(Kind::Tabs, Config::DEFAULT, notify, PathBuf::new());
+        let injector = picker.matcher.injector();
+        for (i, name) in names {
+            injector.push(Item::Tab(i, name), |item, cols| {
+                if let Item::Tab(_, name) = item {
+                    cols[0] = name.as_str().into();
+                }
+            });
+        }
+        picker.walk_done.store(true, Ordering::Relaxed);
+        picker
+    }
+
     /// The line number typed, counting from 1; a leading `:` is allowed, as
     /// some editors write it.
     fn line_target(&self) -> Option<usize> {
@@ -305,6 +324,10 @@ impl Picker {
                 },
                 Item::Line(n) => Row {
                     text: format!("Go to line {n}"),
+                    detail: String::new(),
+                },
+                Item::Tab(_, name) => Row {
+                    text: name.clone(),
                     detail: String::new(),
                 },
                 Item::File(p) => Row {

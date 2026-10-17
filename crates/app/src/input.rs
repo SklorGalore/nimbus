@@ -139,6 +139,20 @@ pub enum Command<'a> {
     /// Open the config file in a tab, creating it if needed.
     OpenConfig,
     /// Quit (asking about unsaved changes first).
+    /// Compare the active tab with its file on disk (M9).
+    CompareSaved,
+    /// Compare the active tab with a file chosen in a dialog.
+    CompareFile,
+    /// Compare the active tab with another open tab.
+    CompareTab,
+    /// Go to the next change in a compare.
+    DiffNext,
+    /// Go to the previous change in a compare.
+    DiffPrev,
+    /// Switch a compare between two columns and one.
+    DiffUnified,
+    /// Leave the compare, keeping the tab.
+    DiffClose,
     Close,
 }
 

@@ -75,6 +75,29 @@ pub struct EditSpan {
     pub inserted: usize,
 }
 
+impl EditSpan {
+    /// The span of `edit`, already applied, read from the text `after` it:
+    /// the text before the edit is the same up to `start`, so the first
+    /// line is the same, and the removed text's line breaks are counted in
+    /// the edit record. `None` when that cannot be done: the removed text
+    /// is held as pieces of a mapped file rather than bytes, or the start
+    /// lies past the part of a mapped file whose lines are counted. The
+    /// caller then falls back to a full diff.
+    #[must_use]
+    pub fn after(after: &dyn Text, edit: &crate::Edit) -> Option<Self> {
+        let removed = edit.removed.as_bytes()?;
+        if edit.start > after.indexed_bytes() {
+            return None;
+        }
+        Some(Self {
+            start: edit.start,
+            first_line: after.byte_to_line(edit.start),
+            removed_lines: memchr::memchr_iter(b'\n', removed).count(),
+            inserted: edit.inserted.len(),
+        })
+    }
+}
+
 /// A stretch of both texts to re-diff, from [`LiveDiff::edit`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Region {

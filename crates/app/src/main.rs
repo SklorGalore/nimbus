@@ -6,6 +6,7 @@
 mod action;
 mod app;
 mod bmp;
+mod compare;
 mod config;
 mod debug;
 mod document;
@@ -81,6 +82,8 @@ pub struct Options {
     /// `--cursors 3,10,20`: with `--headless`, put a cursor at each byte
     /// offset (the last is the primary), to render several cursors.
     pub cursors: Vec<usize>,
+    /// `--diff A B`: compare `B` (opened as a tab) with `A`.
+    pub diff: Option<(PathBuf, PathBuf)>,
 }
 
 /// Write a line to stdout. Command-line output such as `--version` and the
@@ -135,12 +138,38 @@ fn numbers(arg: Option<std::ffi::OsString>) -> Vec<usize> {
         .collect()
 }
 
+/// A `WxH` size after `--headless`, or exit with a usage error.
+fn parse_size(arg: Option<std::ffi::OsString>) -> (u32, u32) {
+    let size = arg.and_then(|a| {
+        let a = a.into_string().ok()?;
+        let (w, h) = a.split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
+    });
+    size.unwrap_or_else(|| {
+        print_err("nimbus: --headless needs a size like 1600x1000");
+        std::process::exit(2);
+    })
+}
+
+/// The two paths after an option, or exit with a usage error.
+fn two_paths(
+    args: &mut impl Iterator<Item = std::ffi::OsString>,
+    option: &str,
+) -> (PathBuf, PathBuf) {
+    let (Some(a), Some(b)) = (args.next(), args.next()) else {
+        print_err(&format!("nimbus: {option} needs two files"));
+        std::process::exit(2);
+    };
+    (PathBuf::from(a), PathBuf::from(b))
+}
+
 fn parse_options() -> Options {
     let mut smoke = false;
     let mut screenshot = None;
     let mut files = Vec::new();
     let mut bench_typing = 0;
     let mut find = None;
+    let mut diff = None;
     let mut wrap = false;
     let mut headless = None;
     let mut picker = None;
@@ -185,17 +214,11 @@ fn parse_options() -> Options {
                 };
                 backend = Some(b);
             }
-            Some("--headless") => {
-                let size = args.next().and_then(|a| {
-                    let a = a.into_string().ok()?;
-                    let (w, h) = a.split_once('x')?;
-                    Some((w.parse().ok()?, h.parse().ok()?))
-                });
-                let Some(size) = size else {
-                    print_err("nimbus: --headless needs a size like 1600x1000");
-                    std::process::exit(2);
-                };
-                headless = Some(size);
+            Some("--headless") => headless = Some(parse_size(args.next())),
+            Some("--diff") => {
+                let (a, b) = two_paths(&mut args, "--diff");
+                files.push(b.clone());
+                diff = Some((a, b));
             }
             Some("--find") => {
                 let Some(pattern) = args.next().and_then(|p| p.into_string().ok()) else {
@@ -233,6 +256,7 @@ fn parse_options() -> Options {
         wait_index,
         debug_overlay,
         cursors,
+        diff,
     }
 }
 

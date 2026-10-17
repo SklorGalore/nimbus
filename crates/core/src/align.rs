@@ -118,6 +118,9 @@ pub struct Row<T> {
 pub struct Rows<T> {
     columns: usize,
     folding: Folding,
+    /// A change shows its first column's lines, then its second column's,
+    /// one after the other (the unified view) instead of side by side.
+    stacked: bool,
     segments: Vec<Segment<T>>,
     /// First row of each segment, plus the total at the end.
     starts: Vec<usize>,
@@ -128,6 +131,23 @@ impl Rows<Change> {
     /// Rows for a two-way diff of `old_lines` against `new_lines` lines.
     #[must_use]
     pub fn two_way(hunks: &[Hunk], old_lines: usize, new_lines: usize, folding: Folding) -> Self {
+        Self::two_way_with(hunks, old_lines, new_lines, folding, false)
+    }
+
+    /// Rows for the unified view: a change's old lines, then its new
+    /// lines, one row each, in one column; equal lines once.
+    #[must_use]
+    pub fn unified(hunks: &[Hunk], old_lines: usize, new_lines: usize, folding: Folding) -> Self {
+        Self::two_way_with(hunks, old_lines, new_lines, folding, true)
+    }
+
+    fn two_way_with(
+        hunks: &[Hunk],
+        old_lines: usize,
+        new_lines: usize,
+        folding: Folding,
+        stacked: bool,
+    ) -> Self {
         let mut segments = Vec::with_capacity(2 * hunks.len() + 1);
         let (mut o, mut n) = (0, 0);
         let mut number = 0;
@@ -155,7 +175,7 @@ impl Rows<Change> {
             old_lines.saturating_sub(o),
             folding,
         );
-        Self::build(2, folding, segments, number)
+        Self::build(2, folding, segments, number, stacked)
     }
 }
 
@@ -180,7 +200,7 @@ impl Rows<Kind> {
                 number += 1;
             }
         }
-        Self::build(3, folding, segments, number)
+        Self::build(3, folding, segments, number, false)
     }
 }
 
@@ -202,10 +222,17 @@ fn push_equal<T>(
 }
 
 impl<T: Copy> Rows<T> {
-    fn build(columns: usize, folding: Folding, segments: Vec<Segment<T>>, changes: usize) -> Self {
+    fn build(
+        columns: usize,
+        folding: Folding,
+        segments: Vec<Segment<T>>,
+        changes: usize,
+        stacked: bool,
+    ) -> Self {
         let mut rows = Self {
             columns,
             folding,
+            stacked,
             segments,
             starts: Vec::new(),
             changes,
@@ -229,6 +256,10 @@ impl<T: Copy> Rows<T> {
         match &s.kind {
             SegmentKind::Equal { len, folded: false } => *len,
             SegmentKind::Equal { folded: true, .. } => 2 * self.folding.context + 1,
+            SegmentKind::Change { .. } if self.stacked => s.lines[..self.columns]
+                .iter()
+                .map(ExactSizeIterator::len)
+                .sum(),
             SegmentKind::Change { .. } => s.lines[..self.columns]
                 .iter()
                 .map(ExactSizeIterator::len)
@@ -296,13 +327,20 @@ impl<T: Copy> Rows<T> {
                 None
             }
             SegmentKind::Change { tag, number } => {
+                let mut skip = 0;
                 for (c, cell) in cells.iter_mut().enumerate().take(self.columns) {
                     let r = &s.lines[c];
-                    *cell = if off < r.len() {
-                        Cell::Line(r.start + off)
+                    // Stacked: each column's lines follow the previous
+                    // column's rows.
+                    let at = off.wrapping_sub(skip);
+                    *cell = if off >= skip && at < r.len() {
+                        Cell::Line(r.start + at)
                     } else {
                         Cell::Filler
                     };
+                    if self.stacked {
+                        skip += r.len();
+                    }
                 }
                 Some((*tag, *number))
             }
@@ -350,6 +388,10 @@ impl<T: Copy> Rows<T> {
                 } else {
                     ctx
                 }
+            }
+            SegmentKind::Change { .. } if self.stacked => {
+                let before: usize = s.lines[..column].iter().map(ExactSizeIterator::len).sum();
+                (before + off).min(rows.saturating_sub(1))
             }
             _ => off.min(rows.saturating_sub(1)),
         };
@@ -643,6 +685,40 @@ mod tests {
         assert_eq!(r.change, Some((Kind::Conflict, 0)));
         assert_eq!(rows.row_of(1, 3), 3);
         assert_eq!(rows.row_of(2, 2), 3);
+    }
+
+    #[test]
+    fn unified_stacks_old_then_new() {
+        // old: a b c ; new: a X Y c  (b -> X Y)
+        let rows = Rows::unified(
+            &[Hunk {
+                old: 1..2,
+                new: 1..3,
+            }],
+            3,
+            4,
+            NO_FOLD,
+        );
+        assert_eq!(rows.len(), 1 + 3 + 1);
+        let cells: Vec<(Cell, Cell)> = (0..rows.len())
+            .map(|r| {
+                let row = rows.at(r).unwrap();
+                (row.cells[0], row.cells[1])
+            })
+            .collect();
+        assert_eq!(
+            cells,
+            vec![
+                (Cell::Line(0), Cell::Line(0)),
+                (Cell::Line(1), Cell::Filler),
+                (Cell::Filler, Cell::Line(1)),
+                (Cell::Filler, Cell::Line(2)),
+                (Cell::Line(2), Cell::Line(3)),
+            ]
+        );
+        assert_eq!(rows.row_of(1, 2), 3);
+        assert_eq!(rows.row_of(0, 1), 1);
+        assert_eq!(rows.row_of(0, 2), 4);
     }
 
     #[test]
