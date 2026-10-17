@@ -688,8 +688,9 @@ mod tests {
         }
     }
 
-    fn rels(r: &Results) -> Vec<&str> {
-        let mut v: Vec<&str> = r.files.iter().map(|f| f.rel.as_str()).collect();
+    /// Relative paths with `/` as the separator, whatever the OS shows.
+    fn rels(r: &Results) -> Vec<String> {
+        let mut v: Vec<String> = r.files.iter().map(|f| f.rel.replace('\\', "/")).collect();
         v.sort_unstable();
         v
     }
@@ -785,7 +786,7 @@ mod tests {
         p.exclude = String::new();
         p.show_ignored = true;
         let r = search(&p, Snapshots::new());
-        assert!(rels(&r).contains(&"ignored.txt"));
+        assert!(rels(&r).iter().any(|r| r == "ignored.txt"));
         let mut bad = params(dir.path(), "needle");
         bad.include = "[".into();
         let g = Arc::new(Generation::default());
