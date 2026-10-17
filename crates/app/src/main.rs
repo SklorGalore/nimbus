@@ -205,7 +205,7 @@ fn parse_options() -> Options {
                 find = Some(pattern);
             }
             Some("--version" | "-V") => {
-                print_out(&format!("nimbus {}", nimbus_core::VERSION));
+                print_out(&format!("nimbus {}", env!("CARGO_PKG_VERSION")));
                 std::process::exit(0);
             }
             Some("--help" | "-h") => {
