@@ -2,11 +2,14 @@ name: Screenshot reference
 
 # Remakes crates/app/tests/screenshot/reference.bmp on a macOS runner after
 # an intended drawing change, for anyone without a Mac at hand. Run it on
-# the branch with the change, download the "screenshot-reference" artifact,
-# look at the image, and commit it.
+# the branch with the change (from the Actions tab, or by putting the
+# "remake-screenshot" label on its pull request), download the
+# "screenshot-reference" artifact, look at the image, and commit it.
 
 on:
   workflow_dispatch:
+  pull_request:
+    types: [labeled]
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,6 +18,7 @@ jobs:
   reference:
     name: remake reference.bmp
     runs-on: macos-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'remake-screenshot'
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
