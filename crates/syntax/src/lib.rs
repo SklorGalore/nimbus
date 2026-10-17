@@ -7,6 +7,7 @@ pub mod language;
 pub mod lexical;
 pub mod registry;
 pub mod state;
+pub mod structure;
 pub mod symbols;
 pub mod text;
 

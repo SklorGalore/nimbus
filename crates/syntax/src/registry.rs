@@ -324,6 +324,68 @@ fn tags_source(id: LanguageId) -> Option<String> {
     }
 }
 
+/// The fold query for a language: nodes captured as `@fold` are regions
+/// M13's folding can collapse. All vendored in `queries/folds/`;
+/// TypeScript's and TSX's are JavaScript's plus TypeScript's additions.
+fn folds_source(id: LanguageId) -> String {
+    let own = match id {
+        LanguageId::Rust => include_str!("../queries/folds/rust.scm"),
+        LanguageId::Markdown => include_str!("../queries/folds/markdown.scm"),
+        LanguageId::Json => include_str!("../queries/folds/json.scm"),
+        LanguageId::Toml => include_str!("../queries/folds/toml.scm"),
+        LanguageId::Yaml => include_str!("../queries/folds/yaml.scm"),
+        LanguageId::Python => include_str!("../queries/folds/python.scm"),
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => {
+            let js = include_str!("../queries/folds/javascript.scm");
+            let ts = include_str!("../queries/folds/typescript.scm");
+            let jsx = include_str!("../queries/folds/jsx.scm");
+            return match id {
+                LanguageId::JavaScript => format!("{js}\n{jsx}"),
+                LanguageId::TypeScript => format!("{js}\n{ts}"),
+                _ => format!("{js}\n{ts}\n{jsx}"),
+            };
+        }
+        LanguageId::Bash => include_str!("../queries/folds/bash.scm"),
+        LanguageId::C => include_str!("../queries/folds/c.scm"),
+        LanguageId::Go => include_str!("../queries/folds/go.scm"),
+        LanguageId::Html => include_str!("../queries/folds/html.scm"),
+        LanguageId::Css => include_str!("../queries/folds/css.scm"),
+    };
+    own.to_owned()
+}
+
+/// A query loaded on first use beside the grammar: the tags or folds
+/// query, from `builtin` unless the user's `<key>.<kind>.scm` replaces
+/// or extends it.
+fn side_query(id: LanguageId, kind: &str, builtin: Option<String>) -> Option<Query> {
+    let grammar = grammar(id)?;
+    let builtin = builtin?;
+    let file = format!("{}.{kind}.scm", id.key());
+    let user = USER_QUERIES
+        .get()
+        .and_then(|dir| user_query(dir, &file, &builtin));
+    match compile(&grammar.language, &builtin, user) {
+        Ok(q) => Some(q),
+        Err(e) => {
+            log::error!("{} {kind} query does not compile: {e}", id.name());
+            None
+        }
+    }
+}
+
+/// The compiled fold query for `id`, loaded on first use like the
+/// grammar: `None` when it fails to compile. Users replace or extend it
+/// with `queries/<key>.folds.scm`.
+#[must_use]
+pub fn folds_query(id: LanguageId) -> Option<&'static Query> {
+    static SLOTS: [OnceLock<Option<Query>>; LanguageId::ALL.len()] =
+        [const { OnceLock::new() }; LanguageId::ALL.len()];
+    SLOTS
+        .get(id.index())?
+        .get_or_init(|| side_query(id, "folds", Some(folds_source(id))))
+        .as_ref()
+}
+
 /// The compiled tags query for `id`, loaded on first use like the
 /// grammar: `None` when the language has none, or it fails to compile.
 /// Users replace or extend it with `queries/<key>.tags.scm`.
@@ -333,21 +395,7 @@ pub fn symbols_query(id: LanguageId) -> Option<&'static Query> {
         [const { OnceLock::new() }; LanguageId::ALL.len()];
     SLOTS
         .get(id.index())?
-        .get_or_init(|| {
-            let grammar = grammar(id)?;
-            let builtin = tags_source(id)?;
-            let file = format!("{}.tags.scm", id.key());
-            let user = USER_QUERIES
-                .get()
-                .and_then(|dir| user_query(dir, &file, &builtin));
-            match compile(&grammar.language, &builtin, user) {
-                Ok(q) => Some(q),
-                Err(e) => {
-                    log::error!("{} tags query does not compile: {e}", id.name());
-                    None
-                }
-            }
-        })
+        .get_or_init(|| side_query(id, "tags", tags_source(id)))
         .as_ref()
 }
 
@@ -618,6 +666,17 @@ mod tests {
             Some(GrammarKey::MarkdownInline)
         );
         assert_eq!(GrammarKey::from_injection_name("regex"), None);
+    }
+
+    #[test]
+    fn every_fold_query_compiles() {
+        for id in LanguageId::ALL {
+            if grammar(id).is_none() {
+                continue;
+            }
+            let q = folds_query(id).unwrap_or_else(|| panic!("{} folds query", id.name()));
+            assert_eq!(q.capture_names(), ["fold"], "{}", id.name());
+        }
     }
 
     #[test]
