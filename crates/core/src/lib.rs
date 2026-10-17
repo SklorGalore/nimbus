@@ -8,6 +8,7 @@ pub mod any;
 pub mod brackets;
 pub mod buffer;
 pub mod column;
+pub mod compare;
 pub mod diff;
 pub mod line_ending;
 pub mod line_index;
@@ -26,6 +27,7 @@ pub use any::AnyBuffer;
 pub use buffer::{
     Buffer, Content, Edit, EditError, LineSpan, SUBSTITUTE, Snapshot, Text, report_sorted,
 };
+pub use compare::{Comparison, compare};
 pub use diff::{DIFF_LIMIT, DiffError, Hunk, Interner, Lines};
 pub use line_ending::LineEnding;
 pub use mapped::{Limits, MappedBuffer, MappedSnapshot, PieceRun};

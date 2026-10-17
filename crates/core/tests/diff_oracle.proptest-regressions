@@ -5,3 +5,8 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc f261b058dcd74ede693d3f42efcaf2a6bcce8912622251a174988b7179884a3c # shrinks to (old, new) = ("    x\né\na\n    x\n", "é\na\n    x\n    x\n")
+cc 221be9d853adfe26fecfd837421761f9735efce79d1068529610e146e713979b # shrinks to (old, new) = ("a\n\n", "\na\n")
+cc 34515217ecab8babd3577fa0fa9d55e9561245f996929a59f6f8931cd33fcf84 # shrinks to (old, new) = ("\n", "x\n")
+cc 0999be8d3253ba7be33093a0b1670409cd0f0b874c26f4f6f1100aa7012dc5dd # shrinks to (old, new) = ("a\na\n}\na\n", "\ta\n"), pad = 1
+cc f7ce19786a08c0371e446fe6c0267472f2e90a59833a9ed128b616637f73375b # shrinks to (old, new) = ("x", "x")
+cc 23341bc8e052b8be1dc1747fbfa762e92cd79542cc42f3af751e134d95303174 # shrinks to (old, new) = ("x", "x")

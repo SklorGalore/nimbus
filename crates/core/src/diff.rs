@@ -158,22 +158,41 @@ impl Interner {
     ///
     /// [`DiffError::TooManyLines`] when distinct lines run past `u32`.
     pub fn intern(&mut self, text: &Arc<dyn Snapshot>) -> Result<Lines, DiffError> {
+        self.intern_range(text, 0..text.len_bytes())
+    }
+
+    /// Like [`intern`](Interner::intern) for the lines in `range`, which
+    /// must start at a line start and end at a line end (after a `\n`, or
+    /// at the end of the text); a range that does not is widened to the
+    /// line boundaries around it only in the sense that its bytes are
+    /// split into tokens as they are. Used by the layered diff to work on
+    /// the part between a common start and end.
+    ///
+    /// # Errors
+    ///
+    /// [`DiffError::TooManyLines`] when distinct lines run past `u32`.
+    pub fn intern_range(
+        &mut self,
+        text: &Arc<dyn Snapshot>,
+        range: Range<usize>,
+    ) -> Result<Lines, DiffError> {
         let Ok(text_idx) = u32::try_from(self.texts.len()) else {
             return Err(DiffError::TooManyLines);
         };
         self.texts.push(Arc::clone(text));
         let text = Arc::clone(text);
-        let len = text.len_bytes();
-        let mut tokens = Vec::with_capacity(len / 32);
+        let len = range.end.min(text.len_bytes());
+        let mut tokens = Vec::with_capacity(len.saturating_sub(range.start) / 32);
         let mut hash = LineHash::default();
-        let mut line_start = 0;
+        let mut line_start = range.start;
         let mut head = LineHead::default();
-        let mut pos = 0;
+        let mut pos = range.start;
         while pos < len {
             let (chunk, base) = text.chunk_at(pos);
             let Some(bytes) = chunk.get(pos - base..) else {
                 break;
             };
+            let bytes = &bytes[..bytes.len().min(len - pos)];
             if bytes.is_empty() {
                 break;
             }

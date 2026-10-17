@@ -1,6 +1,6 @@
 # M9 — Compare and merge
 
-**Status: in progress** (started 2026-10-17; tasks 1 and 2 landed)
+**Status: in progress** (started 2026-10-17; tasks 1, 2 and 2a landed; 2a's long-line splitting waits for task 6)
 
 ## Goal
 
@@ -250,6 +250,28 @@ files in about 0.96 s (budget 3 s). The diff limit (`DIFF_LIMIT`) is
 line (more than the plan's 16 to 24: each entry keeps where a copy of the
 line lives, for comparing on hash collision, so a collision can never
 produce a wrong diff).
+
+**Task 2a: layers** (`crates/core/src/compare.rs`; same machine). The
+common start and end are trimmed byte by byte from storage, the middle
+gets a full diff within `DIFF_LIMIT` (256 MB per side), and past that it
+is walked in 32 MB windows, each diffed on its own and kept up to the
+last change not touching the window's end, where the next window starts;
+a window pair with nothing in common is doubled three times, then
+reported as one block. Measured with `compare_bench` (ropes in memory,
+so the loaded size is in the peak):
+
+| Pair | Compared in | Hunks | Lines through the diff | Exact | Peak RSS |
+|---|---|---|---|---|---|
+| bench 10 MB + edited | 100 ms | 291 | all (edits span the file) | yes | — |
+| bench 100 MB + edited | 0.99 s | 3146 | all | yes | — |
+| 1 GB log + 164 scattered edits | 8.4 s | 164, all found | all, in 33 windows | no (windowed) | 2.4 GB, of which 2.2 GB the two ropes |
+| 4 GB log + 100,000 lines appended | 3.65 s | 1 | 100,000 (the rest trimmed) | yes | 9.2 GB, the two ropes; the app maps files this size |
+
+The trim reads both texts once, about 2.3 GB/s through rope chunks; on a
+mapped file that is the file's read speed. The windowed layer costs
+memory proportional to one window pair, not the file. Long-line
+splitting (the plan's layer 4) is left for task 6, where the views
+decide what a split line looks like.
 
 Interning dominates the time: about 230 MB/s, mostly the hash-table
 lookup and the byte comparison that confirms each repeated line. One
