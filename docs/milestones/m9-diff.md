@@ -1,6 +1,6 @@
 # M9 — Compare and merge
 
-**Status: in progress** (started 2026-10-17; tasks 1 to 8 landed (6 confirmed; 7 and 8 await the owner's look); 2a's long-line splitting still open)
+**Status: in progress** (started 2026-10-17; tasks 1 to 10 landed (6 confirmed; 7 to 10 await the owner's look); left: 2a's long lines, the merge on a worker, task 11; 2a's long-line splitting still open)
 
 ## Goal
 
@@ -66,11 +66,17 @@ views, plus the diff's own:
       with conflicts left asks first; `--merge` exits 0 when the result
       was saved with none left, 1 otherwise. **Owner to confirm on
       screen.**
-- [ ] Opening a file with conflict markers offers "Resolve Conflicts",
-      which opens the three-way view (with the base, when the markers are
-      in diff3 style).
-- [ ] When a file changes on disk while you have unsaved edits (M6), the
-      message line also offers "Compare" and "Merge".
+- [x] Opening a file with conflict markers says so and offers "Resolve
+      Conflicts", which splits the text at its markers (with the base,
+      when they are in diff3 style), merges the three parts again and
+      puts the three-way view on the tab; the blocks come back as marker
+      blocks, labelled "ours" and "theirs", until each is resolved. The
+      tab's undo history starts over at that point.
+- [x] When a file changes on disk while you have unsaved edits (M6), the
+      message also offers "Compare with Saved" and "Merge with Disk": a
+      three-way merge of the text as last loaded (a snapshot every rope
+      document keeps from its last open, reload or save), the unsaved
+      edits, and the file as it is now, in place of the tab's document.
 - [ ] Every budget in the table above, measured on the bench files and
       recorded in Results; typing in the merge result of two 10 MB files
       measured with `--bench-typing`.
@@ -365,6 +371,15 @@ of two 10 MB files blocks for about a third of a second; moving it to the
 worker as the compare does is left for task 11's measurements. "Merge
 with Base…" and "Merge Files…" put the result in a new untitled tab
 rather than over the active one.
+
+**Tasks 9 and 10: markers in, and the M6 offers.** `core::markers::split`
+reads a conflicted file back into base, ours and theirs (the common text
+into all three, each block's parts into their own); merging those again
+finds the same conflicts, so "Resolve Conflicts" is the ordinary
+three-way view over the tab's own file. `Document` keeps a snapshot of
+the text as the file held it at the last open, reload or save (ropes
+share storage, so it costs nothing until edits part them), which is the
+base "Merge with Disk" needs when a file changed under unsaved edits.
 
 Interning dominates the time: about 230 MB/s, mostly the hash-table
 lookup and the byte comparison that confirms each repeated line. One

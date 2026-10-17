@@ -12,7 +12,7 @@ use nimbus_core::live_diff::EditSpan;
 use nimbus_core::search::{self, Literal};
 use nimbus_core::{
     AnyBuffer, Bias, Buffer, Edit, EditError, History, LineEnding, MappedBuffer, Selection,
-    Selections, Source, Text, report_sorted,
+    Selections, Snapshot, Source, Text, report_sorted,
 };
 use nimbus_core::{long_line, movement, multi};
 
@@ -198,6 +198,25 @@ pub struct Document {
     saving: Option<Saving>,
     /// Edits since a compare view (M9) last looked, so it can follow them.
     edits: EditLog,
+    /// The text as the file held it when last opened, reloaded or saved,
+    /// for merging with a changed file (M9 task 10). A rope snapshot
+    /// shares storage with the buffer until edits part them, so this costs
+    /// little; mapped documents keep none.
+    disk_text: DiskText,
+}
+
+/// A snapshot of the text as the file held it, or none; a wrapper only
+/// because a snapshot has no `Debug`.
+#[derive(Default, Clone)]
+struct DiskText(Option<Arc<dyn Snapshot>>);
+
+impl std::fmt::Debug for DiskText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(t) => write!(f, "DiskText({} bytes)", t.len_bytes()),
+            None => f.write_str("DiskText(none)"),
+        }
+    }
 }
 
 /// Edits noted for an observer, such as the compare view's live diff,
@@ -362,7 +381,7 @@ impl Document {
         if doc.path.is_some() {
             // Not what the file holds: `saved_at` points at no history
             // entry, so the tab shows dirty until the first save.
-            doc.saved_at = u64::MAX;
+            doc.saved_at = NOT_SAVED;
         }
         doc
     }
@@ -417,7 +436,22 @@ impl Document {
             ..Self::default()
         };
         doc.adopt_indexing(opened.indexing);
+        doc.remember_disk_text();
         Ok(doc)
+    }
+
+    /// Keep a snapshot of the text as the file holds it now (rope documents
+    /// only; a mapped file's bytes are the file itself).
+    fn remember_disk_text(&mut self) {
+        self.disk_text =
+            DiskText((!self.buffer.is_mapped()).then(|| self.buffer.snapshot().into()));
+    }
+
+    /// The text as the file held it when last opened, reloaded or saved,
+    /// when known: the base for merging edits with a changed file.
+    #[must_use]
+    pub fn disk_text(&self) -> Option<&Arc<dyn Snapshot>> {
+        self.disk_text.0.as_ref()
     }
 
     /// The file changed on disk (a watcher said so): work out what to do.
@@ -536,6 +570,7 @@ impl Document {
         self.conflict = false;
         self.edits.reset = true;
         self.version += 1;
+        self.remember_disk_text();
         let pos = match place {
             Some((line, col)) => {
                 let line = line.min(self.buffer.len_lines().saturating_sub(1));
@@ -696,6 +731,7 @@ impl Document {
         // the saved step and the document would look clean.
         self.history.seal();
         self.saved_at = self.history.top_id();
+        self.remember_disk_text();
     }
 
     /// Whether saving goes through [`Document::begin_save`] on a worker:

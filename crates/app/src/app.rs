@@ -743,6 +743,8 @@ impl App {
             Command::TakeBothReversed => self.merge_take(Take::BothReversed),
             Command::NextConflict => self.conflict_step(true),
             Command::PrevConflict => self.conflict_step(false),
+            Command::ResolveMarkers => self.resolve_markers(),
+            Command::MergeWithDisk => self.merge_with_disk(),
             _ => return false,
         }
         self.changed(false);
@@ -849,6 +851,113 @@ impl App {
         self.start_syntax();
         self.title_key = None;
         self.changed(true);
+    }
+
+    /// The active tab's whole text, when it is small enough to merge here.
+    fn whole_text(&mut self) -> Option<String> {
+        let doc = self.doc();
+        if doc.buffer.len_bytes() > nimbus_core::DIFF_LIMIT || doc.buffer.is_mapped() {
+            self.say("This file is too large to merge here", true);
+            return None;
+        }
+        Some(doc.buffer.slice(0..doc.buffer.len_bytes()).into_owned())
+    }
+
+    /// Put a merge on the active tab in place of its document: the result
+    /// takes the tab (same file, same slot), the old text's undo history
+    /// is gone.
+    fn replace_active_with_merge(&mut self, mut merge: MergeView, mut result: Document) {
+        result.detect_language(&self.languages);
+        for doc in merge.inputs_mut() {
+            if let Some(job) = doc.syntax.take_job(&doc.buffer) {
+                spawn_syntax(&self.proxy, job);
+            }
+        }
+        let tab = &mut self.tabs[self.active];
+        if let Some(c) = tab.compare.take() {
+            c.finish(&mut tab.doc);
+        }
+        tab.doc = result;
+        tab.view = View::default();
+        tab.merge = Some(Box::new(merge));
+        self.start_syntax();
+        self.title_key = None;
+        self.changed(true);
+    }
+
+    /// "Resolve Conflicts": the active tab's text, which holds conflict
+    /// markers, reopened as a three-way merge of what the markers split.
+    fn resolve_markers(&mut self) {
+        let Some(text) = self.whole_text() else {
+            return;
+        };
+        let out = self.doc().path.clone();
+        match MergeView::from_markers(&text, out) {
+            Ok(Some((merge, result))) => {
+                let n = merge.open_conflicts();
+                self.replace_active_with_merge(merge, result);
+                let noun = if n == 1 { "conflict" } else { "conflicts" };
+                self.say(
+                    format!("Resolving {n} {noun}; undo history starts here"),
+                    false,
+                );
+            }
+            Ok(None) => self.say("No conflict markers in this file", false),
+            Err(e) => self.say(format!("Cannot resolve: {e}"), true),
+        }
+    }
+
+    /// "Merge with Disk": the file changed on disk under unsaved edits
+    /// (M6); a three-way merge of the text as last loaded, these edits,
+    /// and the file as it is now, in place of the tab's document.
+    fn merge_with_disk(&mut self) {
+        let doc = self.doc();
+        let (Some(path), Some(base)) = (doc.path.clone(), doc.disk_text().cloned()) else {
+            self.say("Merge with Disk needs a file that was read from disk", true);
+            return;
+        };
+        let Some(ours) = doc.copy_of() else {
+            self.say("This file is too large to merge here", true);
+            return;
+        };
+        let theirs = match Document::open(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                self.say(format!("Cannot read {}: {e}", path.display()), true);
+                return;
+            }
+        };
+        let base_text = base.slice(0..base.len_bytes());
+        let inputs = Inputs {
+            base: Some(Document::with_text(None, &base_text)),
+            ours,
+            theirs,
+            names: ("mine".to_owned(), "disk".to_owned()),
+        };
+        match MergeView::three_way(inputs, Some(path)) {
+            Ok((merge, result)) => {
+                let n = merge.open_conflicts();
+                self.replace_active_with_merge(merge, result);
+                let noun = if n == 1 { "conflict" } else { "conflicts" };
+                self.say(
+                    format!("Merged with the file on disk: {n} {noun} to resolve"),
+                    false,
+                );
+            }
+            Err(e) => self.say(format!("Cannot merge: {e}"), true),
+        }
+    }
+
+    /// Say so when the active document holds conflict markers.
+    fn note_conflict_markers(&mut self) {
+        let doc = self.doc();
+        let head = doc.buffer.slice(0..doc.buffer.len_bytes().min(256 * 1024));
+        if nimbus_core::markers::has_markers(&head) {
+            self.say(
+                "Conflict markers found; run Resolve Conflicts from the command palette",
+                false,
+            );
+        }
     }
 
     /// Take a side for the change under the cursor of the active merge.
@@ -1304,8 +1413,8 @@ impl App {
                 DiskChange::Conflict => {
                     is_error = true;
                     format!(
-                        "{name} changed on disk. Run Reload from Disk, or Keep My Version, \
-                         from the command palette"
+                        "{name} changed on disk. From the command palette: Reload from Disk, \
+                         Keep My Version, Compare with Saved, or Merge with Disk"
                     )
                 }
                 DiskChange::NotReloaded => format!(
@@ -1411,6 +1520,7 @@ impl App {
                 }
                 self.sync_watch();
                 self.changed(false);
+                self.note_conflict_markers();
             }
             Err(e) => self.say(format!("Cannot open {}: {e}", path.display()), true),
         }
@@ -2089,7 +2199,9 @@ impl App {
             | Command::TakeBoth
             | Command::TakeBothReversed
             | Command::NextConflict
-            | Command::PrevConflict => return false,
+            | Command::PrevConflict
+            | Command::ResolveMarkers
+            | Command::MergeWithDisk => return false,
             _ => {
                 let paste = (cmd == Command::Paste)
                     .then(|| self.clipboard_get())
@@ -3522,6 +3634,9 @@ impl ApplicationHandler<AppEvent> for App {
             self.open_find(false);
             let _ = self.find.find.insert(&pattern);
             self.search(true);
+        }
+        if self.options.find.is_none() && self.options.diff.is_none() {
+            self.note_conflict_markers();
         }
         if let Some(args) = self.options.merge.clone() {
             match open_merge_inputs(&args, &self.languages) {

@@ -169,6 +169,10 @@ pub enum Command<'a> {
     NextConflict,
     /// In a merge: go to the previous open conflict.
     PrevConflict,
+    /// Open the three-way merge view on a file with conflict markers.
+    ResolveMarkers,
+    /// Merge unsaved edits with the file as it changed on disk.
+    MergeWithDisk,
     Close,
 }
 

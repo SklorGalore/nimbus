@@ -16,6 +16,7 @@ pub mod line_index;
 pub mod live_diff;
 pub mod long_line;
 pub mod mapped;
+pub mod markers;
 pub mod merge;
 pub mod movement;
 pub mod multi;

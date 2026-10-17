@@ -329,6 +329,18 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::PrevConflict,
         Keys::all(&["Shift+F8"]),
     ),
+    act(
+        "merge.resolveMarkers",
+        "Resolve Conflicts",
+        Command::ResolveMarkers,
+        Keys::NONE,
+    ),
+    act(
+        "merge.withDisk",
+        "Merge with Disk",
+        Command::MergeWithDisk,
+        Keys::NONE,
+    ),
     // Editing.
     act(
         "edit.undo",

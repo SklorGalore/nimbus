@@ -159,6 +159,41 @@ impl MergeView {
         Ok((view, result))
     }
 
+    /// A three-way merge rebuilt from a text with conflict markers: the
+    /// common text with each block's parts split into base, ours and
+    /// theirs, merged again. The result is the same text with the blocks
+    /// written our way, saving to `out`. `Ok(None)` when the text has no
+    /// markers.
+    ///
+    /// # Errors
+    ///
+    /// Markers out of order, or the merge's own error.
+    pub fn from_markers(
+        text: &str,
+        out: Option<PathBuf>,
+    ) -> Result<Option<(Self, Document)>, String> {
+        let Some(parts) = nimbus_core::markers::split(text).map_err(|e| e.to_string())? else {
+            return Ok(None);
+        };
+        let name = |label: &str, fallback: &str| {
+            if label.is_empty() {
+                fallback.to_owned()
+            } else {
+                label.to_owned()
+            }
+        };
+        let inputs = Inputs {
+            base: Some(Document::with_text(None, &parts.base)),
+            ours: Document::with_text(None, &parts.ours),
+            theirs: Document::with_text(None, &parts.theirs),
+            names: (
+                name(&parts.labels.0, "ours"),
+                name(&parts.labels.1, "theirs"),
+            ),
+        };
+        Self::three_way(inputs, out).map(Some)
+    }
+
     fn build(shape: Shape, inputs: Inputs, regions: Regions, result: &mut Document) -> Self {
         result.watch_edits(true);
         let mut views = [View::default(), View::default()];
@@ -522,6 +557,22 @@ mod tests {
         assert_eq!(m.open_conflicts(), 0);
         assert!(m.status(&result, "").contains("no conflicts left"));
         assert!(m.step_conflict(true, &result, &layout).is_none());
+    }
+
+    #[test]
+    fn a_file_with_markers_reopens_as_a_merge() {
+        let source = "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> other\nc\n";
+        let (mut m, mut result) = MergeView::from_markers(source, None).unwrap().unwrap();
+        assert_eq!(
+            text(&result),
+            "a\n<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\nc\n"
+        );
+        assert_eq!(m.open_conflicts(), 1);
+        assert!(m.status(&result, "").starts_with("Merge HEAD + other"));
+        result.click(4, false);
+        m.take(&mut result, Take::Right).unwrap();
+        assert_eq!(text(&result), "a\ny\nc\n");
+        assert!(MergeView::from_markers("plain\n", None).unwrap().is_none());
     }
 
     #[test]
