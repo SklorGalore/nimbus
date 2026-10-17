@@ -126,3 +126,7 @@ The project uses wgpu 30, whose API differs from older examples and from model t
 ## CI
 
 `.github/workflows/ci.yml` runs fmt, clippy, and tests on macOS, Ubuntu, and Windows, plus the release-size check. Linux needs `libwayland-dev` and `libxkbcommon-dev`. Remote: `github.com/SklorGalore/nimbus` (private).
+
+## Crate Versioning
+
+Bump crate versions as appropriate when making patches, minor changes, or major changes, following semantic versioning.

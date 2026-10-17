@@ -1,4 +1,9 @@
-# Nimbus dark theme. Copy this file to themes/NAME.toml in the config
+# Nimbus dark theme. Its colours come from the app icon: the ink of the
+# icon's I-beam is the background, and amber is the one accent (cursor,
+# focus, active tab, toggles, current match). Selection and highlighted
+# rows use a lighter shade of the ink, so they never compete with amber.
+#
+# Copy this file to themes/NAME.toml in the config
 # directory and set `theme = "NAME"` to make your own; settings you leave
 # out come from `base` ("dark" unless given).
 #
@@ -17,22 +22,22 @@ gutter = "#6b7385"
 current_line_number = "#bfc7d6"
 cursor = "#fabf4c"
 preedit = "#fabf4c"
-selection = "#405c8ca6"
+selection = "#4a5468a6"
 bracket = "#6b738566"
 scrollbar = "#8a93a6b3"
 find_match = "#8c732673"
 current_match = "#d99e33b2"
 bar = "#24262e"
 field = "#14171c"
-field_focus = "#4c6b9e"
-toggle_on = "#4c6b9e"
+field_focus = "#fabf4c"
+toggle_on = "#fabf4c47"
 error = "#f2736b"
 tab_bar = "#1c1f24"
 tab_active = "#1a1c22"
 tab_accent = "#fabf4c"
 picker = "#292b36"
 picker_border = "#4c5261"
-picker_selected = "#405c8cd9"
+picker_selected = "#4a5468d9"
 
 [syntax]
 attribute = "#56b6c2"

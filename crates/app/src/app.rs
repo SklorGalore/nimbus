@@ -2376,6 +2376,34 @@ fn draw_headless_picker(
     draw_picker_overlay(gpu, ui, layout, &p, &keymap, true);
 }
 
+/// Give the window the app icon where the window itself carries one.
+///
+/// On Windows the icon embedded in `nimbus.exe` (by `build.rs`, resource
+/// 1 in `assets/icon/nimbus.rc`) shows in Explorer, but a window starts
+/// with none: without this its title bar and Alt-Tab entry show a blank
+/// generic icon. Windows picks the right size from the resource, so
+/// nothing is decoded here. macOS takes the icon from `Nimbus.app`, and
+/// Linux from the `.desktop` file, so they need nothing.
+fn with_app_icon(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    #[cfg(target_os = "windows")]
+    {
+        use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
+        use winit::window::Icon;
+        match Icon::from_resource(1, None) {
+            Ok(icon) => attrs
+                .with_window_icon(Some(icon.clone()))
+                .with_taskbar_icon(Some(icon)),
+            // Built without the resource (build.rs warned): no icon.
+            Err(e) => {
+                log::debug!("app icon not loaded: {e}");
+                attrs
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    attrs
+}
+
 /// What the debug overlay reports about `doc` and the work running for it.
 fn debug_facts(doc: &Document, find: &FindBar) -> crate::debug::Facts {
     let t = &doc.buffer;
@@ -2815,6 +2843,7 @@ impl ApplicationHandler<AppEvent> for App {
         let attrs = Window::default_attributes()
             .with_title(format!("{} — Nimbus", self.doc().display_name()))
             .with_inner_size(LogicalSize::new(960.0, 640.0));
+        let attrs = with_app_icon(attrs);
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),

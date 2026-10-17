@@ -1,3 +1,5 @@
+<img src="assets/icon/nimbus-1024.png" alt="" width="128" align="right">
+
 # Nimbus
 
 A fast, lightweight, modeless text editor, with its own GPU text renderer.
