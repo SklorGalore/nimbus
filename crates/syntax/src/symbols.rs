@@ -235,7 +235,7 @@ mod tests {
     #[cfg(feature = "json")]
     #[test]
     fn languages_without_a_tags_query_have_no_symbols() {
-        assert!(list("{\"a\": 1}", LanguageId::Json).is_empty());
+        assert_eq!(list("{\"a\": 1}", LanguageId::Json), Vec::new());
     }
 
     #[cfg(all(feature = "go", feature = "c", feature = "python", feature = "tsx"))]
