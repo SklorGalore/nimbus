@@ -59,6 +59,12 @@ The compare view (M9) has its own `[ui]` keys: `diff_added`,
 the changed words within a line, `diff_filler` for the rows one side has
 no line for, and `merge_conflict` for the merge view.
 
+Markdown prose uses `text.title` for headings, `text.emphasis` (italic in
+the built-in themes) and `text.strong` (bold), `text.literal` for code
+spans, `text.uri` and `text.reference` for links. Code inside a fenced
+block is coloured by that language's own captures, so `keyword` colours a
+Rust keyword in a Markdown file too.
+
 ## Which language a file is
 
 Map file names or `*.ext` patterns in `config.toml`:
@@ -71,7 +77,8 @@ Map file names or `*.ext` patterns in `config.toml`:
 ```
 
 Built-in languages: `rust`, `markdown`, `json`, `toml`, `yaml`, `python`,
-`javascript`, `typescript`, `bash`. An exact file name beats a pattern, and
+`javascript`, `typescript`, `tsx`, `bash`, `c`, `go`, `html`, `css`. An
+exact file name beats a pattern, and
 a longer pattern beats a shorter one (`*.d.ts` before `*.ts`). The table
 beats everything else. Next come your own languages' extensions, then the
 built-in detection (extension, file name, `#!` line).
@@ -134,6 +141,51 @@ grammar's `queries/highlights.scm`, and Rust's in
 `crates/syntax/queries/rust.scm`. A query that does not compile is reported
 in the message line, and the built-in one is used. Queries load once, the
 first time a file of that language opens, so a change needs a restart.
+
+Markdown has two grammars: `markdown.scm` is the block grammar (headings,
+lists, fences) and `markdown_inline.scm` the inline one (emphasis, code
+spans, links) that runs inside each paragraph.
+
+### The other query kinds
+
+Each language can have three more files beside its highlight query, all
+with the same `;; extends` rule:
+
+```
+queries/
+  rust.scm                 highlighting
+  rust.injections.scm      which parts are another language
+  rust.tags.scm            what "Go to Symbol" lists
+  rust.folds.scm           what can be folded
+```
+
+**Injections** name regions that belong to another language. Markdown's
+built-in query sends each paragraph to the inline grammar and each fenced
+block to the language its fence names (`rust`, `py`, `sh`, `js`, `ts`,
+`tsx`, `c`, `go`, `html`, `css`, `json`, `toml`, `yaml`, `markdown` and
+their usual aliases; a name Nimbus has no grammar for is left in the
+host's colours). HTML sends `<script>` to JavaScript and `<style>` to CSS.
+A pattern captures the region as `@injection.content` and gives the
+language either as `@injection.language` (a node whose text is the name)
+or fixed, with `(#set! injection.language "css")`. Rust ships no
+injections by default: parsing every macro argument as a second Rust
+tree costs frames for no visible gain, so `rust.injections.scm` would
+start from nothing.
+
+**Tags** (`Primary+Shift+R`, "Go to Symbol") list definitions: a pattern
+captures the definition node as `@definition.function`, `.method`,
+`.class`, `.type`, `.interface`, `.module`, `.macro` or `.constant`, and
+the name as `@name`. Markdown's built-in query captures headings. For
+example, to list Rust `static` items:
+
+```scheme
+;; extends
+(static_item name: (identifier) @name) @definition.constant
+```
+
+**Folds** mark the nodes a fold can hide, as `@fold`; only nodes spanning
+more than one line count. The built-in files are in
+`crates/syntax/queries/folds/`.
 
 Adding a new tree-sitter grammar still means adding its crate to
 `crates/syntax` and rebuilding (DESIGN.md §4.2).

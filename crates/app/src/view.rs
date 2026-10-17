@@ -18,7 +18,7 @@ use nimbus_syntax::highlight::{Highlighter, Span};
 
 use crate::document::Document;
 use crate::find::{Field, FindBar};
-use crate::theme::{Color, Look, Ui};
+use crate::theme::{Color, Theme, Ui};
 
 #[expect(
     clippy::cast_precision_loss,
@@ -80,9 +80,10 @@ pub struct Decorations<'a> {
     pub current: Option<Range<usize>>,
     /// Interface colours.
     pub ui: &'a Ui,
-    /// Syntax colour per capture index of the document's language; empty
-    /// when it has none.
-    pub captures: &'a [Option<Look>],
+    /// The theme, with its capture tables resolved (`Theme::resolve_tables`),
+    /// for the look of each syntax span. `None` when the document has no
+    /// highlighting, so no spans are computed.
+    pub looks: Option<&'a Theme>,
 }
 
 /// Pixel geometry for one frame, from the window size and font metrics.
@@ -993,7 +994,7 @@ impl View {
         // Counted once for the top line, then by one per line while known.
         let mut number = t.line_number(at.start);
         let mut shown_end = t.len_bytes();
-        let spans: &[Span] = if deco.captures.is_empty() {
+        let spans: &[Span] = if deco.looks.is_none() {
             &[]
         } else {
             highlight_ranges(t, &mut w, at, layout, scroll_x, &mut self.hl_ranges);
@@ -1091,7 +1092,7 @@ impl View {
         let scroll_x = self.scroll_x;
         let mut w = wrapper(&mut self.cache, false, layout, tab_width);
         planned_ranges(t, plans, &mut self.hl_ranges);
-        let spans: &[Span] = if deco.captures.is_empty() {
+        let spans: &[Span] = if deco.looks.is_none() {
             &[]
         } else {
             self.highlighter.spans(&doc.syntax, t, &self.hl_ranges)
@@ -1616,10 +1617,8 @@ impl Painter<'_, '_> {
             }
             let Some(look) = self
                 .deco
-                .captures
-                .get(span.capture as usize)
-                .copied()
-                .flatten()
+                .looks
+                .and_then(|t| t.look(span.table, span.capture))
             else {
                 continue;
             };
