@@ -37,3 +37,16 @@ repeated in each file:
 | 7 | [Huge files](m7-huge-files.md) | Done |
 | 8 | [Polish](m8-polish.md) | Done |
 | 9 | [Compare and merge](m9-diff.md) | Next |
+| 10 | [Find in files](m10-find-in-files.md) | Draft |
+| 11 | [Everyday editing](m11-everyday-editing.md) | Draft |
+| 12 | [Workspace](m12-workspace.md) | Draft |
+| 13 | [Split views and folding](m13-splits-and-folding.md) | Draft |
+| 14 | [Languages, second pass](m14-languages.md) | Draft |
+| 15 | [Distribution](m15-distribution.md) | Draft |
+
+A **Draft** plan is a proposal, not yet approved: its order among the
+drafts, its grouping and the items it marks **Proposed** all wait for the
+owner. [`backlog.md`](backlog.md) maps every item deferred by M1–M9 to the
+draft that picks it up, and lists what stays unscheduled. Approving a
+draft moves it to Next, answers its open questions in `DESIGN.md` §9 and
+§10, and may reorder the rest.

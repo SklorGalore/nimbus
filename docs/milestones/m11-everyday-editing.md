@@ -1,0 +1,178 @@
+# M11 — Everyday editing
+
+**Status: draft.** Written on 2026-10-17. Collects the small editing
+operations that every editor has and Nimbus does not yet, plus two items
+deferred earlier: per-language indentation (M3) and multi-key chords (M4).
+Not yet approved; **Proposed** items need an answer first.
+
+## Goal
+
+The line and selection operations a programmer reaches for every few
+minutes, each working with several cursors and undoable in one step, and
+the indentation settings that make them land where expected.
+
+## Done when
+
+- [ ] **Comments**: "Toggle Line Comment" (`Primary+/`) comments or
+      uncomments the selected lines using the language's line comment
+      token; blank lines are skipped and the token aligns with the
+      shallowest indent. "Toggle Block Comment" (`Primary+Shift+/`) wraps
+      the selection. Languages without a line comment use the block form.
+      Works for every built-in and user-defined language, since both
+      already declare their tokens.
+- [ ] **Lines**: duplicate line or selection (`Primary+Shift+D`), move
+      line up and down (`Alt+Up`/`Alt+Down`), delete line
+      (`Primary+Shift+K`), join lines (`Primary+J`), select line
+      (`Primary+L`, repeat extends), insert line below and above without
+      breaking the current one (`Primary+Enter`, `Primary+Shift+Enter`).
+- [ ] **Selection**: "Expand Selection" (`Alt+Shift+Right`) grows from
+      the cursor to the word, then the quoted string or bracket pair, then
+      the line, then the whole text; "Shrink Selection" goes back. "Go to
+      Matching Bracket" (`Primary+Shift+\`) and "Select to Matching
+      Bracket" use the bracket matcher from M8.
+- [ ] **Text**: upper, lower and title case; sort selected lines (plain
+      and reversed); remove duplicate lines; trim trailing whitespace in
+      the selection or the file. All multi-cursor aware.
+- [ ] **Auto-pairs**: typing `(`, `[`, `{`, `"`, `'` or a backtick inserts
+      the closing character when the next character is whitespace, a
+      closer or the end of the line; typing the closer over it steps past;
+      Backspace between an empty pair removes both; typing an opener with
+      a selection wraps it. A setting turns it off (**Proposed**: on by
+      default for code, off in Markdown and plain text).
+- [ ] **Indentation per language**: `[indent]` defaults and
+      `[indent.LANGUAGE]` overrides in the config: `width`, `tabs`
+      (true/false), and `detect` (default true: the file's own majority
+      of leading tabs or spaces, and the most common space count, win
+      over the config). The status bar shows "Spaces: 4" or "Tabs" and
+      clicking it offers the choices for this file. Enter after an opening
+      bracket indents one level, and a closer typed first on a line
+      dedents it.
+- [ ] **On save** (both default off, so files round-trip byte for byte as
+      DESIGN.md §4.1 requires): `trim_trailing_whitespace` and
+      `final_newline`, as config settings with per-language overrides.
+- [ ] **Multi-key chords**: a keybinding may be two chords
+      (`"Ctrl+K Ctrl+C"`); after the first, the status bar shows it and
+      waits up to two seconds for the second; Escape or an unknown chord
+      cancels. No default binding uses one; this exists for user overrides,
+      and the keymap conflict test learns that a chord cannot be both a
+      binding and a prefix.
+- [ ] Every operation is an `Action`, in the palette and menus; each
+      covered by a test that applies it to a small document with one and
+      with three cursors and compares with the expected text.
+- [ ] Typing budget kept: on the 4 GB log, every operation on a normal
+      selection stays under 8 ms. A line operation on a selection over a
+      limit (**Proposed**: 64 MB, the M8 `Primary+D` read limit) shows
+      "selection too large for this operation" instead of running.
+
+## Scope
+
+**In**: everything above, in `core` (the pure edits) and `app` (actions,
+keys, settings, status bar).
+
+**Deferred**: syntax-aware expand selection (to the enclosing function or
+block: M14, which has the tree), Markdown list continuation on Enter
+(M14), snippets and templates (not planned), format on save (needs an
+external formatter and a process model, not planned), spelling (not
+planned).
+
+## Design
+
+**Pure edits in `core`** (`crates/core/src/lines.rs`, new): each operation
+takes the text and the selections and returns the `(Range, &str)` items
+for one `replace_sorted` call plus the selections afterwards, the shape
+M8's `multi.rs` established. Nothing here reads a whole line into a
+`String` when the line is long: the long-line helpers from M7 give the
+window around each cursor, and a selection covering a line over the long
+line threshold (64 KB) routes through `slice_into` into a reused buffer.
+The one-pass batch keeps every operation one undo record and keeps it
+within the typing budget, because `replace_sorted` on the mapped buffer
+is O(items) pieces, not O(file).
+
+**Comment tokens** come from the language rules: `lexical::builtin` for
+the nine built-in languages and the user's `languages/NAME.toml` for the
+rest (`line_comments`, `block_comment`, `hash_needs_space`). The `syntax`
+crate exposes a small `CommentTokens` lookup so `app` does not reach into
+the lexer. Markdown has no line comment; it gets `<!-- -->` as the block
+form.
+
+**Expand selection without a tree**: word (the M3 word classes), then the
+nearest enclosing quotes or bracket pair found by the M8 bracket matcher
+scanning outward from both ends, then the line, then all. The sequence is
+a stack on the document, so Shrink retraces it; any other movement clears
+the stack. M14 adds syntax nodes between "pair" and "line".
+
+**Auto-pairs** live in `app`'s input path, before the character becomes
+an insert: the decision needs the next character and whether the cursor
+is inside a string (approximated by the lexical rules; M14 can ask the
+tree). Over-typing and pair deletion are keyed on the previous keystroke
+having inserted the pair, so a closer the user typed on purpose is never
+eaten.
+
+**Indentation** (`crates/core/src/indent.rs`, new): detection samples the
+first 4,000 lines (never the whole file) when a document opens, counts
+lines starting with a tab against lines starting with spaces, and takes
+the most common space count among indented lines with 2 to 8 spaces. The
+result is an `Indent { width, tabs }` on the `Document`, shown in the
+status bar, used by Tab, Enter, outdent and the line operations. The
+config's `[indent]` table maps to the same type; an override wins over
+detection only when `detect = false`.
+
+**Chords** (`keymap.rs`): the keymap's map becomes a trie two levels deep.
+A first chord that is a prefix sets a `pending` state with a deadline;
+the event loop's `WaitUntil` already exists for cursor blink and takes
+the earlier of the two deadlines. While pending, the status bar shows
+the chord. The conflict test gains a case: a chord that is both a
+complete binding and a prefix is an error at config load, reported in
+the message line.
+
+**Settings** (new config keys, all optional): `[editor] auto_pairs`,
+`trim_trailing_whitespace`, `final_newline`; `[indent] width`, `tabs`,
+`detect`; `[indent.rust]` and so on by language name; the same keys in
+`[languages.NAME]` for user languages. `docs/customizing.md` gets a
+section.
+
+**Actions**: `edit.toggleLineComment`, `edit.toggleBlockComment`,
+`edit.duplicate`, `edit.moveLineUp`, `edit.moveLineDown`,
+`edit.deleteLine`, `edit.joinLines`, `edit.insertLineBelow`,
+`edit.insertLineAbove`, `select.line`, `select.expand`, `select.shrink`,
+`cursor.matchingBracket`, `select.toMatchingBracket`, `edit.upperCase`,
+`edit.lowerCase`, `edit.titleCase`, `edit.sortLines`,
+`edit.sortLinesReversed`, `edit.removeDuplicateLines`,
+`edit.trimWhitespace`, `edit.indentUsingSpaces`, `edit.indentUsingTabs`,
+`edit.detectIndent`. Default keys as above where given; the rest
+palette-only.
+
+## Tasks
+
+1. `lines.rs`: duplicate, move, delete, join, insert line below and
+   above, select line; tests with one and three cursors and the long-line
+   guard.
+2. Comment tokens from the language rules; toggle line and block comment.
+3. Expand and shrink selection; go to and select to matching bracket.
+4. Case changes, sort, remove duplicates, trim whitespace.
+5. Indentation: detection, the config tables, the status bar item and its
+   menu, bracket-aware Enter and closer dedent.
+6. Auto-pairs with its setting.
+7. On-save trimming and final newline, with the byte-for-byte round-trip
+   test still passing when both are off.
+8. Multi-key chords in the keymap and the status bar; the conflict test.
+9. Menus and palette entries; `docs/customizing.md`; measurements on the
+   4 GB log; Results.
+
+## Concepts
+
+- **One batch, one undo record**: why each operation computes all its
+  edits first and applies them from the end of the text back.
+- **Detecting indentation**: a cheap majority vote on a sample, and why
+  the sample is bounded.
+- **Keymap as a trie**: a two-level map and a deadline instead of a
+  modal layer.
+
+## Risks
+
+| Risk | Fallback |
+|---|---|
+| Auto-pairs annoy more than they help in some language | The setting is per language; the default can flip after a week of use |
+| Toggling comments on mixed-indent blocks looks wrong | Align to the shallowest line; if any selected line is already commented at that column, uncomment all, else comment all (the common convention) |
+| `Alt+Up` and friends collide with window-manager keys on Linux | Everything is in the palette and rebindable; note it in `customizing.md` |
+| Chord timeout feels wrong at two seconds | Make it a setting |
