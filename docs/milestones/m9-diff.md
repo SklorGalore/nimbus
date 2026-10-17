@@ -422,11 +422,12 @@ file size, and still a quarter of a frame at a hundred megabytes. A
 segment tree over the regions would make it logarithmic if a merge ever
 needs it.
 
-Startup is unchanged in principle: a bare start does none of this
-(`compare.rs` and `merge_view.rs` run only when a compare or merge is
-opened), so `--smoke` is the owner's to re-measure; this container has no
-GPU. The release binary on Linux is 20.2 MB (19.2 MiB; budget 35 MB), of
-which `imara-diff` is about 60 KB.
+Startup: `--smoke` on the owner's M5 Pro, release build, warm:
+first frame in 153 ms (budget 500 ms; M1 measured 116–132 ms), of which
+the window and GPU context take 84 ms. A bare start does none of the
+diff work (`compare.rs` and `merge_view.rs` run only when a compare or
+merge is opened). The release binary on Linux is 20.2 MB (19.2 MiB;
+budget 35 MB), of which `imara-diff` is about 60 KB.
 
 **End-of-milestone review** (2026-10-17). The review found ten things,
 all fixed the same day, four of them real bugs in the merge and compare
