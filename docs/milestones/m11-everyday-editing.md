@@ -1,9 +1,11 @@
 # M11 — Everyday editing
 
-**Status: draft.** Written on 2026-10-17. Collects the small editing
-operations that every editor has and Nimbus does not yet, plus two items
-deferred earlier: per-language indentation (M3) and multi-key chords (M4).
-Not yet approved; **Proposed** items need an answer first.
+**Status: planned, after M10.** Written on 2026-10-17. Collects the
+small editing operations that every editor has and Nimbus does not yet,
+plus two items deferred earlier: per-language indentation (M3) and
+multi-key chords (M4). Approved the same day, with the auto-pairs
+default, the 64 MB limit and the fixed chord timeout decided
+(`DESIGN.md` §9).
 
 ## Goal
 
@@ -37,8 +39,8 @@ the indentation settings that make them land where expected.
       the closing character when the next character is whitespace, a
       closer or the end of the line; typing the closer over it steps past;
       Backspace between an empty pair removes both; typing an opener with
-      a selection wraps it. A setting turns it off (**Proposed**: on by
-      default for code, off in Markdown and plain text).
+      a selection wraps it. A setting turns it off; the default is on
+      for code and off for Markdown and plain text.
 - [ ] **Indentation per language**: `[indent]` defaults and
       `[indent.LANGUAGE]` overrides in the config: `width`, `tabs`
       (true/false), and `detect` (default true: the file's own majority
@@ -52,17 +54,18 @@ the indentation settings that make them land where expected.
       `final_newline`, as config settings with per-language overrides.
 - [ ] **Multi-key chords**: a keybinding may be two chords
       (`"Ctrl+K Ctrl+C"`); after the first, the status bar shows it and
-      waits up to two seconds for the second; Escape or an unknown chord
-      cancels. No default binding uses one; this exists for user overrides,
+      waits two seconds for the second (a fixed timeout, not a setting);
+      Escape or an unknown chord cancels. No default binding uses one;
+      this exists for user overrides,
       and the keymap conflict test learns that a chord cannot be both a
       binding and a prefix.
 - [ ] Every operation is an `Action`, in the palette and menus; each
       covered by a test that applies it to a small document with one and
       with three cursors and compares with the expected text.
 - [ ] Typing budget kept: on the 4 GB log, every operation on a normal
-      selection stays under 8 ms. A line operation on a selection over a
-      limit (**Proposed**: 64 MB, the M8 `Primary+D` read limit) shows
-      "selection too large for this operation" instead of running.
+      selection stays under 8 ms. A line operation on a selection over
+      64 MB (the M8 `Primary+D` read limit) shows "selection too large
+      for this operation" instead of running.
 
 ## Scope
 
@@ -175,4 +178,4 @@ palette-only.
 | Auto-pairs annoy more than they help in some language | The setting is per language; the default can flip after a week of use |
 | Toggling comments on mixed-indent blocks looks wrong | Align to the shallowest line; if any selected line is already commented at that column, uncomment all, else comment all (the common convention) |
 | `Alt+Up` and friends collide with window-manager keys on Linux | Everything is in the palette and rebindable; note it in `customizing.md` |
-| Chord timeout feels wrong at two seconds | Make it a setting |
+| The fixed two-second chord timeout feels wrong in use | Reconsider it as a setting; a fixed value was chosen to keep the keymap simple |

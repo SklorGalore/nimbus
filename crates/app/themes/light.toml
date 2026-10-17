@@ -26,6 +26,12 @@ tab_accent = "#b86e00"
 picker = "#f4f1ea"
 picker_border = "#d3ccbe"
 picker_selected = "#2b2f3b1f"
+diff_added = "#dcf2e1"
+diff_removed = "#fadcdc"
+diff_changed = "#f6eccb"
+diff_word = "#8fcf9a66"
+diff_filler = "#efece5"
+merge_conflict = "#f6c9c9"
 
 [syntax]
 attribute = "#0184bc"

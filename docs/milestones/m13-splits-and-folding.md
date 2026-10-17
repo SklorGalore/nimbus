@@ -1,9 +1,11 @@
 # M13 — Split views and folding
 
-**Status: draft.** Written on 2026-10-17 from items deferred by M5
-(code folding) and M8 (split views); M6 prepared for splits by giving the
-`View` an origin and width. Not yet approved; **Proposed** items need an
-answer first. The split design has real uncertainty: run it through a
+**Status: planned, after M12.** Written on 2026-10-17 from items
+deferred by M5 (code folding) and M8 (split views); M6 prepared for
+splits by giving the `View` an origin and width. Approved the same day:
+up to three columns with no nesting, and the same file open in two of
+them, which puts the document-and-pane refactor in scope (`DESIGN.md`
+§9). The split design still has real uncertainty: run it through a
 `Plan` agent (CLAUDE.md, Subagents) before writing code.
 
 ## Goal
@@ -15,8 +17,8 @@ frame budget as a single view of any file size.
 ## Done when
 
 - [ ] **Split**: "Split Right" (`Primary+\`) opens a second editor group
-      to the right with the current tab; up to three groups side by side
-      (**Proposed**: no nesting, no vertical stacking), each with its own
+      to the right with the current tab; up to three groups side by side,
+      with no nesting and no vertical stacking, each with its own
       tab strip, scrollbar and find bar state. Dividers drag; widths are
       remembered in `state.toml` with the session (M12).
 - [ ] The same file can be open in two groups: edits in one show in the
@@ -59,7 +61,7 @@ there once the queries exist).
 
 **Documents and panes**. Today a `Tab` owns its `Document` and `View`,
 and the `Document` holds the selections. Two views of one document need
-the text and history shared and the selections per view. **Proposed**
+the text and history shared and the selections per view, so the two are
 split:
 
 - `Document` keeps the buffer, path, line ending, history, syntax state,
