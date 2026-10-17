@@ -401,6 +401,12 @@ pub const ACTIONS: &[ActionInfo] = &[
         mac_other(&["Primary+L"], &["Primary+G"]),
     ),
     act(
+        "edit.goToSymbol",
+        "Go to Symbol…",
+        Command::GoToSymbol,
+        Keys::all(&["Primary+Shift+R"]),
+    ),
+    act(
         "view.toggleSidebar",
         "Toggle Sidebar",
         Command::ToggleSidebar,

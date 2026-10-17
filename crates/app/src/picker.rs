@@ -1,5 +1,5 @@
-//! The fuzzy picker behind the command palette (Primary+Shift+P) and the
-//! file opener (Primary+P).
+//! The fuzzy picker behind the command palette (Primary+Shift+P), the
+//! file opener (Primary+P), Go to Line and Go to Symbol (Primary+Shift+R).
 //!
 //! Matching runs in `nucleo`, which scores items on its own thread pool and
 //! accepts new items while it works. The file opener exploits that: a
@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nimbus_core::Text;
+use nimbus_syntax::symbols::Symbol;
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Nucleo};
 
@@ -35,6 +36,9 @@ pub enum Item {
     File(PathBuf),
     /// A line to go to, counting from 1.
     Line(usize),
+    /// A definition in the file: its name, kind and line (from 1), and
+    /// the byte to put the cursor at.
+    Symbol(Symbol, Option<usize>),
 }
 
 /// Which picker is open.
@@ -46,6 +50,8 @@ pub enum Kind {
     Files,
     /// Go to line: the query is a line number.
     Line,
+    /// Go to symbol: the file's definitions.
+    Symbols,
 }
 
 /// One row to draw.
@@ -194,6 +200,25 @@ impl Picker {
         picker
     }
 
+    /// Open Go to Symbol over `symbols`, each with its line number when
+    /// known. Matching is by name only; the kind is shown, not matched.
+    pub fn symbols(
+        notify: Arc<dyn Fn() + Send + Sync>,
+        symbols: impl IntoIterator<Item = (Symbol, Option<usize>)>,
+    ) -> Self {
+        let picker = Self::new(Kind::Symbols, Config::DEFAULT, notify, PathBuf::new());
+        let injector = picker.matcher.injector();
+        for (symbol, line) in symbols {
+            injector.push(Item::Symbol(symbol, line), |item, cols| {
+                if let Item::Symbol(s, _) = item {
+                    cols[0] = s.name.as_str().into();
+                }
+            });
+        }
+        picker.walk_done.store(true, Ordering::Relaxed);
+        picker
+    }
+
     /// The line number typed, counting from 1; a leading `:` is allowed, as
     /// some editors write it.
     fn line_target(&self) -> Option<usize> {
@@ -307,6 +332,13 @@ impl Picker {
                     text: format!("Go to line {n}"),
                     detail: String::new(),
                 },
+                Item::Symbol(s, line) => Row {
+                    text: s.name.clone(),
+                    detail: match line {
+                        Some(n) => format!("{}, line {n}", s.kind.label()),
+                        None => s.kind.label().to_owned(),
+                    },
+                },
                 Item::File(p) => Row {
                     text: p
                         .file_name()
@@ -415,6 +447,37 @@ mod tests {
         assert_eq!(p.scroll, n - VISIBLE_ROWS);
         p.move_selection(1);
         assert_eq!((p.selected, p.scroll), (0, 0));
+    }
+
+    #[test]
+    fn symbols_match_by_name_and_show_their_kind() {
+        use nimbus_syntax::symbols::SymbolKind;
+        let sym = |name: &str, kind, start| Symbol {
+            name: name.to_owned(),
+            kind,
+            start,
+        };
+        let mut p = Picker::symbols(
+            no_notify(),
+            [
+                (sym("main", SymbolKind::Function, 0), Some(1)),
+                (sym("Config", SymbolKind::Class, 40), Some(5)),
+                (sym("parse", SymbolKind::Method, 90), None),
+            ],
+        );
+        settle(&mut p);
+        assert_eq!(p.match_count(), 3);
+        let _ = p.input.insert("cfg");
+        settle(&mut p);
+        match p.chosen() {
+            Some(Item::Symbol(s, Some(5))) => assert_eq!(s.start, 40),
+            other => panic!("{other:?}"),
+        }
+        let (rows, _) = p.rows(&Keymap::default());
+        assert_eq!(
+            (rows[0].text.as_str(), rows[0].detail.as_str()),
+            ("Config", "type, line 5")
+        );
     }
 
     #[test]

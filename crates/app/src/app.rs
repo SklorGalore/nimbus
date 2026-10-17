@@ -612,6 +612,7 @@ impl App {
             Command::GoToTab(i) => self.switch_to(i.min(self.tabs.len() - 1)),
             Command::QuickOpen => self.open_picker(Kind::Files),
             Command::GoToLine => self.open_picker(Kind::Line),
+            Command::GoToSymbol => self.open_picker(Kind::Symbols),
             Command::Palette => self.open_picker(Kind::Palette),
             Command::ReloadConfig => self.reload_config(),
             Command::ToggleTheme => {
@@ -813,6 +814,16 @@ impl App {
         self.pending_line = None;
         let pos = t.line_to_byte(line.min(t.len_lines().saturating_sub(1)));
         let doc = self.doc_mut();
+        doc.click(pos, false);
+        doc.preferred_column = None;
+        self.changed(true);
+    }
+
+    /// Put the cursor at byte `pos` of the active document (a symbol
+    /// chosen in the picker) and scroll it into view.
+    fn go_to_byte(&mut self, pos: usize) {
+        let doc = self.doc_mut();
+        let pos = pos.min(doc.buffer.len_bytes());
         doc.click(pos, false);
         doc.preferred_column = None;
         self.changed(true);
@@ -1526,6 +1537,19 @@ impl App {
                 let t = &self.doc().buffer;
                 Picker::go_to_line(notify, t.is_fully_indexed().then(|| t.len_lines()))
             }
+            Kind::Symbols => {
+                let doc = self.doc();
+                let symbols = symbol_items(doc);
+                if symbols.is_empty() {
+                    let why = match doc.syntax.phase_name() {
+                        "off" | "simple" => "No symbols: this file has no syntax tree",
+                        "waiting" | "parsing" => "No symbols yet: the file is still being parsed",
+                        _ => "No symbols found in this file",
+                    };
+                    self.say(why, false);
+                }
+                Picker::symbols(notify, symbols)
+            }
         });
         self.find.focused = false;
         self.tick_picker();
@@ -1564,6 +1588,7 @@ impl App {
                     Some(Item::Action(a)) => self.run(a.command, event_loop),
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
                     Some(Item::Line(n)) => self.go_to_line(n),
+                    Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     None => {}
                 }
             }
@@ -1678,6 +1703,7 @@ impl App {
             | Command::ToggleTheme
             | Command::ToggleSidebar
             | Command::GoToLine
+            | Command::GoToSymbol
             | Command::FocusSidebar
             | Command::ToggleIgnored
             | Command::ToggleDebugOverlay
@@ -2109,6 +2135,7 @@ impl App {
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
                     Some(Item::Action(a)) => self.pending_action = Some(a.command),
                     Some(Item::Line(n)) => self.go_to_line(n),
+                    Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     None => {}
                 }
             }
@@ -2348,8 +2375,21 @@ fn line_estimate(t: &dyn Text) -> usize {
     usize::try_from(estimate).unwrap_or(usize::MAX).max(lines)
 }
 
-/// `--picker KIND[:QUERY]` with `--headless`: open the palette, file opener
-/// or go-to-line picker with `QUERY` typed, let it settle, and draw it.
+/// The document's definitions with their line numbers, for Go to Symbol.
+fn symbol_items(doc: &Document) -> Vec<(nimbus_syntax::symbols::Symbol, Option<usize>)> {
+    let t = &doc.buffer;
+    nimbus_syntax::symbols::symbols(&doc.syntax, t)
+        .into_iter()
+        .map(|s| {
+            let line = t.line_number(s.start).map(|l| l + 1);
+            (s, line)
+        })
+        .collect()
+}
+
+/// `--picker KIND[:QUERY]` with `--headless`: open the palette, file
+/// opener, go-to-line or symbol picker with `QUERY` typed, let it settle,
+/// and draw it.
 fn draw_headless_picker(
     gpu: &mut Gpu,
     ui: &Ui,
@@ -2364,6 +2404,7 @@ fn draw_headless_picker(
     let mut p = match kind {
         "files" => Picker::files(root, notify),
         "line" => Picker::go_to_line(notify, Some(doc.buffer.len_lines())),
+        "symbols" => Picker::symbols(notify, symbol_items(doc)),
         _ => Picker::palette(notify),
     };
     let _ = p.input.insert(query);
@@ -2676,6 +2717,8 @@ fn draw_picker_overlay(
         (Kind::Palette, false) => "commands",
         (Kind::Files, true) => "file",
         (Kind::Files, false) => "files",
+        (Kind::Symbols, true) => "symbol",
+        (Kind::Symbols, false) => "symbols",
         (Kind::Line, _) => "",
     };
     let more = if p.loading() { "…" } else { "" };
@@ -2688,6 +2731,7 @@ fn draw_picker_overlay(
         Kind::Palette => "Type a command",
         Kind::Files => "Type a file name",
         Kind::Line => "Type a line number",
+        Kind::Symbols => "Type a function, type or heading name",
     };
     let pv = PickerView {
         input: &p.input,
