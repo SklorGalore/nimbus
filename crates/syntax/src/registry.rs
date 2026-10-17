@@ -10,7 +10,10 @@
 //! A user can replace a language's query with `queries/<key>.scm` in a
 //! folder the app names with [`set_user_queries`], or add to it by starting
 //! the file with `;; extends`. A user query that does not compile is
-//! reported through [`take_warnings`] and the built-in one is used.
+//! reported through [`take_warnings`] and the built-in one is used. The
+//! other kinds of query a grammar can have (M14) live beside it as
+//! `queries/<key>.tags.scm` and `queries/<key>.injections.scm`, with the
+//! same rules.
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -41,6 +44,10 @@ impl std::fmt::Debug for Grammar {
 /// builds on another: TypeScript's own query covers only TypeScript
 /// additions, so JavaScript's comes first and TypeScript's after it (later
 /// patterns win).
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per grammar; splitting it would hide the list"
+)]
 fn source(id: LanguageId) -> Option<(Language, String)> {
     match id {
         #[cfg(feature = "rust")]
@@ -96,6 +103,38 @@ fn source(id: LanguageId) -> Option<(Language, String)> {
             tree_sitter_bash::LANGUAGE.into(),
             tree_sitter_bash::HIGHLIGHT_QUERY.to_owned(),
         )),
+        #[cfg(feature = "c")]
+        LanguageId::C => Some((
+            tree_sitter_c::LANGUAGE.into(),
+            tree_sitter_c::HIGHLIGHT_QUERY.to_owned(),
+        )),
+        #[cfg(feature = "go")]
+        LanguageId::Go => Some((
+            tree_sitter_go::LANGUAGE.into(),
+            tree_sitter_go::HIGHLIGHTS_QUERY.to_owned(),
+        )),
+        #[cfg(feature = "html")]
+        LanguageId::Html => Some((
+            tree_sitter_html::LANGUAGE.into(),
+            tree_sitter_html::HIGHLIGHTS_QUERY.to_owned(),
+        )),
+        #[cfg(feature = "css")]
+        LanguageId::Css => Some((
+            tree_sitter_css::LANGUAGE.into(),
+            tree_sitter_css::HIGHLIGHTS_QUERY.to_owned(),
+        )),
+        // TSX is TypeScript plus JSX, so its query is JavaScript's, then
+        // JSX's, then TypeScript's additions.
+        #[cfg(feature = "tsx")]
+        LanguageId::Tsx => Some((
+            tree_sitter_typescript::LANGUAGE_TSX.into(),
+            format!(
+                "{}\n{}\n{}",
+                tree_sitter_javascript::HIGHLIGHT_QUERY,
+                tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                tree_sitter_typescript::HIGHLIGHTS_QUERY
+            ),
+        )),
         #[cfg_attr(
             all(
                 feature = "rust",
@@ -106,7 +145,12 @@ fn source(id: LanguageId) -> Option<(Language, String)> {
                 feature = "python",
                 feature = "javascript",
                 feature = "typescript",
-                feature = "bash"
+                feature = "bash",
+                feature = "c",
+                feature = "go",
+                feature = "html",
+                feature = "css",
+                feature = "tsx"
             ),
             expect(
                 unreachable_patterns,
@@ -115,6 +159,66 @@ fn source(id: LanguageId) -> Option<(Language, String)> {
         )]
         _ => None,
     }
+}
+
+/// The tags query for a language: patterns that capture definitions
+/// (`@definition.function` with its `@name`), the convention code
+/// navigation tools share. From the grammar crate where it ships one,
+/// with Nimbus's additions for constants; vendored for Markdown. `None`
+/// for data formats and for languages whose feature is off.
+fn tags_source(id: LanguageId) -> Option<String> {
+    match id {
+        #[cfg(feature = "rust")]
+        LanguageId::Rust => Some(include_str!("../queries/rust-tags.scm").to_owned()),
+        #[cfg(feature = "markdown")]
+        LanguageId::Markdown => Some(include_str!("../queries/markdown-tags.scm").to_owned()),
+        #[cfg(feature = "python")]
+        LanguageId::Python => Some(tree_sitter_python::TAGS_QUERY.to_owned()),
+        #[cfg(feature = "javascript")]
+        LanguageId::JavaScript => Some(tree_sitter_javascript::TAGS_QUERY.to_owned()),
+        // TypeScript's tags cover only its additions, like its highlights.
+        #[cfg(feature = "typescript")]
+        LanguageId::TypeScript | LanguageId::Tsx => Some(format!(
+            "{}\n{}",
+            tree_sitter_javascript::TAGS_QUERY,
+            tree_sitter_typescript::TAGS_QUERY
+        )),
+        #[cfg(feature = "c")]
+        LanguageId::C => Some(tree_sitter_c::TAGS_QUERY.to_owned()),
+        #[cfg(feature = "go")]
+        LanguageId::Go => Some(format!(
+            "{}\n(const_declaration (const_spec name: (identifier) @name) @definition.constant)\n",
+            tree_sitter_go::TAGS_QUERY
+        )),
+        _ => None,
+    }
+}
+
+/// The compiled tags query for `id`, loaded on first use like the
+/// grammar: `None` when the language has none, or it fails to compile.
+/// Users replace or extend it with `queries/<key>.tags.scm`.
+#[must_use]
+pub fn symbols_query(id: LanguageId) -> Option<&'static Query> {
+    static SLOTS: [OnceLock<Option<Query>>; LanguageId::ALL.len()] =
+        [const { OnceLock::new() }; LanguageId::ALL.len()];
+    SLOTS
+        .get(id.index())?
+        .get_or_init(|| {
+            let grammar = grammar(id)?;
+            let builtin = tags_source(id)?;
+            let file = format!("{}.tags.scm", id.key());
+            let user = USER_QUERIES
+                .get()
+                .and_then(|dir| user_query(dir, &file, &builtin));
+            match compile(&grammar.language, &builtin, user) {
+                Ok(q) => Some(q),
+                Err(e) => {
+                    log::error!("{} tags query does not compile: {e}", id.name());
+                    None
+                }
+            }
+        })
+        .as_ref()
 }
 
 static USER_QUERIES: OnceLock<PathBuf> = OnceLock::new();
@@ -143,10 +247,10 @@ fn warn(message: String) {
     }
 }
 
-/// The user's query for `id`, if there is one: the whole query, or the
-/// built-in followed by the user's additions for an `;; extends` file.
-fn user_query(dir: &std::path::Path, id: LanguageId, builtin: &str) -> Option<(PathBuf, String)> {
-    let path = dir.join(format!("{}.scm", id.key()));
+/// The user's query in `dir/file`, if there is one: the whole query, or
+/// the built-in followed by the user's additions for an `;; extends` file.
+fn user_query(dir: &std::path::Path, file: &str, builtin: &str) -> Option<(PathBuf, String)> {
+    let path = dir.join(file);
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -202,9 +306,10 @@ pub fn grammar(id: LanguageId) -> Option<&'static Grammar> {
         .get_or_init(|| {
             let started = std::time::Instant::now();
             let (language, builtin) = source(id)?;
+            let file = format!("{}.scm", id.key());
             let user = USER_QUERIES
                 .get()
-                .and_then(|dir| user_query(dir, id, &builtin));
+                .and_then(|dir| user_query(dir, &file, &builtin));
             let compiled = compile(&language, &builtin, user);
             match compiled {
                 Ok(highlights) => {
@@ -266,18 +371,14 @@ mod tests {
                 .map(|s| (*s).to_owned())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(
-            user_query(&dir, LanguageId::Json, &builtin),
-            None,
-            "no file"
-        );
+        assert_eq!(user_query(&dir, "json.scm", &builtin), None, "no file");
 
         std::fs::write(dir.join("json.scm"), "(string) @mine\n").unwrap();
-        let user = user_query(&dir, LanguageId::Json, &builtin);
+        let user = user_query(&dir, "json.scm", &builtin);
         assert_eq!(names(user), ["mine"], "replaces");
 
         std::fs::write(dir.join("json.scm"), ";; extends\n(string) @mine\n").unwrap();
-        let user = user_query(&dir, LanguageId::Json, &builtin);
+        let user = user_query(&dir, "json.scm", &builtin);
         let got = names(user);
         assert!(
             got.contains(&"mine".to_owned()) && got.contains(&"string".to_owned()),
@@ -286,10 +387,22 @@ mod tests {
 
         std::fs::write(dir.join("json.scm"), "(not_a_node) @x\n").unwrap();
         let _ = take_warnings();
-        let user = user_query(&dir, LanguageId::Json, &builtin);
+        let user = user_query(&dir, "json.scm", &builtin);
         assert!(names(user).contains(&"string".to_owned()), "falls back");
         assert_eq!(take_warnings().len(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn every_tags_query_compiles() {
+        for id in LanguageId::ALL {
+            let has_source = tags_source(id).is_some();
+            let compiled = symbols_query(id).is_some();
+            assert_eq!(has_source, compiled, "{} tags query", id.name());
+            if let Some(q) = symbols_query(id) {
+                assert!(q.capture_index_for_name("name").is_some(), "{}", id.name());
+            }
+        }
     }
 
     /// Prints every capture name, for writing themes.

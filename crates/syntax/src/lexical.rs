@@ -294,6 +294,71 @@ const MARKDOWN: Rules = Rules {
     ..NONE
 };
 
+const C: Rules = Rules {
+    line_comments: &["//"],
+    block_comment: Some(("/*", "*/")),
+    strings: &[s("\"", "\"", true, false)],
+    char_literals: true,
+    keywords: &[
+        "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+        "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register",
+        "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef",
+        "union", "unsigned", "void", "volatile", "while",
+    ],
+    constants: &["NULL", "true", "false"],
+    ..NONE
+};
+
+const GO: Rules = Rules {
+    line_comments: &["//"],
+    block_comment: Some(("/*", "*/")),
+    strings: &[s("\"", "\"", true, false), s("`", "`", false, true)],
+    char_literals: true,
+    keywords: &[
+        "break",
+        "case",
+        "chan",
+        "const",
+        "continue",
+        "default",
+        "defer",
+        "else",
+        "fallthrough",
+        "for",
+        "func",
+        "go",
+        "goto",
+        "if",
+        "import",
+        "interface",
+        "map",
+        "package",
+        "range",
+        "return",
+        "select",
+        "struct",
+        "switch",
+        "type",
+        "var",
+    ],
+    constants: &["true", "false", "nil", "iota"],
+    ..NONE
+};
+
+const HTML: Rules = Rules {
+    block_comment: Some(("<!--", "-->")),
+    strings: &[s("\"", "\"", false, false), s("'", "'", false, false)],
+    ..NONE
+};
+
+const CSS: Rules = Rules {
+    block_comment: Some(("/*", "*/")),
+    strings: &[s("\"", "\"", true, false), s("'", "'", true, false)],
+    // Words only: `!important` colours as `!` then the constant.
+    constants: &["important", "inherit", "initial", "unset"],
+    ..NONE
+};
+
 /// The built-in rules for `language`, used for its files over 16 MB.
 #[must_use]
 pub fn builtin(language: LanguageId) -> &'static Rules {
@@ -305,8 +370,12 @@ pub fn builtin(language: LanguageId) -> &'static Rules {
         LanguageId::Yaml => &YAML,
         LanguageId::Python => &PYTHON,
         LanguageId::JavaScript => &JAVASCRIPT,
-        LanguageId::TypeScript => &TYPESCRIPT,
+        LanguageId::TypeScript | LanguageId::Tsx => &TYPESCRIPT,
         LanguageId::Bash => &BASH,
+        LanguageId::C => &C,
+        LanguageId::Go => &GO,
+        LanguageId::Html => &HTML,
+        LanguageId::Css => &CSS,
     }
 }
 
