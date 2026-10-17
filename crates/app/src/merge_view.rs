@@ -17,6 +17,7 @@
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use nimbus_core::align::{Folding, Row, Rows};
 use nimbus_core::merge::{Kind, Merge, Pick};
@@ -24,7 +25,7 @@ use nimbus_core::regions::{RegionTag, Regions, Resolution};
 use nimbus_core::{Buffer, Snapshot, Text};
 use nimbus_render::Gpu;
 
-use crate::columns::{Click, Columns, Live};
+use crate::columns::{Click, Columns, Live, lines_of};
 use crate::document::Document;
 use crate::theme::Theme;
 use crate::view::{Layout, Preedit, View};
@@ -62,6 +63,26 @@ impl Take {
     }
 }
 
+/// What a merge's worker computes: the chunks, and for a three-way merge
+/// the result text with each chunk's lines in it.
+pub type Outcome = Result<(Merge, Option<(String, Vec<Range<usize>>)>), String>;
+
+/// A worker's answer to a merge request.
+#[derive(Debug)]
+pub struct Merged {
+    /// Which request it answers.
+    pub generation: u64,
+    /// The merge, or why there is none.
+    pub outcome: Outcome,
+}
+
+/// Sends the worker's result back to the event loop.
+pub type Send = Arc<dyn Fn(Merged) -> bool + std::marker::Send + Sync>;
+
+/// Generations are unique across every merge, so a result finds its merge
+/// by generation alone.
+static GENERATION: AtomicU64 = AtomicU64::new(1);
+
 /// A merge attached to a tab.
 pub struct MergeView {
     /// Two-way or three-way.
@@ -82,6 +103,11 @@ pub struct MergeView {
     pub columns: Columns<RegionTag>,
     /// `--merge`: the merge should report through the exit code.
     pub reports_exit: bool,
+    /// Waiting for the worker's merge under this generation; the result
+    /// cannot be edited until it arrives.
+    pending: Option<u64>,
+    /// Why there is no merge, when the worker failed.
+    failed: Option<String>,
     status: String,
     scratch: String,
 }
@@ -109,69 +135,185 @@ pub struct Inputs {
 }
 
 impl MergeView {
-    /// A two-way merge of `inputs.ours` and `inputs.theirs`. Returns the
-    /// view and the result document: a copy of ours, saving to `out`.
-    ///
-    /// # Errors
-    ///
-    /// The diff's error when a text has too many distinct lines.
-    pub fn two_way(inputs: Inputs, out: Option<PathBuf>) -> Result<(Self, Document), String> {
-        let ours: Arc<dyn Snapshot> = inputs.ours.buffer.snapshot().into();
-        let theirs: Arc<dyn Snapshot> = inputs.theirs.buffer.snapshot().into();
-        let merge = Merge::new(&ours, &ours, &theirs).map_err(|e| e.to_string())?;
-        let regions = Regions::from_ours(&merge);
-        let text = ours.slice(0..ours.len_bytes());
-        let mut result = Document::with_text(out, &text);
-        result.line_ending = inputs.ours.line_ending;
-        let view = Self::build(Shape::TwoWay, inputs, regions, &mut result);
-        Ok((view, result))
-    }
-
-    /// A three-way merge. The result starts as the merge's output with
-    /// conflicts as marker blocks, saving to `out`.
-    ///
-    /// # Errors
-    ///
-    /// The diff's error when a text has too many distinct lines, or a
-    /// missing base.
-    pub fn three_way(inputs: Inputs, out: Option<PathBuf>) -> Result<(Self, Document), String> {
-        let Some(base_doc) = &inputs.base else {
-            return Err("a three-way merge needs a base".to_owned());
-        };
-        let base: Arc<dyn Snapshot> = base_doc.buffer.snapshot().into();
-        let ours: Arc<dyn Snapshot> = inputs.ours.buffer.snapshot().into();
-        let theirs: Arc<dyn Snapshot> = inputs.theirs.buffer.snapshot().into();
-        let merge = Merge::new(&base, &ours, &theirs).map_err(|e| e.to_string())?;
-        let mut text = String::new();
-        let mut ranges = Vec::new();
-        merge.write_tracked(
-            &*base,
-            &*ours,
-            &*theirs,
-            |_| Pick::Markers,
-            &mut text,
-            &mut ranges,
-        );
-        let regions = Regions::new(&merge, &ranges);
-        let mut result = Document::with_text(out, &text);
-        result.line_ending = inputs.ours.line_ending;
-        let view = Self::build(Shape::ThreeWay, inputs, regions, &mut result);
-        Ok((view, result))
-    }
-
-    /// A three-way merge rebuilt from a text with conflict markers: the
-    /// common text with each block's parts split into base, ours and
-    /// theirs, merged again. The result is the same text with the blocks
-    /// written our way, saving to `out`. `Ok(None)` when the text has no
-    /// markers.
-    ///
-    /// # Errors
-    ///
-    /// Markers out of order, or the merge's own error.
-    pub fn from_markers(
-        text: &str,
+    /// Start a merge of `inputs` on a worker, through `send`. Returns the
+    /// view, waiting, and the result document, which saves to `out`: a
+    /// copy of the left text for a two-way merge, empty for a three-way
+    /// one until the worker's text arrives.
+    pub fn start(
+        shape: Shape,
+        inputs: Inputs,
         out: Option<PathBuf>,
-    ) -> Result<Option<(Self, Document)>, String> {
+        send: &Send,
+    ) -> (Self, Document) {
+        let (mut view, mut result) = Self::new(shape, inputs, out);
+        let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
+        view.pending = Some(generation);
+        let job = view.job();
+        let send = Arc::clone(send);
+        let spawned = std::thread::Builder::new()
+            .name("merge".into())
+            .spawn(move || {
+                send(Merged {
+                    generation,
+                    outcome: job(),
+                });
+            });
+        if let Err(e) = spawned {
+            log::warn!("merge thread: {e}");
+            view.pending = None;
+            view.failed = Some(e.to_string());
+        }
+        result.watch_edits(true);
+        (view, result)
+    }
+
+    /// Like [`start`](MergeView::start), merging on this thread before
+    /// returning: for headless rendering and tests.
+    pub fn start_sync(
+        shape: Shape,
+        inputs: Inputs,
+        out: Option<PathBuf>,
+    ) -> Result<(Self, Document), String> {
+        let (mut view, mut result) = Self::new(shape, inputs, out);
+        let outcome = (view.job())();
+        view.pending = Some(0);
+        view.receive(
+            &mut result,
+            Merged {
+                generation: 0,
+                outcome,
+            },
+        );
+        if let Some(e) = view.failed.take() {
+            return Err(e);
+        }
+        result.watch_edits(true);
+        Ok((view, result))
+    }
+
+    /// A two-way merge on this thread (tests and headless): the result is
+    /// a copy of ours.
+    #[cfg(test)]
+    pub fn two_way(inputs: Inputs, out: Option<PathBuf>) -> Result<(Self, Document), String> {
+        Self::start_sync(Shape::TwoWay, inputs, out)
+    }
+
+    /// A three-way merge on this thread (tests and headless).
+    pub fn three_way(inputs: Inputs, out: Option<PathBuf>) -> Result<(Self, Document), String> {
+        Self::start_sync(Shape::ThreeWay, inputs, out)
+    }
+
+    /// The view and its result document before any merge is known.
+    fn new(shape: Shape, inputs: Inputs, out: Option<PathBuf>) -> (Self, Document) {
+        let text = match shape {
+            Shape::TwoWay => inputs
+                .ours
+                .buffer
+                .slice(0..inputs.ours.buffer.len_bytes())
+                .into_owned(),
+            Shape::ThreeWay => String::new(),
+        };
+        let mut result = Document::with_text(out, &text);
+        result.line_ending = inputs.ours.line_ending;
+        let mut views = [View::default(), View::default()];
+        for v in &mut views {
+            v.wrap = false;
+        }
+        let view = Self {
+            shape,
+            base: inputs.base,
+            ours: inputs.ours,
+            theirs: inputs.theirs,
+            names: inputs.names,
+            views,
+            regions: Regions::default(),
+            change_regions: Vec::new(),
+            columns: Columns::new(Rows::from_segments(3, Folding::default(), []), 3, 1),
+            reports_exit: false,
+            pending: None,
+            failed: None,
+            status: String::new(),
+            scratch: String::new(),
+        };
+        (view, result)
+    }
+
+    /// The work a merge needs, over snapshots, runnable on any thread.
+    fn job(&self) -> impl FnOnce() -> Outcome + std::marker::Send + 'static {
+        let ours: Arc<dyn Snapshot> = self.ours.buffer.snapshot().into();
+        let theirs: Arc<dyn Snapshot> = self.theirs.buffer.snapshot().into();
+        let base: Option<Arc<dyn Snapshot>> =
+            self.base.as_ref().map(|b| b.buffer.snapshot().into());
+        let shape = self.shape;
+        move || match shape {
+            Shape::TwoWay => {
+                let merge = Merge::new(&ours, &ours, &theirs).map_err(|e| e.to_string())?;
+                Ok((merge, None))
+            }
+            Shape::ThreeWay => {
+                let Some(base) = base else {
+                    return Err("a three-way merge needs a base".to_owned());
+                };
+                let merge = Merge::new(&base, &ours, &theirs).map_err(|e| e.to_string())?;
+                let mut text = String::new();
+                let mut ranges = Vec::new();
+                merge.write_tracked(
+                    &*base,
+                    &*ours,
+                    &*theirs,
+                    |_| Pick::Markers,
+                    &mut text,
+                    &mut ranges,
+                );
+                Ok((merge, Some((text, ranges))))
+            }
+        }
+    }
+
+    /// Whether `merged` answers this merge's request.
+    #[must_use]
+    pub fn wants(&self, merged: &Merged) -> bool {
+        self.pending == Some(merged.generation)
+    }
+
+    /// The worker finished: take its merge, and for a three-way merge put
+    /// its text into the result. The caller re-detects the result's
+    /// language after a three-way merge (its text was empty before).
+    pub fn receive(&mut self, result: &mut Document, merged: Merged) {
+        if !self.wants(&merged) {
+            return;
+        }
+        self.pending = None;
+        match merged.outcome {
+            Ok((merge, None)) => self.regions = Regions::from_ours(&merge),
+            Ok((merge, Some((text, ranges)))) => {
+                result.set_text(&text);
+                self.regions = Regions::new(&merge, &ranges);
+            }
+            Err(e) => self.failed = Some(e),
+        }
+        // Whatever the log noted while waiting (nothing: edits were held
+        // off) or `set_text` marked is moot now.
+        result.watch_edits(true);
+        self.rebuild_rows();
+    }
+
+    /// Whether the merge is still being computed; the result cannot be
+    /// edited meanwhile.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// The inputs of a three-way merge rebuilt from a text with conflict
+    /// markers (the common text with each block's parts split into base,
+    /// ours and theirs), and how many blocks there were. `Ok(None)` when
+    /// the text has no markers.
+    ///
+    /// # Errors
+    ///
+    /// Markers out of order.
+    pub fn inputs_from_markers(text: &str) -> Result<Option<(Inputs, usize)>, String> {
         let Some(parts) = nimbus_core::markers::split(text).map_err(|e| e.to_string())? else {
             return Ok(None);
         };
@@ -191,31 +333,30 @@ impl MergeView {
                 name(&parts.labels.1, "theirs"),
             ),
         };
-        Self::three_way(inputs, out).map(Some)
+        Ok(Some((inputs, parts.conflicts)))
     }
 
-    fn build(shape: Shape, inputs: Inputs, regions: Regions, result: &mut Document) -> Self {
-        result.watch_edits(true);
-        let mut views = [View::default(), View::default()];
-        for v in &mut views {
-            v.wrap = false;
+    /// A three-way merge rebuilt from a text with conflict markers, on
+    /// this thread (tests). `Ok(None)` without markers.
+    ///
+    /// # Errors
+    ///
+    /// Markers out of order, or the merge's own error.
+    #[cfg(test)]
+    pub fn from_markers(
+        text: &str,
+        out: Option<PathBuf>,
+    ) -> Result<Option<(Self, Document)>, String> {
+        match Self::inputs_from_markers(text)? {
+            Some((inputs, _)) => Self::three_way(inputs, out).map(Some),
+            None => Ok(None),
         }
-        let mut m = Self {
-            shape,
-            base: inputs.base,
-            ours: inputs.ours,
-            theirs: inputs.theirs,
-            names: inputs.names,
-            views,
-            regions,
-            change_regions: Vec::new(),
-            columns: Columns::new(Rows::from_segments(3, Folding::default(), []), 3, 1),
-            reports_exit: false,
-            status: String::new(),
-            scratch: String::new(),
-        };
-        m.rebuild_rows();
-        m
+    }
+
+    /// Why the worker could not merge, if it could not.
+    #[must_use]
+    pub fn failure(&self) -> Option<&str> {
+        self.failed.as_deref()
     }
 
     /// Stop watching the result; the tab goes back to one column.
@@ -275,6 +416,9 @@ impl MergeView {
     /// Take a side for the change under the cursor: one undoable edit of
     /// the result. Returns what happened, for the message line.
     pub fn take(&mut self, doc: &mut Document, take: Take) -> Result<(), String> {
+        if self.pending.is_some() {
+            return Err("still merging".to_owned());
+        }
         let Some(i) = self.region_at_cursor(doc) else {
             return Err("no change at the cursor".to_owned());
         };
@@ -391,6 +535,12 @@ impl MergeView {
                 let _ = write!(self.status, "Merge {l} + {r}");
             }
         }
+        if self.pending.is_some() {
+            self.status.push_str(" · merging…");
+        }
+        if let Some(e) = &self.failed {
+            let _ = write!(self.status, " · cannot merge: {e}");
+        }
         let changes = self.columns.rows.changes();
         let conflicts = self.open_conflicts();
         match self.region_at_cursor(doc).and_then(|i| {
@@ -461,9 +611,18 @@ impl MergeView {
                 _ => Some(ui.diff_filler),
             }
         };
-        // Merges mark no words: the inputs' lines differ as wholes.
-        self.columns
-            .plan(layout, background, |_: &Row<RegionTag>| [None, None, None]);
+        if self.columns.rows.is_empty() {
+            let lines = [
+                lines_of(&self.ours.buffer),
+                lines_of(&doc.buffer),
+                lines_of(&self.theirs.buffer),
+            ];
+            self.columns.plan_unaligned(layout, &lines);
+        } else {
+            // Merges mark no words: the inputs' lines differ as wholes.
+            self.columns
+                .plan(layout, background, |_: &Row<RegionTag>| [None, None, None]);
+        }
         let [ours_view, theirs_view] = &mut self.views;
         let live = Live {
             cursor_visible,
@@ -485,6 +644,48 @@ impl MergeView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A merge started on a worker shows the inputs unaligned and refuses
+    /// edits until its result arrives, then aligns like a synchronous one.
+    #[test]
+    fn worker_merge_waits_then_aligns() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let send: Send = Arc::new(move |m| tx.send(m).is_ok());
+        let (mut m, mut result) = MergeView::start(
+            Shape::ThreeWay,
+            inputs(Some("a\nb\nc\n"), "x\nb\nc\n", "a\nb\ny\n"),
+            None,
+            &send,
+        );
+        assert!(m.is_pending());
+        assert!(m.columns.rows.is_empty());
+        assert_eq!(result.buffer.len_bytes(), 0);
+        assert_eq!(
+            m.take(&mut result, Take::Left),
+            Err("still merging".to_owned())
+        );
+        let merged = rx.recv().unwrap();
+        assert!(m.wants(&merged));
+        m.receive(&mut result, merged);
+        assert!(!m.is_pending());
+        assert!(m.failure().is_none());
+        assert_eq!(
+            result.buffer.slice(0..result.buffer.len_bytes()),
+            "x\nb\ny\n"
+        );
+        assert!(!m.columns.rows.is_empty());
+        assert_eq!(m.open_conflicts(), 0);
+        // A stale answer is ignored.
+        m.pending = Some(7);
+        m.receive(
+            &mut result,
+            Merged {
+                generation: 1,
+                outcome: Err("late".to_owned()),
+            },
+        );
+        assert!(m.failure().is_none());
+    }
 
     fn inputs(base: Option<&str>, ours: &str, theirs: &str) -> Inputs {
         Inputs {

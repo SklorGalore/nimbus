@@ -440,6 +440,26 @@ impl Document {
         Ok(doc)
     }
 
+    /// Replace the whole text with `text`, as a merge result arriving from
+    /// its worker does: a fresh rope, no undo history, the language to be
+    /// detected again by the caller (so the syntax state sees the new
+    /// text), and dirty when the document has a path.
+    pub fn set_text(&mut self, text: &str) {
+        self.buffer = nimbus_core::RopeBuffer::from_text(text).into();
+        self.history = History::default();
+        self.selections = Selections::default();
+        self.preferred_column = None;
+        self.goals.clear();
+        self.language = None;
+        self.saved_at = if self.path.is_some() {
+            NOT_SAVED
+        } else {
+            self.history.top_id()
+        };
+        self.edits.reset = true;
+        self.version += 1;
+    }
+
     /// Keep a snapshot of the text as the file holds it now (rope documents
     /// only; a mapped file's bytes are the file itself).
     fn remember_disk_text(&mut self) {

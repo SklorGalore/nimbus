@@ -37,7 +37,7 @@ use crate::io;
 use crate::keymap::Keymap;
 use crate::languages::Languages;
 use crate::menu::{self, MenuBar};
-use crate::merge_view::{Inputs, MergeView, Shape, Take};
+use crate::merge_view::{Inputs, MergeView, Merged, Shape, Take};
 use crate::picker::{self, Item, Kind, Picker};
 use crate::saver::{self, ReplacePolicy, SaveEvent, SaveStep};
 use crate::sidebar::{self, Sidebar};
@@ -76,6 +76,8 @@ pub enum AppEvent {
     Save(SaveEvent),
     /// A compare's diff finished on a worker (M9).
     Diff(DiffResult),
+    /// A merge's chunks (and result text) finished on a worker (M9).
+    Merged(Merged),
 }
 
 /// List a folder for the sidebar on its own thread.
@@ -813,17 +815,8 @@ impl App {
     /// Open a merge tab for `inputs`; `out` is where its result saves, and
     /// `reports` whether `--merge` asked for the exit code.
     fn start_merge(&mut self, shape: Shape, inputs: Inputs, out: Option<PathBuf>, reports: bool) {
-        let built = match shape {
-            Shape::TwoWay => MergeView::two_way(inputs, out),
-            Shape::ThreeWay => MergeView::three_way(inputs, out),
-        };
-        let (mut merge, mut result) = match built {
-            Ok(x) => x,
-            Err(e) => {
-                self.say(format!("Cannot merge: {e}"), true);
-                return;
-            }
-        };
+        let send = self.merge_sender();
+        let (mut merge, mut result) = MergeView::start(shape, inputs, out, &send);
         result.detect_language(&self.languages);
         for doc in merge.inputs_mut() {
             if let Some(job) = doc.syntax.take_job(&doc.buffer) {
@@ -853,6 +846,50 @@ impl App {
         self.changed(true);
     }
 
+    /// The sender a merge's worker reports through.
+    fn merge_sender(&self) -> crate::merge_view::Send {
+        let proxy = self.proxy.clone();
+        Arc::new(move |m| proxy.send_event(AppEvent::Merged(m)).is_ok())
+    }
+
+    /// A merge's worker finished: hand it to the merge it is for, and give
+    /// the result its language now that it has text.
+    fn merged_arrived(&mut self, merged: Merged) {
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.merge.as_ref().is_some_and(|m| m.wants(&merged)))
+        else {
+            return;
+        };
+        let Some(m) = tab.merge.as_mut() else { return };
+        m.receive(&mut tab.doc, merged);
+        tab.doc.detect_language(&self.languages);
+        let n = m.open_conflicts();
+        let noun = if n == 1 { "conflict" } else { "conflicts" };
+        let (note, is_error) = match m.failure() {
+            Some(e) => (format!("Cannot merge: {e}"), true),
+            None if n == 0 => ("Merged cleanly".to_owned(), false),
+            None => (format!("Merged: {n} {noun} to resolve"), false),
+        };
+        self.say(note, is_error);
+        self.start_syntax();
+        self.changed(true);
+    }
+
+    /// Edits wait while the active tab's merge is still being computed.
+    fn waits_for_merge(&mut self) -> bool {
+        if !self.tabs[self.active]
+            .merge
+            .as_ref()
+            .is_some_and(|m| m.is_pending())
+        {
+            return false;
+        }
+        self.say("Still merging; edits wait until the result is in", false);
+        true
+    }
+
     /// The active tab's whole text, when it is small enough to merge here.
     fn whole_text(&mut self) -> Option<String> {
         let doc = self.doc();
@@ -866,7 +903,9 @@ impl App {
     /// Put a merge on the active tab in place of its document: the result
     /// takes the tab (same file, same slot), the old text's undo history
     /// is gone.
-    fn replace_active_with_merge(&mut self, mut merge: MergeView, mut result: Document) {
+    fn replace_active_with_merge(&mut self, inputs: Inputs, out: Option<PathBuf>) {
+        let send = self.merge_sender();
+        let (mut merge, mut result) = MergeView::start(Shape::ThreeWay, inputs, out, &send);
         result.detect_language(&self.languages);
         for doc in merge.inputs_mut() {
             if let Some(job) = doc.syntax.take_job(&doc.buffer) {
@@ -892,10 +931,9 @@ impl App {
             return;
         };
         let out = self.doc().path.clone();
-        match MergeView::from_markers(&text, out) {
-            Ok(Some((merge, result))) => {
-                let n = merge.open_conflicts();
-                self.replace_active_with_merge(merge, result);
+        match MergeView::inputs_from_markers(&text) {
+            Ok(Some((inputs, n))) => {
+                self.replace_active_with_merge(inputs, out);
                 let noun = if n == 1 { "conflict" } else { "conflicts" };
                 self.say(
                     format!("Resolving {n} {noun}; undo history starts here"),
@@ -934,18 +972,8 @@ impl App {
             theirs,
             names: ("mine".to_owned(), "disk".to_owned()),
         };
-        match MergeView::three_way(inputs, Some(path)) {
-            Ok((merge, result)) => {
-                let n = merge.open_conflicts();
-                self.replace_active_with_merge(merge, result);
-                let noun = if n == 1 { "conflict" } else { "conflicts" };
-                self.say(
-                    format!("Merged with the file on disk: {n} {noun} to resolve"),
-                    false,
-                );
-            }
-            Err(e) => self.say(format!("Cannot merge: {e}"), true),
-        }
+        self.replace_active_with_merge(inputs, Some(path));
+        self.say("Merging with the file on disk…", false);
     }
 
     /// Say so when the active document holds conflict markers.
@@ -1126,7 +1154,7 @@ impl App {
 
     /// Editing, movement and find commands on the active tab.
     fn run_edit(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
-        if cmd.edits_text() && self.waits_for_save() {
+        if cmd.edits_text() && (self.waits_for_save() || self.waits_for_merge()) {
             return Ok(());
         }
         let page = self.layout().map_or(1, |l| l.full_lines());
@@ -1540,6 +1568,10 @@ impl App {
     /// saves on a worker: this starts it and returns [`Saved::Started`],
     /// and [`App::save_ended`] finishes.
     fn save(&mut self, i: usize) -> Saved {
+        if self.tabs[i].merge.as_ref().is_some_and(|m| m.is_pending()) {
+            self.say("Still merging; save once the result is in", false);
+            return Saved::No;
+        }
         if !self.confirm_conflicts(i) {
             return Saved::No;
         }
@@ -3482,6 +3514,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.run(action.command, event_loop);
             }
             AppEvent::Diff(result) => self.diff_arrived(result),
+            AppEvent::Merged(merged) => self.merged_arrived(merged),
             AppEvent::Syntax(result) => {
                 let Some(result) = self.other_side_parsed(result) else {
                     return;
