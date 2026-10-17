@@ -249,3 +249,8 @@ with three cursors, in `crates/core` and `crates/app/src/editing.rs`).
 - `Block::of` deliberately leaves out a line that a selection only
   touches at its start, which is what makes Select Line repeatable and
   keeps "sort the whole file" from eating the final line break.
+- The status bar's new indentation item changed the macOS screenshot
+  test's picture, and the container has no GPU to remake the reference.
+  A new workflow (`.github/workflows/screenshot-reference.yml`) renders
+  it on a macOS runner, started by the `remake-screenshot` label on a
+  pull request; the only rows that differ are the status bar's.
