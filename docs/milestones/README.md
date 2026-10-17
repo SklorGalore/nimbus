@@ -36,17 +36,18 @@ repeated in each file:
 | 6 | [File tree](m6-file-tree.md) | Done |
 | 7 | [Huge files](m7-huge-files.md) | Done |
 | 8 | [Polish](m8-polish.md) | Done |
-| 9 | [Compare and merge](m9-diff.md) | In progress |
-| 10 | [Find in files](m10-find-in-files.md) | Draft |
-| 11 | [Everyday editing](m11-everyday-editing.md) | Draft |
-| 12 | [Workspace](m12-workspace.md) | Draft |
-| 13 | [Split views and folding](m13-splits-and-folding.md) | Draft |
-| 14 | [Languages, second pass](m14-languages.md) | Draft |
-| 15 | [Distribution](m15-distribution.md) | Draft |
+| 9 | [Compare and merge](m9-diff.md) | Done |
+| 10 | [Find in files](m10-find-in-files.md) | Next |
+| 11 | [Everyday editing](m11-everyday-editing.md) | Planned |
+| 12 | [Workspace](m12-workspace.md) | Planned |
+| 13 | [Split views and folding](m13-splits-and-folding.md) | Planned |
+| 14 | [Languages, second pass](m14-languages.md) | Planned |
+| 15 | [Distribution](m15-distribution.md) | Planned |
 
-A **Draft** plan is a proposal, not yet approved: its order among the
-drafts, its grouping and the items it marks **Proposed** all wait for the
-owner. [`backlog.md`](backlog.md) maps every item deferred by M1–M9 to the
-draft that picks it up, and lists what stays unscheduled. Approving a
-draft moves it to Next, answers its open questions in `DESIGN.md` §9 and
-§10, and may reorder the rest.
+**Next** is the milestone to start; **Planned** plans are approved and
+queued in table order. M10–M15 were drafted after M8 and approved, with
+their order and the answers to their open questions, on 2026-10-17
+(`DESIGN.md` §9 and §10). [`backlog.md`](backlog.md) maps every item
+deferred by M1–M9 to the plan that picks it up, and lists what stays
+unscheduled. A plan becomes **In progress** when its first task lands and
+**Done** when its checklist is ticked and its Results filled in.

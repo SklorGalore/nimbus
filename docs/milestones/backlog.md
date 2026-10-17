@@ -2,26 +2,26 @@
 
 Written on 2026-10-17, after M8 landed and M9 was planned. Every plan
 from M1 to M9 deferred something; this file collects those items in one
-place, says which draft milestone picks each one up, and lists what stays
-unscheduled. The drafts (M10–M15) are proposals: their order, their
-grouping and the items marked **Proposed** inside them all wait for the
-owner. Nothing here changes a decision in `DESIGN.md` until a draft is
-approved; approval adds its open questions' answers to the decision log.
+place, says which milestone picks each one up, and lists what stays
+unscheduled. The owner approved M10–M15, their order and the answers to
+their open questions on 2026-10-17; the answers are in `DESIGN.md` §9 and
+its decision log (§10), and each plan carries them in place of the items
+it had marked **Proposed**.
 
-## Proposed order
+## Order
 
 | # | Draft | One line | Why here |
 |---|---|---|---|
-| 10 | [Find in files](m10-find-in-files.md) | Search and replace across the project, streaming, bounded memory | The largest gap for daily work on a codebase; reuses M3's search and M6's walker |
+| 10 | [Find in files](m10-find-in-files.md) | Search and replace across the project, streaming, bounded memory | The largest gap for daily work on a codebase; reuses M3's search and M6's walker. **Next** |
 | 11 | [Everyday editing](m11-everyday-editing.md) | Comment toggling, line operations, expand selection, auto-pairs, per-language indentation, chords | Many small wins; all built on M8's one-pass multi-cursor edits |
 | 12 | [Workspace](m12-workspace.md) | Session restore, recent files, tree file operations, follow a growing log | Makes Nimbus the editor you leave open; the log tail finishes M7's story |
 | 13 | [Split views and folding](m13-splits-and-folding.md) | A second editor column; fold regions at any file size | Needs the document-and-pane refactor; worth doing once the feature set above is stable |
 | 14 | [Languages, second pass](m14-languages.md) | Injections (Markdown inline, fenced code), symbols, structural selection, syntax folds, more grammars | Builds on M13's fold model and M11's selection stack |
 | 15 | [Distribution](m15-distribution.md) | Signing, notarisation, installers, update check, Linux QA | Owner decisions on accounts and cost; last so it packages a finished editor |
 
-An alternative order the owner may prefer: M11 before M10, since its
-items are smaller and felt sooner. M13 should stay before M14 (the fold
-model comes first, the fold queries second), and M15 last.
+The owner chose this order over the alternative of M11 before M10. M13
+stays before M14 (the fold model comes first, the fold queries second),
+and M15 is last.
 
 ## Where each deferred item went
 
@@ -70,8 +70,9 @@ its own later.
   hash, so the cuts survive insertions) so minified JSON and similar
   one-line files get real diffs; needs the compare view to show a split
   line's pieces as rows of their own.
-- **Autosave of unsaved work** for crash recovery: an owner question in
-  M12's scope section, planned only on a yes.
+- **Autosave of unsaved work** for crash recovery: the owner decided
+  against it when approving M12 (it would write the user's text
+  somewhere they did not choose); it stays here in case that changes.
 - **Drag and drop in the tree**, multiple roots, named workspaces (M12
   deferred).
 - **Sticky scroll and minimap** (M13 deferred). The minimap in

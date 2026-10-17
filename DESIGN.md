@@ -482,17 +482,17 @@ introduces and points at the code.
 | 7 | Huge files | **Done** | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
 | 8 | Polish | **Done** | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
 | 9 | Compare and merge | **Done** | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
-| 10 | Find in files | Draft | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
-| 11 | Everyday editing | Draft | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
-| 12 | Workspace | Draft | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
-| 13 | Split views and folding | Draft | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
-| 14 | Languages, second pass | Draft | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
-| 15 | Distribution | Draft | Signed, notarised, installable builds; an update check | [m15](docs/milestones/m15-distribution.md) |
+| 10 | Find in files | **Next** | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
+| 11 | Everyday editing | Planned | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
+| 12 | Workspace | Planned | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
+| 13 | Split views and folding | Planned | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
+| 14 | Languages, second pass | Planned | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
+| 15 | Distribution | Planned | Signed, notarised, installable builds; an update check | [m15](docs/milestones/m15-distribution.md) |
 
-M10–M15 are drafts, written after M8 from the items earlier plans
-deferred; `docs/milestones/backlog.md` maps each item to its draft and
-proposes the order. A draft becomes Next when the owner approves it and
-answers its open questions (§9).
+M10–M15 were drafted after M8 from the items earlier plans deferred;
+`docs/milestones/backlog.md` maps each item to its plan. The owner
+approved the six plans and their order on 2026-10-17 and answered their
+open questions (§9, §10): M10 is Next, and M11–M15 follow in that order.
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -501,28 +501,32 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-Raised by the drafts of M10–M15 (2026-10-17); each is marked **Proposed**
-in its plan with a recommended answer, and none blocks M9.
+None open. The questions the drafts of M10–M15 raised were answered on
+2026-10-17, when the owner approved the six plans and their order:
 
-- Order: M10 (find in files) before M11 (everyday editing), or the other
-  way round? M13 must precede M14, and M15 is last (`backlog.md`).
-- M10: the search panel as a second mode of the sidebar rather than a
-  bottom panel; a 10,000-match cap; a 64 MB budget for undoing a replace
-  across files.
-- M11: auto-pairs on by default for code and off for prose; a 64 MB limit
-  on line operations; the chord timeout.
-- M12: `nimbus` with no arguments reopens the last session; deleting from
-  the tree goes to the system trash via a new crate; and whether to
-  autosave unsaved work for crash recovery at all (it writes the user's
-  text somewhere they did not choose).
-- M13: at most three editor groups side by side, no nesting; the same
-  file may be open in two groups (which forces the document-and-pane
-  split in that plan).
-- M14: which grammars to add (C, Go, HTML, CSS, TSX are the candidates,
-  each measured against the 35 MB budget); the Go to Symbol key.
-- M15: whether to pay for an Apple Developer account (signing and
-  notarisation need it) and a Windows certificate; an automatic update
-  check off by default; `minisign` for signed checksums.
+- Order: M10 (find in files), then M11 (everyday editing), then M12 to
+  M15 as drafted. M10 is Next.
+- M10: the search panel is a second mode of the sidebar, beside Files;
+  results cap at 10,000 matches; undoing a replace across files keeps up
+  to 64 MB of old contents.
+- M11: auto-pairs on by default for code, off for Markdown and plain
+  text; line operations refuse selections over 64 MB; the chord timeout
+  is a fixed two seconds.
+- M12: `nimbus` with no arguments reopens the last session, and
+  `--no-session` skips it; deleting from the tree goes to the system
+  trash through the `trash` crate, measured for binary size; autosave of
+  unsaved work for crash recovery is not planned (it would write the
+  user's text somewhere they did not choose) and stays unscheduled in
+  `backlog.md`.
+- M13: up to three editor columns, no nesting or stacking; the same file
+  may be open in two columns, so the document-and-pane refactor is in
+  scope.
+- M14: add C, Go, HTML, CSS and TSX, each measured against the 35 MB
+  budget before it stays; Go to Symbol is `Primary+Shift+R`.
+- M15: no Apple Developer account and no Windows certificate, so builds
+  ship unsigned and the README keeps its `xattr` step; the startup
+  update check is off unless `check_updates = true`; `SHA256SUMS` is
+  signed with `minisign`.
 
 Resolved before M8: Dependabot updates GitHub Actions weekly
 (`.github/dependabot.yml`); cargo crates are updated by hand at each
@@ -605,3 +609,10 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-17 | M9 merge: touching hunks conflict (git's rule); the result is tracked by regions shifted per edit, not re-diffed; conflict markers read back by splitting into base, ours, theirs; a two-way merge is the three-way machinery with the left text as base | §4.4, m9 |
 | 2026-10-17 | M9: merges and compares are built on workers; the tab shows its texts unaligned until the answer arrives, and edits wait on a pending merge | §4.4, m9 |
 | 2026-10-17 | M9 long-line splitting (layer 4) deferred to the backlog: a view question (how a split line's pieces show) before a diff one | m9, backlog |
+| 2026-10-17 | M10–M15 approved in that order; M10 (find in files) is Next | §8, §9, backlog |
+| 2026-10-17 | Find in files lives in the sidebar as a Search mode; 10,000-match cap; 64 MB undo budget for replace across files | §9, m10 |
+| 2026-10-17 | Auto-pairs on for code, off for Markdown and plain text; line operations refuse selections over 64 MB; chord timeout fixed at two seconds | §9, m11 |
+| 2026-10-17 | `nimbus` alone reopens the last session (`--no-session` skips); tree delete uses the `trash` crate; no autosave for crash recovery | §9, m12 |
+| 2026-10-17 | Up to three editor columns, no nesting; one file may be open in two columns, so documents and panes are split | §9, m13 |
+| 2026-10-17 | Grammars to add: C, Go, HTML, CSS, TSX, each measured against the 35 MB budget; Go to Symbol is `Primary+Shift+R` | §9, m14 |
+| 2026-10-17 | No signing accounts: builds stay unsigned and the README keeps its `xattr` step; update check off unless `check_updates = true`; checksums signed with `minisign` | §9, m15 |
