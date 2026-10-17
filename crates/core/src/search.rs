@@ -42,6 +42,8 @@ pub struct Query {
     pub regex: bool,
     /// Match case exactly.
     pub case_sensitive: bool,
+    /// Match only where the pattern starts and ends at a word boundary.
+    pub whole_word: bool,
 }
 
 /// A query that could not be compiled.
@@ -71,6 +73,11 @@ impl Query {
             self.pattern.clone()
         } else {
             regex::escape(&self.pattern)
+        };
+        let source = if self.whole_word {
+            format!(r"\b(?:{source})\b")
+        } else {
+            source
         };
         RegexBuilder::new(&source)
             .case_insensitive(!self.case_sensitive)
@@ -266,6 +273,178 @@ pub fn prev_match(matches: &[Range<usize>], pos: usize) -> Option<usize> {
     Some(if i == 0 { matches.len() - 1 } else { i - 1 })
 }
 
+/// Longest line the block matcher carries whole from one block to the
+/// next, in bytes. A line longer than this (a minified file is one line of
+/// megabytes) is searched in pieces at block edges, where a match straddling
+/// the edge can be missed and `^` can match at the edge.
+pub const MAX_CARRY: usize = 4 * 1024 * 1024;
+
+/// One match found by a [`LineMatcher`], with the line it is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineHit<'a> {
+    /// Line number, counted from 0 by `\n`.
+    pub line: usize,
+    /// The match, as byte offsets in the whole text.
+    pub range: Range<usize>,
+    /// The line's bytes, without its line ending.
+    pub text: &'a [u8],
+    /// Offset of `text` in the whole text.
+    pub line_start: usize,
+}
+
+/// Searches a text fed to it in blocks of any size, finding the same
+/// matches whatever the block boundaries, as long as no match spans a line
+/// break. Find in files reads each file in blocks through this, so a file
+/// is never held in memory whole.
+///
+/// The idea: a block usually ends in the middle of a line. Searching that
+/// partial line would find matches that the full line does not have (a
+/// `$` at the cut), and miss ones it does (a word cut in two). So each
+/// block is searched only up to its last line break, and the tail after it
+/// is *carried* to the front of the next block, where the line is complete.
+/// [`LineMatcher::finish`] searches whatever is carried at the end.
+///
+/// A match that would span a line break (`\s+` over a line ending) is cut
+/// at the line: the line is searched again on its own from the match's
+/// start, so what is found never depends on which block the next line
+/// landed in. Patterns that need the next line (`a\nb`) therefore never
+/// match; the in-editor find handles those.
+#[derive(Debug)]
+pub struct LineMatcher<'r> {
+    re: &'r Regex,
+    /// Text after the last line break fed so far: the start of a line whose
+    /// end has not arrived yet.
+    carry: Vec<u8>,
+    /// Offset in the whole text of `carry[0]` (or of the next byte to be
+    /// fed, when nothing is carried).
+    offset: usize,
+    /// Line number at `offset`.
+    line: usize,
+    /// The carry plus the current block, reused between blocks.
+    window: Vec<u8>,
+    max_carry: usize,
+}
+
+impl<'r> LineMatcher<'r> {
+    /// A matcher for `re`, positioned at the start of the text.
+    #[must_use]
+    pub fn new(re: &'r Regex) -> Self {
+        Self {
+            re,
+            carry: Vec::new(),
+            offset: 0,
+            line: 0,
+            window: Vec::new(),
+            max_carry: MAX_CARRY,
+        }
+    }
+
+    /// Search the next block of the text. `found` is called for each match
+    /// in order; it returns `false` to stop, and then so does this.
+    pub fn feed(&mut self, block: &[u8], found: &mut dyn FnMut(&LineHit<'_>) -> bool) -> bool {
+        self.window.clear();
+        self.window.append(&mut self.carry);
+        self.window.extend_from_slice(block);
+        let complete = match memchr::memrchr(b'\n', &self.window) {
+            Some(nl) => nl + 1,
+            // No complete line yet: carry it all, unless the line is too
+            // long to wait for, in which case search what there is.
+            None if self.window.len() <= self.max_carry => {
+                std::mem::swap(&mut self.carry, &mut self.window);
+                return true;
+            }
+            None => self.window.len(),
+        };
+        let ok = search_lines(
+            self.re,
+            &self.window[..complete],
+            (self.offset, self.line),
+            false,
+            found,
+        );
+        self.carry.extend_from_slice(&self.window[complete..]);
+        self.line += memchr::memchr_iter(b'\n', &self.window[..complete]).count();
+        self.offset += complete;
+        ok
+    }
+
+    /// The text has ended: search the last line, which has no line break
+    /// after it. The matcher is then back at the start, ready for another
+    /// text.
+    pub fn finish(&mut self, found: &mut dyn FnMut(&LineHit<'_>) -> bool) -> bool {
+        self.window.clear();
+        self.window.append(&mut self.carry);
+        let ok = search_lines(self.re, &self.window, (self.offset, self.line), true, found);
+        self.offset = 0;
+        self.line = 0;
+        ok
+    }
+}
+
+/// Search `hay`, which holds whole lines starting at byte `offset` and line
+/// `line` of the text; `last` says it ends where the text does. Matches
+/// are cut at line breaks (see [`LineMatcher`]).
+fn search_lines(
+    re: &Regex,
+    hay: &[u8],
+    (offset, line): (usize, usize),
+    last: bool,
+    found: &mut dyn FnMut(&LineHit<'_>) -> bool,
+) -> bool {
+    let mut pos = 0;
+    let mut last_end = None;
+    let mut line = line;
+    // Line breaks before `counted` are in `line` already.
+    let mut counted = 0;
+    while pos <= hay.len() {
+        let Some(m) = re.find_at(hay, pos) else {
+            break;
+        };
+        let (mut start, mut end) = (m.start(), m.end());
+        if let Some(nl) = memchr::memchr(b'\n', &hay[start..end]) {
+            // The match runs into the next line: take what the line alone
+            // gives from the same start, which cannot reach a line break.
+            let line_end = start + nl;
+            match re.find_at(&hay[..line_end], start) {
+                Some(m) => (start, end) = (m.start(), m.end()),
+                None => {
+                    pos = line_end + 1;
+                    continue;
+                }
+            }
+        }
+        // As the regex crate's own iterator: an empty match moves on by a
+        // byte, and none is reported where the previous match ended.
+        pos = if end > start { end } else { end + 1 };
+        if start == end && last_end == Some(start) {
+            continue;
+        }
+        if start == hay.len() && !last {
+            // An empty match at the very end is at the start of the next
+            // line, which is searched with the next block.
+            break;
+        }
+        last_end = Some(end);
+        line += memchr::memchr_iter(b'\n', &hay[counted..start]).count();
+        counted = start;
+        let line_start = memchr::memrchr(b'\n', &hay[..start]).map_or(0, |i| i + 1);
+        let mut line_end = memchr::memchr(b'\n', &hay[start..]).map_or(hay.len(), |i| start + i);
+        if line_end > line_start && hay[line_end - 1] == b'\r' {
+            line_end -= 1;
+        }
+        let hit = LineHit {
+            line,
+            range: offset + start..offset + end,
+            text: &hay[line_start..line_end],
+            line_start: offset + line_start,
+        };
+        if !found(&hit) {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +600,7 @@ mod tests {
                 pattern: pattern.into(),
                 regex: true,
                 case_sensitive: true,
+                whole_word: false,
             };
             let re = q.compile().unwrap().unwrap();
             let expected: Vec<_> = re.find_iter(text.as_bytes()).map(|m| m.range()).collect();
@@ -487,12 +667,153 @@ mod tests {
         assert_eq!(g.current(), b);
     }
 
+    /// Every hit from feeding `text` in blocks of `block` bytes.
+    fn hits_in_blocks(
+        re: &Regex,
+        text: &[u8],
+        block: usize,
+    ) -> Vec<(usize, Range<usize>, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut keep = |h: &LineHit<'_>| {
+            out.push((h.line, h.range.clone(), h.text.to_vec()));
+            true
+        };
+        let mut m = LineMatcher::new(re);
+        for chunk in text.chunks(block.max(1)) {
+            assert!(m.feed(chunk, &mut keep));
+        }
+        assert!(m.finish(&mut keep));
+        out
+    }
+
+    fn re(pattern: &str) -> Regex {
+        Query {
+            pattern: pattern.into(),
+            regex: true,
+            case_sensitive: true,
+            whole_word: false,
+        }
+        .compile()
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn line_matcher_reports_lines_and_their_text() {
+        let text = b"one needle\r\ntwo\nthree needle needle\n";
+        let got = hits_in_blocks(&re("needle"), text, 7);
+        assert_eq!(
+            got,
+            vec![
+                (0, 4..10, b"one needle".to_vec()),
+                (2, 22..28, b"three needle needle".to_vec()),
+                (2, 29..35, b"three needle needle".to_vec()),
+            ]
+        );
+        // The last line, with no break after it, is found by `finish`.
+        let got = hits_in_blocks(&re("^t.*$"), b"one\ntwo\nthree", 1000);
+        assert_eq!(got[1].1, 8..13);
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn line_matcher_equals_whole_text_search_for_single_line_patterns() {
+        let mut text = Vec::new();
+        for i in 0..5_000 {
+            text.extend_from_slice(format!("line {i} needle{} ab  cd\n", i % 5).as_bytes());
+        }
+        for pattern in [
+            "needle[0-2]",
+            "^line",
+            r"cd$",
+            r"\bab\b",
+            "ab  ",
+            "x*",
+            " +",
+        ] {
+            let re = re(pattern);
+            let expected: Vec<_> = re.find_iter(&text).map(|m| m.range()).collect();
+            for block in [1, 7, 100, 4096, usize::MAX] {
+                let got: Vec<_> = hits_in_blocks(&re, &text, block)
+                    .into_iter()
+                    .map(|h| h.1)
+                    .collect();
+                assert_eq!(got, expected, "{pattern} in blocks of {block}");
+            }
+        }
+    }
+
+    #[test]
+    fn line_matcher_cuts_matches_at_line_breaks() {
+        // `\s+` would match the break and the indentation after it as one.
+        let got = hits_in_blocks(&re(r"\s+"), b"a \n  b", 100);
+        let ranges: Vec<_> = got.iter().map(|h| h.1.clone()).collect();
+        assert_eq!(ranges, vec![1..2, 3..5]);
+        assert_eq!(got[1].0, 1);
+    }
+
+    #[test]
+    fn a_line_longer_than_the_carry_is_searched_in_pieces() {
+        let text = "x".repeat(100) + "needle" + &"y".repeat(100);
+        let re = re("needle|^x");
+        let mut m = LineMatcher::new(&re);
+        m.max_carry = 50;
+        let mut n = 0;
+        let mut count = |_: &LineHit<'_>| {
+            n += 1;
+            true
+        };
+        for chunk in text.as_bytes().chunks(60) {
+            m.feed(chunk, &mut count);
+        }
+        m.finish(&mut count);
+        // The real line start plus the cut ones; the needle lies in one piece.
+        assert!(n >= 2, "{n}");
+        assert_eq!(hits_in_blocks(&re, text.as_bytes(), 1000).len(), 2);
+    }
+
+    #[test]
+    fn line_matcher_stops_when_asked_and_can_be_reused() {
+        let re = re("a");
+        let mut m = LineMatcher::new(&re);
+        let mut seen = 0;
+        let mut stop = |_: &LineHit<'_>| {
+            seen += 1;
+            false
+        };
+        assert!(!m.feed(b"a a\n", &mut stop));
+        assert_eq!(seen, 1);
+        assert!(m.finish(&mut |_| true));
+        assert_eq!(hits_in_blocks(&re, b"b\na", 1)[0].0, 1);
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config {
             cases: 256,
             failure_persistence: None,
             ..Default::default()
         })]
+
+        /// Feeding the text in blocks of any size finds the same lines and
+        /// matches as feeding it whole.
+        #[test]
+        fn line_matcher_ignores_block_boundaries(
+            pieces in proptest::collection::vec(
+                proptest::sample::select(vec!["ab", "a", "b", " ", "\n", "\r\n", "é", "日", "ba ", "aaa", "\n\n"]),
+                0..80,
+            ),
+            pattern in proptest::sample::select(vec![
+                "a", "ab", "^a", "b$", r"\ba", r"a\b", r"\s+", "a+", "^$", "é", r"\w+",
+                "a*", "b?", r"\s*", "^", "$", r"[ab]+$", r"^\s*b",
+            ]),
+            block in 1usize..12,
+        ) {
+            let text: Vec<u8> = pieces.concat().into_bytes();
+            let re = re(pattern);
+            let whole = hits_in_blocks(&re, &text, usize::MAX);
+            let blocks = hits_in_blocks(&re, &text, block);
+            proptest::prop_assert_eq!(blocks, whole, "{:?} in {:?}", pattern, text);
+        }
 
         /// Searching in tiny chunks finds exactly what one search of the
         /// whole text finds, for patterns that look at line starts, word
@@ -512,7 +833,7 @@ mod tests {
             chunk in 1usize..12,
         ) {
             let text: String = pieces.concat();
-            let q = Query { pattern: pattern.into(), regex: true, case_sensitive: true };
+            let q = Query { pattern: pattern.into(), regex: true, case_sensitive: true, whole_word: false };
             let re = q.compile().unwrap().unwrap();
             let expected: Vec<_> = re.find_iter(text.as_bytes()).map(|m| m.range()).collect();
             let t = RopeBuffer::from_text(&text);
