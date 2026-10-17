@@ -1,6 +1,6 @@
 # M9 — Compare and merge
 
-**Status: landed, pending the owner's look** (2026-10-17; every task is in and measured; the owner has confirmed the compare view (task 6) on screen and has yet to look at the merge views and the M6 offers (tasks 7 to 10); long-line splitting, the plan's layer 4, is deferred to the backlog)
+**Status: landed** (2026-10-17; every task in and measured; the compare view, the merge views and the M6 offers confirmed by the owner on screen with `examples/merge`; long-line splitting, the plan's layer 4, is deferred to the backlog)
 
 ## Goal
 

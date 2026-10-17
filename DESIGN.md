@@ -481,7 +481,7 @@ introduces and points at the code.
 | 6 | File tree | **Done** | Sidebar, file watching, reload on external change | [m6](docs/milestones/m6-file-tree.md) |
 | 7 | Huge files | **Done** | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
 | 8 | Polish | **Done** | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
-| 9 | Compare and merge | Landed, pending the owner's look at the merge views | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
+| 9 | Compare and merge | Landed | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
 | 10 | Find in files | Draft | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
 | 11 | Everyday editing | Draft | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
 | 12 | Workspace | Draft | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
