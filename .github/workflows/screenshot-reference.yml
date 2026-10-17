@@ -1,0 +1,30 @@
+name: Screenshot reference
+
+# Remakes crates/app/tests/screenshot/reference.bmp on a macOS runner after
+# an intended drawing change, for anyone without a Mac at hand. Run it on
+# the branch with the change, download the "screenshot-reference" artifact,
+# look at the image, and commit it.
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  reference:
+    name: remake reference.bmp
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Render the reference frame
+        run: NIMBUS_UPDATE_SCREENSHOT=1 cargo test -p nimbus --test screenshot
+      - name: Check the new reference passes
+        run: cargo test -p nimbus --test screenshot
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-reference
+          path: crates/app/tests/screenshot/reference.bmp
+          if-no-files-found: error
