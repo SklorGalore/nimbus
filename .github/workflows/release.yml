@@ -1,21 +1,36 @@
-# Release builds (M8): push a tag like v0.8.0 and this makes a draft GitHub
-# release with a build for each platform attached. Check the draft, then
-# publish it on GitHub.
+# Release builds (M8, extended in M15): push a tag like v0.8.0 and this
+# makes a draft GitHub release with a package for each platform attached.
+# Check the draft, then publish it on GitHub.
 #
 # Before tagging, set the same version in Cargo.toml ([workspace.package]):
 # the first job refuses a tag that does not match, so the app's --version
 # and the release always agree.
 #
-# Packages:
-#   Nimbus-VERSION-macos.zip          Nimbus.app, one binary for Apple
-#                                     silicon and Intel (joined with lipo);
-#                                     unsigned, see the release notes
+# Packages (every build is unsigned; the README says how to get past the
+# first-run warnings on macOS and Windows):
+#   Nimbus-VERSION-macos.dmg            Nimbus.app with an Applications
+#                                       shortcut; one binary for Apple
+#                                       silicon and Intel (joined with lipo)
+#   Nimbus-VERSION-macos.zip            the same app, zipped
 #   nimbus-VERSION-linux-x86_64.tar.gz  the binary, an icon and a .desktop
-#                                     file; built on the oldest supported
-#                                     Ubuntu so it runs on older systems
+#                                       file; built on the oldest supported
+#                                       Ubuntu so it runs on older systems
+#   nimbus_VERSION_amd64.deb            the same, installed by apt or dpkg
+#   Nimbus-VERSION-x86_64.AppImage      the same, as one runnable file
+#   nimbus-VERSION-windows-x86_64-setup.exe  installer (Inno Setup): Start
+#                                       Menu entry, "Open with Nimbus"
 #   nimbus-VERSION-windows-x86_64.zip   nimbus.exe (icon embedded) and the
-#                                     icon file
-#   SHA256SUMS                        each package's SHA-256, made last
+#                                       icon file, for no installer
+#   nimbus.rb, winget-manifest.zip      Homebrew cask and winget manifest,
+#                                       filled in from the packages above
+#   SHA256SUMS, SHA256SUMS.minisig      each package's SHA-256, made last,
+#                                       and its minisign signature when
+#                                       the MINISIGN_SECRET_KEY secret is set
+#
+# Signing a package (Developer ID, notarisation, Authenticode) is not done:
+# the owner has no Apple Developer account or Windows certificate. If one
+# is bought later, its steps go in the build job behind `if: env.SECRET
+# != ''`, like the minisign step, so forks and test tags keep working.
 
 name: Release
 
@@ -47,7 +62,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh release create "$GITHUB_REF_NAME" --draft --title "Nimbus ${GITHUB_REF_NAME#v}" --notes "Unsigned builds. On macOS, open Nimbus.app the first time with right-click > Open (or run xattr -d com.apple.quarantine Nimbus.app)."
+          version="${GITHUB_REF_NAME#v}"
+          # The release notes are this version's CHANGELOG section, when
+          # there is one, over a standing note about the unsigned builds.
+          notes=$(awk -v v="## $version" '
+            index($0, v) == 1 { on = 1; next }
+            /^## / && on { exit }
+            on { print }' CHANGELOG.md)
+          {
+            printf '%s\n\n' "$notes"
+            echo "Unsigned builds. On macOS, open Nimbus.app the first time with right-click > Open (or run \`xattr -d com.apple.quarantine /Applications/Nimbus.app\`). On Windows, SmartScreen's \"More info\" > \"Run anyway\" runs the installer. See the README for checking the SHA256SUMS signature."
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" --draft --title "Nimbus $version" --notes-file notes.md
 
   build:
     name: ${{ matrix.name }}
@@ -71,7 +97,7 @@ jobs:
         with:
           targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: macOS app
+      - name: macOS app, zip and dmg
         if: matrix.name == 'macos'
         shell: bash
         run: |
@@ -84,9 +110,10 @@ jobs:
             target/x86_64-apple-darwin/release/nimbus
           lipo -info dist/nimbus
           zip=$(scripts/bundle-macos.sh dist/nimbus "$version" dist)
-          gh release upload "$GITHUB_REF_NAME" "$zip" --clobber
+          dmg=$(scripts/dmg-macos.sh dist/Nimbus.app "$version" dist)
+          gh release upload "$GITHUB_REF_NAME" "$zip" "$dmg" --clobber
 
-      - name: Linux tarball
+      - name: Linux tarball, deb and AppImage
         if: matrix.name == 'linux'
         shell: bash
         run: |
@@ -102,9 +129,15 @@ jobs:
           cp LICENSE "dist/$name/"
           cp crates/render/assets/HackNerdFont-LICENSE.md "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          gh release upload "$GITHUB_REF_NAME" "dist/$name.tar.gz" --clobber
+          deb=$(scripts/deb-linux.sh target/release/nimbus "$version" dist)
+          dpkg-deb --info "$deb"
+          curl -sSL -o dist/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x dist/appimagetool
+          image=$(scripts/appimage-linux.sh target/release/nimbus "$version" dist dist/appimagetool)
+          gh release upload "$GITHUB_REF_NAME" "dist/$name.tar.gz" "$deb" "$image" --clobber
 
-      - name: Windows zip
+      - name: Windows zip and installer
         if: matrix.name == 'windows'
         shell: pwsh
         run: |
@@ -117,28 +150,64 @@ jobs:
           Copy-Item LICENSE "dist/$name/"
           Copy-Item crates/render/assets/HackNerdFont-LICENSE.md "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
-          gh release upload $env:GITHUB_REF_NAME "dist/$name.zip" --clobber
+          # Inno Setup is on every windows-latest runner.
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "/DVersion=$version" "/DSource=$PWD\dist\$name" "/DOut=$PWD\dist" packaging\windows\nimbus.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release upload $env:GITHUB_REF_NAME "dist/$name.zip" "dist/$name-setup.exe" --clobber
 
   # Once every package is attached: a SHA256SUMS file listing each one's
   # SHA-256 hash, so a download can be checked for damage with
   # `sha256sum -c SHA256SUMS --ignore-missing` (Linux) or
   # `shasum -a 256 -c SHA256SUMS --ignore-missing` (macOS). It is computed
-  # from the files as uploaded, read back from the release.
+  # from the files as uploaded, read back from the release. The package
+  # manifests take their hashes from the same files.
+  #
+  # When the repository has a MINISIGN_SECRET_KEY secret (the contents of
+  # a key made with `minisign -G -W`, so no password; its public half is
+  # minisign.pub at the repository root), SHA256SUMS is signed with it.
+  # A signature that checks against the published key says the file came
+  # from whoever holds the secret, which a bare hash cannot.
   checksums:
-    name: SHA256SUMS
+    name: SHA256SUMS and manifests
     needs: build
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
     steps:
+      - uses: actions/checkout@v7
       - name: Hash the attached packages
         shell: bash
         run: |
+          version="${GITHUB_REF_NAME#v}"
           mkdir dist && cd dist
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --pattern '*.zip' --pattern '*.tar.gz'
+            --pattern '*.zip' --pattern '*.tar.gz' --pattern '*.dmg' \
+            --pattern '*.deb' --pattern '*.AppImage' --pattern '*-setup.exe'
           ls -l
-          test "$(ls | wc -l)" -eq 3
+          test "$(ls | wc -l)" -eq 7
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
-          gh release upload "$GITHUB_REF_NAME" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          cd ..
+          scripts/manifests.sh "$version" dist
+          (cd dist/winget && zip -q ../winget-manifest.zip ./*.yaml)
+          gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS dist/nimbus.rb dist/winget-manifest.zip \
+            --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Sign SHA256SUMS
+        if: env.MINISIGN_SECRET_KEY != ''
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > minisign.key
+          minisign -S -s minisign.key -m dist/SHA256SUMS -t "Nimbus ${GITHUB_REF_NAME#v} SHA256SUMS"
+          rm -f minisign.key
+          # The signature must check against the key people will use.
+          test -f minisign.pub
+          minisign -V -p minisign.pub -m dist/SHA256SUMS
+          gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS.minisig --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Signing skipped
+        if: env.MINISIGN_SECRET_KEY == ''
+        run: echo "MINISIGN_SECRET_KEY is not set; SHA256SUMS is not signed."

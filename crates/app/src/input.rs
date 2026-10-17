@@ -138,6 +138,10 @@ pub enum Command<'a> {
     ReloadConfig,
     /// Open the config file in a tab, creating it if needed.
     OpenConfig,
+    /// Ask GitHub whether a newer release exists.
+    CheckUpdates,
+    /// Open the latest release's page in the browser.
+    OpenRelease,
     /// Quit (asking about unsaved changes first).
     /// Compare the active tab with its file on disk (M9).
     CompareSaved,

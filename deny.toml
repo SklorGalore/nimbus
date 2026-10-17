@@ -1,0 +1,59 @@
+# cargo-deny: licences and advisories for every dependency (M15). CI runs
+# `cargo deny check` (EmbarkStudios/cargo-deny-action); locally, install
+# with `cargo install cargo-deny` and run the same.
+
+[graph]
+all-features = false
+# The three desktop targets CI builds for; a dependency used only on
+# another platform is not checked.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+# A known vulnerability anywhere in the tree fails CI. An unmaintained
+# crate is reported only when it is one of ours directly: the transitive
+# ones (proc-macro-error under gtk under muda, ttf-parser under winit)
+# are for those crates to replace, and a yanked version only warns, since
+# replacing one is a milestone decision.
+version = 2
+unmaintained = "workspace"
+yanked = "warn"
+ignore = []
+
+[licenses]
+version = 2
+# Licences a dependency may carry. Everything permissive that a binary
+# under MIT can ship; no copyleft (GPL, LGPL) reaches the binary.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OFL-1.1",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Several versions of one crate cost binary size; warn rather than fail,
+# since the versions are set by wgpu, winit and tree-sitter.
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

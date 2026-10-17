@@ -26,6 +26,9 @@ pub struct Config {
     pub keys: HashMap<String, Vec<String>>,
     /// File name or `*.ext` pattern to language name.
     pub languages: HashMap<String, String>,
+    /// Ask GitHub for the latest release once at startup. Off unless set:
+    /// a personal tool should not phone home without being asked.
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -37,6 +40,7 @@ impl Default for Config {
             theme: "dark".to_owned(),
             keys: HashMap::new(),
             languages: HashMap::new(),
+            check_updates: false,
         }
     }
 }
@@ -64,6 +68,7 @@ const KNOWN: &[&str] = &[
     "theme",
     "keys",
     "languages",
+    "check_updates",
 ];
 
 /// A commented starting point written by "Open Config File" when there is
@@ -74,6 +79,7 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # tab_width = 4
 # soft_wrap = false
 # theme = "dark"            # or "light", or NAME for themes/NAME.toml here
+# check_updates = false     # true: ask GitHub for a newer release at startup
 
 # Key bindings: action id = list of chords. "Primary" is Cmd on macOS and
 # Ctrl elsewhere. An empty list unbinds the action. The command palette
@@ -133,6 +139,12 @@ impl Config {
         take(&table, "theme", &mut config.theme, &mut warnings);
         take(&table, "keys", &mut config.keys, &mut warnings);
         take(&table, "languages", &mut config.languages, &mut warnings);
+        take(
+            &table,
+            "check_updates",
+            &mut config.check_updates,
+            &mut warnings,
+        );
         if !(6.0..=72.0).contains(&config.font_size) {
             warnings.push(format!(
                 "config: font_size {} out of range 6–72",

@@ -34,6 +34,16 @@ jobs:
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
 
+  # Licences and advisories for every dependency, from deny.toml (M15).
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   release-size:
     name: release binary size
     runs-on: ubuntu-latest

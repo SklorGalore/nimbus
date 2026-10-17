@@ -248,6 +248,18 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::OpenConfig,
         Keys::NONE,
     ),
+    act(
+        "app.checkUpdates",
+        "Check for Updates",
+        Command::CheckUpdates,
+        Keys::NONE,
+    ),
+    act(
+        "app.openRelease",
+        "Open Latest Release Page",
+        Command::OpenRelease,
+        Keys::NONE,
+    ),
     // Compare (M9).
     act(
         "diff.compareSaved",

@@ -21,6 +21,7 @@ rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 unicode-segmentation = "1.13.3"
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
 winit = "0.30"
 
 [lints]

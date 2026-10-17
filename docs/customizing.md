@@ -16,6 +16,15 @@ and cost only the setting that has them.
 To try a config without touching your own, point `NIMBUS_CONFIG_DIR` at
 another folder: `NIMBUS_CONFIG_DIR=/tmp/try nimbus file.lua`.
 
+## Settings
+
+`config.toml` holds the editor settings; "Open Config File" writes a
+commented template listing them. Besides the font size, tab width, soft
+wrap and theme, `check_updates = true` asks GitHub for the latest release
+once at each start (off by default, so the editor never phones home
+unless told to); "Check for Updates" in the palette does the same on
+demand.
+
 ## Themes
 
 ```

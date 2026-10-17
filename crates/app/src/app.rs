@@ -44,6 +44,7 @@ use crate::sidebar::{self, Sidebar};
 use crate::state::State;
 use crate::theme::{Theme, Ui};
 use crate::tree::{self, Entry, ListRequest};
+use crate::update::{self, Outcome, UpdateError};
 use crate::view::{self, Decorations, Layout, PickerView, Preedit, TabLabel, View};
 use crate::watch::{Change, Watch};
 use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
@@ -78,6 +79,23 @@ pub enum AppEvent {
     Diff(DiffResult),
     /// A merge's chunks (and result text) finished on a worker (M9).
     Merged(Merged),
+    /// A check for updates finished; `true` when it was the startup
+    /// check, which stays quiet unless a newer release exists.
+    Update(Result<Outcome, UpdateError>, bool),
+}
+
+/// Ask GitHub for the latest release on its own thread.
+fn spawn_update_check(proxy: &EventLoopProxy<AppEvent>, at_startup: bool) {
+    let proxy = proxy.clone();
+    let spawned = std::thread::Builder::new()
+        .name("nimbus-update".to_owned())
+        .spawn(move || {
+            let result = update::check(env!("CARGO_PKG_VERSION"));
+            let _ = proxy.send_event(AppEvent::Update(result, at_startup));
+        });
+    if let Err(e) = spawned {
+        log::error!("could not start the update check: {e}");
+    }
 }
 
 /// List a folder for the sidebar on its own thread.
@@ -366,6 +384,9 @@ pub struct App {
     resize_cursor: bool,
     /// Watching has started (after the first frame).
     watching: bool,
+    /// The newest release the last check found, for Open Latest Release
+    /// Page; the releases list until a check has run.
+    latest_release: Option<update::Release>,
     /// A go-to-line waiting for a huge file's lines to be counted.
     pending_line: Option<usize>,
     /// Open files that changed on disk too soon after their last reload,
@@ -504,6 +525,7 @@ impl App {
             ui_state,
             resize_cursor: false,
             watching: false,
+            latest_release: None,
             pending_line: None,
             recheck: Vec::new(),
             recheck_at: None,
@@ -705,6 +727,11 @@ impl App {
                 );
             }
             Command::OpenConfig => self.open_config(),
+            Command::CheckUpdates => {
+                self.say("Checking GitHub for the latest release…", false);
+                spawn_update_check(&self.proxy, false);
+            }
+            Command::OpenRelease => self.open_release(),
             Command::Close => {
                 self.quit(event_loop);
                 return true;
@@ -2008,6 +2035,56 @@ impl App {
         }
     }
 
+    /// Open the newest release's page in the browser, or the releases
+    /// list when no check has run yet.
+    fn open_release(&mut self) {
+        let url = self
+            .latest_release
+            .as_ref()
+            .map_or(update::RELEASES_URL, |r| r.url.as_str());
+        match update::open_url(url) {
+            Ok(()) => self.say(format!("Opening {url}"), false),
+            Err(e) => self.say(format!("Cannot open the browser: {e}"), true),
+        }
+    }
+
+    /// Tell the person what a check for updates found. The startup check
+    /// says nothing unless a newer release exists: a tool should not
+    /// greet every launch with "up to date" or "no network".
+    fn update_checked(&mut self, result: Result<Outcome, UpdateError>, at_startup: bool) {
+        let current = env!("CARGO_PKG_VERSION");
+        match result {
+            Ok(Outcome::Newer(release)) => {
+                self.say(
+                    format!(
+                        "Nimbus {} is available (you have {current}); run Open Latest Release Page to get it",
+                        release.version
+                    ),
+                    false,
+                );
+                self.latest_release = Some(release);
+            }
+            Ok(Outcome::UpToDate(release)) => {
+                if !at_startup {
+                    let note = if release.version == current {
+                        String::new()
+                    } else {
+                        format!(" (latest release: {})", release.version)
+                    };
+                    self.say(format!("Nimbus {current} is up to date{note}"), false);
+                }
+                self.latest_release = Some(release);
+            }
+            Err(e) => {
+                if at_startup {
+                    log::info!("update check: {e}");
+                } else {
+                    self.say(e.to_string(), true);
+                }
+            }
+        }
+    }
+
     /// Open the config file in a tab, creating it from the template first.
     fn open_config(&mut self) {
         let Some(path) = config::path() else {
@@ -2233,7 +2310,9 @@ impl App {
             | Command::NextConflict
             | Command::PrevConflict
             | Command::ResolveMarkers
-            | Command::MergeWithDisk => return false,
+            | Command::MergeWithDisk
+            | Command::CheckUpdates
+            | Command::OpenRelease => return false,
             _ => {
                 let paste = (cmd == Command::Paste)
                     .then(|| self.clipboard_get())
@@ -3636,6 +3715,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.say(warning, true);
                 self.changed(false);
             }
+            AppEvent::Update(result, at_startup) => self.update_checked(result, at_startup),
             AppEvent::Search(batch) => {
                 if !self.find.receive(batch) {
                     return;
@@ -3823,6 +3903,16 @@ impl ApplicationHandler<AppEvent> for App {
             // event stream for each folder), so not before the first frame.
             self.watching = true;
             self.sync_watch();
+            // The startup update check, when the config asks for it: once,
+            // after the first frame like the watches, and not in unattended
+            // runs (--smoke, screenshots, benchmarks), which should not
+            // depend on the network.
+            let unattended = self.options.smoke
+                || self.options.screenshot.is_some()
+                || self.options.bench_typing > 0;
+            if self.config.check_updates && !unattended {
+                spawn_update_check(&self.proxy, true);
+            }
         }
         // --smoke and --screenshot must not wait forever: a locked screen or
         // a hidden window never lets the first frame be drawn.
