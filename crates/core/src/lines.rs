@@ -619,7 +619,7 @@ mod tests {
         // At the top nothing moves.
         let before = cursors(&[0]);
         let b = move_lines(&t, &before, false);
-        assert!(b.items.is_empty());
+        assert!(b.items.is_empty(), "{:?}", b.items);
         // A selection across lines moves them all and stays selected.
         let before = sels(&[(2, 6)]);
         let (out, s) = apply(text, &before, move_lines(&t, &before, true));

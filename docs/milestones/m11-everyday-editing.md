@@ -236,7 +236,7 @@ with three cursors, in `crates/core` and `crates/app/src/editing.rs`).
 
 | What | Value |
 |---|---|
-| Release binary, Linux x86_64 (container) | see PR |
+| Release binary, Linux x86_64 (container) | 20.3 MB (20,323,200 bytes), under the 35 MB budget |
 | `--smoke` first frame | needs a GPU; owner's machine |
 | Line operation on the 4 GB log | not measured here; every operation reads only the selected lines (`Block::of` walks `line_span`), and the mapped buffer's `replace_sorted` rebuilds its pieces once per batch, so the cost is the selection's size, capped at 64 MB |
 
