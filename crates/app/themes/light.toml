@@ -49,8 +49,10 @@ string = "#50a14f"
 "string.special" = "#0184bc"
 "string.special.key" = "#e45649"
 tag = "#e45649"
+"text.emphasis" = { italic = true }
 "text.literal" = "#50a14f"
 "text.reference" = "#a626a4"
+"text.strong" = { bold = true }
 "text.title" = "#4078f2"
 "text.uri" = "#0184bc"
 type = "#c18401"

@@ -22,6 +22,50 @@ use tree_sitter::{Language, Query};
 
 use crate::LanguageId;
 
+/// Which grammar a tree was parsed with. Every [`LanguageId`] has one;
+/// Markdown has a second, for the inline structure of each paragraph
+/// (emphasis, code spans, links), which only ever runs as an injection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GrammarKey {
+    /// A language's own grammar.
+    Language(LanguageId),
+    /// `tree-sitter-markdown-inline`, injected into Markdown's `inline`
+    /// nodes.
+    MarkdownInline,
+}
+
+/// One more capture table than the grammars: the simple rules' captures
+/// ([`crate::lexical::CAPTURES`]).
+pub const LEXICAL_TABLE: usize = LanguageId::ALL.len();
+/// The table of the Markdown inline grammar.
+pub const INLINE_TABLE: usize = LanguageId::ALL.len() + 1;
+/// How many capture tables there are: a [`crate::highlight::Span::table`]
+/// is below this.
+pub const TABLES: usize = LanguageId::ALL.len() + 2;
+
+impl GrammarKey {
+    /// The capture table spans from this grammar index into: the
+    /// language's index, or [`INLINE_TABLE`].
+    #[must_use]
+    pub fn table(self) -> usize {
+        match self {
+            Self::Language(id) => id.index(),
+            Self::MarkdownInline => INLINE_TABLE,
+        }
+    }
+
+    /// The grammar an injection query names: a language key or alias
+    /// (`"rust"`, `"py"`), or `"markdown_inline"`. `None` for a language
+    /// Nimbus has no grammar for (`"latex"`, `"regex"`).
+    #[must_use]
+    pub fn from_injection_name(name: &str) -> Option<Self> {
+        if name.eq_ignore_ascii_case("markdown_inline") {
+            return Some(Self::MarkdownInline);
+        }
+        LanguageId::from_alias(name).map(Self::Language)
+    }
+}
+
 /// A language ready to parse and highlight.
 pub struct Grammar {
     /// The parser tables.
@@ -29,13 +73,60 @@ pub struct Grammar {
     /// The highlight query: patterns that tag syntax nodes with capture
     /// names such as `keyword` or `string`.
     pub highlights: Query,
+    /// Where other languages are nested inside this one, if the grammar
+    /// says (M14).
+    pub injections: Option<Injections>,
 }
 
 impl std::fmt::Debug for Grammar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Grammar")
             .field("captures", &self.highlights.capture_names().len())
+            .field("injections", &self.injections.is_some())
             .finish_non_exhaustive()
+    }
+}
+
+/// A compiled injections query and what its patterns ask for.
+///
+/// The query captures each nested region as `@injection.content`, and
+/// names its language either with `(#set! injection.language "css")` on
+/// the pattern, or by capturing a node whose text is the name as
+/// `@injection.language` (a code fence's info string).
+pub struct Injections {
+    /// The query.
+    pub query: Query,
+    /// Capture index of `@injection.content`.
+    pub content: u32,
+    /// Capture index of `@injection.language`, if any pattern uses it.
+    pub language: Option<u32>,
+    /// Per pattern: the grammar `#set! injection.language` names, if it
+    /// is set and known. A pattern with neither this nor a language
+    /// capture never injects.
+    pub fixed: Vec<Option<GrammarKey>>,
+}
+
+impl Injections {
+    /// Read a compiled query's patterns. `None` when it has no
+    /// `@injection.content` capture, so it could never inject anything.
+    fn new(query: Query) -> Option<Self> {
+        let content = query.capture_index_for_name("injection.content")?;
+        let language = query.capture_index_for_name("injection.language");
+        let fixed = (0..query.pattern_count())
+            .map(|i| {
+                query.property_settings(i).iter().find_map(|p| {
+                    (&*p.key == "injection.language")
+                        .then(|| p.value.as_deref().and_then(GrammarKey::from_injection_name))
+                        .flatten()
+                })
+            })
+            .collect();
+        Some(Self {
+            query,
+            content,
+            language,
+            fixed,
+        })
     }
 }
 
@@ -159,6 +250,45 @@ fn source(id: LanguageId) -> Option<(Language, String)> {
         )]
         _ => None,
     }
+}
+
+/// The injections query for a grammar, where it ships one that names
+/// languages Nimbus has. Rust's (macro bodies reparsed as Rust) is left
+/// out: the highlight query already colours the tokens in a macro call,
+/// and a child tree per `println!` would cost more than it shows.
+/// JavaScript's (tagged template strings such as `` css`...` ``) also
+/// serves TypeScript and TSX, whose grammars share those node names.
+fn injections_source(key: GrammarKey) -> Option<&'static str> {
+    match key {
+        #[cfg(feature = "markdown")]
+        GrammarKey::Language(LanguageId::Markdown) => Some(tree_sitter_md::INJECTION_QUERY_BLOCK),
+        #[cfg(feature = "markdown")]
+        GrammarKey::MarkdownInline => Some(tree_sitter_md::INJECTION_QUERY_INLINE),
+        #[cfg(feature = "html")]
+        GrammarKey::Language(LanguageId::Html) => Some(tree_sitter_html::INJECTIONS_QUERY),
+        #[cfg(feature = "javascript")]
+        GrammarKey::Language(LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx) => {
+            Some(tree_sitter_javascript::INJECTIONS_QUERY)
+        }
+        _ => None,
+    }
+}
+
+/// The capture names of a table (see [`TABLES`]): a grammar's, once it
+/// is loaded, or the simple rules'. `None` for a grammar not loaded yet,
+/// whose spans cannot exist either.
+#[must_use]
+pub fn capture_table(table: usize) -> Option<&'static [&'static str]> {
+    if table == LEXICAL_TABLE {
+        return Some(crate::lexical::CAPTURES);
+    }
+    let key = if table == INLINE_TABLE {
+        GrammarKey::MarkdownInline
+    } else {
+        GrammarKey::Language(*LanguageId::ALL.get(table)?)
+    };
+    let slot = slot(key);
+    Some(slot.get()?.as_ref()?.highlights.capture_names())
 }
 
 /// The tags query for a language: patterns that capture definitions
@@ -286,10 +416,13 @@ fn compile(
     Query::new(language, builtin)
 }
 
-fn slot(id: LanguageId) -> &'static OnceLock<Option<Grammar>> {
-    static SLOTS: [OnceLock<Option<Grammar>>; LanguageId::ALL.len()] =
-        [const { OnceLock::new() }; LanguageId::ALL.len()];
-    &SLOTS[id.index()]
+fn slot(key: GrammarKey) -> &'static OnceLock<Option<Grammar>> {
+    static SLOTS: [OnceLock<Option<Grammar>>; LanguageId::ALL.len() + 1] =
+        [const { OnceLock::new() }; LanguageId::ALL.len() + 1];
+    &SLOTS[match key {
+        GrammarKey::Language(id) => id.index(),
+        GrammarKey::MarkdownInline => LanguageId::ALL.len(),
+    }]
 }
 
 /// The grammar for `id`, compiling its query on first use. `None` if its
@@ -302,36 +435,86 @@ fn slot(id: LanguageId) -> &'static OnceLock<Option<Grammar>> {
 /// grammar through the tree it parsed ([`crate::state::SyntaxState::tree`]).
 #[must_use]
 pub fn grammar(id: LanguageId) -> Option<&'static Grammar> {
-    slot(id)
+    grammar_for(GrammarKey::Language(id))
+}
+
+/// The grammar behind `key`; see [`grammar`]. The Markdown inline grammar
+/// loads here too, the first time a Markdown paragraph is on screen.
+#[must_use]
+pub fn grammar_for(key: GrammarKey) -> Option<&'static Grammar> {
+    slot(key)
         .get_or_init(|| {
             let started = std::time::Instant::now();
-            let (language, builtin) = source(id)?;
-            let file = format!("{}.scm", id.key());
+            let (name, file_key, language, builtin) = match key {
+                GrammarKey::Language(id) => {
+                    let (language, builtin) = source(id)?;
+                    (id.name(), id.key(), language, builtin)
+                }
+                GrammarKey::MarkdownInline => {
+                    let (language, builtin) = inline_source()?;
+                    ("Markdown inline", "markdown_inline", language, builtin)
+                }
+            };
+            let file = format!("{file_key}.scm");
             let user = USER_QUERIES
                 .get()
                 .and_then(|dir| user_query(dir, &file, &builtin));
-            let compiled = compile(&language, &builtin, user);
-            match compiled {
-                Ok(highlights) => {
-                    log::debug!("{} grammar ready in {:?}", id.name(), started.elapsed());
-                    Some(Grammar {
-                        language,
-                        highlights,
-                    })
-                }
+            let highlights = match compile(&language, &builtin, user) {
+                Ok(q) => q,
                 Err(e) => {
-                    log::error!("{} highlight query does not compile: {e}", id.name());
-                    None
+                    log::error!("{name} highlight query does not compile: {e}");
+                    return None;
                 }
-            }
+            };
+            let injections = injections_source(key).and_then(|builtin| {
+                let file = format!("{file_key}.injections.scm");
+                let user = USER_QUERIES
+                    .get()
+                    .and_then(|dir| user_query(dir, &file, builtin));
+                match compile(&language, builtin, user) {
+                    Ok(q) => Injections::new(q),
+                    Err(e) => {
+                        log::error!("{name} injections query does not compile: {e}");
+                        None
+                    }
+                }
+            });
+            log::debug!("{name} grammar ready in {:?}", started.elapsed());
+            Some(Grammar {
+                language,
+                highlights,
+                injections,
+            })
         })
         .as_ref()
+}
+
+/// The Markdown inline grammar and its highlight query.
+#[cfg_attr(
+    feature = "markdown",
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "None when the markdown feature is off"
+    )
+)]
+fn inline_source() -> Option<(Language, String)> {
+    #[cfg(feature = "markdown")]
+    {
+        Some((
+            tree_sitter_md::INLINE_LANGUAGE.into(),
+            tree_sitter_md::HIGHLIGHT_QUERY_INLINE.to_owned(),
+        ))
+    }
+    #[cfg(not(feature = "markdown"))]
+    {
+        None
+    }
 }
 
 /// Whether `id`'s grammar is loaded already.
 #[cfg(test)]
 fn is_loaded(id: LanguageId) -> bool {
-    slot(id).get().is_some()
+    slot(GrammarKey::Language(id)).get().is_some()
 }
 
 #[cfg(test)]
@@ -391,6 +574,50 @@ mod tests {
         assert!(names(user).contains(&"string".to_owned()), "falls back");
         assert_eq!(take_warnings().len(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn injection_queries_compile_and_name_known_grammars() {
+        let mut keys: Vec<GrammarKey> = LanguageId::ALL
+            .into_iter()
+            .map(GrammarKey::Language)
+            .collect();
+        keys.push(GrammarKey::MarkdownInline);
+        for key in keys {
+            let Some(g) = grammar_for(key) else {
+                continue;
+            };
+            assert_eq!(
+                g.injections.is_some(),
+                injections_source(key).is_some(),
+                "{key:?} injections"
+            );
+            if let Some(inj) = &g.injections {
+                assert!(
+                    inj.fixed.iter().any(Option::is_some) || inj.language.is_some(),
+                    "{key:?} injects nothing"
+                );
+            }
+        }
+        #[cfg(feature = "markdown")]
+        {
+            let md = grammar(LanguageId::Markdown).and_then(|g| g.injections.as_ref());
+            let md = md.expect("markdown injections");
+            assert!(md.fixed.contains(&Some(GrammarKey::MarkdownInline)));
+            assert!(
+                md.language.is_some(),
+                "fenced code blocks name their language"
+            );
+            assert!(grammar_for(GrammarKey::MarkdownInline).is_some());
+            assert!(capture_table(INLINE_TABLE).is_some_and(|n| n.contains(&"text.emphasis")));
+        }
+        assert_eq!(capture_table(LEXICAL_TABLE), Some(crate::lexical::CAPTURES));
+        assert_eq!(capture_table(TABLES), None);
+        assert_eq!(
+            GrammarKey::from_injection_name("markdown_inline"),
+            Some(GrammarKey::MarkdownInline)
+        );
+        assert_eq!(GrammarKey::from_injection_name("regex"), None);
     }
 
     #[test]

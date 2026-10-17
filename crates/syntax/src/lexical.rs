@@ -864,6 +864,7 @@ impl Lexical {
                             start: a + sp.start,
                             end: a + sp.end,
                             capture,
+                            table: crate::registry::LEXICAL_TABLE,
                         });
                     });
                 }
@@ -879,6 +880,7 @@ impl Lexical {
                             start: s,
                             end: e,
                             capture,
+                            table: crate::registry::LEXICAL_TABLE,
                         });
                     }
                 });
@@ -990,7 +992,8 @@ mod tests {
             vec![Span {
                 start: 10,
                 end: 15,
-                capture: STRING
+                capture: STRING,
+                table: crate::registry::LEXICAL_TABLE,
             }]
         );
     }

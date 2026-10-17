@@ -2,6 +2,7 @@
 
 pub mod edit;
 pub mod highlight;
+pub mod inject;
 pub mod language;
 pub mod lexical;
 pub mod registry;

@@ -2188,6 +2188,13 @@ impl App {
                 tab_width,
             },
         );
+        // Nested languages the budget left unparsed colour on the next
+        // frame.
+        if tab.doc.syntax.injections_pending()
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
         view::draw_tabs(gpu, &self.theme.ui, layout, &labels, self.active);
         let active = self.tabs[self.active].doc.canonical.as_deref();
         sidebar::draw(gpu, &self.theme.ui, layout, &self.sidebar, active);
@@ -2375,6 +2382,19 @@ fn line_estimate(t: &dyn Text) -> usize {
     usize::try_from(estimate).unwrap_or(usize::MAX).max(lines)
 }
 
+/// The tab labels for headless rendering: the given ones, or the one
+/// document's own.
+fn labels_or_own(labels: Vec<TabLabel>, doc: &Document) -> Vec<TabLabel> {
+    if labels.is_empty() {
+        vec![TabLabel {
+            name: doc.display_name(),
+            dirty: false,
+        }]
+    } else {
+        labels
+    }
+}
+
 /// The document's definitions with their line numbers, for Go to Symbol.
 fn symbol_items(doc: &Document) -> Vec<(nimbus_syntax::symbols::Symbol, Option<usize>)> {
     let t = &doc.buffer;
@@ -2498,9 +2518,11 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     let current = find.current.and_then(|i| find.matches.get(i)).cloned();
     let ui = scene.theme.ui;
     let syntax = &scene.doc.syntax;
-    let captures = match syntax.capture_names() {
-        Some((key, names)) => scene.theme.capture_looks(key, names),
-        None => &[],
+    let looks = if syntax.capture_names().is_some() {
+        scene.theme.resolve_tables();
+        Some(&*scene.theme)
+    } else {
+        None
     };
     scene.view.draw(
         gpu,
@@ -2518,9 +2540,13 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
             },
             current,
             ui: &ui,
-            captures,
+            looks,
         },
     );
+    // A nested language that came into view loads its grammar or was
+    // parsed this frame: its table may be new to the theme, and its spans
+    // may be waiting on the next frame's budget.
+    scene.theme.resolve_tables();
     scene.view.draw_scrollbar(gpu, scene.doc, layout, &ui);
     if find.open {
         view::draw_find_bar(gpu, &ui, find, layout, scene.cursor_visible);
@@ -2599,19 +2625,12 @@ pub fn run_headless(
     for w in warnings {
         print_err(&format!("nimbus: {w}"));
     }
-    let label = TabLabel {
-        name: doc.display_name(),
-        dirty: false,
-    };
-    let labels = if labels.is_empty() {
-        vec![label]
-    } else {
-        labels
-    };
+    let labels = labels_or_own(labels, &doc);
     // Characters the bundled font lacks are looked for in system fonts on
     // a worker; with no later frame to show them in, wait for them once
     // everything has been painted, and paint again if any arrived.
-    for pass in 0..2 {
+    let mut fonts_waited = false;
+    for _ in 0..8 {
         paint_scene(
             &mut gpu,
             &layout,
@@ -2635,9 +2654,15 @@ pub fn run_headless(
         if let Some(spec) = &options.picker {
             draw_headless_picker(&mut gpu, ui, &layout, (spec, &root), &doc, config);
         }
-        if pass == 1 || !gpu.wait_for_fonts(Duration::from_secs(5)) {
+        // Nested languages are parsed a few per frame; keep painting
+        // until none is left over, as the window would on redraws.
+        if doc.syntax.injections_pending() {
+            continue;
+        }
+        if fonts_waited || !gpu.wait_for_fonts(Duration::from_secs(5)) {
             break;
         }
+        fonts_waited = true;
     }
     gpu.request_capture();
     if let Err(e) = gpu.render() {
