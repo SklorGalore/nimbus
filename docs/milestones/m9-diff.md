@@ -1,6 +1,6 @@
 # M9 — Compare and merge
 
-**Status: in progress** (started 2026-10-17; tasks 1, 2, 2a and 3 landed; 2a's long-line splitting waits for task 6)
+**Status: in progress** (started 2026-10-17; tasks 1 to 6 landed, 6 awaiting the owner's look on screen; 2a's long-line splitting still open)
 
 ## Goal
 
@@ -35,13 +35,21 @@ views, plus the diff's own:
 
 ## Done when
 
-- [ ] Compare: "Compare with Saved", "Compare with File…", "Compare Tabs",
-      and `--diff A B`. Side-by-side, rows aligned across the sides;
-      added, removed and changed lines coloured, the changed words within
-      a line marked more strongly; both sides keep syntax colours. A
-      unified view is one toggle away.
-- [ ] Navigation: next and previous change keys; a count ("3 of 12") in the
-      diff bar; long unchanged runs fold to "N unchanged lines".
+- [x] Compare: "Compare with Saved", "Compare with File…", "Compare with
+      Tab…" (the only other tab, or a picker), and `--diff A B`.
+      Side-by-side, rows aligned across the sides; added, removed and
+      changed lines coloured, the changed words within a line marked more
+      strongly; both sides keep syntax colours. "Toggle Unified Compare"
+      stacks each change's old lines over its new ones in one column.
+      **Owner to confirm on screen**: built and tested headlessly here
+      (no GPU in the build container), so the colours and alignment need a
+      look on a real display.
+- [x] Navigation: `F7` / `Shift+F7` step through the changes; the status
+      bar shows "Compare with saved · change 3 of 12" (the plan's diff
+      bar became part of the status bar: no layout change, and the find
+      bar keeps its place); long unchanged runs fold to "··· N unchanged
+      lines ···" with three lines of context, and a click on the fold
+      opens it.
 - [ ] Two-way merge: "Merge Files…" opens two sides and a result column
       (starting as a copy of the left side); on each change, "Take Left",
       "Take Right" or "Take Both" edits the result as one undoable step.
@@ -301,6 +309,30 @@ O(log segments); memory is O(segments); folding toggles re-sum. Change
 navigation ("3 of 12", next, previous) reads the same list. Generic over
 the change tag, so the merge view's three columns use the same model
 with `merge::Kind`.
+
+**Task 6: the compare view** (`crates/app/src/compare.rs`, with
+`View::draw_rows`, `Layout::column` and `begin_frame` in `view.rs`). A
+compare sits on an ordinary tab: the tab's document stays the editable
+right side, and the tab gains a read-only left side plus the diff. The
+first diff runs on a worker over snapshots ("comparing…" until it
+arrives, as highlighting does); within `DIFF_LIMIT` it is a `LiveDiff`
+that follows each edit through `Document::take_edits` (a log every edit
+site feeds, undo and redo included; a reload marks it so the compare
+starts over), and a local re-diff over the 20,000-line budget, or past
+the limit, goes back to the worker after a 300 ms pause in typing. Rows
+come from `Rows`; only the rows on screen are planned and drawn, and the
+changed-word marks (common start and end of a changed pair trimmed, for
+lines under 4 KB) are worked out for those alone. `View::draw_rows`
+draws a column from a row plan (a line, a filler, or a fold label) and
+shares `draw_line` with the ordinary `draw`, so selection, cursor,
+matches, IME and syntax colours come for free; `Layout::column` narrows
+a layout to one column, and everything that took `width` as the right
+edge stops at the column's edge. Horizontal scroll is shared; soft wrap
+is off while comparing. `Compare::start_sync` runs the diff in place for
+`--headless` and the tests. Deviations from the plan: the diff bar's
+text lives in the status bar; "Compare with Tab…" compares with a copy
+of the other tab's text (edits there are not followed); drag selection
+in a compare is off for now (click and keyboard selection work).
 
 Interning dominates the time: about 230 MB/s, mostly the hash-table
 lookup and the byte comparison that confirms each repeated line. One
