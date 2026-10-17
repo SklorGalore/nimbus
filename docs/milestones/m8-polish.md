@@ -17,6 +17,11 @@ runs. **Owner** items need a person at the keyboard; each says what to try.
       deleting, movement and paste apply to every cursor; undo restores all.
       Also `Primary+Alt+Up/Down`. Property suite `multi_oracle.rs` on both
       backends; document tests; headless renders with `--cursors`.
+- [x] **Column selection** (added before the first release, at the owner's
+      request): Shift+Alt+drag (⇧⌥-drag on macOS) puts a cursor or
+      selection on every line between the press and the pointer, by
+      display column; lines too short to reach are skipped; at most 10,000
+      lines (document and view tests).
 - [x] **Bracket matching**: the bracket pair around the cursor is
       highlighted, using the syntax tree where there is one and a bounded
       scan otherwise (syntax and core tests; headless renders).
@@ -66,6 +71,8 @@ runs. **Owner** items need a person at the keyboard; each says what to try.
       in the taskbar.
 - [ ] **Owner, macOS:** the same multi-cursor steps with ⌘D and ⌥-click;
       the palette shows ⇧⌘P-style shortcuts.
+- [ ] **Owner, both:** Shift+Alt+drag (⇧⌥ on macOS) down over lines of
+      different lengths and type: every line long enough gets the text.
 - [ ] A tag push builds release artifacts in GitHub Actions: a macOS `.app`
       in a zip, a Linux tarball, a Windows zip. Workflow, bundle script
       (tested locally) and icon are in; **owner**: push a tag to run it.

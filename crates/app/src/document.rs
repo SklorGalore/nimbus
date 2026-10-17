@@ -13,7 +13,7 @@ use nimbus_core::{
     AnyBuffer, Bias, Buffer, Edit, EditError, History, LineEnding, MappedBuffer, Selection,
     Selections, Source, Text, report_sorted,
 };
-use nimbus_core::{movement, multi};
+use nimbus_core::{long_line, movement, multi};
 
 use nimbus_syntax::state::SyntaxState;
 
@@ -79,6 +79,9 @@ pub enum DiskChange {
     /// Changed on disk, but reading it failed.
     Failed(String),
 }
+
+/// Most lines a column selection covers ([`Document::column_select`]).
+pub const MAX_COLUMN_LINES: usize = 10_000;
 
 /// Most bytes [`Document::add_next_occurrence`] reads per press.
 pub const NEXT_BUDGET: usize = 32 * 1024 * 1024;
@@ -1384,6 +1387,55 @@ impl Document {
         self.goals.clear();
     }
 
+    /// Column (box) selection, as Shift+Alt+drag makes it: one selection on
+    /// every line from the line starting at `from.0` to the one starting at
+    /// `to.0`, each from display column `from.1` to column `to.1` (a cursor
+    /// when they are equal). It replaces the selections there were.
+    ///
+    /// A line too short to reach the nearer column gets nothing, as in
+    /// other editors; one that reaches it but not the farther column is
+    /// selected to its end. At most [`MAX_COLUMN_LINES`] lines, so a drag
+    /// across a huge file stays quick. The selection on the pointer's line
+    /// is the primary.
+    pub fn column_select(&mut self, from: (usize, usize), to: (usize, usize), tab_width: usize) {
+        let t = &self.buffer;
+        // Any byte of a line names it.
+        let (from_line, to_line) = (t.line_span(from.0).start, t.line_span(to.0).start);
+        let (top, bottom) = (from_line.min(to_line), from_line.max(to_line));
+        let (a_col, h_col) = (from.1, to.1);
+        let near = a_col.min(h_col);
+        let mut rows: Vec<Selection> = Vec::new();
+        let mut primary = None;
+        let mut pos = top;
+        for _ in 0..MAX_COLUMN_LINES {
+            let span = t.line_span(pos);
+            let width = long_line::col_at(t, span, span.end, tab_width);
+            if width >= near {
+                if span.start == to_line {
+                    primary = Some(rows.len());
+                }
+                rows.push(Selection {
+                    anchor: long_line::byte_at_col(t, span, a_col, tab_width),
+                    head: long_line::byte_at_col(t, span, h_col, tab_width),
+                });
+            }
+            match span.next {
+                Some(next) if span.start < bottom => pos = next,
+                _ => break,
+            }
+        }
+        if rows.is_empty() {
+            // Every line was too short: a cursor at the end of the
+            // pointer's line.
+            rows.push(Selection::cursor(t.line_span(to_line).end));
+        }
+        let primary = primary.unwrap_or(rows.len() - 1);
+        self.selections = Selections::from_vec(rows, primary);
+        self.goals.clear();
+        self.preferred_column = None;
+        self.history.seal();
+    }
+
     /// Primary+Alt+Up or Down: add a cursor on the line above the topmost
     /// cursor (`lines` -1) or below the bottommost (1), at the column the
     /// primary aims for, as the new primary. So pressing it again keeps
@@ -2270,6 +2322,41 @@ mod tests {
         assert_eq!(heads(&d), [4, 8]);
         d.move_cursor(Motion::Down, false, 4, 10);
         assert_eq!(heads(&d), [11, 15], "columns 4 and 1 of the next lines");
+    }
+
+    #[test]
+    fn column_selection_puts_a_selection_on_each_line() {
+        // Lines start at 0, 7, 10, 17 and 23 ("\tx yz" is a tab, then x).
+        let mut d = doc("abcdef\nab\nabcdef\n\tx yz\nabcdef");
+        // Cursors in column 1 down four lines; column 1 on the tab line is
+        // nearer the tab's start, so that cursor is before it.
+        d.column_select((0, 1), (17, 1), 4);
+        assert_eq!(heads(&d), [1, 8, 11, 17]);
+        assert_eq!(d.selection().head, 17, "the pointer's line is primary");
+        // Columns 3 to 5: "ab" is too short and gets nothing. A column
+        // inside a tab goes to the tab's nearer edge: column 3 is nearer
+        // its end (column 4), so that line's selection is just "x".
+        d.column_select((0, 3), (17, 5), 4);
+        assert_eq!(
+            d.selections
+                .iter()
+                .map(Selection::range)
+                .collect::<Vec<_>>(),
+            [3..5, 13..15, 18..19]
+        );
+        // Dragged upwards: the same lines, the pointer's line primary.
+        d.column_select((23, 2), (7, 2), 4);
+        assert_eq!(heads(&d), [9, 12, 17, 25]);
+        assert_eq!(d.selection().head, 9);
+        // Any byte of a line names it.
+        d.column_select((3, 0), (8, 0), 4);
+        assert_eq!(heads(&d), [0, 7]);
+        // Typing then goes to every line.
+        d.insert("> ").unwrap();
+        assert_eq!(text(&d), "> abcdef\n> ab\nabcdef\n\tx yz\nabcdef");
+        // Past every line's end: a cursor at the end of the pointer's line.
+        d.column_select((0, 40), (11, 40), 4);
+        assert_eq!(d.selections.count(), 1);
     }
 
     #[test]

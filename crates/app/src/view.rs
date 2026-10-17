@@ -835,6 +835,52 @@ impl View {
         span.start + wrap::byte_at_row_half_col(&text, rows, at.row, half, tab_width)
     }
 
+    /// The line under window position `(x, y)` (its first byte) and the
+    /// display column there, for column selection. Unlike [`View::hit`],
+    /// the column is not limited to the line's length: dragging past the
+    /// end of a short line still names a column further right. With soft
+    /// wrap, the column counts from the start of the whole line.
+    pub fn hit_column(
+        &mut self,
+        x: f32,
+        y: f32,
+        doc: &Document,
+        layout: &Layout,
+        tab_width: usize,
+    ) -> (usize, usize) {
+        let t = &doc.buffer;
+        let lh = layout.metrics.line_height;
+        let rows_down = ((y - layout.top + self.px()) / lh).floor().max(0.0);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a row count within the window"
+        )]
+        let rows_down = rows_down as isize;
+        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
+        let anchor = anchor(self.scroll_top, t, &mut w);
+        let (at, _) = wrap::step_rows(t, &mut w, anchor, rows_down);
+        let span = t.line_span(at.start);
+        let long = long_line::is_long(span);
+        let wrapped = self.wrap && !long;
+        let scroll = if wrapped { 0.0 } else { self.scroll_x };
+        let x_text = (f64::from(x - layout.text_left) + scroll).max(0.0);
+        // The nearer column boundary: a click right of a character's middle
+        // is after it.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a non-negative column count"
+        )]
+        let col = (x_text / f64::from(layout.metrics.cell_width)).round() as usize;
+        let row_col = if wrapped {
+            let text = t.slice(span.start..span.end);
+            w.rows(&text).get(at.row).map_or(0, |r| r.col)
+        } else {
+            0
+        };
+        (span.start, row_col + col)
+    }
+
     /// The cursor's rectangle on screen as `[x, y, width, height]` from the
     /// last frame drawn, for the IME's candidate window. `preedit_cols` is
     /// the width of any composition in progress.
@@ -1859,6 +1905,20 @@ mod tests {
         };
         assert_eq!(size(512), "512 B");
         assert_eq!(size(3 * 1024 * 1024 + 400 * 1024), "3.4 MB");
+    }
+
+    #[test]
+    fn column_hits_go_past_the_end_of_short_lines() {
+        let d = doc("ab\nabcdef\n");
+        let l = layout(3);
+        let mut v = View::default();
+        let (cell, lh) = (l.metrics.cell_width, l.metrics.line_height);
+        // Four cells in on the first line, which has two: column 4.
+        let x = l.text_left + 4.0 * cell + 1.0;
+        assert_eq!(v.hit_column(x, l.top + 1.0, &d, &l, 4), (0, 4));
+        // The second line, nearer the boundary after column 2.
+        let x = l.text_left + 2.4 * cell;
+        assert_eq!(v.hit_column(x, l.top + lh + 1.0, &d, &l, 4), (3, 2));
     }
 
     #[test]

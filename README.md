@@ -18,6 +18,11 @@ GitHub.
   `~/.local/share/icons` for a menu entry.
 - **Windows**: unzip and run `nimbus.exe`.
 
+Each release also has a `SHA256SUMS` file. To check a download, put it in
+the same folder and run `shasum -a 256 -c SHA256SUMS --ignore-missing`
+(macOS) or `sha256sum -c SHA256SUMS --ignore-missing` (Linux); on Windows,
+compare the output of `Get-FileHash FILE` with its line.
+
 ## Building from source
 
 ```sh
