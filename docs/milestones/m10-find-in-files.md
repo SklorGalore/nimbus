@@ -1,9 +1,10 @@
 # M10 — Find in files
 
-**Status: draft.** Written on 2026-10-17 from the items deferred by M3 and
-M8 ("find across files", "find in files"). Not yet approved. Items marked
-**Proposed** need a yes, or a different answer, before work starts; the
-order of M10–M15 is itself a proposal (see `backlog.md`).
+**Status: next.** Written on 2026-10-17 from the items deferred by M3 and
+M8 ("find across files", "find in files"); approved the same day, with
+the sidebar placement, the 10,000-match cap and the 64 MB undo budget
+decided (`DESIGN.md` §9). First of M10–M15 in the approved order
+(`backlog.md`).
 
 ## Goal
 
@@ -37,8 +38,8 @@ streaming in while the search runs and the editor never waiting on it.
 - [ ] "Undo Replace in Files" restores the files just written, as long as
       none has changed since (checked by size and modification time, as
       M6 does), and says which ones it could not restore.
-- [ ] Memory: results are capped (**Proposed**: 10,000 matches; the panel
-      says "more than 10,000 matches, narrow the search"), and each result
+- [ ] Memory: results are capped at 10,000 matches (the panel says "more
+      than 10,000 matches, narrow the search"), and each result
       holds a file id, a line number, a byte range and at most 200 bytes
       of preview. Measured on a search for `e` over this repository and
       over a 1 GB tree from `bench/gen.sh`.
@@ -61,11 +62,11 @@ free.
 
 ## Design
 
-**Where the panel lives. Proposed**: the sidebar column gets a second
-mode, Search, beside Files; `Primary+Shift+F` switches to it and focuses
-the query, `Primary+Shift+E` goes back to the tree. The sidebar already
-draws rows of text at a persisted width (M6), and search results are rows
-of text. A bottom panel would cost the editor height it needs for the
+**Where the panel lives**: the sidebar column gets a second mode,
+Search, beside Files; `Primary+Shift+F` switches to it and focuses the
+query, `Primary+Shift+E` goes back to the tree. The sidebar already draws
+rows of text at a persisted width (M6), and search results are rows of
+text. A bottom panel would have cost the editor height it needs for the
 file being read.
 
 **Workers** (`crates/app/src/find_files.rs`). `ignore::WalkBuilder` has a
@@ -82,8 +83,8 @@ their next file.
 **Reading files**. A file under 16 MB is read whole into a buffer the
 thread reuses; the pattern runs over it with `regex::bytes`, and the
 literal fast path (`search::Literal`, `memchr`) when the pattern has no
-regex syntax. Files from 16 MB up to the limit (**Proposed**: 256 MB, the
-rope threshold) are read in 4 MB blocks with the previous block's tail
+regex syntax. Files from 16 MB up to the limit (256 MB, the rope
+threshold) are read in 4 MB blocks with the previous block's tail
 kept, so a match across the block edge is still found; a match is never
 longer than one line, which is why multi-line patterns are deferred. Files
 over the limit are skipped with a count; the in-editor find (M3, M7) is
@@ -118,9 +119,9 @@ every ticked range still holds the matched text (the file may have
 changed since the search), builds the new content and writes it through
 `saver` (temp file plus rename, M2), and records the file's new stamp.
 The old content of each written file is kept in memory for "Undo Replace
-in Files" until the next replace or exit, up to a budget (**Proposed**:
-64 MB; past it, the summary says that undo is not available for the
-largest files, and lists them). Undo checks each file's stamp before
+in Files" until the next replace or exit, up to a budget of 64 MB (past
+it, the summary says that undo is not available for the largest files,
+and lists them). Undo checks each file's stamp before
 writing the old content back.
 
 **Globs**. Include and exclude fields take comma-separated patterns and

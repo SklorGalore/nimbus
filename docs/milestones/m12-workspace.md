@@ -1,9 +1,11 @@
 # M12 — Workspace
 
-**Status: draft.** Written on 2026-10-17 from items deferred by M4
-(recently opened files), M6 (file operations in the tree), M7 (following
-a growing log) and M8 and DESIGN.md §2 (session restore). Not yet
-approved; **Proposed** items need an answer first.
+**Status: planned, after M11.** Written on 2026-10-17 from items
+deferred by M4 (recently opened files), M6 (file operations in the tree),
+M7 (following a growing log) and M8 and DESIGN.md §2 (session restore).
+Approved the same day: `nimbus` alone reopens the last session, deletes
+go to the trash through the `trash` crate, and autosave for crash
+recovery is not planned (`DESIGN.md` §9).
 
 ## Goal
 
@@ -18,11 +20,9 @@ being written can be followed.
       the open files, their cursor and scroll positions, the active tab,
       the expanded folders in the tree and the sidebar mode. `nimbus
       FOLDER` reopens that folder's session; `nimbus` with no arguments
-      reopens the last one (**Proposed**; the alternative is an empty
-      window and "Reopen Last Session" in the palette); `nimbus FILE`
-      opens just that file, and `--no-session` skips restoring. Untitled
-      buffers with text are not restored (**Proposed**: see the
-      autosave question below).
+      reopens the last one; `nimbus FILE` opens just that file, and
+      `--no-session` skips restoring. Untitled buffers with text are not
+      restored (there is no autosave; see Scope).
 - [ ] Restoring does not pay for every file before the first frame: the
       active file opens as now, the other tabs show their names and load
       when first shown or within the first second on a worker, whichever
@@ -30,8 +30,8 @@ being written can be followed.
       budget, recorded in Results.
 - [ ] A file that no longer exists is dropped from the session with a
       message-line note, not an error.
-- [ ] **Recent files**: "Open Recent" (`Primary+Shift+O`, **Proposed**)
-      lists the last 100 files opened in any session, fuzzy-matched like
+- [ ] **Recent files**: "Open Recent" (`Primary+Shift+O`) lists the
+      last 100 files opened in any session, fuzzy-matched like
       the file opener; the file opener itself lists recent files in the
       root first when the query is empty. "Reopen Closed Tab"
       (`Primary+Shift+T`) brings back the last closed tab with its cursor.
@@ -41,7 +41,7 @@ being written can be followed.
       the palette on Linux. Rename and Delete of an open file move or
       close its tab (Delete asks when the tab has unsaved edits); a
       rename over an existing name asks. Delete moves to the system
-      trash (**Proposed**: the `trash` crate; measured for binary size).
+      trash through the `trash` crate, measured for binary size.
 - [ ] **Follow a growing file**: "Follow Tail" (`view.followTail`,
       shown in the status bar for files whose size grew while open) keeps
       the view pinned to the end as new lines arrive, for both buffer
@@ -61,11 +61,12 @@ tree operations, follow tail, window geometry.
 
 **Deferred**: drag and drop in the tree (moving files between folders;
 rename-with-path covers it clumsily), multiple roots, named workspaces.
-**Open question (owner)**: autosave of unsaved work to the state folder
-every 30 s, offered on the next launch after a crash. It protects
-against the one thing `panic = "abort"` makes costly, but it means Nimbus
-writes copies of the user's text somewhere they did not choose; it needs a
-yes before it is planned.
+
+**Not planned**: autosave of unsaved work to the state folder for crash
+recovery. It would protect against the one thing `panic = "abort"` makes
+costly, but it means Nimbus writes copies of the user's text somewhere
+they did not choose, and the owner decided against it (2026-10-17). It
+stays in `backlog.md`'s unscheduled list in case that changes.
 
 ## Design
 

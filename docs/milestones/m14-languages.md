@@ -1,10 +1,11 @@
 # M14 — Languages, second pass
 
-**Status: draft.** Written on 2026-10-17 from the items deferred by M5
-and M8: Markdown inline highlighting and language injections, and the
-features a syntax tree enables (M8's bracket matching misled by strings,
-M11's expand selection, M13's fold regions). Not yet approved;
-**Proposed** items need an answer first, the grammar list above all.
+**Status: planned, after M13.** Written on 2026-10-17 from the items
+deferred by M5 and M8: Markdown inline highlighting and language
+injections, and the features a syntax tree enables (M8's bracket
+matching misled by strings, M11's expand selection, M13's fold regions).
+Approved the same day, with the grammar list and the Go to Symbol key
+decided (`DESIGN.md` §9).
 
 ## Goal
 
@@ -28,7 +29,7 @@ string is.
       range plus a margin and are dropped when scrolled far away, so a
       15 MB Markdown file (the largest that gets a tree at all; past
       16 MB files are lexical) does not hold a tree per paragraph.
-- [ ] **Go to Symbol** (`Primary+Shift+R`, **Proposed**): a picker of the
+- [ ] **Go to Symbol** (`Primary+Shift+R`): a picker of the
       functions, types, constants and Markdown headings in the current
       file from a `tags.scm`-style query, fuzzy matched, jumping on
       Enter; built lazily on first use from the existing tree.
@@ -47,11 +48,10 @@ string is.
       per-language settings (`[languages.markdown] wrap = true`, extending
       M11's `[indent.LANGUAGE]` tables into a general per-language
       table).
-- [ ] **More grammars** (**Proposed**, owner to choose; each measured
-      for binary size against the 35 MB budget before it stays): C, Go,
-      HTML, CSS; TSX reconsidered now that the budget has room (the M5
-      measurement was about 1.5 MB). Each gets the lexical rules table
-      for files over 16 MB as the nine starters have.
+- [ ] **More grammars**: C, Go, HTML, CSS and TSX, each measured for
+      binary size against the 35 MB budget before it stays (TSX was left
+      out in M5 at about 1.5 MB; the budget has room now). Each gets the
+      lexical rules table for files over 16 MB as the nine starters have.
 - [ ] User queries (`queries/NAME.scm`, M5) also accept `injections.scm`,
       `folds.scm` and `tags.scm` files in the config directory, documented
       in `docs/customizing.md`.
@@ -123,7 +123,8 @@ the total passes 30 MB on Linux, Bash goes first as DESIGN.md §4.2 says.
 7. `folds.scm` regions feeding M13's fold model.
 8. Markdown list and quote continuation; per-language settings table;
    `customizing.md`.
-9. Grammars chosen by the owner, one commit each with its size.
+9. The five grammars (C, Go, HTML, CSS, TSX), one commit each with its
+   measured size; any that breaks the budget is dropped and noted.
 10. Results.
 
 ## Concepts

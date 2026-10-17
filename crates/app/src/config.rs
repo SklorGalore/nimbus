@@ -172,6 +172,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(clippy::float_cmp, reason = "exact values by construction")]
     fn empty_and_partial_files_use_defaults() {
         assert_eq!(Config::parse(""), (Config::default(), vec![]));
         let (c, w) = Config::parse("tab_width = 2\n");
@@ -190,6 +191,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp, reason = "exact values by construction")]
     fn mistakes_become_warnings_not_failures() {
         let (c, w) = Config::parse("tab_width = \n");
         assert_eq!(c, Config::default());
