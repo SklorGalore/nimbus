@@ -56,18 +56,20 @@ pub fn fold_regions(
     };
     let first = out.len();
     let mut cursor = QueryCursor::new();
-    cursor.set_byte_range(range);
-    let mut matches = cursor.matches(query, tree.root_node(), |node: tree_sitter::Node<'_>| {
-        NodeChunks::new(text, node)
-    });
-    while let Some(m) = matches.next() {
-        for c in m.captures() {
-            let (s, e) = (c.node.start_byte(), c.node.end_byte());
-            if s < e && text.byte_to_line(s) < text.byte_to_line(e.saturating_sub(1)) {
-                out.push(s..e);
+    crate::split::for_each_root(tree.root_node(), &range, &mut |root| {
+        crate::split::prepare(&mut cursor, &root, &range);
+        let mut matches = cursor.matches(query, root.0, |node: tree_sitter::Node<'_>| {
+            NodeChunks::new(text, node)
+        });
+        while let Some(m) = matches.next() {
+            for c in m.captures() {
+                let (s, e) = (c.node.start_byte(), c.node.end_byte());
+                if s < e && text.byte_to_line(s) < text.byte_to_line(e.saturating_sub(1)) {
+                    out.push(s..e);
+                }
             }
         }
-    }
+    });
     let added = out.get_mut(first..).unwrap_or(&mut []);
     added.sort_unstable_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
     // The same node can be captured by two patterns; keep one.

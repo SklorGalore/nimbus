@@ -17,6 +17,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::QueryCursor;
 
 use crate::registry::{Grammar, LEXICAL_TABLE};
+use crate::split;
 use crate::state::SyntaxState;
 use crate::text::NodeChunks;
 
@@ -55,9 +56,8 @@ pub struct Highlighter {
     captures: Vec<Capture>,
     paint: Vec<u32>,
     spans: Vec<Span>,
-    /// What `spans` was computed for: the state's and the injections'
-    /// revisions, and the ranges.
-    key_rev: Option<(u64, u64)>,
+    /// What `spans` was computed for: the state's revision and the ranges.
+    key_rev: Option<u64>,
     key_ranges: Vec<Range<usize>>,
     /// Time allowed per call for parsing nested languages.
     pub injection_budget: Duration,
@@ -117,10 +117,16 @@ impl Highlighter {
             .map(|r| r.start.min(len)..r.end.min(len))
             .filter(|r| !r.is_empty())
             .collect();
-        // Nested languages first: what the view shows decides which
-        // regions have trees.
         let host = state.tree();
         let mut injected = state.injected().borrow_mut();
+        // Nothing changed since the last call, and no nested region is
+        // waiting for a parse: the cached spans stand. (Nested regions
+        // depend on the view, the text and the host tree, all unchanged.)
+        if self.key_rev == Some(state.rev()) && self.key_ranges == ranges && !injected.pending() {
+            return &self.spans;
+        }
+        // Nested languages first: what the view shows decides which
+        // regions have trees.
         match host {
             Some((tree, grammar)) if grammar.injections.is_some() => {
                 let deadline = Instant::now().checked_add(self.injection_budget);
@@ -128,12 +134,8 @@ impl Highlighter {
             }
             _ => injected.clear(),
         }
-        let key = (state.rev(), injected.rev());
-        if self.key_rev == Some(key) && self.key_ranges == ranges {
-            return &self.spans;
-        }
         self.spans.clear();
-        self.key_rev = Some(key);
+        self.key_rev = Some(state.rev());
         self.key_ranges.clear();
         self.key_ranges.extend_from_slice(ranges);
         for range in clamped {
@@ -215,22 +217,25 @@ impl Highlighter {
         let Ok(table) = u32::try_from(table) else {
             return;
         };
-        self.cursor.set_byte_range(range.clone());
-        let mut matches = self.cursor.captures(
-            &grammar.highlights,
-            tree.root_node(),
-            |node: tree_sitter::Node<'_>| NodeChunks::new(text, node),
-        );
-        while let Some((m, i)) = matches.next() {
-            let Some(c) = m.captures().get(*i) else {
-                continue;
-            };
-            let (s, e) = (c.node.start_byte(), c.node.end_byte());
-            if s < e {
-                let encoded = (table << TABLE_SHIFT) | (c.index & ((1 << TABLE_SHIFT) - 1));
-                self.captures.push((s, e, depth, m.pattern_index, encoded));
+        let (cursor, captures) = (&mut self.cursor, &mut self.captures);
+        split::for_each_root(tree.root_node(), range, &mut |root| {
+            split::prepare(cursor, &root, range);
+            let mut matches = cursor.captures(
+                &grammar.highlights,
+                root.0,
+                |node: tree_sitter::Node<'_>| NodeChunks::new(text, node),
+            );
+            while let Some((m, i)) = matches.next() {
+                let Some(c) = m.captures().get(*i) else {
+                    continue;
+                };
+                let (s, e) = (c.node.start_byte(), c.node.end_byte());
+                if s < e {
+                    let encoded = (table << TABLE_SHIFT) | (c.index & ((1 << TABLE_SHIFT) - 1));
+                    captures.push((s, e, depth, m.pattern_index, encoded));
+                }
             }
-        }
+        });
     }
 }
 

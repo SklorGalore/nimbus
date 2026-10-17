@@ -26,6 +26,7 @@ use tree_sitter::{InputEdit, Node, Parser, QueryCursor, Tree};
 
 use crate::edit::point_at;
 use crate::registry::{self, Grammar, GrammarKey};
+use crate::split;
 use crate::text::{NodeChunks, bytes_from};
 
 /// A region larger than this is not injected: the host colours it. A
@@ -37,8 +38,10 @@ pub const MAX_INJECTION_BYTES: usize = 1024 * 1024;
 pub const MAX_DEPTH: u8 = 2;
 
 /// Children are kept while within this many screens of the view, in
-/// each direction.
-const MARGIN_SCREENS: usize = 2;
+/// each direction. One screen: a Markdown paragraph costs about 0.3 ms
+/// to parse with the inline grammar, so a wider margin is more frames
+/// of background parsing after a jump, for text that is rarely seen.
+const MARGIN_SCREENS: usize = 1;
 
 /// One nested region: its grammar, its tree, and where it is.
 pub struct Child {
@@ -57,6 +60,9 @@ pub struct Child {
     /// Found by the latest query of the host; unseen children are
     /// dropped.
     seen: bool,
+    /// This tree has been queried for its own nested regions since it
+    /// was last parsed; until it has, its children may be missing.
+    nested: bool,
     /// Regions nested inside this one.
     pub children: Children,
 }
@@ -115,6 +121,17 @@ impl Children {
     #[must_use]
     pub fn count(&self) -> usize {
         self.map.values().map(|c| 1 + c.children.count()).sum()
+    }
+
+    /// Whether any child, at any depth, is unparsed, behind an edit, or
+    /// has not been queried for its own nested regions yet. When nothing
+    /// needs work a refresh skips the nested layers entirely, which is
+    /// what keeps a frame with no edit and no scroll cheap.
+    #[must_use]
+    pub fn needs_work(&self) -> bool {
+        self.map
+            .values()
+            .any(|c| c.dirty || c.tree.is_none() || !c.nested || c.children.needs_work())
     }
 
     fn edit(&mut self, ie: &InputEdit) {
@@ -258,7 +275,7 @@ fn refresh_layer(
     for c in children.map.values_mut() {
         c.seen = false;
     }
-    let mut found = find_regions(children, pass, root, inj);
+    let mut found = find_regions(children, pass, root, inj, depth);
     let before = children.map.len();
     children.map.retain(|_, c| c.seen);
     let mut changed = children.map.len() != before;
@@ -284,11 +301,16 @@ fn refresh_layer(
             if let Some(tree) = parse_child(child, pass) {
                 child.tree = Some(tree);
                 child.dirty = false;
+                child.nested = false;
                 changed = true;
             }
             pass.parsed_one = true;
         }
+        // A child is queried for its own regions once per parse, then
+        // only while something below it is unfinished; querying every
+        // child every frame cost more than the parses did.
         if depth < MAX_DEPTH
+            && (!child.nested || child.children.needs_work())
             && let Some(tree) = &child.tree
         {
             changed |= refresh_layer(
@@ -298,6 +320,7 @@ fn refresh_layer(
                 child.grammar,
                 depth + 1,
             );
+            child.nested = true;
         }
     }
     changed
@@ -311,72 +334,85 @@ fn find_regions(
     pass: &mut Pass<'_>,
     root: Node<'_>,
     inj: &registry::Injections,
+    depth: u8,
 ) -> Vec<usize> {
     let mut found: Vec<usize> = Vec::new();
-    pass.cursor.set_byte_range(pass.keep.clone());
     let text = pass.text;
-    let mut matches = pass.cursor.matches(&inj.query, root, |node: Node<'_>| {
-        NodeChunks::new(text, node)
-    });
-    while let Some(m) = matches.next() {
-        let key = inj
-            .fixed
-            .get(m.pattern_index)
-            .copied()
-            .flatten()
-            .or_else(|| {
-                let capture = inj.language?;
-                let node = m.captures().iter().find(|c| c.index == capture)?.node;
-                let name: String = NodeChunks::new(text, node)
-                    .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
-                    .collect();
-                GrammarKey::from_injection_name(&name)
-            });
-        let Some(key) = key else {
-            continue;
-        };
-        let mut ranges = Vec::new();
-        let mut id = None;
-        for c in m.captures() {
-            if c.index == inj.content && c.node.start_byte() < c.node.end_byte() {
-                id.get_or_insert(c.node.id());
-                ranges.push(c.node.start_byte()..c.node.end_byte());
-            }
-        }
-        let Some(id) = id else {
-            continue;
-        };
-        if ranges.iter().map(Range::len).sum::<usize>() > MAX_INJECTION_BYTES {
-            continue;
-        }
-        match children.map.get_mut(&id) {
-            Some(c) if c.key == key => {
-                if c.ranges != ranges {
-                    c.ranges = ranges;
-                    c.dirty = true;
+    // The host is queried near the view only; a child is small (it was
+    // kept because it is near the view) and is queried whole, so its
+    // nested regions are found once and not again on every scroll.
+    let keep = if depth == 1 {
+        pass.keep.clone()
+    } else {
+        root.start_byte()..root.end_byte()
+    };
+    let cursor = &mut *pass.cursor;
+    split::for_each_root(root, &keep, &mut |query_root| {
+        split::prepare(cursor, &query_root, &keep);
+        let mut matches = cursor.matches(&inj.query, query_root.0, |node: Node<'_>| {
+            NodeChunks::new(text, node)
+        });
+        while let Some(m) = matches.next() {
+            let key = inj
+                .fixed
+                .get(m.pattern_index)
+                .copied()
+                .flatten()
+                .or_else(|| {
+                    let capture = inj.language?;
+                    let node = m.captures().iter().find(|c| c.index == capture)?.node;
+                    let name: String = NodeChunks::new(text, node)
+                        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+                        .collect();
+                    GrammarKey::from_injection_name(&name)
+                });
+            let Some(key) = key else {
+                continue;
+            };
+            let mut ranges = Vec::new();
+            let mut id = None;
+            for c in m.captures() {
+                if c.index == inj.content && c.node.start_byte() < c.node.end_byte() {
+                    id.get_or_insert(c.node.id());
+                    ranges.push(c.node.start_byte()..c.node.end_byte());
                 }
-                c.seen = true;
             }
-            _ => {
-                let Some(grammar) = registry::grammar_for(key) else {
-                    continue;
-                };
-                children.map.insert(
-                    id,
-                    Child {
-                        key,
-                        grammar,
-                        tree: None,
-                        ranges,
-                        dirty: true,
-                        seen: true,
-                        children: Children::default(),
-                    },
-                );
+            let Some(id) = id else {
+                continue;
+            };
+            if ranges.iter().map(Range::len).sum::<usize>() > MAX_INJECTION_BYTES {
+                continue;
             }
+            match children.map.get_mut(&id) {
+                Some(c) if c.key == key => {
+                    if c.ranges != ranges {
+                        c.ranges = ranges;
+                        c.dirty = true;
+                    }
+                    c.seen = true;
+                }
+                _ => {
+                    let Some(grammar) = registry::grammar_for(key) else {
+                        continue;
+                    };
+                    children.map.insert(
+                        id,
+                        Child {
+                            key,
+                            grammar,
+                            tree: None,
+                            ranges,
+                            dirty: true,
+                            seen: true,
+                            nested: false,
+                            children: Children::default(),
+                        },
+                    );
+                }
+            }
+            found.push(id);
         }
-        found.push(id);
-    }
+    });
     found
 }
 
