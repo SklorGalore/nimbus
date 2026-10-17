@@ -7,6 +7,8 @@
 //! the config overrides on top of it, so nothing is reachable by a
 //! hard-coded key alone (DESIGN.md §4.4).
 
+use nimbus_core::transform::{Case, Lines};
+
 use crate::input::{Command, Motion};
 
 /// When an action applies. A key bound to an action that does not apply
@@ -356,6 +358,151 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::Escape,
         Keys::all(&["Escape"]),
     ),
+    // Everyday editing (M11).
+    act(
+        "edit.toggleLineComment",
+        "Toggle Line Comment",
+        Command::ToggleLineComment,
+        Keys::all(&["Primary+/"]),
+    ),
+    act(
+        "edit.toggleBlockComment",
+        "Toggle Block Comment",
+        Command::ToggleBlockComment,
+        Keys::all(&["Primary+Shift+/"]),
+    ),
+    act(
+        "edit.duplicate",
+        "Duplicate Line or Selection",
+        Command::Duplicate,
+        Keys::all(&["Primary+Shift+D"]),
+    ),
+    act(
+        "edit.moveLineUp",
+        "Move Line Up",
+        Command::MoveLineUp,
+        Keys::all(&["Alt+Up"]),
+    ),
+    act(
+        "edit.moveLineDown",
+        "Move Line Down",
+        Command::MoveLineDown,
+        Keys::all(&["Alt+Down"]),
+    ),
+    act(
+        "edit.deleteLine",
+        "Delete Line",
+        Command::DeleteLine,
+        Keys::all(&["Primary+Shift+K"]),
+    ),
+    act(
+        "edit.joinLines",
+        "Join Lines",
+        Command::JoinLines,
+        Keys::all(&["Primary+J"]),
+    ),
+    act(
+        "edit.insertLineBelow",
+        "Insert Line Below",
+        Command::InsertLineBelow,
+        Keys::all(&["Primary+Enter"]),
+    ),
+    act(
+        "edit.insertLineAbove",
+        "Insert Line Above",
+        Command::InsertLineAbove,
+        Keys::all(&["Primary+Shift+Enter"]),
+    ),
+    act(
+        "select.line",
+        "Select Line",
+        Command::SelectLine,
+        Keys::all(&["Primary+L"]),
+    ),
+    act(
+        "select.expand",
+        "Expand Selection",
+        Command::ExpandSelection,
+        mac_other(&["Ctrl+Shift+Right"], &["Alt+Shift+Right"]),
+    ),
+    act(
+        "select.shrink",
+        "Shrink Selection",
+        Command::ShrinkSelection,
+        mac_other(&["Ctrl+Shift+Left"], &["Alt+Shift+Left"]),
+    ),
+    act(
+        "cursor.matchingBracket",
+        "Go to Matching Bracket",
+        Command::MatchingBracket(false),
+        Keys::all(&["Primary+Shift+\\"]),
+    ),
+    act(
+        "select.toMatchingBracket",
+        "Select to Matching Bracket",
+        Command::MatchingBracket(true),
+        Keys::NONE,
+    ),
+    act(
+        "edit.upperCase",
+        "Transform to Upper Case",
+        Command::ChangeCase(Case::Upper),
+        Keys::NONE,
+    ),
+    act(
+        "edit.lowerCase",
+        "Transform to Lower Case",
+        Command::ChangeCase(Case::Lower),
+        Keys::NONE,
+    ),
+    act(
+        "edit.titleCase",
+        "Transform to Title Case",
+        Command::ChangeCase(Case::Title),
+        Keys::NONE,
+    ),
+    act(
+        "edit.sortLines",
+        "Sort Lines",
+        Command::RewriteLines(Lines::Sort),
+        Keys::NONE,
+    ),
+    act(
+        "edit.sortLinesReversed",
+        "Sort Lines Reversed",
+        Command::RewriteLines(Lines::SortReversed),
+        Keys::NONE,
+    ),
+    act(
+        "edit.removeDuplicateLines",
+        "Remove Duplicate Lines",
+        Command::RewriteLines(Lines::Dedupe),
+        Keys::NONE,
+    ),
+    act(
+        "edit.trimWhitespace",
+        "Trim Trailing Whitespace",
+        Command::TrimWhitespace,
+        Keys::NONE,
+    ),
+    act(
+        "edit.indentUsingSpaces",
+        "Indent Using Spaces",
+        Command::IndentUsingSpaces,
+        Keys::NONE,
+    ),
+    act(
+        "edit.indentUsingTabs",
+        "Indent Using Tabs",
+        Command::IndentUsingTabs,
+        Keys::NONE,
+    ),
+    act(
+        "edit.detectIndent",
+        "Detect Indentation from File",
+        Command::DetectIndent,
+        Keys::NONE,
+    ),
     // Find.
     act(
         "find.open",
@@ -394,11 +541,13 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::ToggleWrap,
         Keys::all(&["Alt+Z"]),
     ),
+    // Primary+G on every platform since M11, which gave Primary+L to
+    // Select Line.
     act(
         "edit.goToLine",
         "Go to Line…",
         Command::GoToLine,
-        mac_other(&["Primary+L"], &["Primary+G"]),
+        Keys::all(&["Primary+G"]),
     ),
     act(
         "view.toggleSidebar",
@@ -606,8 +755,7 @@ pub fn by_id(id: &str) -> Option<&'static ActionInfo> {
 /// cursor movement and typing keys, which nobody searches for by name.
 pub fn palette_actions() -> impl Iterator<Item = &'static ActionInfo> {
     ACTIONS.iter().filter(|a| {
-        !a.id.starts_with("cursor.")
-            && !a.id.starts_with("select.")
+        !matches!(a.command, Command::Move(..))
             && !matches!(
                 a.id,
                 "edit.newline"
@@ -642,5 +790,6 @@ mod tests {
     fn palette_hides_movement_and_typing_keys() {
         assert!(palette_actions().any(|a| a.id == "file.save"));
         assert!(!palette_actions().any(|a| a.id == "cursor.left" || a.id == "edit.newline"));
+        assert!(palette_actions().any(|a| a.id == "select.line"));
     }
 }

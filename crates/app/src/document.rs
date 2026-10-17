@@ -150,7 +150,7 @@ pub struct Document {
     /// With several cursors, the column each aims for in the same way, in
     /// selection order; empty until the first vertical move, and cleared
     /// when anything else moves or merges cursors.
-    goals: Vec<Option<usize>>,
+    pub(crate) goals: Vec<Option<usize>>,
     /// Where [`Document::add_next_occurrence`] gave up last time, for the
     /// next press to go on from: the text's version, the primary it was
     /// looking from, and the offset reached.
@@ -195,6 +195,19 @@ pub struct Document {
     /// A save of this mapped document under way ([`crate::saver`]). Edits
     /// wait while it is set.
     saving: Option<Saving>,
+    /// One level of indentation for this file: detected from it, or from
+    /// the config (M11). Shown in the status bar; used by Tab, Enter and
+    /// the line operations.
+    pub indent: nimbus_core::indent::Indent,
+    /// The language's comment syntax, for Toggle Comment.
+    pub comment_tokens: nimbus_core::comment::Tokens,
+    /// The selections each Expand Selection started from and led to, so
+    /// Shrink Selection can retrace them (see `editing.rs`).
+    pub(crate) expand_stack: Vec<(Selections, Selections)>,
+    /// Auto-pairs just typed: the selections after the last typing step
+    /// (a closer sits right after each cursor) and how many pairs deep.
+    /// Any other change of the selections makes it stale.
+    pub(crate) pairs: Option<(Selections, usize)>,
 }
 
 /// Stops a worker when dropped: when its document closes, reloads or goes
@@ -537,6 +550,10 @@ impl Document {
             Detected::Builtin(id) => id.name(),
             Detected::Simple(name, _) => name,
         });
+        self.comment_tokens = detected.map_or_else(Default::default, |d| match d {
+            Detected::Builtin(id) => nimbus_syntax::lexical::comment_tokens(id),
+            Detected::Simple(_, rules) => rules.comment_tokens(),
+        });
         match detected {
             // A mapped file is not in memory for tree-sitter to parse, so
             // it gets the simple rules at any size, even when small.
@@ -553,6 +570,13 @@ impl Document {
     #[must_use]
     pub fn language_name(&self) -> Option<&'static str> {
         self.language_name
+    }
+
+    /// The detected language's key (`"rust"`, a user language's name), as
+    /// the config's per-language tables name it.
+    #[must_use]
+    pub fn language_key(&self) -> Option<&'static str> {
+        self.language
     }
 
     /// The encoding, as far as it is known, for the status bar. A rope
@@ -1176,26 +1200,6 @@ impl Document {
         result.map(drop)
     }
 
-    /// Enter: insert the line ending, then the current line's indentation,
-    /// so a new line starts where the previous one did.
-    ///
-    /// # Errors
-    ///
-    /// See [`Document::replace`].
-    pub fn insert_newline(&mut self) -> Result<(), EditError> {
-        let ending = self.line_ending.as_str();
-        let items = self.each(|t, s| {
-            let r = s.range();
-            let line_start = movement::line_start(t, r.start);
-            // Only the indentation before the cursor carries over, so only
-            // the line up to the cursor (and at most a few KB of it) is read.
-            let head = t.slice(line_start..r.start.min(line_start + nimbus_core::long_line::NEAR));
-            let indent_len = head.len() - head.trim_start_matches([' ', '\t']).len();
-            Some((r, Cow::Owned(format!("{ending}{}", &head[..indent_len]))))
-        });
-        self.apply_each(items, (Bias::After, Bias::After)).map(drop)
-    }
-
     /// How many bytes the selections hold together.
     #[must_use]
     pub fn selected_len(&self) -> usize {
@@ -1694,12 +1698,13 @@ impl Document {
         {
             return Ok(false);
         }
+        let unit = self.indent.unit();
         let items = self
             .touched_lines()
             .into_iter()
             .map(|l| {
                 let s = self.buffer.line_to_byte(l);
-                (s..s, Cow::Borrowed("\t"))
+                (s..s, Cow::Owned(unit.to_string()))
             })
             .collect();
         self.history.seal();
@@ -1709,15 +1714,17 @@ impl Document {
         Ok(true)
     }
 
-    /// Shift+Tab: remove one level of indentation (a tab, or up to
-    /// `tab_width` spaces) from every line touched by any selection, as
-    /// one undo step. A selection spanning lines then covers them whole; a
-    /// cursor or selection within one line keeps its place in the text.
+    /// Shift+Tab: remove one level of indentation (a tab, or up to the
+    /// indent width in spaces) from every line touched by any selection,
+    /// as one undo step. A selection spanning lines then covers them
+    /// whole; a cursor or selection within one line keeps its place in the
+    /// text.
     ///
     /// # Errors
     ///
     /// See [`Document::replace`].
-    pub fn outdent_lines(&mut self, tab_width: usize) -> Result<(), EditError> {
+    pub fn outdent_lines(&mut self) -> Result<(), EditError> {
+        let indent = self.indent;
         let items: Vec<_> = self
             .touched_lines()
             .into_iter()
@@ -1725,16 +1732,9 @@ impl Document {
                 let t = &self.buffer;
                 let s = t.line_to_byte(l);
                 // Only the start of the line matters.
-                let end = t.line_span(s).end.min(s + tab_width + 1);
+                let end = t.line_span(s).end.min(s + indent.width + 1);
                 let text = t.slice(s..end);
-                let n = if text.starts_with('\t') {
-                    1
-                } else {
-                    text.bytes()
-                        .take(tab_width)
-                        .take_while(|b| *b == b' ')
-                        .count()
-                };
+                let n = indent.dedent_bytes(&text);
                 (n > 0).then(|| (s..s + n, Cow::Borrowed("")))
             })
             .collect();
@@ -1820,7 +1820,7 @@ impl Document {
     /// every edit, every cursor moved through the edits with the biases
     /// `bias` (start, end), and one undo batch, which typing coalesces
     /// with the batch before it. Returns whether anything changed.
-    fn apply_each(
+    pub(crate) fn apply_each(
         &mut self,
         mut items: Vec<(Range<usize>, Cow<'_, str>)>,
         bias: (Bias, Bias),
@@ -1842,7 +1842,7 @@ impl Document {
     }
 
     /// One replacement per selection: what `f` returns for it, if anything.
-    fn each<'a>(
+    pub(crate) fn each<'a>(
         &self,
         mut f: impl FnMut(&dyn Text, Selection) -> Option<(Range<usize>, Cow<'a, str>)>,
     ) -> Vec<(Range<usize>, Cow<'a, str>)> {
@@ -1942,12 +1942,16 @@ mod tests {
     #[test]
     fn indent_and_outdent_selected_lines_as_one_step() {
         let mut d = doc("a\n    b\nc");
+        d.indent = nimbus_core::indent::Indent {
+            width: 4,
+            tabs: true,
+        };
         d.select(0..7);
         assert!(d.indent_lines().unwrap());
         assert_eq!(text(&d), "\ta\n\t    b\nc");
-        d.outdent_lines(4).unwrap();
+        d.outdent_lines().unwrap();
         assert_eq!(text(&d), "a\n    b\nc");
-        d.outdent_lines(4).unwrap();
+        d.outdent_lines().unwrap();
         assert_eq!(text(&d), "a\nb\nc");
         d.undo().unwrap();
         assert_eq!(text(&d), "a\n    b\nc");
@@ -2273,6 +2277,10 @@ mod tests {
     #[test]
     fn a_line_shared_by_two_selections_is_indented_once() {
         let mut d = doc("one\ntwo\nthree\n");
+        d.indent = nimbus_core::indent::Indent {
+            width: 4,
+            tabs: true,
+        };
         d.selections = Selections::from_vec(
             vec![
                 Selection { anchor: 0, head: 5 },
@@ -2285,7 +2293,7 @@ mod tests {
         );
         assert!(d.indent_lines().unwrap());
         assert_eq!(text(&d), "\tone\n\ttwo\n\tthree\n");
-        d.outdent_lines(4).unwrap();
+        d.outdent_lines().unwrap();
         assert_eq!(text(&d), "one\ntwo\nthree\n");
         d.undo().unwrap();
         d.undo().unwrap();

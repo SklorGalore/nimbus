@@ -26,6 +26,110 @@ pub struct Config {
     pub keys: HashMap<String, Vec<String>>,
     /// File name or `*.ext` pattern to language name.
     pub languages: HashMap<String, String>,
+    /// Editing behaviour: auto-pairs and what happens on save, with
+    /// per-language overrides (`[editor.rust]`).
+    pub editor: EditorSettings,
+    /// Indentation defaults and detection, with per-language overrides
+    /// (`[indent.python]`).
+    pub indent: IndentSettings,
+}
+
+/// The `[editor]` table and its per-language sub-tables. Every field is
+/// optional so that a language table can override just one.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default)]
+pub struct EditorSettings {
+    /// Typing an opening bracket or quote inserts its closer. Unset means:
+    /// on for code, off for Markdown and plain text.
+    pub auto_pairs: Option<bool>,
+    /// Remove spaces and tabs from line ends when saving.
+    pub trim_trailing_whitespace: Option<bool>,
+    /// End the file with a line break when saving.
+    pub final_newline: Option<bool>,
+    /// Overrides by language key (`rust`, `markdown`, a user language's
+    /// name), each with the same three settings.
+    #[serde(flatten)]
+    pub languages: HashMap<String, EditorSettings>,
+}
+
+/// The `[indent]` table and its per-language sub-tables.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default)]
+pub struct IndentSettings {
+    /// Columns per level.
+    pub width: Option<usize>,
+    /// A tab per level rather than spaces.
+    pub tabs: Option<bool>,
+    /// Let the file's own indentation win over these settings (the
+    /// default).
+    pub detect: Option<bool>,
+    /// Overrides by language key.
+    #[serde(flatten)]
+    pub languages: HashMap<String, IndentSettings>,
+}
+
+/// What one document edits with: the editor settings resolved for its
+/// language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Editing {
+    /// Whether typing an opener inserts its closer.
+    pub auto_pairs: bool,
+    /// Trim line ends on save.
+    pub trim_trailing_whitespace: bool,
+    /// Add a final line break on save.
+    pub final_newline: bool,
+}
+
+/// Indentation resolved for one document's language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Indenting {
+    /// The indentation when the file does not say.
+    pub indent: nimbus_core::indent::Indent,
+    /// Whether the file's own indentation wins.
+    pub detect: bool,
+}
+
+/// Languages that are prose rather than code, where auto-pairs are off
+/// unless the config says otherwise.
+const PROSE: &[&str] = &["markdown"];
+
+impl EditorSettings {
+    /// The settings for a document in `language` (its key, or `None` for
+    /// plain text): the language's table over the general one over the
+    /// defaults.
+    #[must_use]
+    pub fn for_language(&self, language: Option<&str>) -> Editing {
+        let lang = language.and_then(|l| self.languages.get(l));
+        let pick = |f: fn(&Self) -> Option<bool>, default: bool| {
+            lang.and_then(f).or_else(|| f(self)).unwrap_or(default)
+        };
+        let code = language.is_some_and(|l| !PROSE.contains(&l));
+        Editing {
+            auto_pairs: pick(|s| s.auto_pairs, code),
+            trim_trailing_whitespace: pick(|s| s.trim_trailing_whitespace, false),
+            final_newline: pick(|s| s.final_newline, false),
+        }
+    }
+}
+
+impl IndentSettings {
+    /// The indentation settings for a document in `language`.
+    #[must_use]
+    pub fn for_language(&self, language: Option<&str>) -> Indenting {
+        let lang = language.and_then(|l| self.languages.get(l));
+        let base = nimbus_core::indent::Indent::default();
+        let width = lang
+            .and_then(|s| s.width)
+            .or(self.width)
+            .filter(|w| (1..=16).contains(w))
+            .unwrap_or(base.width);
+        let tabs = lang.and_then(|s| s.tabs).or(self.tabs).unwrap_or(base.tabs);
+        let detect = lang.and_then(|s| s.detect).or(self.detect).unwrap_or(true);
+        Indenting {
+            indent: nimbus_core::indent::Indent { width, tabs },
+            detect,
+        }
+    }
 }
 
 impl Default for Config {
@@ -37,6 +141,8 @@ impl Default for Config {
             theme: "dark".to_owned(),
             keys: HashMap::new(),
             languages: HashMap::new(),
+            editor: EditorSettings::default(),
+            indent: IndentSettings::default(),
         }
     }
 }
@@ -64,6 +170,8 @@ const KNOWN: &[&str] = &[
     "theme",
     "keys",
     "languages",
+    "editor",
+    "indent",
 ];
 
 /// A commented starting point written by "Open Config File" when there is
@@ -89,6 +197,23 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # [languages]
 # "Justfile" = "bash"
 # "*.jsonc" = "json"
+
+# Editing. auto_pairs: typing ( [ { " ' or ` inserts the closer; on for
+# code and off for Markdown and plain text unless set. The two save
+# settings are off so files round-trip byte for byte. A language table
+# ([editor.markdown], [editor.lua]) overrides any of the three.
+# [editor]
+# auto_pairs = true
+# trim_trailing_whitespace = false
+# final_newline = false
+
+# Indentation. With detect = true (the default) the file's own
+# indentation wins over width and tabs. [indent.python] and the like
+# override per language.
+# [indent]
+# width = 4
+# tabs = false
+# detect = true
 "#;
 
 /// Where the config file lives: `~/Library/Application Support/nimbus` on
@@ -133,6 +258,12 @@ impl Config {
         take(&table, "theme", &mut config.theme, &mut warnings);
         take(&table, "keys", &mut config.keys, &mut warnings);
         take(&table, "languages", &mut config.languages, &mut warnings);
+        take(&table, "editor", &mut config.editor, &mut warnings);
+        take(&table, "indent", &mut config.indent, &mut warnings);
+        if let Some(w) = config.indent.width.filter(|w| !(1..=16).contains(w)) {
+            warnings.push(format!("config: indent.width {w} out of range 1–16"));
+            config.indent.width = None;
+        }
         if !(6.0..=72.0).contains(&config.font_size) {
             warnings.push(format!(
                 "config: font_size {} out of range 6–72",
@@ -213,6 +344,35 @@ mod tests {
         assert_eq!(c.font_size, 16.0);
         assert_eq!(c.keys["file.save"], vec!["F2".to_owned()]);
         assert_eq!(w.len(), 1, "{w:?}");
+    }
+
+    #[test]
+    fn editor_and_indent_tables_resolve_per_language() {
+        let (c, w) = Config::parse(
+            "[editor]\nauto_pairs = false\nfinal_newline = true\n[editor.rust]\nauto_pairs = true\n\
+             [indent]\nwidth = 2\n[indent.python]\nwidth = 4\ntabs = false\ndetect = false\n\
+             [indent.makefile]\ntabs = true\n",
+        );
+        assert_eq!(w, Vec::<String>::new());
+        let rust = c.editor.for_language(Some("rust"));
+        assert!(rust.auto_pairs && rust.final_newline && !rust.trim_trailing_whitespace);
+        assert!(!c.editor.for_language(Some("python")).auto_pairs);
+        assert!(!c.editor.for_language(None).auto_pairs);
+        let py = c.indent.for_language(Some("python"));
+        assert_eq!((py.indent.width, py.indent.tabs, py.detect), (4, false, false));
+        let mk = c.indent.for_language(Some("makefile"));
+        assert_eq!((mk.indent.width, mk.indent.tabs, mk.detect), (2, true, true));
+        assert_eq!(c.indent.for_language(None).indent.width, 2);
+        // Defaults: auto-pairs for code only; detection on; 4 spaces.
+        let d = Config::default();
+        assert!(d.editor.for_language(Some("rust")).auto_pairs);
+        assert!(!d.editor.for_language(Some("markdown")).auto_pairs);
+        assert!(!d.editor.for_language(None).auto_pairs);
+        let plain = d.indent.for_language(None);
+        assert_eq!((plain.indent.width, plain.indent.tabs, plain.detect), (4, false, true));
+        let (c, w) = Config::parse("[indent]\nwidth = 99\n");
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(c.indent.for_language(None).indent.width, 4);
     }
 
     #[test]
