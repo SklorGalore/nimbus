@@ -112,6 +112,26 @@ pub enum Command<'a> {
     ToggleRegex(&'a str),
     /// Find bar: replace every match.
     ReplaceAll,
+    /// Show the sidebar's Search panel and put the keyboard in its query.
+    FindInFiles,
+    /// The same, with the replacement field shown.
+    ReplaceInFiles,
+    /// Open the next find-in-files result.
+    NextResult,
+    /// Open the previous find-in-files result.
+    PrevResult,
+    /// Search panel: toggle case-sensitive matching.
+    SearchToggleCase,
+    /// Search panel: toggle regular-expression matching.
+    SearchToggleRegex,
+    /// Search panel: toggle whole-word matching.
+    SearchToggleWord,
+    /// Search panel: replace every ticked result.
+    ReplaceInFilesAll,
+    /// Put back the files the last Replace in Files wrote.
+    UndoReplaceInFiles,
+    /// Forget the search panel's results.
+    ClearSearch,
     /// Close the find bar, or collapse the selection.
     Escape,
     /// Save the document.

@@ -19,7 +19,9 @@ mod languages;
 mod mapping;
 mod menu;
 mod picker;
+mod replace_files;
 mod saver;
+mod search_panel;
 mod sidebar;
 mod state;
 mod theme;
@@ -61,6 +63,9 @@ pub struct Options {
     pub bench_typing: usize,
     /// Open with the find bar searching for this pattern.
     pub find: Option<String>,
+    /// Open with the sidebar's Search panel searching the project for this
+    /// pattern; with `--headless`, the search runs to the end first.
+    pub search: Option<String>,
     /// Start with soft wrap on, whatever the config says.
     pub wrap: bool,
     /// Render without a window at this size in physical pixels (with
@@ -124,7 +129,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--headless WxH [--wait-index]] [--debug-overlay] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--headless WxH [--wait-index]] [--debug-overlay] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -136,12 +141,21 @@ fn numbers(arg: Option<std::ffi::OsString>) -> Vec<usize> {
         .collect()
 }
 
+/// The pattern after `--find` or `--search`, or exit with a usage error.
+fn pattern_arg(arg: Option<std::ffi::OsString>, flag: &str) -> String {
+    arg.and_then(|p| p.into_string().ok()).unwrap_or_else(|| {
+        print_err(&format!("nimbus: {flag} needs a pattern"));
+        std::process::exit(2);
+    })
+}
+
 fn parse_options() -> Options {
     let mut smoke = false;
     let mut screenshot = None;
     let mut files = Vec::new();
     let mut bench_typing = 0;
     let mut find = None;
+    let mut search = None;
     let mut wrap = false;
     let mut headless = None;
     let mut picker = None;
@@ -198,13 +212,8 @@ fn parse_options() -> Options {
                 };
                 headless = Some(size);
             }
-            Some("--find") => {
-                let Some(pattern) = args.next().and_then(|p| p.into_string().ok()) else {
-                    print_err("nimbus: --find needs a pattern");
-                    std::process::exit(2);
-                };
-                find = Some(pattern);
-            }
+            Some("--find") => find = Some(pattern_arg(args.next(), "--find")),
+            Some("--search") => search = Some(pattern_arg(args.next(), "--search")),
             Some("--version" | "-V") => {
                 print_out(&format!("nimbus {}", nimbus_core::VERSION));
                 std::process::exit(0);
@@ -226,6 +235,7 @@ fn parse_options() -> Options {
         files,
         bench_typing,
         find,
+        search,
         wrap,
         headless,
         picker,

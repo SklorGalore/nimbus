@@ -38,6 +38,8 @@ tab_accent = "#fabf4c"
 picker = "#292b36"
 picker_border = "#4c5261"
 picker_selected = "#4a5468d9"
+search_match = "#8c732673"
+search_file = "#8fb4e8"
 
 [syntax]
 attribute = "#56b6c2"

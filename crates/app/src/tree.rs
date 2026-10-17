@@ -178,6 +178,12 @@ impl Tree {
         }
     }
 
+    /// The folder the tree shows.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// A node.
     #[must_use]
     pub fn node(&self, id: NodeId) -> Option<&Node> {

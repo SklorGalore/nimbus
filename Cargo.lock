@@ -1730,6 +1730,7 @@ dependencies = [
  "globset",
  "ignore",
  "log",
+ "memchr",
  "memmap2",
  "muda",
  "nimbus-core",

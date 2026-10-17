@@ -11,6 +11,7 @@ env_logger = "0.11.11"
 globset = "0.4"
 ignore = "0.4"
 log = "0.4.34"
+memchr = "2.8.3"
 memmap2 = "0.9"
 nimbus-core = { version = "0.1.0", path = "../core" }
 nimbus-render = { version = "0.1.0", path = "../render" }

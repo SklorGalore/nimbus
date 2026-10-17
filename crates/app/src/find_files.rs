@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -246,24 +246,23 @@ impl Results {
         self.done |= batch.done;
         self.capped |= batch.capped;
         for item in batch.items {
-            let i = match self.index.get(&item.path) {
-                Some(&i) => i,
-                None => {
-                    let rel = item
-                        .path
-                        .strip_prefix(&self.root)
-                        .unwrap_or(&item.path)
-                        .to_string_lossy()
-                        .into_owned();
-                    self.files.push(FileHits {
-                        path: item.path.clone(),
-                        rel,
-                        dirty: item.dirty,
-                        hits: Vec::new(),
-                    });
-                    self.index.insert(item.path, self.files.len() - 1);
-                    self.files.len() - 1
-                }
+            let i = if let Some(&i) = self.index.get(&item.path) {
+                i
+            } else {
+                let rel = item
+                    .path
+                    .strip_prefix(&self.root)
+                    .unwrap_or(&item.path)
+                    .to_string_lossy()
+                    .into_owned();
+                self.files.push(FileHits {
+                    path: item.path.clone(),
+                    rel,
+                    dirty: item.dirty,
+                    hits: Vec::new(),
+                });
+                self.index.insert(item.path, self.files.len() - 1);
+                self.files.len() - 1
             };
             for hit in item.hits {
                 let start = self.previews.len();
@@ -439,8 +438,7 @@ impl<S: Fn(Batch) -> bool> Worker<S> {
                 WalkState::Continue
             };
         }
-        if !entry.file_type().is_some_and(|t| t.is_file()) || !self.shared.filter.takes_file(rel)
-        {
+        if !entry.file_type().is_some_and(|t| t.is_file()) || !self.shared.filter.takes_file(rel) {
             return WalkState::Continue;
         }
         let state = self.search_one(path);
@@ -668,10 +666,10 @@ mod tests {
     }
 
     /// Run a search to the end and return its results.
-    fn search(params: Params, snapshots: Snapshots) -> Results {
+    fn search(params: &Params, snapshots: Snapshots) -> Results {
         let generation = Arc::new(Generation::default());
         let (tx, rx) = mpsc::channel();
-        let g = start(&params, snapshots, &generation, move |b| tx.send(b).is_ok()).unwrap();
+        let g = start(params, snapshots, &generation, move |b| tx.send(b).is_ok()).unwrap();
         let mut results = Results::new(g, params.root.clone());
         while !results.done {
             assert!(results.receive(rx.recv().unwrap()));
@@ -699,8 +697,12 @@ mod tests {
     #[test]
     fn searches_a_tree_with_line_numbers_and_previews() {
         let dir = tree();
-        let r = search(params(dir.path(), "needle"), Snapshots::new());
-        assert_eq!(rels(&r), vec!["a.txt", "src/b.rs"], "ignored and binary left out");
+        let r = search(&params(dir.path(), "needle"), Snapshots::new());
+        assert_eq!(
+            rels(&r),
+            vec!["a.txt", "src/b.rs"],
+            "ignored and binary left out"
+        );
         assert_eq!(r.hits, 3);
         assert_eq!(r.skipped, 1, "the binary file");
         let a = r.files.iter().find(|f| f.rel == "a.txt").unwrap();
@@ -716,13 +718,13 @@ mod tests {
         let dir = tree();
         let mut p = params(dir.path(), "needle");
         p.include = "*.rs".into();
-        assert_eq!(rels(&search(p.clone(), Snapshots::new())), vec!["src/b.rs"]);
+        assert_eq!(rels(&search(&p, Snapshots::new())), vec!["src/b.rs"]);
         p.include = String::new();
         p.exclude = "src".into();
-        assert_eq!(rels(&search(p.clone(), Snapshots::new())), vec!["a.txt"]);
+        assert_eq!(rels(&search(&p, Snapshots::new())), vec!["a.txt"]);
         p.exclude = String::new();
         p.show_ignored = true;
-        let r = search(p, Snapshots::new());
+        let r = search(&p, Snapshots::new());
         assert!(rels(&r).contains(&"ignored.txt"));
         let mut bad = params(dir.path(), "needle");
         bad.include = "[".into();
@@ -739,7 +741,7 @@ mod tests {
         let mut snapshots = Snapshots::new();
         snapshots.insert(path, snapshot);
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let r = search(params(&root, "needle"), snapshots);
+        let r = search(&params(&root, "needle"), snapshots);
         let a = r.files.iter().find(|f| f.rel == "a.txt").unwrap();
         assert!(a.dirty);
         assert_eq!(a.hits.len(), 1);
@@ -752,14 +754,17 @@ mod tests {
         let line = "x\n".repeat(MAX_HITS);
         dir.write("many.txt", &line);
         dir.write("more.txt", &line);
-        let r = search(params(dir.path(), "x"), Snapshots::new());
+        let r = search(&params(dir.path(), "x"), Snapshots::new());
         assert!(r.capped);
         assert_eq!(r.hits, MAX_HITS);
         // Cancelled: the final batch never comes.
         let generation = Arc::new(Generation::default());
         let (tx, rx) = mpsc::channel();
         let p = params(dir.path(), "x");
-        let g = start(&p, Snapshots::new(), &generation, move |b| tx.send(b).is_ok()).unwrap();
+        let g = start(&p, Snapshots::new(), &generation, move |b| {
+            tx.send(b).is_ok()
+        })
+        .unwrap();
         generation.bump();
         let batches: Vec<Batch> = rx.iter().collect();
         assert!(!batches.iter().any(|b| b.done && b.generation == g));
