@@ -27,6 +27,11 @@ jobs:
         run: NIMBUS_UPDATE_SCREENSHOT=1 cargo test -p nimbus --test screenshot
       - name: Check the new reference passes
         run: cargo test -p nimbus --test screenshot
+      - name: Print the image too, for machines that cannot download artifacts
+        run: |
+          echo "::group::reference.bmp, gzip then base64"
+          gzip -9 -c crates/app/tests/screenshot/reference.bmp | base64
+          echo "::endgroup::"
       - uses: actions/upload-artifact@v4
         with:
           name: screenshot-reference
