@@ -48,7 +48,7 @@ preview images, HTML export), was dropped whole (`DESIGN.md` §9).
 | # | Plan | One line | Why here |
 |---|---|---|---|
 | 22 | [Screen readers](m22-screen-readers.md) | An AccessKit tree for the editor and chrome, built only when a screen reader asks | The owner named it the first milestone after 1.0; `accesskit_winit` 0.34 works on winit 0.30, so it need not wait |
-| 23 | [Library upgrades](m23-library-upgrades.md) | Ropey 2, winit 0.31, current wgpu; the emoji picker | Waits on stable releases; goes whenever they arrive, ahead of whatever is next |
+| 23 | [Library upgrades](m23-library-upgrades.md) | Ropey 2, winit 0.31, current wgpu; the emoji picker; compatibility mode without a GPU | Waits on stable releases (compatibility mode does not); goes whenever they arrive, ahead of whatever is next |
 | 24 | [International text](m24-international-text.md) | Fallback fonts per script and language, variable fonts, tested East Asian encodings behind their feature, editable mapped files in single-byte encodings | What M16 and M17 deferred; the riskiest piece (the piece table) last |
 | 25 | [Command line](m25-command-line.md) | Install the `nimbus` command from the palette, open files in the running window, `--wait` | Added at the owner's request on 2026-10-18; groups the palette action with the two command-line items that were unscheduled |
 
@@ -82,6 +82,7 @@ preview images, HTML export), was dropped whole (`DESIGN.md` §9).
 | Proportional fonts in UI chrome | DESIGN.md §2 | M20 |
 | Ropey 2.0 | DESIGN.md §4.1 | M21, then M23 (still beta at 1.0) |
 | winit 0.31, macOS emoji picker | M21 | M23 |
+| Running without a GPU (compatibility mode) | 1.0 exits when no GPU opens | M23 |
 | Opening files in the running window, `--wait` | Unscheduled (owner, 2026-10-18) | M25 |
 | Finder "Open With" | M21 | 1.0.1, with an `objc2` open-files listener (owner, 2026-10-18) |
 | Screen-reader support (AccessKit) | M21 | M22 |
