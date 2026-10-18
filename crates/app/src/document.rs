@@ -127,6 +127,10 @@ type Opener = fn(&Path) -> Result<io::Opened, OpenError>;
 
 /// An open document.
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about the document, not a state machine"
+)]
 pub struct Document {
     /// The text: a rope, or a piece table over a mapped file (see
     /// [`io::Backend`]).
@@ -203,6 +207,9 @@ pub struct Document {
     /// shares storage with the buffer until edits part them, so this costs
     /// little; mapped documents keep none.
     disk_text: DiskText,
+    /// A stand-in for a restored tab whose file has not been read yet
+    /// ([`Document::placeholder`]).
+    placeholder: bool,
 }
 
 /// A snapshot of the text as the file held it, or none; a wrapper only
@@ -376,6 +383,31 @@ impl Document {
     #[must_use]
     pub fn untitled() -> Self {
         Self::default()
+    }
+
+    /// A stand-in for `path` in a restored tab that has not been shown yet:
+    /// the name for the tab bar and nothing else, no text read and no
+    /// syntax state. Restoring ten tabs then costs one file's work before
+    /// the first frame; the app swaps in the real document when the tab is
+    /// first shown, or when a worker has read it.
+    ///
+    /// It has no [`Document::canonical`] path, so everything that finds
+    /// open files by path (file watching, find and replace in files, the
+    /// tree's marker) treats the file as not open and reads the disk. It is
+    /// never dirty, so saving all and the quit prompt pass it by.
+    #[must_use]
+    pub fn placeholder(path: PathBuf) -> Self {
+        Self {
+            path: Some(path),
+            placeholder: true,
+            ..Self::default()
+        }
+    }
+
+    /// Whether this is a [`Document::placeholder`].
+    #[must_use]
+    pub fn is_placeholder(&self) -> bool {
+        self.placeholder
     }
 
     /// An untitled document holding `text`, unmodified.

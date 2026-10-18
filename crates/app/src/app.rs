@@ -44,8 +44,9 @@ use crate::picker::{self, Item, Kind, Picker};
 use crate::replace_files::{self, Replacement};
 use crate::saver::{self, ReplacePolicy, SaveEvent, SaveStep};
 use crate::search_panel::{Focus, Reply};
+use crate::session::{self, Restore};
 use crate::sidebar::{self, Mode, Sidebar};
-use crate::state::State;
+use crate::state::{Session, SessionTab, State};
 use crate::theme::{Theme, Ui};
 use crate::tree::{self, Entry, ListRequest};
 use crate::view::{self, Decorations, Layout, PickerView, Preedit, TabLabel, View};
@@ -86,6 +87,48 @@ pub enum AppEvent {
     Diff(DiffResult),
     /// A merge's chunks (and result text) finished on a worker (M9).
     Merged(Merged),
+    /// A restored tab's file was read on a worker: the document for the
+    /// placeholder with this path, or why it could not be read.
+    Restored(PathBuf, Result<Box<Document>, String>),
+}
+
+/// What `main` worked out about this run's session.
+#[derive(Debug)]
+pub struct Startup {
+    /// What was remembered from earlier runs.
+    pub state: State,
+    /// The session to restore, if any: its tabs replace the command line's
+    /// (which named none).
+    pub restore: Option<Restore>,
+    /// The project folder whose session this run saves; `None` when files
+    /// were named, with `--no-session`, and in unattended runs.
+    pub session_root: Option<PathBuf>,
+}
+
+/// How long after a tab opens or closes the state file is written: a burst
+/// of changes (closing five tabs) writes once.
+const STATE_SAVE_DELAY: Duration = Duration::from_secs(1);
+
+/// Read restored tabs' files on one worker, one after another, sending each
+/// document back as it is ready.
+fn spawn_restore(proxy: &EventLoopProxy<AppEvent>, paths: Vec<PathBuf>) {
+    let proxy = proxy.clone();
+    let spawned = std::thread::Builder::new()
+        .name("nimbus-restore".to_owned())
+        .spawn(move || {
+            for path in paths {
+                let doc = Document::open(&path)
+                    .map(Box::new)
+                    .map_err(|e| e.to_string());
+                if proxy.send_event(AppEvent::Restored(path, doc)).is_err() {
+                    return; // the app is gone
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        // Each tab is still read when it is first shown.
+        log::warn!("could not start the restore thread: {e}");
+    }
 }
 
 /// List a folder for the sidebar on its own thread.
@@ -188,6 +231,29 @@ pub struct Tab {
     /// A merge view on this tab (M9): the inputs and the regions of the
     /// result, which is this tab's document.
     pub merge: Option<Box<MergeView>>,
+    /// Where a restored tab's cursor and view go once its file is read.
+    pending: Option<Pending>,
+}
+
+/// What is remembered between runs, and when it is next written.
+#[derive(Debug)]
+struct Workspace {
+    /// The sidebar, the window, recent files and sessions.
+    state: State,
+    /// The project folder whose session is saved ([`Startup::session_root`]).
+    session_root: Option<PathBuf>,
+    /// Write the state file at this time.
+    save_at: Option<Instant>,
+    /// The worker reading restored tabs has been started.
+    restore_started: bool,
+}
+
+/// A restored tab's cursor and top of view, as byte offsets, until its
+/// file is read and they can be clamped to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Pending {
+    cursor: usize,
+    scroll: usize,
 }
 
 impl Tab {
@@ -204,7 +270,24 @@ impl Tab {
             discard_at: None,
             compare: None,
             merge: None,
+            pending: None,
         }
+    }
+
+    /// Put the cursor and the view where a restored session left them,
+    /// once the file is read.
+    fn apply_pending(&mut self) {
+        if self.doc.is_placeholder() {
+            return;
+        }
+        let Some(p) = self.pending.take() else { return };
+        let t = &self.doc.buffer;
+        let (cursor, scroll) = (
+            session::clamp_offset(t, p.cursor),
+            session::clamp_offset(t, p.scroll),
+        );
+        self.doc.click(cursor, false);
+        self.view.scroll_top = scroll;
     }
 }
 
@@ -381,8 +464,8 @@ pub struct App {
     sidebar: Sidebar,
     /// Changes on disk to the sidebar's folders and open files.
     watch: Watch,
-    /// Remembered between runs (sidebar visibility and width).
-    ui_state: State,
+    /// What is remembered between runs, and the session's bookkeeping.
+    ws: Workspace,
     /// The pointer shows the resize cursor.
     resize_cursor: bool,
     /// Watching has started (after the first frame).
@@ -450,20 +533,28 @@ impl App {
         started: Instant,
         gpu_init: JoinHandle<Result<GpuContext, GpuError>>,
         (config, languages, docs, root): (Config, Languages, Vec<Document>, PathBuf),
+        startup: Startup,
         proxy: EventLoopProxy<AppEvent>,
         warnings: Vec<String>,
     ) -> Self {
+        let Startup {
+            mut state,
+            restore,
+            session_root,
+        } = startup;
+        let session_root = session_root.filter(|_| !options.unattended());
         let debug_overlay = options.debug_overlay;
         let (keymap, key_warnings) = Keymap::new(&config.keys);
         let (theme, theme_warnings) = Theme::load(&config.theme);
-        let ui_state = State::load();
         let disk_proxy = proxy.clone();
         let warn_proxy = proxy.clone();
         let mut sidebar = Sidebar::new(
             io::canonical(&root),
-            ui_state.sidebar_visible,
-            ui_state.sidebar_width,
+            state.sidebar_visible,
+            state.sidebar_width,
         );
+        let wrap = options.wrap || config.soft_wrap;
+        let (tabs, active, note) = startup_tabs(docs, restore, &mut state, &mut sidebar, wrap);
         // `--search`: the Search panel open, searching once the window is
         // up (the first frame schedules it like a typed query).
         let search_files_at = options.search.as_ref().map(|pattern| {
@@ -472,26 +563,12 @@ impl App {
             sidebar.search.focus_query(Some(pattern.clone()));
             started
         });
-        let wrap = options.wrap || config.soft_wrap;
-        let mut tabs: Vec<Tab> = docs.into_iter().map(|d| Tab::new(d, wrap)).collect();
-        if tabs.is_empty() {
-            tabs.push(Tab::new(Document::untitled(), wrap));
-        }
         let all_warnings: Vec<String> = warnings
             .into_iter()
             .chain(key_warnings)
             .chain(theme_warnings)
             .collect();
-        let message = (!all_warnings.is_empty()).then(|| {
-            for w in &all_warnings {
-                log::warn!("{w}");
-            }
-            Message {
-                text: all_warnings.join("; "),
-                is_error: true,
-                until: Instant::now() + MESSAGE_TIME * 2,
-            }
-        });
+        let message = startup_message(all_warnings, note);
         Self {
             options,
             started,
@@ -509,7 +586,7 @@ impl App {
             merge_saved_clean: None,
             frames: 0,
             tabs,
-            active: 0,
+            active,
             blink: Blink::new(started),
             preedit: None,
             debug: Debug::new(debug_overlay),
@@ -537,7 +614,12 @@ impl App {
                     let _ = warn_proxy.send_event(AppEvent::WatchWarning(warning));
                 },
             ),
-            ui_state,
+            ws: Workspace {
+                state,
+                session_root,
+                save_at: None,
+                restore_started: false,
+            },
             resize_cursor: false,
             watching: false,
             pending_line: None,
@@ -1176,8 +1258,18 @@ impl App {
         if i == self.active || i >= self.tabs.len() {
             return;
         }
+        // A restored tab not read yet: compare with its file.
         let src = &self.tabs[i].doc;
         let name = src.display_name();
+        if src.is_placeholder()
+            && let Some(path) = src.path.clone()
+        {
+            match Document::open(&path) {
+                Ok(other) => self.start_compare(other, Other::File(path)),
+                Err(e) => self.say(format!("Cannot read {}: {e}", path.display()), true),
+            }
+            return;
+        }
         match (src.copy_of(), src.path.clone()) {
             (Some(copy), _) => self.start_compare(copy, Other::Tab(name)),
             (None, Some(path)) => match Document::open(&path) {
@@ -1310,10 +1402,11 @@ impl App {
 
     /// Make tab `i` the active one.
     fn switch_to(&mut self, i: usize) {
-        if i == self.active || i >= self.tabs.len() {
+        if i == self.active || i >= self.tabs.len() || !self.ensure_loaded(i) {
             return;
         }
         self.active = i;
+        self.session_changed();
         self.preedit = None;
         self.sidebar.focused = false;
         if self.find.open {
@@ -1427,13 +1520,174 @@ impl App {
 
     /// Remember the sidebar's visibility and width for the next run.
     fn remember(&mut self) {
-        let state = State {
-            sidebar_visible: self.sidebar.visible,
-            sidebar_width: self.sidebar.width,
+        let (visible, width) = (self.sidebar.visible, self.sidebar.width);
+        if (visible, width) != (self.ws.state.sidebar_visible, self.ws.state.sidebar_width) {
+            self.ws.state.sidebar_visible = visible;
+            self.ws.state.sidebar_width = width;
+            self.save_state_soon();
+        }
+    }
+
+    /// Write the state file a moment from now, so a burst of changes
+    /// writes once. Never in an unattended run.
+    fn save_state_soon(&mut self) {
+        if !self.options.unattended() {
+            self.ws
+                .save_at
+                .get_or_insert_with(|| Instant::now() + STATE_SAVE_DELAY);
+        }
+    }
+
+    /// A tab opened, closed or came to the front: the session changed.
+    fn session_changed(&mut self) {
+        if self.ws.session_root.is_some() {
+            self.save_state_soon();
+        }
+    }
+
+    /// Write the state file now, with this run's session in it.
+    fn save_state(&mut self) {
+        self.ws.save_at = None;
+        if self.options.unattended() {
+            return;
+        }
+        if let Some(session) = self.capture_session() {
+            self.ws.state.put_session(session);
+        }
+        self.ws.state.save();
+    }
+
+    /// The session as it stands: the open files with their cursors and
+    /// views, the expanded folders and the sidebar's mode. Untitled tabs
+    /// are left out; there is no autosave to bring their text back.
+    fn capture_session(&self) -> Option<Session> {
+        let root = self.ws.session_root.clone()?;
+        let tabs = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| {
+                let path = if t.doc.is_placeholder() {
+                    t.doc.path.clone()?
+                } else {
+                    t.doc.canonical.clone()?
+                };
+                let (cursor, scroll) = t.pending.map_or((t.doc.cursor(), t.view.scroll_top), |p| {
+                    (p.cursor, p.scroll)
+                });
+                Some(SessionTab {
+                    path,
+                    cursor,
+                    scroll,
+                    active: i == self.active,
+                })
+            })
+            .collect();
+        let tree_root = self.sidebar.tree.root();
+        let expanded = self
+            .sidebar
+            .tree
+            .expanded_dirs()
+            .into_iter()
+            .filter_map(|p| p.strip_prefix(tree_root).ok().map(Path::to_path_buf))
+            .collect();
+        Some(Session {
+            root,
+            mode: self.sidebar.mode.into(),
+            expanded,
+            tabs,
+        })
+    }
+
+    /// Read tab `i`'s file if it is still a restored placeholder, so it can
+    /// be shown. A file that cannot be read closes its tab with a message.
+    /// Returns whether tab `i` is still there.
+    fn ensure_loaded(&mut self, i: usize) -> bool {
+        let Some(tab) = self.tabs.get(i) else {
+            return false;
         };
-        if state != self.ui_state {
-            state.save();
-            self.ui_state = state;
+        if !tab.doc.is_placeholder() {
+            return true;
+        }
+        let Some(path) = tab.doc.path.clone() else {
+            return true;
+        };
+        match Document::open(&path) {
+            Ok(doc) => {
+                self.adopt_restored(i, doc);
+                true
+            }
+            Err(e) => {
+                self.say(format!("Cannot open {}: {e}", path.display()), true);
+                self.drop_tab(i);
+                false
+            }
+        }
+    }
+
+    /// Put `doc`, just read, in place of tab `i`'s placeholder.
+    fn adopt_restored(&mut self, i: usize, mut doc: Document) {
+        doc.detect_language(&self.languages);
+        let tab = &mut self.tabs[i];
+        tab.doc = doc;
+        tab.apply_pending();
+        self.title_key = None;
+        self.sync_watch();
+    }
+
+    /// Remove tab `i` without asking: only for a tab with nothing to lose
+    /// (a placeholder whose file cannot be read). The last tab becomes an
+    /// untitled one rather than quitting.
+    fn drop_tab(&mut self, i: usize) {
+        if i >= self.tabs.len() {
+            return;
+        }
+        if self.tabs.len() == 1 {
+            self.tabs[0] = Tab::new(Document::untitled(), self.config.soft_wrap);
+        } else {
+            self.tabs.remove(i);
+            if self.active > i || self.active == self.tabs.len() {
+                self.active = self.active.saturating_sub(1);
+            }
+        }
+        self.title_key = None;
+        self.session_changed();
+    }
+
+    /// After the first frame, read the restored tabs' files on a worker.
+    fn start_restoring(&mut self) {
+        if self.ws.restore_started {
+            return;
+        }
+        self.ws.restore_started = true;
+        let paths: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|t| t.doc.is_placeholder())
+            .filter_map(|t| t.doc.path.clone())
+            .collect();
+        if !paths.is_empty() {
+            spawn_restore(&self.proxy, paths);
+        }
+    }
+
+    /// A restored tab's file arrived from the worker. It is dropped if the
+    /// tab was shown (and so read) meanwhile, or closed.
+    fn restored_arrived(&mut self, path: &Path, doc: Result<Box<Document>, String>) {
+        let Some(i) = self
+            .tabs
+            .iter()
+            .position(|t| t.doc.is_placeholder() && t.doc.path.as_deref() == Some(path))
+        else {
+            return;
+        };
+        match doc {
+            Ok(doc) => {
+                self.adopt_restored(i, *doc);
+                self.changed(false);
+            }
+            // Tried again, with a message, when the tab is shown.
+            Err(e) => log::debug!("restoring {}: {e}", path.display()),
         }
     }
 
@@ -1594,6 +1848,9 @@ impl App {
                 let replace = self.tabs.len() == 1
                     && self.tabs[0].doc.path.is_none()
                     && !self.tabs[0].doc.is_dirty();
+                if let Some(c) = &doc.canonical {
+                    self.ws.state.note_recent(c);
+                }
                 let tab = Tab::new(doc, self.config.soft_wrap);
                 if replace {
                     self.tabs[0] = tab;
@@ -1604,6 +1861,8 @@ impl App {
                     self.tabs.push(tab);
                     self.switch_to(self.tabs.len() - 1);
                 }
+                self.save_state_soon();
+                self.session_changed();
                 self.sync_watch();
                 self.changed(false);
                 self.note_conflict_markers();
@@ -1981,6 +2240,7 @@ impl App {
             }
         }
         if self.tabs.len() == 1 {
+            self.save_state();
             event_loop.exit();
             return;
         }
@@ -1988,6 +2248,8 @@ impl App {
         if self.active >= i && self.active > 0 {
             self.active -= 1;
         }
+        while !self.ensure_loaded(self.active) {}
+        self.session_changed();
         self.title_key = None;
         self.preedit = None;
         if self.find.open {
@@ -2024,6 +2286,7 @@ impl App {
             // `--merge`: git's mergetool reads the exit code.
             self.exit_code = i32::from(!clean);
         }
+        self.save_state();
         event_loop.exit();
     }
 
@@ -2042,7 +2305,7 @@ impl App {
         let (languages, language_warnings) = Languages::load(&config.languages);
         warnings.extend(language_warnings);
         self.languages = languages;
-        for tab in &mut self.tabs {
+        for tab in self.tabs.iter_mut().filter(|t| !t.doc.is_placeholder()) {
             tab.doc.detect_language(&self.languages);
         }
         self.keymap = keymap;
@@ -2938,6 +3201,9 @@ impl App {
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let frame_started = Instant::now();
+        // The front tab is always read: a closed tab can bring a
+        // placeholder to the front.
+        while !self.ensure_loaded(self.active) {}
         // The first parse runs on a worker while this frame shows the
         // text plain; colours follow when it finishes. Before the layout,
         // which leaves room for any message this adds.
@@ -3630,6 +3896,67 @@ fn replace_in_tab(
     Some(n)
 }
 
+/// The first tabs: the files named on the command line (noted as recent),
+/// or else a restored session's (the front one read, the rest
+/// placeholders, with the sidebar's mode and expanded folders and a note
+/// for files that are gone), or else one untitled tab. Returns them and
+/// the front tab's index.
+fn startup_tabs(
+    docs: Vec<Document>,
+    restore: Option<Restore>,
+    state: &mut State,
+    sidebar: &mut Sidebar,
+    wrap: bool,
+) -> (Vec<Tab>, usize, Option<String>) {
+    for c in docs.iter().filter_map(|d| d.canonical.as_deref()) {
+        state.note_recent(c);
+    }
+    let mut tabs: Vec<Tab> = docs.into_iter().map(|d| Tab::new(d, wrap)).collect();
+    let mut active = 0;
+    let mut note = None;
+    if let Some(r) = restore.filter(|_| tabs.is_empty()) {
+        if let Some(mode) = r.mode {
+            sidebar.mode = mode;
+        }
+        sidebar.tree.expand_later(r.expanded);
+        note = session::dropped_note(&r.dropped);
+        for t in r.tabs {
+            let mut tab = Tab::new(t.doc, wrap);
+            tab.pending = Some(Pending {
+                cursor: t.cursor,
+                scroll: t.scroll,
+            });
+            tab.apply_pending();
+            tabs.push(tab);
+        }
+        active = r.active;
+    }
+    if tabs.is_empty() {
+        tabs.push(Tab::new(Document::untitled(), wrap));
+    }
+    let active = active.min(tabs.len() - 1);
+    (tabs, active, note)
+}
+
+/// The first message: startup warnings (as an error, shown for longer),
+/// then any note about the restored session.
+fn startup_message(warnings: Vec<String>, note: Option<String>) -> Option<Message> {
+    for w in &warnings {
+        log::warn!("{w}");
+    }
+    let is_error = !warnings.is_empty();
+    let text = warnings
+        .into_iter()
+        .chain(note)
+        .collect::<Vec<_>>()
+        .join("; ");
+    (!text.is_empty()).then(|| Message {
+        text,
+        is_error,
+        until: Instant::now() + MESSAGE_TIME * if is_error { 2 } else { 1 },
+    })
+}
+
 /// A path's file name, for messages.
 fn name_of(path: &Path) -> String {
     path.file_name().map_or_else(
@@ -4298,6 +4625,7 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             AppEvent::Replaced(report) => self.replaced(report),
+            AppEvent::Restored(path, doc) => self.restored_arrived(&path, doc),
             AppEvent::WatchWarning(warning) => {
                 self.say(warning, true);
                 self.changed(false);
@@ -4461,6 +4789,9 @@ impl ApplicationHandler<AppEvent> for App {
         if self.sidebar.search.tick(now) {
             self.changed(false);
         }
+        if self.ws.save_at.is_some_and(|t| now >= t) {
+            self.save_state();
+        }
         if self.recheck_at.is_some_and(|t| now >= t) {
             self.recheck_at = None;
             let changes: Vec<Change> = std::mem::take(&mut self.recheck)
@@ -4491,6 +4822,9 @@ impl ApplicationHandler<AppEvent> for App {
             // Huge files count their lines in the background, started
             // after the first frame so the disk is not shared with it.
             self.start_indexing();
+        }
+        if self.frames > 0 {
+            self.start_restoring();
         }
         if self.frames > 0 && !self.watching {
             // Starting watches can take milliseconds (macOS restarts its
@@ -4525,6 +4859,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.search_files_at,
             self.sidebar.search.wake_at(),
             self.recheck_at,
+            self.ws.save_at,
             self.saves.poll_at,
             self.tabs[self.active]
                 .compare
