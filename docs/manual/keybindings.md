@@ -3,7 +3,7 @@
 Every command in Nimbus, with its **id** (what you write in the `[keys]`
 table of `config.toml`), its **title** (what the command palette and
 menus show) and its default keys. This list is made from the editor's
-own command table, so it matches the build it describes (version 0.9.0).
+own command table, so it matches the build it describes (version 0.10.0).
 
 - Commands without a key are run from the command palette
   (`Cmd+Shift+P` / `Ctrl+Shift+P`).
@@ -39,6 +39,9 @@ screen. Rebind them, or use the palette.
 | Change line endings | click `LF` or `CRLF` in the status bar | click `LF` or `CRLF` in the status bar |
 | Reopen or save in another encoding | click the encoding (`UTF-8`) in the status bar | click the encoding (`UTF-8`) in the status bar |
 | Resize the sidebar or a group | drag its edge | drag its edge |
+| Jump to a line pinned by sticky scroll | click it | click it |
+| Scroll with the minimap | click or drag in it | click or drag in it |
+| Follow a link in the Markdown preview | click it | click it |
 | Turn Follow Tail on or off | click `Follow Tail` or `Following` in the status bar | click `Follow Tail` or `Following` in the status bar |
 | New File, New Folder, Rename, Move to Trash, Reveal | right-click a row of the file tree | right-click a row of the file tree (Windows); the palette on Linux |
 
@@ -244,6 +247,9 @@ These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
 | Reset Zoom | `view.resetZoom` | `Cmd+0` | `Ctrl+0` |
 | Toggle Render Whitespace (selection, all, none) | `view.toggleWhitespace` | — | — |
 | Toggle Indent Guides | `view.toggleIndentGuides` | — | — |
+| Toggle Sticky Scroll | `view.toggleStickyScroll` | — | — |
+| Toggle Minimap | `view.toggleMinimap` | — | — |
+| Open Preview (Markdown) | `view.openPreview` | `Cmd+Shift+V` | `Ctrl+Shift+V` |
 | Show/Hide Ignored Files in Sidebar | `view.toggleIgnored` | — | — |
 | Reload from Disk | `file.reloadFromDisk` | — | — |
 | Keep My Version (ignore the change on disk) | `file.keepMine` | — | — |

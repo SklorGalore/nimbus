@@ -37,7 +37,7 @@ does not overwrite your session.
 | `--diff OLD NEW` | Open `NEW` in a tab, compared with `OLD` (see [Compare and merge](compare-and-merge.md#comparing)). With two folders, compare the folders instead (see [Comparing folders](compare-and-merge.md#comparing-folders)). |
 | `--merge BASE LOCAL REMOTE` | Open a three-way merge of the three files. The result saves to `LOCAL` unless `-o` says otherwise. The exit code is 0 only if the result was saved with no conflicts left, 1 otherwise. |
 | `-o FILE`, `--output FILE` | With `--merge`: where the result saves. |
-| `--version`, `-V` | Print the version (`nimbus 0.9.1`) and exit. |
+| `--version`, `-V` | Print the version (`nimbus 0.10.0`) and exit. |
 | `--help`, `-h` | Print a one-line usage summary and exit. |
 
 An unknown option, or an option missing its value, prints an error and
@@ -74,6 +74,7 @@ need them for everyday use.
 | `--wait-index` | With `--headless`: count all of a huge file's lines before drawing. |
 | `--debug-overlay` | Start with the debug overlay (`F12`) showing. |
 | `--cursors N,N,…` | With `--headless`: put a cursor at each byte offset; the last is the main one. |
+| `--preview` | With `--headless`: draw the file's Markdown preview instead of its text. |
 | `--picker KIND[:QUERY]` | With `--headless`: draw an open picker, `palette`, `files`, `line` or `symbols`, optionally with a query. |
 
 ## Exit codes

@@ -13,6 +13,8 @@ use crate::font::{Font, Metrics};
 use crate::frame::FrameBuilder;
 use crate::raster::{BOLD, GlyphKey, REGULAR, Rasterizer};
 use crate::shape::{Grid, MissingCells, ShapedGlyph, Shaper};
+use crate::ui::{UiFont, UiStyle};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// A colour and style for part of a line: from the end of the previous run
 /// (or the start of the text) up to byte `end` of the text being drawn.
@@ -78,6 +80,9 @@ pub(crate) struct TextRenderer {
     /// `None` records glyphs with no bitmap (spaces), so they are not
     /// rasterized again every frame.
     cache: HashMap<GlyphKey, Option<CachedGlyph>>,
+    /// The same, for glyphs of the interface font (M20), which is not one
+    /// of `faces`: its keys would collide with theirs in one map.
+    ui_cache: HashMap<GlyphKey, Option<CachedGlyph>>,
     shaped: Vec<ShapedGlyph>,
     /// The atlas filled up during the last frame. The next frame starts by
     /// clearing atlas and cache so every glyph can be stored again. It cannot
@@ -106,6 +111,7 @@ impl TextRenderer {
             shaper: Shaper::new(),
             raster: Rasterizer::new(),
             cache: HashMap::new(),
+            ui_cache: HashMap::new(),
             shaped: Vec::new(),
             reset_pending: false,
         }
@@ -113,6 +119,11 @@ impl TextRenderer {
 
     pub(crate) fn metrics(&self) -> Metrics {
         self.metrics
+    }
+
+    /// The editor font's regular and bold faces.
+    pub(crate) fn editor_faces(&self) -> (Font, Font) {
+        (self.faces[0], self.faces[1])
     }
 
     pub(crate) fn grid(&self) -> Grid {
@@ -198,6 +209,7 @@ impl TextRenderer {
 
     fn reset(&mut self, atlas: &mut Atlas, queue: &wgpu::Queue) {
         self.cache.clear();
+        self.ui_cache.clear();
         atlas.clear(queue);
         self.reset_pending = false;
     }
@@ -298,6 +310,142 @@ impl TextRenderer {
 }
 
 impl TextRenderer {
+    /// Queue a line of interface text (M20) with its top-left corner at
+    /// `origin`, placed glyph by glyph at the advances `ui` measures with
+    /// (see [`crate::ui`]). Graphemes the interface font lacks are drawn
+    /// by the editor font in their cells. Returns the x where the text
+    /// ends.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the GPU's queue, atlas and frame, as push_line takes them"
+    )]
+    pub(crate) fn push_ui_line(
+        &mut self,
+        queue: &wgpu::Queue,
+        atlas: &mut Atlas,
+        frame: &mut FrameBuilder,
+        origin: [f32; 2],
+        text: &str,
+        color: [f32; 4],
+        ui: &UiFont,
+    ) -> f32 {
+        if ui.font().is_none() {
+            self.push_line(queue, atlas, frame, origin, text, plain(color));
+            return origin[0] + ui.width(text);
+        }
+        self.push_ui_styled(
+            queue,
+            atlas,
+            frame,
+            (origin, color),
+            text,
+            ui,
+            UiStyle::PLAIN,
+        )
+    }
+
+    /// Queue a line of interface text in `style` (size, weight, slant)
+    /// with its top-left corner at `origin`; returns the x where it ends.
+    /// Graphemes neither weight has are drawn by the editor font in its
+    /// cells, at its own size.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the renderer's parts plus the text"
+    )]
+    pub(crate) fn push_ui_styled(
+        &mut self,
+        queue: &wgpu::Queue,
+        atlas: &mut Atlas,
+        frame: &mut FrameBuilder,
+        (origin, color): ([f32; 2], [f32; 4]),
+        text: &str,
+        ui: &UiFont,
+        style: UiStyle,
+    ) -> f32 {
+        let size_px = self.metrics.size_px * style.scale;
+        let baseline_y = origin[1] + ui.styled_baseline(style);
+        let mut pen = origin[0];
+        let mut col = 0;
+        for (i, g) in text.grapheme_indices(true) {
+            let (adv, cols, font) = ui.styled_advance(g, col, style);
+            if let Some((font, bold)) = font {
+                let scaled = font.face().glyph_metrics(&[]).scale(size_px);
+                let mut x = pen;
+                for c in g.chars() {
+                    let id = font.glyph_id(c);
+                    if id == 0 {
+                        continue;
+                    }
+                    let glyph = UiGlyph {
+                        font,
+                        id,
+                        size_px,
+                        bold,
+                        italic: style.italic,
+                    };
+                    self.push_ui_glyph(queue, atlas, frame, glyph, [x, baseline_y], color);
+                    x += scaled.advance_width(id);
+                }
+            } else if let Some(g) = text.get(i..i + g.len()) {
+                self.push_line(queue, atlas, frame, [pen, origin[1]], g, plain(color));
+            }
+            pen += adv;
+            col += cols;
+        }
+        pen
+    }
+
+    /// Queue one glyph of the interface font with its pen position at
+    /// `at` (x, baseline y).
+    fn push_ui_glyph(
+        &mut self,
+        queue: &wgpu::Queue,
+        atlas: &mut Atlas,
+        frame: &mut FrameBuilder,
+        glyph: UiGlyph,
+        [x, baseline_y]: [f32; 2],
+        color: [f32; 4],
+    ) {
+        if self.reset_pending {
+            return;
+        }
+        let whole = x.floor();
+        // The glyph rasterizes from a list holding just its own font, so
+        // its face is 0; the key's face still tells the weights apart, as
+        // their glyph ids differ.
+        let face = if glyph.bold { BOLD } else { REGULAR };
+        let key = GlyphKey::new(glyph.id, glyph.size_px, x - whole).styled(face, glyph.italic);
+        let cached = if let Some(entry) = self.ui_cache.get(&key) {
+            *entry
+        } else {
+            let raster_key = key.styled(REGULAR, glyph.italic);
+            match load_glyph(&[glyph.font], &mut self.raster, atlas, queue, raster_key) {
+                Loaded::Glyph(g) => {
+                    self.ui_cache.insert(key, Some(g));
+                    Some(g)
+                }
+                Loaded::Blank => {
+                    self.ui_cache.insert(key, None);
+                    None
+                }
+                Loaded::NoRoom => {
+                    self.reset_pending = true;
+                    None
+                }
+            }
+        };
+        if let Some(c) = cached {
+            let y = baseline_y.round() - px(c.top);
+            frame.push_glyph([whole + px(c.left), y], &c.slot, color);
+        }
+    }
+
+    /// Forget the interface font's glyphs, for a new interface font. The
+    /// atlas keeps them until its next reset; they are not drawn again.
+    pub(crate) fn clear_ui_glyphs(&mut self) {
+        self.ui_cache.clear();
+    }
+
     /// Queue one character of the editor font with its cell's top-left
     /// corner at `origin`, without shaping: for markers such as the `·` and
     /// `→` of visible whitespace, drawn many times a frame. Nothing is drawn
@@ -394,6 +542,27 @@ impl TextRenderer {
             Some(id) => GlyphKey { glyph: id, ..key }.styled(BOLD, look.italic),
             None => key.styled(REGULAR, look.italic),
         }
+    }
+}
+
+/// One glyph of the interface font and how to draw it.
+#[derive(Clone, Copy)]
+struct UiGlyph {
+    font: Font,
+    id: u16,
+    size_px: f32,
+    bold: bool,
+    italic: bool,
+}
+
+/// A whole line in one colour, on the grid from column 0.
+fn plain(color: [f32; 4]) -> LineStyle<'static> {
+    LineStyle {
+        color,
+        runs: &[],
+        clip_left: f32::NEG_INFINITY,
+        start_col: 0,
+        splits: &[],
     }
 }
 

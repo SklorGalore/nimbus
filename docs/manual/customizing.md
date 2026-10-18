@@ -72,6 +72,8 @@ The `[ui]` keys are:
 | `diff_added`, `diff_removed`, `diff_changed`, `diff_word`, `diff_filler` | compare rows that were added, removed or changed, the changed words within a line, and rows one side has no line for |
 | `merge_conflict` | conflicts in the merge view |
 | `fold_chip` | behind the `… 12 lines` chip after a folded line |
+| `sticky`, `sticky_shadow` | behind the lines sticky scroll pins at the top of the text, and the shadow under them |
+| `minimap_slider` | the minimap's mark over the lines on screen |
 
 "Toggle Light/Dark Theme" in the palette switches between the two
 built-in themes for the current session; it does not change your config.

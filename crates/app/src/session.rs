@@ -70,6 +70,8 @@ pub struct RestoredTab {
     pub folds: Vec<Range<usize>>,
     /// The file's size and time when the folds were saved.
     pub disk: Option<[u64; 2]>,
+    /// It shows the file's Markdown preview (M20).
+    pub preview: bool,
 }
 
 /// How this run treats sessions.
@@ -231,6 +233,7 @@ fn placeholder(t: &SessionTab) -> RestoredTab {
         front: t.front,
         folds: t.folds.iter().map(|&[a, b]| a..b).collect(),
         disk: t.disk,
+        preview: t.preview,
     }
 }
 

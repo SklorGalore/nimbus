@@ -60,6 +60,10 @@ then `[tables]`.
 | `remember_zoom` | `true` or `false` | `true` | Keep the size Zoom In and Zoom Out left (in `state.toml`) for the next start. `false` starts every session at `font_size`. Changing `font_size` in the file always wins. |
 | `render_whitespace` | `"selection"`, `"all"` or `"none"` | `"selection"` | Draw spaces as `·` and tabs as `→`: only inside a selection, everywhere, or never. Toggle Render Whitespace in the palette cycles it for the session. |
 | `indent_guides` | `true` or `false` | `false` | Draw a thin line at each indentation level, the one around the cursor brighter. Toggle Indent Guides in the palette switches it for the session. |
+| `sticky_scroll` | `true` or `false` | `true` | Pin the lines that start the function, class or Markdown section you are in at the top of the text, up to five. Files over 16 MB have none. Toggle Sticky Scroll in the palette switches it for the session. |
+| `minimap` | `true` or `false` | `false` | Show a map of the lines around the view at the right edge of the text. Toggle Minimap in the palette switches it for the session. |
+| `minimap_width` | number, 40 to 400 | `100` | The minimap's width in points. It never takes more than half the text area. |
+| `ui_font` | text | `""` (empty) | A proportional font, by name (`"Inter"`, `"SF Pro"`) or file path, for the sidebar, tabs, status bar, palette, pickers and the Markdown preview. The text you edit stays in the monospace `font`. Empty draws all of these in the editor font. Like `font`, it loads just after the window appears. |
 
 ### `[keys]`
 
@@ -189,6 +193,13 @@ This is the file "Open Config File" writes:
 # Show spaces as · and tabs as →: "selection", "all" or "none".
 # render_whitespace = "selection"
 # indent_guides = false     # true: a hairline at each indentation level
+# sticky_scroll = true      # pin the enclosing function or heading at the top
+# minimap = false           # true: a map of the lines around the view, at the right
+# minimap_width = 100       # in points
+# A proportional font for the sidebar, tabs, status bar, pickers and the
+# Markdown preview, by name or path. Empty uses the editor font. The text
+# stays monospace.
+# ui_font = "Inter"
 
 # Key bindings: action id = list of chords. "Primary" is Cmd on macOS and
 # Ctrl elsewhere. An empty list unbinds the action. The command palette

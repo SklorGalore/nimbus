@@ -1026,6 +1026,24 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::NONE,
     ),
     act(
+        "view.toggleStickyScroll",
+        "Toggle Sticky Scroll",
+        Command::ToggleStickyScroll,
+        Keys::NONE,
+    ),
+    act(
+        "view.toggleMinimap",
+        "Toggle Minimap",
+        Command::ToggleMinimap,
+        Keys::NONE,
+    ),
+    act(
+        "view.openPreview",
+        "Open Preview",
+        Command::OpenPreview,
+        Keys::all(&["Primary+Shift+V"]),
+    ),
+    act(
         "view.toggleIgnored",
         "Show/Hide Ignored Files in Sidebar",
         Command::ToggleIgnored,

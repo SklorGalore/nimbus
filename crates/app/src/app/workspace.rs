@@ -251,6 +251,7 @@ impl App {
                 };
                 let disk = disk.filter(|_| !folds.is_empty());
                 Some(SessionTab {
+                    preview: t.preview.is_some(),
                     path,
                     cursor,
                     scroll,
@@ -669,6 +670,7 @@ pub(super) fn startup_tabs(
             if let Some(j) = seen
                 .iter()
                 .position(|(c, g, _)| *c == t.canonical && *g == group)
+                .filter(|_| !t.preview)
             {
                 // Listed twice in one group (a split saved by an M12
                 // build): one tab.
@@ -693,9 +695,13 @@ pub(super) fn startup_tabs(
                 }
                 None => open.insert(t.doc),
             };
-            seen.push((t.canonical, group, id));
+            // A preview shares the document but is not its text's tab:
+            // listed under no group, so it never stands in for one.
+            let shown_in = if t.preview { usize::MAX } else { group };
+            seen.push((t.canonical, shown_in, id));
             let mut tab = Tab::new(id, wrap);
             tab.group = group;
+            tab.preview = t.preview.then(Box::default);
             tab.pending = Some(Pending {
                 cursor: t.cursor,
                 scroll: t.scroll,
@@ -800,6 +806,7 @@ mod tests {
             front: false,
             folds: Vec::new(),
             disk: None,
+            preview: false,
         }
     }
 

@@ -8,6 +8,15 @@ section before tagging.
 
 ### Added
 
+- Reading aids: sticky scroll pins the function, impl, class or Markdown
+  section you are in at the top of the text (click a pinned row to jump
+  to it; `sticky_scroll`, on by default). Toggle Minimap shows the lines
+  around the view at the right edge, with drag to scroll (`minimap`,
+  off by default, and `minimap_width`). `ui_font` draws the sidebar,
+  tabs, status bar, palette and pickers in a proportional font such as
+  Inter. Open Preview (`Primary+Shift+V`) shows a Markdown file as a
+  page beside it, following as you type and scroll, with code blocks
+  coloured by their languages and links that open in the browser.
 - Compare, second pass: Ignore whitespace (at line ends, or all), Ignore
   case and Ignore blank lines, as buttons in the sidebar's Compare tab
   and as palette commands, remembered between runs. Lines over 4 KB,

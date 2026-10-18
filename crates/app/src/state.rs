@@ -297,6 +297,9 @@ pub struct SessionTab {
     /// the folds were saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<[u64; 2]>,
+    /// It showed the file's Markdown preview (M20) rather than its text.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preview: bool,
 }
 
 /// For `skip_serializing_if`: older files have no group numbers, and a

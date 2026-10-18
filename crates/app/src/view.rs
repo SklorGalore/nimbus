@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use nimbus_core::wrap::{self, RowPos, RowStart, WrapCache, WrapView};
 use nimbus_core::{Folds, LineEnding, Selection, Selections, Text, column, long_line};
-use nimbus_render::{ColorRun, Gpu, Metrics, Style};
+use nimbus_render::{ColorRun, Gpu, Metrics, Style, UiFont};
 use nimbus_syntax::highlight::{Highlighter, Span};
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -22,6 +22,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::config::Whitespace;
 use crate::document::{Carets, Document, Solo, Tail};
 use crate::find::{Field, FindBar};
+use crate::minimap::{self, Minimap};
+use crate::sticky::Sticky;
 use crate::theme::{Color, Theme, Ui};
 
 #[expect(
@@ -48,7 +50,9 @@ fn columns_on_screen(layout: &Layout, scroll_x: f64) -> (usize, usize) {
         clippy::cast_sign_loss,
         reason = "a small non-negative column count"
     )]
-    let width = ((layout.width - layout.text_left) / cell).ceil().max(0.0) as usize;
+    let width = ((layout.text_right() - layout.text_left) / cell)
+        .ceil()
+        .max(0.0) as usize;
     (first_col(scroll_x, cell), width)
 }
 
@@ -93,6 +97,8 @@ pub struct Decorations<'a> {
     /// Indent guides, with the columns per indentation level; `None`
     /// draws none.
     pub guides: Option<usize>,
+    /// Pin the scopes around the top line above the text (M20).
+    pub sticky: bool,
 }
 
 /// How long the scrollbar stays after the last scroll before it hides
@@ -233,6 +239,12 @@ pub struct Layout {
     pub tabs_h: f32,
     /// Left edge of the editor column: 0, or the sidebar's width.
     pub left: f32,
+    /// Width of the minimap at the column's right edge (M20), 0 when
+    /// none. The text stops at [`Layout::text_right`].
+    pub minimap: f32,
+    /// How interface text (tabs, status bar, pickers, sidebar) is
+    /// measured: the `ui_font` when one is loaded, else the grid (M20).
+    pub ui: UiFont,
 }
 
 impl Layout {
@@ -266,7 +278,23 @@ impl Layout {
             wrap_cols,
             tabs_h: 0.0,
             left: 0.0,
+            minimap: 0.0,
+            ui: UiFont::grid(metrics),
         }
+    }
+
+    /// Measure interface text with `ui` (from [`Gpu::ui_font`]).
+    #[must_use]
+    pub fn with_ui(mut self, ui: UiFont) -> Self {
+        self.ui = ui;
+        self
+    }
+
+    /// Right edge of the text: the column's edge, or the minimap's left
+    /// edge when one is shown.
+    #[must_use]
+    pub fn text_right(&self) -> f32 {
+        self.width - self.minimap
     }
 
     /// Move the editor column right of a sidebar `left` pixels wide.
@@ -275,16 +303,32 @@ impl Layout {
         let left = left.clamp(0.0, (self.width - 10.0 * self.metrics.cell_width).max(0.0));
         self.text_left += left - self.left;
         self.left = left;
+        self.fit_wrap();
+        self
+    }
+
+    /// Reserve `width` pixels at the right of the column for the minimap
+    /// (M20), at most half the text area; the text wraps short of it.
+    #[must_use]
+    pub fn with_minimap(mut self, width: f32) -> Self {
+        let room = ((self.width - self.text_left) / 2.0).max(0.0);
+        self.minimap = width.round().clamp(0.0, room);
+        self.fit_wrap();
+        self
+    }
+
+    /// Work out the soft-wrap width from the text area's edges.
+    fn fit_wrap(&mut self) {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "a small non-negative column count"
         )]
-        let wrap_cols = ((self.width - self.text_left - self.margin) / self.metrics.cell_width)
+        let wrap_cols = ((self.text_right() - self.text_left - self.margin)
+            / self.metrics.cell_width)
             .floor()
             .max(1.0) as usize;
         self.wrap_cols = wrap_cols;
-        self
     }
 
     /// Reserve room for the window chrome: a tab bar, `find_rows` rows of
@@ -328,15 +372,7 @@ impl Layout {
         l.left = left;
         l.width = right;
         l.text_left = left + gutter;
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "a small non-negative column count"
-        )]
-        let wrap_cols = ((l.width - l.text_left - l.margin) / l.metrics.cell_width)
-            .floor()
-            .max(1.0) as usize;
-        l.wrap_cols = wrap_cols;
+        l.fit_wrap();
         l
     }
 
@@ -449,7 +485,7 @@ fn begin_column(gpu: &mut Gpu, layout: &Layout) {
     gpu.begin_layer(Some([
         layout.left,
         layout.top,
-        layout.width - layout.left,
+        layout.text_right() - layout.left,
         layout.bottom - layout.top,
     ]));
 }
@@ -737,6 +773,10 @@ pub struct View {
     /// The line under the pointer, by its start, when it can be folded:
     /// its gutter shows the fold marker.
     pub fold_hover: Option<usize>,
+    /// The lines pinned above the text (M20's sticky scroll).
+    sticky: Sticky,
+    /// The minimap's blocks and where it was drawn (M20).
+    minimap: Minimap,
 }
 
 /// The scrollbar as drawn: a track down the right edge of the text and a
@@ -1051,15 +1091,23 @@ impl View {
     /// [`View::status_info`], which [`draw_status`] right-aligns.
     #[must_use]
     pub fn status_item_at(&self, layout: &Layout, x: f32) -> Option<StatusItem> {
-        let cell = layout.metrics.cell_width;
-        let info_w = f(self.status.chars().count()) * cell;
+        let ui = &layout.ui;
+        let info_w = ui.width(&self.status);
         let info_x = (layout.width - layout.margin - info_w)
             .round()
             .max(layout.margin);
-        let col = (x - info_x) / cell;
+        // Where the character `c` of the status text is drawn.
+        let x_of = |c: usize| {
+            let byte = self
+                .status
+                .char_indices()
+                .nth(c)
+                .map_or(self.status.len(), |(i, _)| i);
+            info_x + ui.width(&self.status[..byte])
+        };
         self.status_items
             .iter()
-            .find(|(_, r)| col >= f(r.start) && col < f(r.end))
+            .find(|(_, r)| !r.is_empty() && x >= x_of(r.start) && x < x_of(r.end))
             .map(|(item, _)| *item)
     }
 
@@ -1082,9 +1130,16 @@ impl View {
         let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width, &self.folds);
         let cursor_row = wrap::row_pos_of(t, &mut w, cursor);
         let top_row = anchor(self.scroll_top, t, &mut w);
-        let new_anchor = if cursor_row < top_row || (cursor_row == top_row && self.scroll_px > 0.0)
-        {
-            Some(cursor_row)
+        // Rows pinned by sticky scroll cover the top of the text: a cursor
+        // under them is scrolled to just below them.
+        let pinned = self.sticky.lines().len();
+        let under_pinned = pinned > 0
+            && cursor_row >= top_row
+            && wrap::rows_between(t, &mut w, top_row, cursor_row, pinned) < pinned;
+        let above = cursor_row < top_row || (cursor_row == top_row && self.scroll_px > 0.0);
+        let new_anchor = if above || under_pinned {
+            let back = isize::try_from(pinned).unwrap_or(0);
+            Some(wrap::step_rows(t, &mut w, cursor_row, -back).0)
         } else if wrap::rows_between(t, &mut w, top_row, cursor_row, full) >= full {
             let back = isize::try_from(full - 1).unwrap_or(0);
             Some(wrap::step_rows(t, &mut w, cursor_row, -back).0)
@@ -1102,7 +1157,7 @@ impl View {
         let cell = f64::from(layout.metrics.cell_width);
         let x = f64_of(nimbus_core::movement::column_of(t, cursor, tab_width)) * cell;
         let visible = f64::from(
-            (layout.width - layout.text_left - layout.margin - layout.metrics.cell_width)
+            (layout.text_right() - layout.text_left - layout.margin - layout.metrics.cell_width)
                 .max(layout.metrics.cell_width),
         );
         if x < self.scroll_x {
@@ -1278,6 +1333,17 @@ impl View {
             highlight_ranges(t, &mut w, at, layout, scroll_x, &mut self.hl_ranges);
             self.highlighter.spans(&doc.syntax, t, &self.hl_ranges)
         };
+        // Sticky scroll (M20): asked again only when the text, its tree,
+        // the top row, the wrapping or the folds changed.
+        let key = (
+            doc.version,
+            doc.syntax.rev(),
+            self.scroll_top,
+            wrapping.then_some(layout.wrap_cols),
+            self.folds.len(),
+        );
+        self.sticky
+            .update(deco.sticky.then_some(key), doc, &mut w, at);
         let mut top = layout.top - px;
         let mut painter = Painter {
             spans,
@@ -1346,6 +1412,29 @@ impl View {
         }
         self.cursor_at = painter.cursor_at;
         self.shown = shown_end.saturating_sub(self.scroll_top);
+        draw_sticky(&mut painter, &mut self.sticky, doc, geom);
+    }
+
+    /// The pinned line at window `y`, by its start, if `y` is on a sticky
+    /// row of the last frame.
+    #[must_use]
+    pub fn sticky_at(&self, layout: &Layout, y: f32) -> Option<usize> {
+        if y < layout.top {
+            return None;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small non-negative row index"
+        )]
+        let row = ((y - layout.top) / layout.metrics.line_height).floor() as usize;
+        self.sticky.lines().get(row).copied()
+    }
+
+    /// Scroll so the line starting at `start` is the top row.
+    pub fn scroll_to_line(&mut self, start: usize) {
+        self.scroll_top = start;
+        self.scroll_px = 0.0;
     }
 
     /// Queue the rows of one column of a compare view: each entry of
@@ -1427,7 +1516,7 @@ impl View {
                 break;
             }
             if let Some(bg) = plan.background {
-                painter.rect(layout.text_left, layout.width, top, bg);
+                painter.rect(layout.text_left, layout.text_right(), top, bg);
             }
             match (plan.line, plan.fold) {
                 (Some(line), _) => {
@@ -1468,6 +1557,65 @@ impl View {
         }
     }
 
+    /// Draw the minimap for the frame just drawn, when `layout` has room
+    /// for one (M20).
+    pub fn draw_minimap(
+        &mut self,
+        gpu: &mut Gpu,
+        doc: &Document,
+        layout: &Layout,
+        (ui, looks): (&Ui, Option<&Theme>),
+        tab_width: usize,
+    ) {
+        self.minimap.draw(
+            gpu,
+            doc,
+            &self.folds,
+            (self.scroll_top, self.shown),
+            layout,
+            ui,
+            looks,
+            tab_width,
+        );
+    }
+
+    /// What a press at `(x, y)` hits on the minimap, if anything.
+    #[must_use]
+    pub fn minimap_press(&self, x: f32, y: f32) -> Option<minimap::Press> {
+        self.minimap.press(x, y)
+    }
+
+    /// The minimap mark's height in the last frame.
+    #[must_use]
+    pub fn minimap_slider_height(&self) -> f32 {
+        self.minimap.slider_height()
+    }
+
+    /// Drag the minimap's mark so its top is at `y`.
+    pub fn drag_minimap(&mut self, y: f32, doc: &Document, layout: &Layout, tab_width: usize) {
+        match self.minimap.drag(y) {
+            Some(minimap::Drag::Line(start)) => self.scroll_to_line(start),
+            Some(minimap::Drag::Share(share)) => {
+                let len = doc.buffer.len_bytes();
+                let target = share * f64_of(len.saturating_sub(self.shown));
+                self.scroll_to_fraction(target / f64_of(len.max(1)), doc, layout, tab_width);
+            }
+            None => {}
+        }
+    }
+
+    /// Scroll so the line starting at `start` is in the middle of the
+    /// view: a click on the minimap.
+    pub fn centre_line(&mut self, start: usize, doc: &Document, layout: &Layout, tab_width: usize) {
+        let t = &doc.buffer;
+        let half = isize::try_from(layout.full_lines() / 2).unwrap_or(0);
+        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width, &self.folds);
+        let at = wrap::row_pos_of(t, &mut w, start);
+        let (to, _) = wrap::step_rows(t, &mut w, at, -half);
+        self.scroll_px = 0.0;
+        self.set_anchor(t, layout, tab_width, to);
+    }
+
     /// Draw the scrollbar for the frame just drawn, or nothing when the
     /// whole text fits on screen.
     ///
@@ -1490,7 +1638,7 @@ impl View {
         let w = (cell * if self.scrollbar_hover { 0.9 } else { 0.5 })
             .round()
             .max(3.0);
-        let x = layout.width - w - 2.0 * layout.scale;
+        let x = layout.text_right() - w - 2.0 * layout.scale;
         gpu.begin_layer(None);
         gpu.push_rect([x, bar.thumb_top], [w, bar.thumb_h], ui.scrollbar);
     }
@@ -1516,7 +1664,7 @@ impl View {
         let thumb_h = (h * f32_of(shown) / f32_of(len)).clamp((3.0 * cell).min(h), h);
         let frac = (f32_of(self.scroll_top) / f32_of(len.saturating_sub(shown).max(1))).min(1.0);
         Some(Scrollbar {
-            x: layout.width - cell,
+            x: layout.text_right() - cell,
             top,
             h,
             thumb_top: top + (h - thumb_h) * frac,
@@ -1557,6 +1705,60 @@ impl View {
         let target = frac * f64_of(len.saturating_sub(shown));
         self.scroll_to_fraction(target / f64_of(len.max(1)), doc, layout, tab_width);
     }
+}
+
+/// Draw the pinned rows of sticky scroll over the top of the text: each
+/// line's first row on the sticky background with its line number, then
+/// a shadow under the last.
+fn draw_sticky<'a>(
+    painter: &mut Painter<'a, '_>,
+    sticky: &'a mut Sticky,
+    doc: &Document,
+    (scroll_col, width_cols, scroll_x): (usize, usize, f64),
+) {
+    let t = &doc.buffer;
+    let (spans, lines) = sticky.parts(doc, painter.deco.looks.is_some());
+    if lines.is_empty() {
+        return;
+    }
+    painter.spans = spans;
+    painter.sels = &[];
+    painter.next_sel = 0;
+    let layout = painter.layout;
+    // A layer of its own: rects in a layer are drawn under all of its
+    // glyphs, and the pinned rows must cover the text's.
+    begin_column(painter.gpu, layout);
+    let lh = layout.metrics.line_height;
+    let ui = painter.deco.ui;
+    let right = layout.text_right();
+    let (shift, first) = if painter.wrapping {
+        (0.0, 0)
+    } else {
+        (row_shift(scroll_x), scroll_col)
+    };
+    let mut top = layout.top;
+    for &start in lines {
+        painter
+            .gpu
+            .push_rect([layout.left, top], [right - layout.left, lh], ui.sticky);
+        painter.gutter(t.line_number(start), false, top);
+        let span = t.line_span(start);
+        let text = t.slice(start..span.end.min(start + crate::sticky::LINE_BYTES));
+        painter.span(
+            &text,
+            Some(start),
+            0,
+            [layout.text_left - shift, top],
+            (first, width_cols),
+        );
+        top += lh;
+    }
+    let h = (2.0 * layout.scale).round().max(1.0);
+    painter.gpu.push_rect(
+        [layout.left, top],
+        [right - layout.left, h],
+        ui.sticky_shadow,
+    );
 }
 
 /// Draws rows for one frame; holds what every row needs.
@@ -1896,7 +2098,7 @@ impl Painter<'_, '_> {
             clippy::cast_sign_loss,
             reason = "non-negative column counts within the window"
         )]
-        let width = ((self.layout.width - self.layout.text_left) / cell)
+        let width = ((self.layout.text_right() - self.layout.text_left) / cell)
             .ceil()
             .max(0.0) as usize;
         let preedit = self.deco.preedit.filter(|p| !p.text.is_empty());
@@ -1957,7 +2159,7 @@ impl Painter<'_, '_> {
             if x < self.layout.text_left {
                 continue;
             }
-            if x >= self.layout.width {
+            if x >= self.layout.text_right() {
                 break;
             }
             let active = self
@@ -2414,7 +2616,7 @@ pub fn tab_extents(layout: &Layout, tabs: &[TabLabel], active: usize) -> Vec<(f3
         .iter()
         .map(|t| {
             // Room for the name, a dirty dot and padding on both sides.
-            let w = f(t.name.chars().count() + 5) * cell;
+            let w = (layout.ui.width(&t.name) + 5.0 * cell).round();
             let ext = (x, x + w);
             x += w + 1.0;
             ext
@@ -2478,7 +2680,7 @@ pub fn draw_tabs(
             );
         }
         let color = if is_active { ui.text } else { ui.gutter };
-        gpu.push_text_line([x0 + 2.0 * cell, text_y], &tab.name, color);
+        gpu.push_ui_text([x0 + 2.0 * cell, text_y], &tab.name, color);
         if tab.dirty {
             let dot_x = x1 - 2.0 * cell;
             gpu.push_text_line([dot_x, text_y], "●", color);
@@ -2572,7 +2774,8 @@ pub fn draw_picker(
     );
     gpu.push_rect([left, top], [width, height], ui.picker);
     // The query field, with the status on its right.
-    let status_w = f(view.status.chars().count() + 2) * cell;
+    let ui_font = &layout.ui;
+    let status_w = ui_font.width(&view.status) + 2.0 * cell;
     let field_w = width - 2.0 * cell - status_w;
     let field_y = top + pad;
     gpu.push_rect(
@@ -2581,7 +2784,7 @@ pub fn draw_picker(
         ui.field,
     );
     if view.input.doc.buffer.len_bytes() == 0 {
-        gpu.push_text_line([left + cell, field_y], view.placeholder, ui.gutter);
+        gpu.push_ui_text([left + cell, field_y], view.placeholder, ui.gutter);
     }
     draw_field(
         gpu,
@@ -2593,7 +2796,7 @@ pub fn draw_picker(
         cursor_visible,
     );
     gpu.begin_layer(None);
-    gpu.push_text_line(
+    gpu.push_ui_text(
         [left + width - status_w + cell, field_y],
         &view.status,
         ui.gutter,
@@ -2607,13 +2810,12 @@ pub fn draw_picker(
             gpu.push_rect([left, ry], [width, row_h], ui.picker_selected);
         }
         let ty = (ry + (row_h - lh) / 2.0).round();
-        gpu.push_text_line([left + cell, ty], text, ui.text);
-        let detail_x = left + width - f(detail.chars().count() + 1) * cell;
-        let text_end = left + cell + f(text.chars().count() + 2) * cell;
-        gpu.push_text_line([detail_x.max(text_end), ty], detail, ui.gutter);
+        let text_end = gpu.push_ui_text([left + cell, ty], text, ui.text) + 2.0 * cell;
+        let detail_x = left + width - ui_font.width(detail) - cell;
+        gpu.push_ui_text([detail_x.max(text_end).round(), ty], detail, ui.gutter);
     }
     if view.rows.is_empty() {
-        gpu.push_text_line([left + cell, list_y], "No matches", ui.gutter);
+        gpu.push_ui_text([left + cell, list_y], "No matches", ui.gutter);
     }
 }
 
@@ -2637,20 +2839,16 @@ pub fn draw_status(
         ui.bar,
     );
     let y = (layout.bottom + (layout.height - layout.bottom - lh) / 2.0).round();
-    let info_w = f(info.chars().count()) * cell;
+    let info_w = layout.ui.width(info);
     let info_x = (layout.width - layout.margin - info_w).round();
-    gpu.push_text_line([info_x.max(layout.margin), y], info, ui.gutter);
+    gpu.push_ui_text([info_x.max(layout.margin), y], info, ui.gutter);
     if let Some((text, is_error)) = message {
-        // Columns left for the message, with two between it and the info.
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "a small non-negative column count"
-        )]
-        let room = ((info_x - layout.margin) / cell - 2.0).max(0.0) as usize;
-        let end = text.char_indices().nth(room).map_or(text.len(), |(i, _)| i);
+        // Room left for the message, with two cells between it and the
+        // info.
+        let room = (info_x - layout.margin - 2.0 * cell).max(0.0);
+        let end = layout.ui.fit(text, room);
         let color = if is_error { ui.error } else { ui.text };
-        gpu.push_text_line([layout.margin, y], &text[..end], color);
+        gpu.push_ui_text([layout.margin, y], &text[..end], color);
     }
 }
 
@@ -2755,6 +2953,7 @@ mod tests {
                     looks: None,
                     whitespace,
                     guides,
+                    sticky: false,
                 };
                 view.draw(&mut gpu, &doc.doc, &doc.carets, &layout, 4, &deco);
                 queue.push(t.elapsed());
@@ -2771,6 +2970,78 @@ mod tests {
                     v[v.len() - 1]
                 );
             }
+        }
+    }
+
+    /// `NIMBUS_BENCH_FILE=$PWD/bench/out/src-10mb.rs cargo test --release -p nimbus -- --ignored --nocapture m20_scroll_bench`
+    ///
+    /// M20 task 7: what sticky scroll and the minimap add to a scroll
+    /// frame (queueing it, `View::draw` plus `draw_minimap`) on a parsed
+    /// file, scrolling a line and a half per frame. Needs a GPU (a
+    /// software one will do: only the queueing is timed).
+    #[test]
+    #[ignore = "benchmark: needs NIMBUS_BENCH_FILE, a GPU and a release build"]
+    fn m20_scroll_bench() {
+        use std::time::Instant;
+        let Ok(path) = std::env::var("NIMBUS_BENCH_FILE") else {
+            return;
+        };
+        let context = nimbus_render::GpuContext::open().unwrap();
+        let font = nimbus_render::Font::bundled().unwrap();
+        let mut gpu = Gpu::headless(context, font, 28.0, (1600, 1000), false);
+        let mut doc = Document::open(std::path::Path::new(&path)).unwrap();
+        doc.detect_language(&crate::languages::Languages::default());
+        doc.syntax.parse_now(&doc.buffer);
+        let mut theme = Theme::default();
+        theme.resolve_tables();
+        let ui = theme.ui;
+        let carets = Carets::default();
+        let lines = doc.buffer.len_lines();
+        let plain = Layout::new(gpu.metrics(), 1600, 1000, 2.0, lines);
+        let with_map = plain.with_minimap(200.0);
+        let modes = [
+            ("neither", false, false),
+            ("sticky", true, false),
+            ("minimap", false, true),
+            ("both", true, true),
+        ];
+        for (label, sticky, map) in modes {
+            let layout = if map { with_map } else { plain };
+            let mut view = View::default();
+            view.scroll_to_fraction(0.5, &doc, &layout, 4);
+            let mut times = Vec::new();
+            for i in 0..400 {
+                let t = Instant::now();
+                let dy = if i % 50 < 25 { 30.0 } else { -30.0 } * (1.0 + f32_of(i % 3));
+                view.scroll_by(dy, &doc, &layout, 4);
+                begin_frame(&mut gpu, &ui);
+                let deco = Decorations {
+                    cursor_visible: true,
+                    preedit: None,
+                    matches: &[],
+                    current: None,
+                    ui: &ui,
+                    looks: Some(&theme),
+                    whitespace: Whitespace::Selection,
+                    guides: None,
+                    sticky,
+                };
+                view.draw(&mut gpu, &doc, &carets, &layout, 4, &deco);
+                if map {
+                    view.draw_minimap(&mut gpu, &doc, &layout, (&ui, Some(&theme)), 4);
+                }
+                times.push(t.elapsed());
+                gpu.render().unwrap();
+            }
+            times.sort();
+            let pick = |p: usize| times[(times.len() - 1) * p / 100];
+            println!(
+                "{label:8} queue p50 {:?} p90 {:?} p99 {:?} max {:?}",
+                pick(50),
+                pick(90),
+                pick(99),
+                times[times.len() - 1]
+            );
         }
     }
 

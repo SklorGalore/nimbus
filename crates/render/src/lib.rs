@@ -12,6 +12,7 @@ mod pipeline;
 pub mod raster;
 pub mod shape;
 mod text;
+pub mod ui;
 
 pub use fallback::{EditorFont, find_editor_font};
 pub use font::{Font, FontError, Metrics};
@@ -20,3 +21,4 @@ pub use gpu::{
 };
 pub use pipeline::{GLYPH_COLOR, GlyphInstance, RectInstance};
 pub use text::{ColorRun, Style};
+pub use ui::{UiFont, UiStyle};

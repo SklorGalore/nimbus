@@ -87,3 +87,6 @@ its syntax tree:
   `wrap = false` in `[editor.markdown]`.
 - **Auto-pairs** are off in Markdown unless you turn them on.
 - Comments use `<!-- -->`.
+- **Open Preview** (`Cmd+Shift+V` / `Ctrl+Shift+V`) shows the file as a
+  formatted page beside it. See
+  [The Markdown preview](window.md#the-markdown-preview).

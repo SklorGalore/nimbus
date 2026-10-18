@@ -48,6 +48,7 @@ use crate::keymap::{Chord, Keymap, chord_label};
 use crate::languages::Languages;
 use crate::menu::{self, MenuBar};
 use crate::merge_view::{Inputs, MergeView, Merged, Shape, Take};
+use crate::minimap;
 use crate::picker::{self, EncodingFor, Item, Kind, Picker};
 use crate::replace_files::{self, Replacement};
 use crate::saver::{self, ReplacePolicy, SaveEvent, SaveStep};
@@ -63,6 +64,7 @@ use crate::watch::{Change, Watch};
 use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
 
 mod geometry;
+mod preview_tab;
 mod tail;
 mod tree_ops;
 mod workspace;
@@ -82,6 +84,8 @@ pub enum AppEvent {
     /// The worker looking up the config's `font` finished: the name it
     /// looked for, and the font if found.
     EditorFont(String, Option<nimbus_render::EditorFont>),
+    /// The worker looking up the config's `ui_font` finished (M20).
+    UiFont(String, Option<nimbus_render::EditorFont>),
     /// The picker's matcher has new results.
     PickerChanged,
     /// A menu item was chosen; carries its action id.
@@ -124,6 +128,8 @@ pub enum AppEvent {
     Revision(Revision),
     /// Rows from a folder compare's workers (M18).
     FolderCompare(folder_compare::Batch),
+    /// A Markdown preview's page, laid out on a worker (M20).
+    Preview(crate::preview::Laid),
 }
 
 /// A file read at a git revision on a worker (M18).
@@ -288,6 +294,8 @@ pub struct Tab {
     /// A merge view on this tab (M9): the inputs and the regions of the
     /// result, which is this tab's document.
     pub merge: Option<Box<MergeView>>,
+    /// A Markdown preview of the document (M20), instead of its text.
+    pub preview: Option<Box<crate::preview::Preview>>,
     /// Where a restored tab's cursor and view go once its file is read.
     pending: Option<Pending>,
 }
@@ -328,6 +336,7 @@ impl Tab {
             discard_at: None,
             compare: None,
             merge: None,
+            preview: None,
             pending: None,
         }
     }
@@ -530,6 +539,8 @@ pub struct App {
     /// When a scrollbar shown by a recent scroll hides (M16): the one
     /// wakeup that draws the frame without it.
     scrollbar_hide_at: Option<Instant>,
+    /// When to look again at a preview waiting for a pause in typing.
+    preview_at: Option<Instant>,
     /// Connected on first copy or paste, not at startup.
     clipboard: Option<arboard::Clipboard>,
     clicks: Clicks,
@@ -566,6 +577,12 @@ pub struct App {
     /// Indent guides on: the config's `indent_guides`, toggled from the
     /// palette.
     indent_guides: bool,
+    /// Sticky scroll on: the config's `sticky_scroll`, toggled from the
+    /// palette (M20).
+    sticky_scroll: bool,
+    /// The minimap shown: the config's `minimap`, toggled from the
+    /// palette (M20).
+    minimap: bool,
     /// When the last zoom step started, until its first frame is drawn:
     /// that frame refills the atlas, and its time is logged.
     zoom_started: Option<Instant>,
@@ -573,6 +590,8 @@ pub struct App {
     ws: Workspace,
     /// The pointer shows the resize cursor.
     resize_cursor: bool,
+    /// The pointer is over a link in a Markdown preview (M20).
+    link_cursor: bool,
     /// Watching has started (after the first frame).
     watching: bool,
     /// A go-to-line waiting for a huge file's lines to be counted.
@@ -607,6 +626,8 @@ struct Clicks {
     adding: bool,
     /// Dragging the scrollbar's thumb, held this far below its top.
     scrollbar_grab: Option<f32>,
+    /// Dragging the minimap's mark (M20), held this far below its top.
+    minimap_grab: Option<f32>,
     /// A Shift+Alt press started a column selection here: the line's first
     /// byte and the display column.
     column: Option<(usize, usize)>,
@@ -682,6 +703,8 @@ impl App {
             font_size: starting_zoom(&config, &state),
             whitespace: config.render_whitespace,
             indent_guides: config.indent_guides,
+            sticky_scroll: config.sticky_scroll,
+            minimap: config.minimap,
             config,
             theme,
             languages,
@@ -708,6 +731,7 @@ impl App {
             title_key: None,
             hidden_retry: None,
             scrollbar_hide_at: None,
+            preview_at: None,
             clipboard: None,
             clicks: Clicks::default(),
             find: FindBar::default(),
@@ -725,6 +749,7 @@ impl App {
             zoom_started: None,
             ws: Workspace::new(state, session_root),
             resize_cursor: false,
+            link_cursor: false,
             watching: false,
             pending_line: None,
             recheck: Vec::new(),
@@ -844,6 +869,48 @@ impl App {
         }
     }
 
+    /// Look up the config's `ui_font` on a worker, as the editor font is
+    /// (the system's font list takes tens of milliseconds); an empty name
+    /// goes back to the grid at once.
+    fn load_ui_font(&mut self) {
+        let name = self.config.ui_font.clone();
+        if name.is_empty() {
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.set_ui_font(None);
+            }
+            return;
+        }
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name("nimbus-ui-font".to_owned())
+            .spawn(move || {
+                let found = nimbus_render::find_editor_font(&name);
+                let _ = proxy.send_event(AppEvent::UiFont(name, found));
+            });
+        if let Err(e) = spawned {
+            log::warn!("cannot look up the interface font: {e}");
+        }
+    }
+
+    /// The configured interface font was looked up: draw the chrome with
+    /// it, unless the config changed again meanwhile.
+    fn ui_font_arrived(&mut self, name: &str, found: Option<nimbus_render::EditorFont>) {
+        if name != self.config.ui_font {
+            return;
+        }
+        match (found, self.gpu.as_mut()) {
+            (Some(font), Some(gpu)) => {
+                gpu.set_ui_font(Some(font));
+                self.changed(false);
+            }
+            (None, _) => self.say(
+                format!("Interface font {name:?} not found; using the editor font"),
+                true,
+            ),
+            (Some(_), None) => {}
+        }
+    }
+
     /// The configured font was looked up: draw with it, unless the config
     /// changed again meanwhile.
     fn editor_font_arrived(&mut self, name: &str, found: Option<nimbus_render::EditorFont>) {
@@ -917,14 +984,22 @@ impl App {
     fn group_layout(&self, g: usize) -> Option<Layout> {
         let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
         let scale = to_f32(effective_scale(window.scale_factor()));
-        let lines = self.tab_lines(&self.tabs[self.group_active(g)]);
+        let tab = &self.tabs[self.group_active(g)];
+        let lines = self.tab_lines(tab);
         let full = layout_for_lines(gpu, scale, lines, self.group_find(g))
             .with_sidebar(self.sidebar.px(scale));
-        if self.groups.len() == 1 {
-            return Some(full);
+        let column = if self.groups.len() == 1 {
+            full
+        } else {
+            let &(a, b) = self.groups.columns(full.left, full.width).get(g)?;
+            full.column(a, b)
+        };
+        // The minimap is for one document's text, not a compare's columns.
+        if self.minimap && tab.compare.is_none() && tab.merge.is_none() {
+            let width = to_f32(self.config.minimap_width) * scale;
+            return Some(column.with_minimap(width));
         }
-        let &(a, b) = self.groups.columns(full.left, full.width).get(g)?;
-        Some(full.column(a, b))
+        Some(column)
     }
 
     /// Geometry for the focused group, where the keyboard's edits show.
@@ -1122,6 +1197,10 @@ impl App {
             return;
         }
         if self.run_app_command(cmd, event_loop) {
+            return;
+        }
+        if self.is_preview(self.active) {
+            self.run_preview(cmd);
             return;
         }
         let result = self.run_edit(cmd);
@@ -3239,6 +3318,19 @@ impl App {
                 self.say(format!("Indent guides {state}"), false);
                 self.changed(false);
             }
+            Command::ToggleStickyScroll => {
+                self.sticky_scroll = !self.sticky_scroll;
+                let state = if self.sticky_scroll { "on" } else { "off" };
+                self.say(format!("Sticky scroll {state}"), false);
+                self.changed(false);
+            }
+            Command::OpenPreview => self.open_preview(),
+            Command::ToggleMinimap => {
+                self.minimap = !self.minimap;
+                let state = if self.minimap { "shown" } else { "hidden" };
+                self.say(format!("Minimap {state}"), false);
+                self.changed(false);
+            }
             _ => {}
         }
     }
@@ -3506,6 +3598,12 @@ impl App {
         if old.indent_guides != self.config.indent_guides {
             self.indent_guides = self.config.indent_guides;
         }
+        if old.sticky_scroll != self.config.sticky_scroll {
+            self.sticky_scroll = self.config.sticky_scroll;
+        }
+        if old.minimap != self.config.minimap {
+            self.minimap = self.config.minimap;
+        }
         if let Some(menu) = &self.menu_bar {
             menu.update(&self.keymap);
         }
@@ -3518,6 +3616,9 @@ impl App {
         }
         if old.font != self.config.font {
             self.load_editor_font();
+        }
+        if old.ui_font != self.config.ui_font {
+            self.load_ui_font();
         }
         if warnings.is_empty() {
             self.say("Config reloaded", false);
@@ -4119,6 +4220,10 @@ impl App {
         let layout = *layout;
         self.find.focused = false;
         let tab_width = self.tab_width();
+        if self.is_preview(self.active) {
+            self.preview_click(self.active, &layout, x, y);
+            return;
+        }
         let tab = &mut self.tabs[self.active];
         if tab.compare.is_some() || tab.merge.is_some() {
             if let Some(hit) = self.columns_scrollbar_hit(&layout, x, y) {
@@ -4128,8 +4233,23 @@ impl App {
             }
             return;
         }
+        if let Some(press) = tab.view.minimap_press(x, y) {
+            self.grab_minimap(press, &layout);
+            return;
+        }
         if let Some(hit) = tab.view.scrollbar_hit(x, y) {
             self.grab_scrollbar(hit, y, &layout);
+            return;
+        }
+        // A pinned line of sticky scroll (M20): jump to it.
+        if let Some(line) = tab.view.sticky_at(&layout, y) {
+            tab.view.scroll_to_line(line);
+            let doc = &mut self.docs[tab.doc];
+            let start = nimbus_core::movement::smart_home(&doc.buffer, line);
+            Editor::new(doc, &mut tab.carets).click(start, false);
+            doc.stop_following();
+            self.blink.reset(now);
+            self.changed(false);
             return;
         }
         if self.fold_click(&layout, x, y) {
@@ -4287,6 +4407,35 @@ impl App {
         };
         self.clicks.scrollbar_grab = Some(grab);
         self.docs[tab.doc].stop_following();
+        self.changed(false);
+    }
+
+    /// A press on the minimap (M20): grab its mark where pressed, or
+    /// centre the line pressed and grab the mark by its middle.
+    fn grab_minimap(&mut self, press: minimap::Press, layout: &Layout) {
+        let tab_width = self.tab_width();
+        let tab = &mut self.tabs[self.active];
+        let doc = &self.docs[tab.doc];
+        let grab = match press {
+            minimap::Press::Slider(offset) => offset,
+            minimap::Press::Line(start) => {
+                tab.view.centre_line(start, doc, layout, tab_width);
+                tab.view.minimap_slider_height() / 2.0
+            }
+        };
+        self.clicks.minimap_grab = Some(grab);
+        self.docs[tab.doc].stop_following();
+        self.changed(false);
+    }
+
+    /// The pointer moved with the minimap's mark grabbed: put its top at
+    /// `y`.
+    fn drag_minimap_to(&mut self, y: f32) {
+        let Some(layout) = self.layout() else { return };
+        let tab_width = self.tab_width();
+        let tab = &mut self.tabs[self.active];
+        tab.view
+            .drag_minimap(y, &self.docs[tab.doc], &layout, tab_width);
         self.changed(false);
     }
 
@@ -4465,6 +4614,8 @@ impl App {
         };
         if self.sidebar.contains(&window, x) {
             self.sidebar.wheel(-dy, &window);
+        } else if self.preview_wheel(i, -dy, &layout) {
+            // A preview scrolls on its own; its source stays put.
         } else {
             let tab_width = self.tab_width();
             let tab = &mut self.tabs[i];
@@ -4539,11 +4690,15 @@ impl App {
             || self.sidebar.on_divider(&layout, x)
             || (self.groups.len() > 1
                 && Groups::on_divider(&self.group_columns(&layout), x, layout.scale).is_some());
-        if resize != self.resize_cursor {
+        let link = !resize && self.over_preview_link();
+        if resize != self.resize_cursor || link != self.link_cursor {
             self.resize_cursor = resize;
+            self.link_cursor = link;
             if let Some(window) = &self.window {
                 window.set_cursor(if resize {
                     CursorIcon::ColResize
+                } else if link {
+                    CursorIcon::Pointer
                 } else {
                     CursorIcon::Default
                 });
@@ -4558,7 +4713,7 @@ impl App {
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
-        if tab.compare.is_some() || tab.merge.is_some() {
+        if tab.compare.is_some() || tab.merge.is_some() || tab.preview.is_some() {
             return;
         }
         if let Some(from) = self.clicks.column {
@@ -4607,6 +4762,12 @@ impl App {
                 }
                 let d = &self.docs[self.tabs[i].doc];
                 let name = d.display_name();
+                if self.tabs[i].preview.is_some() {
+                    return TabLabel {
+                        name: format!("Preview {name}"),
+                        dirty: false,
+                    };
+                }
                 let name = if d.deleted {
                     format!("{name} (deleted)")
                 } else if d.conflict {
@@ -4719,6 +4880,7 @@ impl App {
     /// the dividers between groups, the status bar, then the overlays.
     /// `panes` holds each group's layout, `layout` the window's.
     fn paint(&mut self, gpu: &mut Gpu, layout: &Layout, panes: &[Layout]) {
+        self.prepare_previews(gpu, panes);
         let tab_width = self.tab_width();
         let chord_message = self.pending_chord.map(|(chord, until)| Message {
             text: format!("{} …", chord_label(chord)),
@@ -4747,6 +4909,7 @@ impl App {
                 view: &mut tab.view,
                 compare: tab.compare.as_deref_mut(),
                 merge: tab.merge.as_deref_mut(),
+                preview: tab.preview.as_deref_mut(),
                 theme: &mut self.theme,
                 find,
                 message: chord_message.as_ref().or(self.message.as_ref()),
@@ -4762,6 +4925,7 @@ impl App {
                 tab_width,
                 whitespace: self.whitespace,
                 guides: self.indent_guides,
+                sticky: self.sticky_scroll,
             };
             paint_pane(gpu, pane, &mut scene);
             hide_at = hide_at
@@ -5750,7 +5914,9 @@ pub fn layout_for_lines(gpu: &Gpu, scale: f32, lines: usize, find: &FindBar) -> 
         (true, false) => 1,
         (true, true) => 2,
     };
-    Layout::new(gpu.metrics(), w, h, scale, lines).with_chrome(true, bar_rows, true)
+    Layout::new(gpu.metrics(), w, h, scale, lines)
+        .with_chrome(true, bar_rows, true)
+        .with_ui(gpu.ui_font())
 }
 
 /// Everything one frame shows.
@@ -5763,6 +5929,8 @@ pub struct Scene<'a> {
     compare: Option<&'a mut Compare>,
     /// A merge on the tab: three columns, the result in the middle.
     merge: Option<&'a mut MergeView>,
+    /// A Markdown preview (M20): the page instead of the text.
+    preview: Option<&'a mut crate::preview::Preview>,
     theme: &'a mut Theme,
     find: &'a FindBar,
     message: Option<&'a Message>,
@@ -5774,6 +5942,36 @@ pub struct Scene<'a> {
     whitespace: Whitespace,
     /// Indent guides on.
     guides: bool,
+    /// Sticky scroll on (M20).
+    sticky: bool,
+}
+
+/// `--preview`: the document's Markdown preview, laid out here, to draw
+/// instead of its text.
+fn headless_preview(
+    options: &Options,
+    doc: &Document,
+    gpu: &Gpu,
+    layout: &Layout,
+) -> Option<Box<crate::preview::Preview>> {
+    if !options.preview {
+        return None;
+    }
+    let mut p = Box::<crate::preview::Preview>::default();
+    let params = crate::preview::Params {
+        width: layout.width - layout.left,
+        font: gpu.preview_font(),
+    };
+    let (job, _) = p.wants(
+        (&doc.buffer, doc.version, &doc.syntax),
+        params,
+        Instant::now(),
+    );
+    if let Some(job) = job {
+        p.arrived(&mut Some(job.run()));
+    }
+    p.follow(0);
+    Some(p)
 }
 
 /// The config's tab width, ligatures and font for a headless render. With
@@ -5787,6 +5985,48 @@ fn headless_fonts(gpu: &mut Gpu, config: &Config) {
             Some(f) => gpu.set_font(f),
             None => log::warn!("font {:?} not found; using the bundled font", config.font),
         }
+    }
+    if !config.ui_font.is_empty() {
+        match nimbus_render::find_editor_font(&config.ui_font) {
+            Some(f) => gpu.set_ui_font(Some(f)),
+            None => log::warn!(
+                "interface font {:?} not found; using the editor font",
+                config.ui_font
+            ),
+        }
+    }
+}
+
+/// The GPU for a headless render at `scale` and `size`, with the
+/// config's fonts; `None` after saying why the bundled font could not be
+/// read.
+fn headless_gpu(
+    context: GpuContext,
+    config: &Config,
+    (scale, size): (f64, (u32, u32)),
+    linear_blend: bool,
+) -> Option<Gpu> {
+    let font = Font::bundled()
+        .map_err(|e| print_err(&format!("nimbus: {e}")))
+        .ok()?;
+    let mut gpu = Gpu::headless(
+        context,
+        font,
+        to_f32(config.font_size * scale),
+        size,
+        linear_blend,
+    );
+    headless_fonts(&mut gpu, config);
+    Some(gpu)
+}
+
+/// `layout` with room for the minimap when the config shows one and the
+/// tab is a plain document (`plain`: no compare or merge columns).
+fn headless_minimap(layout: Layout, config: &Config, scale: f64, plain: bool) -> Layout {
+    if config.minimap && plain {
+        layout.with_minimap(to_f32(config.minimap_width * scale))
+    } else {
+        layout
     }
 }
 
@@ -5812,7 +6052,11 @@ pub fn paint_pane(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     } else {
         &[]
     };
-    if let Some(c) = scene.compare.as_deref_mut() {
+    if let Some(p) = scene.preview.as_deref_mut() {
+        // Code blocks are coloured by their languages' tables.
+        scene.theme.resolve_tables();
+        p.draw(gpu, layout, scene.theme);
+    } else if let Some(c) = scene.compare.as_deref_mut() {
         c.draw(
             gpu,
             layout,
@@ -5867,12 +6111,19 @@ pub fn paint_pane(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
                         indent.width
                     }
                 }),
+                sticky: scene.sticky,
             },
         );
         // A nested language that came into view loads its grammar or was
         // parsed this frame: its table may be new to the theme, and its
         // spans may be waiting on the next frame's budget.
         scene.theme.resolve_tables();
+        if layout.minimap > 0.0 {
+            let looks = syntax.capture_names().is_some().then_some(&*scene.theme);
+            scene
+                .view
+                .draw_minimap(gpu, scene.doc, layout, (&ui, looks), scene.tab_width);
+        }
         scene.view.draw_scrollbar(gpu, scene.doc, layout, &ui);
     }
     if find.open {
@@ -5914,23 +6165,11 @@ pub fn run_headless(
         print_err("nimbus: --headless needs --screenshot FILE.bmp");
         return 2;
     };
-    let font = match Font::bundled() {
-        Ok(f) => f,
-        Err(e) => {
-            print_err(&format!("nimbus: {e}"));
-            return 1;
-        }
-    };
     // No window to ask: default to a Retina scale, or NIMBUS_SCALE.
     let scale = effective_scale(2.0);
-    let mut gpu = Gpu::headless(
-        context,
-        font,
-        to_f32(config.font_size * scale),
-        size,
-        options.linear_blend,
-    );
-    headless_fonts(&mut gpu, config);
+    let Some(mut gpu) = headless_gpu(context, config, (scale, size), options.linear_blend) else {
+        return 1;
+    };
     let mut view = View::default();
     view.set_wrap(options.wrap || wrap_for(config, &doc));
     if options.wait_index {
@@ -5942,9 +6181,15 @@ pub fn run_headless(
         &mut Editor::new(&mut doc, &mut carets),
     );
     headless_cursors(options, &doc, &mut carets);
+    let plain = compare.is_none() && merge.is_none();
     let (sidebar, layout) = headless_sidebar(
         (&root, more_roots),
-        layout_for(&gpu, to_f32(scale), &doc, &find),
+        headless_minimap(
+            layout_for(&gpu, to_f32(scale), &doc, &find),
+            config,
+            scale,
+            plain,
+        ),
         doc.canonical.as_deref(),
         options.search.as_deref(),
         folder_diff(options),
@@ -5952,6 +6197,7 @@ pub fn run_headless(
     view.ensure_cursor_visible(&doc, &carets, &layout, config.tab_width);
     // One frame only: parse here rather than on a worker.
     doc.syntax.parse_now(&doc.buffer);
+    let mut preview = headless_preview(options, &doc, &gpu, &layout);
     print_warnings(nimbus_syntax::registry::take_warnings());
     let (mut theme, warnings) = Theme::load(&config.theme);
     print_warnings(warnings);
@@ -5970,6 +6216,7 @@ pub fn run_headless(
                 view: &mut view,
                 compare: compare.as_deref_mut(),
                 merge: merge.as_deref_mut(),
+                preview: preview.as_deref_mut(),
                 theme: &mut theme,
                 find: &find,
                 message: None,
@@ -5978,6 +6225,7 @@ pub fn run_headless(
                 tab_width: config.tab_width,
                 whitespace: config.render_whitespace,
                 guides: config.indent_guides,
+                sticky: config.sticky_scroll,
             },
         );
         let ui = &theme.ui;
@@ -6371,6 +6619,8 @@ impl App {
             self.drag_group_divider(d, to_f32(position.x));
         } else if let Some(grab) = self.clicks.scrollbar_grab {
             self.drag_scrollbar_to(to_f32(position.y) - grab);
+        } else if let Some(grab) = self.clicks.minimap_grab {
+            self.drag_minimap_to(to_f32(position.y) - grab);
         } else if self.sidebar.drag.is_some() {
             let at = (to_f32(position.x), to_f32(position.y));
             let copy = self.modifiers.alt_key();
@@ -6393,6 +6643,7 @@ impl App {
     fn left_released(&mut self) {
         self.clicks.dragging = false;
         self.clicks.scrollbar_grab = None;
+        self.clicks.minimap_grab = None;
         self.groups.dragging = None;
         let dragged = self.sidebar.drag.is_some_and(|d| d.moving);
         if let Some((from, dir)) = self.sidebar.end_drag() {
@@ -6491,12 +6742,14 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::Folded(result) => self.folded(result),
             AppEvent::Revision(r) => self.revision_read(r),
             AppEvent::FolderCompare(batch) => self.folder_compare_arrived(batch),
+            AppEvent::Preview(laid) => self.preview_arrived(laid),
             AppEvent::Save(event) => {
                 self.save_event(event, event_loop);
                 self.changed(false);
             }
             AppEvent::FontLoaded => self.changed(false),
             AppEvent::EditorFont(name, found) => self.editor_font_arrived(&name, found),
+            AppEvent::UiFont(name, found) => self.ui_font_arrived(&name, found),
             AppEvent::FindFiles(batch) => {
                 if self.sidebar.search.receive(batch) {
                     self.changed(false);
@@ -6661,6 +6914,10 @@ impl ApplicationHandler<AppEvent> for App {
         if scrollbar_due {
             self.scrollbar_hide_at = None;
         }
+        let preview_due = self.preview_at.is_some_and(|at| now >= at);
+        if preview_due {
+            self.preview_at = None;
+        }
         if self.research_at.is_some_and(|t| now >= t) {
             self.research_at = None;
             if self.find.open {
@@ -6703,7 +6960,7 @@ impl ApplicationHandler<AppEvent> for App {
                 window.request_redraw();
             }
         }
-        if (blink_changed || retry_due || scrollbar_due)
+        if (blink_changed || retry_due || scrollbar_due || preview_due)
             && let Some(window) = &self.window
         {
             window.request_redraw();
@@ -6727,6 +6984,9 @@ impl ApplicationHandler<AppEvent> for App {
             // A configured font, looked up once the first frame is up.
             if !self.config.font.is_empty() {
                 self.load_editor_font();
+            }
+            if !self.config.ui_font.is_empty() {
+                self.load_ui_font();
             }
             // The startup update check, when the config asks for it: once,
             // after the first frame like the watches, and not in unattended
@@ -6762,6 +7022,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.blink.next,
             self.hidden_retry.map(|(at, _)| at),
             self.scrollbar_hide_at,
+            self.preview_at,
             self.message.as_ref().map(|m| m.until),
             self.pending_chord.map(|(_, until)| until),
             self.research_at,

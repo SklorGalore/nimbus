@@ -238,6 +238,46 @@ brighter for the level around the cursor. Both start from
 The scrollbar fades out a second after you stop scrolling, and comes back
 when you scroll or point at it.
 
+## Sticky scroll and the minimap
+
+**Sticky scroll** keeps your place in a long file. When the line that
+starts the function, impl, class or Markdown section you are reading
+scrolls off the top, it stays pinned there, above the text, with the
+scopes around it: up to five rows, outermost first. Click a pinned row
+to jump to it. It works in every language with a syntax tree, so not in
+files over 16 MB. It is on by default; turn it off with
+`sticky_scroll = false` in the [settings](settings.md), or for the
+session with Toggle Sticky Scroll in the palette.
+
+The **minimap** is a narrow column at the right edge of the text that
+draws the lines around the view as small coloured blocks, with a
+lighter band over the lines on screen. Click in it to centre that line,
+or drag the band to scroll. It is off by default: Toggle Minimap in the
+palette shows it for the session, and `minimap = true` shows it from the
+start. `minimap_width` sets its width in points. In a big file it shows
+the few thousand lines around the view, not the whole file, so it costs
+the same on a 4 GB log as on a small file.
+
+## The Markdown preview
+
+Open Preview (`Cmd+Shift+V` / `Ctrl+Shift+V`, or View > Open Preview) in
+a Markdown file shows it as a formatted page in a group to the right:
+headings, bold, italic and struck-through text, lists and task lists,
+quotes, tables, links and code blocks. Code blocks are coloured by the
+language their fence names, as in the editor. Images and HTML show as
+`[image: …]` and `[HTML]` placeholders.
+
+The keyboard stays in the file, so you can type and watch the page. It
+updates once you pause typing for a moment, and scrolls along when you
+scroll the file. You can also scroll the preview on its own with the
+wheel, or click into it and use the arrow and page keys. Click a link to
+open it: a web link opens in your browser, and a link to a file next to
+this one opens it in Nimbus. The preview is read-only; it closes like
+any tab, and comes back with your session.
+
+The preview uses the `ui_font` when you set one, and the editor font
+otherwise. Files over 16 MB are not previewed.
+
 ## Menus
 
 On macOS and Windows, Nimbus has a menu bar: File, Edit, Selection, View

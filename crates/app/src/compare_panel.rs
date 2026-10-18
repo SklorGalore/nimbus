@@ -313,7 +313,7 @@ fn draw_options(
 ) {
     let (cell, lh) = (layout.metrics.cell_width, layout.metrics.line_height);
     let pad = layout.margin;
-    gpu.push_text_line([pad, header], "Compare options", ui.gutter);
+    gpu.push_ui_text([pad, header], "Compare options", ui.gutter);
     let line = layout.scale.round().max(1.0);
     let accent = (2.0 * layout.scale).round().max(1.0);
     let inset = (0.1 * lh).round();
@@ -340,7 +340,7 @@ fn draw_options(
         } else {
             ui.text
         };
-        gpu.push_text_line([pad + cell, row_y], label, color);
+        gpu.push_ui_text([pad + cell, row_y], label, color);
         row_y += lh;
     }
 }
@@ -361,7 +361,7 @@ pub fn draw(
     draw_options(gpu, ui, layout, panel.options, (header, w));
     let mut y = Panel::summary_top(layout, header);
     let Some(results) = &panel.results else {
-        gpu.push_text_line([pad, y], &panel.summary(), ui.gutter);
+        gpu.push_ui_text([pad, y], &panel.summary(), ui.gutter);
         return;
     };
     let title = format!(
@@ -369,9 +369,9 @@ pub fn draw(
         folder_name(&results.left),
         folder_name(&results.right)
     );
-    gpu.push_text_line([pad, y], &title, ui.text);
+    gpu.push_ui_text([pad, y], &title, ui.text);
     y += lh;
-    gpu.push_text_line([pad, y], &panel.summary(), ui.gutter);
+    gpu.push_ui_text([pad, y], &panel.summary(), ui.gutter);
     y += lh;
     for (i, entry) in results.rows().iter().enumerate().skip(panel.scroll) {
         if y >= bottom {
@@ -393,7 +393,7 @@ pub fn draw(
         };
         gpu.push_text_line([pad, y], mark, ui.gutter);
         let rel = entry.rel.to_string_lossy();
-        gpu.push_text_span([pad + 2.0 * cell, y], &rel, 0, ui.text, 0.0);
+        gpu.push_ui_text([pad + 2.0 * cell, y], &rel, ui.text);
         y += lh;
     }
 }
