@@ -464,7 +464,9 @@ impl Compare {
             .map(|(t, ..)| t)
     }
 
-    /// The header's toggles: each with its x range, label and whether on.
+    /// The header's toggles: each with its button's x range, label and
+    /// whether on. A button is the label with one cell of padding each
+    /// side, so the whole box is clickable.
     fn header_items(&self, layout: &Layout) -> Vec<(Toggle, Range<f32>, &'static str, bool)> {
         let cell = layout.metrics.cell_width;
         let n = self.normalize;
@@ -487,15 +489,17 @@ impl Compare {
             .into_iter()
             .map(|(t, label, on)| {
                 #[expect(clippy::cast_precision_loss, reason = "a short label's length")]
-                let w = label.chars().count() as f32 * cell;
+                let w = (label.chars().count() + 2) as f32 * cell;
                 let item = (t, x..x + w, label, on);
-                x += w + 2.0 * cell;
+                x += w + cell;
                 item
             })
             .collect()
     }
 
-    /// Draw the header row: the toggles, bright when on.
+    /// Draw the header row: each toggle a bordered button, filled with the
+    /// theme's "on" colour and underlined when on, so it reads as
+    /// something to click rather than a label.
     fn draw_header(&self, gpu: &mut Gpu, layout: &Layout, theme: &Theme) {
         let ui = theme.ui;
         let lh = layout.metrics.line_height;
@@ -511,16 +515,24 @@ impl Compare {
             ui.tab_bar,
         );
         let accent = (2.0 * layout.scale).round().max(1.0);
+        let line = layout.scale.round().max(1.0);
+        let inset = (0.1 * lh).round();
+        let (top, h) = (layout.top + inset, lh - 2.0 * inset);
         for (_, range, label, on) in self.header_items(layout) {
-            let color = if on { ui.text } else { ui.gutter };
-            gpu.push_text_line([range.start, layout.top], label, color);
+            let (x, w) = (range.start, range.end - range.start);
+            gpu.push_rect([x, top], [w, h], ui.picker_border);
+            let fill = if on { ui.toggle_on } else { ui.field };
+            gpu.push_rect(
+                [x + line, top + line],
+                [w - 2.0 * line, h - 2.0 * line],
+                fill,
+            );
             if on {
-                gpu.push_rect(
-                    [range.start, layout.top + lh - accent],
-                    [range.end - range.start, accent],
-                    ui.tab_accent,
-                );
+                gpu.push_rect([x, top + h - accent], [w, accent], ui.tab_accent);
             }
+            let color = if on { ui.text } else { ui.gutter };
+            let cell = layout.metrics.cell_width;
+            gpu.push_text_line([x + cell, layout.top], label, color);
         }
         gpu.begin_layer(None);
     }
