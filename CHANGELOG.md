@@ -8,6 +8,16 @@ section before tagging.
 
 ### Added
 
+- Workspaces of several folders: Add Folder to Workspace… (or drop a
+  folder on the window, or `nimbus DIR1 DIR2`); Go to File and Find in
+  Files cover every folder. Save Workspace As… and Open Workspace…, with
+  `--workspace NAME`; Save Workspace Here writes `.nimbus/workspace.toml`
+  so a workspace travels with its repository.
+- Drag and drop in the file tree (Option/Alt copies), Undo Move, Search
+  in Folder, and files dropped on the window open.
+- Find in Files: folders outside the project in the include field
+  (`~/notes`), the last 50 patterns and replacements on Up and Down,
+  Save Search…, and regex patterns with `\n` that match across lines.
 - A user manual in `docs/manual/`, with a keyboard shortcut and command
   reference, every setting, and the command-line options.
 - Compare and merge: Compare with Saved, Compare with File… and Compare
