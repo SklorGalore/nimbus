@@ -196,6 +196,23 @@ impl Scanner {
         }
     }
 
+    /// A scanner that carries on where `index` ends, for a file that grew
+    /// after it was indexed (M12's Follow Tail): fed the bytes from
+    /// [`LineIndex::indexed`] on, its chunks merge into `index`. `spacing`
+    /// must be the one the index was built with.
+    #[must_use]
+    pub fn resume(index: &LineIndex, spacing: Spacing) -> Self {
+        Self {
+            spacing,
+            pos: index.upto,
+            lines: index.lines,
+            last: index.last_checkpoint().map_or(0, |c| c.offset),
+            pending: Vec::new(),
+            chunk_from: index.upto,
+            done: false,
+        }
+    }
+
     /// Bytes fed so far.
     #[must_use]
     pub fn position(&self) -> u64 {
@@ -386,6 +403,12 @@ impl LineIndex {
         Ok(())
     }
 
+    /// The file grew after it was indexed to its end: it is not done any
+    /// more, and chunks from a [`Scanner::resume`]d scanner can follow.
+    pub fn reopen(&mut self) {
+        self.done = false;
+    }
+
     /// Bytes from the start of the file that the index covers.
     #[must_use]
     pub fn indexed(&self) -> u64 {
@@ -408,6 +431,13 @@ impl LineIndex {
     /// Every stored checkpoint, in increasing offset order.
     pub fn checkpoints(&self) -> impl Iterator<Item = Checkpoint> + '_ {
         self.chunks.iter().flat_map(|c| c.iter().copied())
+    }
+
+    /// The last stored checkpoint, found without walking the others
+    /// (only chunks with checkpoints are kept).
+    #[must_use]
+    pub fn last_checkpoint(&self) -> Option<Checkpoint> {
+        self.chunks.last().and_then(|c| c.last()).copied()
     }
 
     /// Number of stored checkpoints; times 16 bytes is the index's size.

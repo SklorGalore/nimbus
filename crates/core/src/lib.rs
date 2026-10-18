@@ -44,7 +44,7 @@ pub use diff::{DIFF_LIMIT, DiffError, Hunk, Interner, Lines};
 pub use fold::Folds;
 pub use line_ending::LineEnding;
 pub use live_diff::{EditSpan, LiveDiff, Region, Side};
-pub use mapped::{Limits, MappedBuffer, MappedSnapshot, PieceRun};
+pub use mapped::{ExtendError, Limits, MappedBuffer, MappedSnapshot, PieceRun};
 pub use merge::{Chunk, Kind, Merge, Pick};
 pub use regions::{RegionTag, Regions, Resolution, diff_lines};
 pub use rope::RopeBuffer;

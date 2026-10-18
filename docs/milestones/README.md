@@ -39,7 +39,7 @@ repeated in each file:
 | 9 | [Compare and merge](m9-diff.md) | Done |
 | 10 | [Find in files](m10-find-in-files.md) | Done |
 | 11 | [Everyday editing](m11-everyday-editing.md) | Done |
-| 12 | [Workspace](m12-workspace.md) | Next |
+| 12 | [Workspace](m12-workspace.md) | Done |
 | 13 | [Split views and folding](m13-splits-and-folding.md) | In progress |
 | 14 | [Languages, second pass](m14-languages.md) | In progress |
 | 15 | [Distribution](m15-distribution.md) | Done |

@@ -13,7 +13,7 @@
 //! folders stay expanded.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Index of a node in the tree's arena.
@@ -141,6 +141,12 @@ pub struct Tree {
     reveal: Option<PathBuf>,
     /// The row picked by the keyboard or a click.
     pub selected: Option<NodeId>,
+    /// Folders to open as soon as they are listed: a restored session's
+    /// expanded folders, which load one level at a time.
+    expand_later: HashSet<PathBuf>,
+    /// Select this path when a listing shows it: a file just created or
+    /// renamed, which the tree learns about from the disk.
+    select_later: Option<PathBuf>,
 }
 
 /// The root node's index.
@@ -175,6 +181,8 @@ impl Tree {
             generation: 0,
             reveal: None,
             selected: None,
+            expand_later: HashSet::new(),
+            select_later: None,
         }
     }
 
@@ -314,6 +322,27 @@ impl Tree {
         for id in kept.into_values() {
             self.remove(id);
         }
+        let mut out = Vec::new();
+        if !self.expand_later.is_empty() {
+            for &id in &children {
+                let n = &self.nodes[id];
+                if n.is_dir && self.expand_later.remove(&n.path) {
+                    self.nodes[id].expanded = true;
+                    if self.nodes[id].children.is_none() {
+                        self.request(id, &mut out);
+                    }
+                }
+            }
+            // Ones this folder should have held are gone.
+            self.expand_later
+                .retain(|p| p.parent() != Some(req.path.as_path()));
+        }
+        if let Some(want) = &self.select_later
+            && let Some(&id) = children.iter().find(|&&c| &self.nodes[c].path == want)
+        {
+            self.selected = Some(id);
+            self.select_later = None;
+        }
         let node = &mut self.nodes[req.node];
         node.children = Some(children);
         node.loading = false;
@@ -321,7 +350,6 @@ impl Tree {
         if self.selected.is_some_and(|s| self.node(s).is_none()) {
             self.selected = None;
         }
-        let mut out = Vec::new();
         if again {
             self.request(req.node, &mut out);
         }
@@ -410,6 +438,39 @@ impl Tree {
                 self.request(id, &mut out);
             }
         }
+        out
+    }
+
+    /// Open the folders at `paths` (absolute) once their parents are
+    /// listed, as a restored session asks. A folder that is no longer
+    /// there is never listed, so it is quietly left out.
+    pub fn expand_later(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        self.expand_later
+            .extend(paths.into_iter().filter(|p| p.starts_with(&self.root)));
+    }
+
+    /// Select `path` once a listing shows it, and list its folder again now
+    /// (after our own change to it, so it need not wait for the watcher).
+    pub fn select_when_listed(&mut self, path: &Path) -> Vec<ListRequest> {
+        self.select_later = Some(path.to_path_buf());
+        self.affected_by(path)
+    }
+
+    /// The folders shown open (not the root), and any still waiting to
+    /// open, for saving the session: a sidebar never shown keeps the
+    /// restored folders for next time.
+    #[must_use]
+    pub fn expanded_dirs(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, n)| *i != ROOT && !n.dead && n.is_dir && n.expanded)
+            .map(|(_, n)| n.path.clone())
+            .chain(self.expand_later.iter().cloned())
+            .collect();
+        out.sort();
+        out.dedup();
         out
     }
 
@@ -537,6 +598,39 @@ mod tests {
         // Collapse hides children without forgetting them.
         assert_eq!(t.toggle(src), Vec::new());
         assert_eq!(names(&t), ["src", "new.txt"]);
+    }
+
+    #[test]
+    fn restored_folders_open_as_they_are_listed() {
+        let mut t = Tree::new(PathBuf::from("/p"));
+        t.expand_later([
+            PathBuf::from("/p/src"),
+            PathBuf::from("/p/src/view"),
+            PathBuf::from("/p/gone"),
+            PathBuf::from("/elsewhere"),
+        ]);
+        let mut expanded = t.expanded_dirs();
+        assert_eq!(
+            expanded.len(),
+            3,
+            "kept until listed; outside the root never"
+        );
+        assert!(expanded.contains(&PathBuf::from("/p/gone")));
+        let req = t.start();
+        let req = t.loaded(&req[0], entries(&[("src", true), ("README", false)]));
+        assert_eq!(req.len(), 1, "src opens and is listed");
+        let req = t.loaded(&req[0], entries(&[("view", true), ("lib.rs", false)]));
+        t.loaded(&req[0], entries(&[("draw.rs", false)]));
+        assert_eq!(
+            names(&t),
+            ["src", "  view", "    draw.rs", "  lib.rs", "README"]
+        );
+        expanded = t.expanded_dirs();
+        assert!(expanded.contains(&PathBuf::from("/p/src/view")));
+        assert!(
+            !expanded.contains(&PathBuf::from("/p/gone")),
+            "not in /p: dropped"
+        );
     }
 
     #[test]
