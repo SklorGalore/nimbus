@@ -69,8 +69,10 @@ string = "#98c379"
 "string.special" = "#56b6c2"
 "string.special.key" = "#e06c75"
 tag = "#e06c75"
+"text.emphasis" = { italic = true }
 "text.literal" = "#98c379"
 "text.reference" = "#c678dd"
+"text.strong" = { bold = true }
 "text.title" = "#61afef"
 "text.uri" = "#56b6c2"
 type = "#e5c07b"

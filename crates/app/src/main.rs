@@ -78,7 +78,7 @@ pub struct Options {
     /// Render without a window at this size in physical pixels (with
     /// `--screenshot`), for checks while the screen is locked.
     pub headless: Option<(u32, u32)>,
-    /// With `--headless`: draw an open picker, `palette`, `files` or `line`,
+    /// With `--headless`: draw an open picker, `palette`, `files`, `line` or `symbols`,
     /// optionally with a query after a colon (`files:main`).
     pub picker: Option<String>,
     /// Use this theme instead of the config's.

@@ -127,6 +127,9 @@ pub enum Command<'a> {
     ToggleSidebar,
     /// Ask for a line number and move the cursor there.
     GoToLine,
+    /// Pick a definition in the file (function, type, heading) and move
+    /// the cursor there.
+    GoToSymbol,
     /// Show the sidebar and move the keyboard into it.
     FocusSidebar,
     /// Show or hide `.gitignore`d files in the sidebar.
