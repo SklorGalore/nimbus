@@ -9,6 +9,7 @@ use crate::font::{Font, Metrics};
 use crate::frame::FrameBuilder;
 use crate::pipeline::{Globals, GlyphPipeline, Pipelines, RectPipeline};
 use crate::text::{ColorRun, LineStyle, TextRenderer};
+use crate::ui::UiFont;
 
 /// Columns per tab stop until the app sets one with [`Gpu::set_tab_width`].
 const DEFAULT_TAB_WIDTH: usize = 4;
@@ -38,6 +39,9 @@ pub struct Gpu {
     pipelines: Pipelines,
     atlas: Atlas,
     text: TextRenderer,
+    /// The interface font (M20), when `ui_font` names one and it has
+    /// loaded; `None` draws the interface on the editor's grid.
+    ui_font: Option<crate::Font>,
     frame: FrameBuilder,
     /// Set by [`Gpu::request_capture`]; the next frame is copied back.
     capture_requested: bool,
@@ -458,6 +462,7 @@ impl Gpu {
             pipelines,
             atlas,
             text,
+            ui_font: None,
             frame: FrameBuilder::default(),
             capture_requested: false,
             captured: None,
@@ -649,6 +654,40 @@ impl Gpu {
     #[must_use]
     pub fn metrics(&self) -> Metrics {
         self.text.metrics()
+    }
+
+    /// Draw the interface (sidebar, tabs, status bar, pickers) in `font`,
+    /// a proportional font, or on the editor's grid with `None` (M20).
+    pub fn set_ui_font(&mut self, font: Option<crate::Font>) {
+        self.ui_font = font;
+        self.text.clear_ui_glyphs();
+    }
+
+    /// How interface text is measured at the current size: carry it in a
+    /// layout to measure labels without the GPU.
+    #[must_use]
+    pub fn ui_font(&self) -> UiFont {
+        let editor = self.text.metrics();
+        match self.ui_font {
+            Some(font) => UiFont::new(font, editor),
+            None => UiFont::grid(editor),
+        }
+    }
+
+    /// Queue a line of interface text with its top-left corner at
+    /// `origin`, in the interface font when one is set (M20). Returns the
+    /// x where it ends.
+    pub fn push_ui_text(&mut self, origin: [f32; 2], text: &str, color: [f32; 4]) -> f32 {
+        let ui = self.ui_font();
+        self.text.push_ui_line(
+            &self.queue,
+            &mut self.atlas,
+            &mut self.frame,
+            origin,
+            text,
+            color,
+            &ui,
+        )
     }
 
     /// Copy the next rendered frame back from the GPU; collect it with

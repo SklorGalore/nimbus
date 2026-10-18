@@ -26,6 +26,7 @@ mod languages;
 mod mapping;
 mod menu;
 mod merge_view;
+mod minimap;
 mod picker;
 mod replace_files;
 mod saver;

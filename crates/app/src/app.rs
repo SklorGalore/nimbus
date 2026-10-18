@@ -45,6 +45,7 @@ use crate::keymap::{Chord, Keymap, chord_label};
 use crate::languages::Languages;
 use crate::menu::{self, MenuBar};
 use crate::merge_view::{Inputs, MergeView, Merged, Shape, Take};
+use crate::minimap;
 use crate::picker::{self, EncodingFor, Item, Kind, Picker};
 use crate::replace_files::{self, Replacement};
 use crate::saver::{self, ReplacePolicy, SaveEvent, SaveStep};
@@ -79,6 +80,8 @@ pub enum AppEvent {
     /// The worker looking up the config's `font` finished: the name it
     /// looked for, and the font if found.
     EditorFont(String, Option<nimbus_render::EditorFont>),
+    /// The worker looking up the config's `ui_font` finished (M20).
+    UiFont(String, Option<nimbus_render::EditorFont>),
     /// The picker's matcher has new results.
     PickerChanged,
     /// A menu item was chosen; carries its action id.
@@ -595,6 +598,8 @@ struct Clicks {
     adding: bool,
     /// Dragging the scrollbar's thumb, held this far below its top.
     scrollbar_grab: Option<f32>,
+    /// Dragging the minimap's mark (M20), held this far below its top.
+    minimap_grab: Option<f32>,
     /// A Shift+Alt press started a column selection here: the line's first
     /// byte and the display column.
     column: Option<(usize, usize)>,
@@ -834,6 +839,48 @@ impl App {
         }
     }
 
+    /// Look up the config's `ui_font` on a worker, as the editor font is
+    /// (the system's font list takes tens of milliseconds); an empty name
+    /// goes back to the grid at once.
+    fn load_ui_font(&mut self) {
+        let name = self.config.ui_font.clone();
+        if name.is_empty() {
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.set_ui_font(None);
+            }
+            return;
+        }
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name("nimbus-ui-font".to_owned())
+            .spawn(move || {
+                let found = nimbus_render::find_editor_font(&name);
+                let _ = proxy.send_event(AppEvent::UiFont(name, found));
+            });
+        if let Err(e) = spawned {
+            log::warn!("cannot look up the interface font: {e}");
+        }
+    }
+
+    /// The configured interface font was looked up: draw the chrome with
+    /// it, unless the config changed again meanwhile.
+    fn ui_font_arrived(&mut self, name: &str, found: Option<nimbus_render::EditorFont>) {
+        if name != self.config.ui_font {
+            return;
+        }
+        match (found, self.gpu.as_mut()) {
+            (Some(font), Some(gpu)) => {
+                gpu.set_ui_font(Some(font.regular));
+                self.changed(false);
+            }
+            (None, _) => self.say(
+                format!("Interface font {name:?} not found; using the editor font"),
+                true,
+            ),
+            (Some(_), None) => {}
+        }
+    }
+
     /// The configured font was looked up: draw with it, unless the config
     /// changed again meanwhile.
     fn editor_font_arrived(&mut self, name: &str, found: Option<nimbus_render::EditorFont>) {
@@ -907,14 +954,22 @@ impl App {
     fn group_layout(&self, g: usize) -> Option<Layout> {
         let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
         let scale = to_f32(effective_scale(window.scale_factor()));
-        let lines = self.tab_lines(&self.tabs[self.group_active(g)]);
+        let tab = &self.tabs[self.group_active(g)];
+        let lines = self.tab_lines(tab);
         let full = layout_for_lines(gpu, scale, lines, self.group_find(g))
             .with_sidebar(self.sidebar.px(scale));
-        if self.groups.len() == 1 {
-            return Some(full);
+        let column = if self.groups.len() == 1 {
+            full
+        } else {
+            let &(a, b) = self.groups.columns(full.left, full.width).get(g)?;
+            full.column(a, b)
+        };
+        // The minimap is for one document's text, not a compare's columns.
+        if self.minimap && tab.compare.is_none() && tab.merge.is_none() {
+            let width = to_f32(self.config.minimap_width) * scale;
+            return Some(column.with_minimap(width));
         }
-        let &(a, b) = self.groups.columns(full.left, full.width).get(g)?;
-        Some(full.column(a, b))
+        Some(column)
     }
 
     /// Geometry for the focused group, where the keyboard's edits show.
@@ -3318,6 +3373,9 @@ impl App {
         if old.font != self.config.font {
             self.load_editor_font();
         }
+        if old.ui_font != self.config.ui_font {
+            self.load_ui_font();
+        }
         if warnings.is_empty() {
             self.say("Config reloaded", false);
         } else {
@@ -3923,6 +3981,10 @@ impl App {
             }
             return;
         }
+        if let Some(press) = tab.view.minimap_press(x, y) {
+            self.grab_minimap(press, &layout);
+            return;
+        }
         if let Some(hit) = tab.view.scrollbar_hit(x, y) {
             self.grab_scrollbar(hit, y, &layout);
             return;
@@ -4087,6 +4149,35 @@ impl App {
         };
         self.clicks.scrollbar_grab = Some(grab);
         self.docs[tab.doc].stop_following();
+        self.changed(false);
+    }
+
+    /// A press on the minimap (M20): grab its mark where pressed, or
+    /// centre the line pressed and grab the mark by its middle.
+    fn grab_minimap(&mut self, press: minimap::Press, layout: &Layout) {
+        let tab_width = self.tab_width();
+        let tab = &mut self.tabs[self.active];
+        let doc = &self.docs[tab.doc];
+        let grab = match press {
+            minimap::Press::Slider(offset) => offset,
+            minimap::Press::Line(start) => {
+                tab.view.centre_line(start, doc, layout, tab_width);
+                tab.view.minimap_slider_height() / 2.0
+            }
+        };
+        self.clicks.minimap_grab = Some(grab);
+        self.docs[tab.doc].stop_following();
+        self.changed(false);
+    }
+
+    /// The pointer moved with the minimap's mark grabbed: put its top at
+    /// `y`.
+    fn drag_minimap_to(&mut self, y: f32) {
+        let Some(layout) = self.layout() else { return };
+        let tab_width = self.tab_width();
+        let tab = &mut self.tabs[self.active];
+        tab.view
+            .drag_minimap(y, &self.docs[tab.doc], &layout, tab_width);
         self.changed(false);
     }
 
@@ -5546,7 +5637,9 @@ pub fn layout_for_lines(gpu: &Gpu, scale: f32, lines: usize, find: &FindBar) -> 
         (true, false) => 1,
         (true, true) => 2,
     };
-    Layout::new(gpu.metrics(), w, h, scale, lines).with_chrome(true, bar_rows, true)
+    Layout::new(gpu.metrics(), w, h, scale, lines)
+        .with_chrome(true, bar_rows, true)
+        .with_ui(gpu.ui_font())
 }
 
 /// Everything one frame shows.
@@ -5585,6 +5678,25 @@ fn headless_fonts(gpu: &mut Gpu, config: &Config) {
             Some(f) => gpu.set_font(f),
             None => log::warn!("font {:?} not found; using the bundled font", config.font),
         }
+    }
+    if !config.ui_font.is_empty() {
+        match nimbus_render::find_editor_font(&config.ui_font) {
+            Some(f) => gpu.set_ui_font(Some(f.regular)),
+            None => log::warn!(
+                "interface font {:?} not found; using the editor font",
+                config.ui_font
+            ),
+        }
+    }
+}
+
+/// `layout` with room for the minimap when the config shows one and the
+/// tab is a plain document (`plain`: no compare or merge columns).
+fn headless_minimap(layout: Layout, config: &Config, scale: f64, plain: bool) -> Layout {
+    if config.minimap && plain {
+        layout.with_minimap(to_f32(config.minimap_width * scale))
+    } else {
+        layout
     }
 }
 
@@ -5672,6 +5784,12 @@ pub fn paint_pane(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
         // parsed this frame: its table may be new to the theme, and its
         // spans may be waiting on the next frame's budget.
         scene.theme.resolve_tables();
+        if layout.minimap > 0.0 {
+            let looks = syntax.capture_names().is_some().then_some(&*scene.theme);
+            scene
+                .view
+                .draw_minimap(gpu, scene.doc, layout, (&ui, looks), scene.tab_width);
+        }
         scene.view.draw_scrollbar(gpu, scene.doc, layout, &ui);
     }
     if find.open {
@@ -5747,6 +5865,7 @@ pub fn run_headless(
         doc.canonical.as_deref(),
         options.search.as_deref(),
     );
+    let layout = headless_minimap(layout, config, scale, compare.is_none() && merge.is_none());
     view.ensure_cursor_visible(&doc, &carets, &layout, config.tab_width);
     // One frame only: parse here rather than on a worker.
     doc.syntax.parse_now(&doc.buffer);
@@ -6132,6 +6251,8 @@ impl App {
             self.drag_group_divider(d, to_f32(position.x));
         } else if let Some(grab) = self.clicks.scrollbar_grab {
             self.drag_scrollbar_to(to_f32(position.y) - grab);
+        } else if let Some(grab) = self.clicks.minimap_grab {
+            self.drag_minimap_to(to_f32(position.y) - grab);
         } else if self.sidebar.drag.is_some() {
             let at = (to_f32(position.x), to_f32(position.y));
             let copy = self.modifiers.alt_key();
@@ -6154,6 +6275,7 @@ impl App {
     fn left_released(&mut self) {
         self.clicks.dragging = false;
         self.clicks.scrollbar_grab = None;
+        self.clicks.minimap_grab = None;
         self.groups.dragging = None;
         let dragged = self.sidebar.drag.is_some_and(|d| d.moving);
         if let Some((from, dir)) = self.sidebar.end_drag() {
@@ -6256,6 +6378,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
             AppEvent::FontLoaded => self.changed(false),
             AppEvent::EditorFont(name, found) => self.editor_font_arrived(&name, found),
+            AppEvent::UiFont(name, found) => self.ui_font_arrived(&name, found),
             AppEvent::FindFiles(batch) => {
                 if self.sidebar.search.receive(batch) {
                     self.changed(false);
@@ -6483,6 +6606,9 @@ impl ApplicationHandler<AppEvent> for App {
             // A configured font, looked up once the first frame is up.
             if !self.config.font.is_empty() {
                 self.load_editor_font();
+            }
+            if !self.config.ui_font.is_empty() {
+                self.load_ui_font();
             }
             // The startup update check, when the config asks for it: once,
             // after the first frame like the watches, and not in unattended

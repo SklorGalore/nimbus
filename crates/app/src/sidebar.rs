@@ -287,16 +287,10 @@ impl Sidebar {
         if y >= Self::header_h(layout) {
             return None;
         }
-        let cell = layout.metrics.cell_width;
-        let files = layout.margin..layout.margin + 5.0 * cell;
-        let search = files.end + cell..files.end + 7.0 * cell;
-        if files.contains(&x) {
-            Some(Mode::Files)
-        } else if search.contains(&x) {
-            Some(Mode::Search)
-        } else {
-            None
-        }
+        header_tabs(layout)
+            .into_iter()
+            .find(|&(_, _, x0, x1)| x >= x0 && x < x1)
+            .map(|(mode, ..)| mode)
     }
 
     /// A click at physical `(x, y)`: in the header, switch mode; in the
@@ -527,15 +521,14 @@ pub fn draw(
     let y = ((header - lh) / 2.0).round();
     let accent = (2.0 * layout.scale).round().max(1.0);
     let mut x = pad;
-    for (mode, label) in [(Mode::Files, "Files"), (Mode::Search, "Search")] {
+    for (mode, label, x0, x1) in header_tabs(layout) {
         let on = sidebar.mode == mode;
         let color = if on { ui.text } else { ui.gutter };
-        gpu.push_text_line([x, y], label, color);
-        let cols = cols(label.len());
+        gpu.push_ui_text([x0, y], label, color);
         if on {
-            gpu.push_rect([x, header - accent], [cols * cell, accent], ui.tab_accent);
+            gpu.push_rect([x0, header - accent], [x1 - x0, accent], ui.tab_accent);
         }
-        x += (cols + 1.0) * cell;
+        x = x1 + cell;
     }
     // The project's name sits against the right edge, apart from the
     // tabs, so it does not read as a third one; a name that would run
@@ -550,10 +543,10 @@ pub fn draw(
             .node(crate::tree::ROOT)
             .map_or("", |n| n.name.as_str()),
     };
-    let title_w = cols(title.chars().count()) * cell;
-    let title_x = w - pad - title_w;
+    let title_w = layout.ui.width(title);
+    let title_x = (w - pad - title_w).round();
     if !title.is_empty() && title_x >= x + cell {
-        gpu.push_text_line([title_x, y], title, ui.gutter);
+        gpu.push_ui_text([title_x, y], title, ui.gutter);
     }
 
     if sidebar.mode == Mode::Search {
@@ -569,6 +562,24 @@ pub fn draw(
     let line = layout.scale.round().max(1.0);
     gpu.push_rect([w - line, 0.0], [line, bottom], ui.picker_border);
     gpu.begin_layer(None);
+}
+
+/// The header's two mode tabs: each mode, its label and its extent
+/// `[x0, x1)`, measured in the interface font.
+fn header_tabs(layout: &Layout) -> [(Mode, &'static str, f32, f32); 2] {
+    let cell = layout.metrics.cell_width;
+    let files = layout.margin;
+    let files_end = files + layout.ui.width("Files");
+    let search = (files_end + cell).round();
+    [
+        (Mode::Files, "Files", files, files_end),
+        (
+            Mode::Search,
+            "Search",
+            search,
+            search + layout.ui.width("Search"),
+        ),
+    ]
 }
 
 /// The tree's rows below the header, with the name field when one is open:
@@ -634,7 +645,7 @@ fn draw_tree(
         // The row being dragged reads as lifted out: dimmed.
         let dragged = drag.is_some_and(|d| d.node == row.node);
         let color = if dragged { ui.gutter } else { ui.text };
-        gpu.push_text_span([x + 2.0 * cell, y], &node.name, 0, color, 0.0);
+        gpu.push_ui_text([x + 2.0 * cell, y], &node.name, color);
         y += lh;
         if let Some(e) = edit.filter(|_| new_after == Some(Some(row.node))) {
             draw_edit_row(gpu, ui, layout, e, (y, row.depth + 1), new_mark, cursor);

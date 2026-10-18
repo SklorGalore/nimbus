@@ -944,7 +944,7 @@ pub fn draw(gpu: &mut Gpu, ui: &Ui, layout: &Layout, panel: &Panel, focused: boo
     } else {
         ui.gutter
     };
-    gpu.push_text_line([geo.left, geo.count], &status, color);
+    gpu.push_ui_text([geo.left, geo.count], &status, color);
     if !panel.rows.is_empty() {
         draw_list(gpu, ui, layout, panel, &geo, focused);
     }
@@ -984,7 +984,7 @@ fn draw_tooltip(
         left += (toggle_cols(label) + TOGGLE_GAP) * cell;
     }
     let pad = cell / 2.0;
-    let width = f(text.chars().count()) * cell + 2.0 * pad;
+    let width = (layout.ui.width(&text) + 2.0 * pad).round();
     let left = left.min(layout.left - width - layout.margin).max(0.0);
     let top = geo.toggles + lh + layout.margin / 2.0;
     let border = layout.scale.round().max(1.0);
@@ -995,7 +995,7 @@ fn draw_tooltip(
         [width - 2.0 * border, lh],
         ui.picker,
     );
-    gpu.push_text_line([left + pad, top + border], &text, ui.text);
+    gpu.push_ui_text([left + pad, top + border], &text, ui.text);
 }
 
 /// The four fields, with placeholders while empty and unfocused.
@@ -1130,9 +1130,8 @@ fn draw_list(
                     continue;
                 };
                 let name = format!("\u{2605} {}", saved.name);
-                gpu.push_text_line([geo.left, y], &name, ui.search_file);
-                let x = geo.left + f(name.chars().count() + 2) * cell;
-                gpu.push_text_span([x, y], &saved.pattern, 0, ui.gutter, 0.0);
+                let x = gpu.push_ui_text([geo.left, y], &name, ui.search_file) + 2.0 * cell;
+                gpu.push_text_span([x.round(), y], &saved.pattern, 0, ui.gutter, 0.0);
             }
             Row::File(i) => {
                 let Some(file) = results.files.get(i) else {
@@ -1152,15 +1151,12 @@ fn draw_list(
                 }
                 let dot = if file.dirty { " ●" } else { "" };
                 let text = format!("{}{dot}", file.rel);
-                gpu.push_text_line([geo.left + indent, y], &text, ui.search_file);
+                gpu.push_ui_text([geo.left + indent, y], &text, ui.search_file);
                 let count = file.hits.len().to_string();
-                let cx = width - layout.margin - f(count.len()) * cell;
-                gpu.push_rect(
-                    [cx - cell / 2.0, y],
-                    [f(count.len() + 1) * cell, lh],
-                    ui.tab_bar,
-                );
-                gpu.push_text_line([cx, y], &count, ui.gutter);
+                let count_w = layout.ui.width(&count);
+                let cx = (width - layout.margin - count_w).round();
+                gpu.push_rect([cx - cell / 2.0, y], [count_w + cell, lh], ui.tab_bar);
+                gpu.push_ui_text([cx, y], &count, ui.gutter);
             }
             Row::Hit(i, j) => {
                 let Some(hit) = results.files.get(i).and_then(|f| f.hits.get(j)) else {
