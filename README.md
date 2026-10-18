@@ -42,6 +42,9 @@ shortcuts, and the mouse works the way you expect. It is aimed at source
 code first, then prose and notes in Markdown, then config and data files
 and logs.
 
+The [user manual](docs/manual/README.md) covers everything from opening
+your first file to themes, languages and key bindings.
+
 Nimbus is a personal tool that is being built in the open, one milestone
 at a time. It is usable every day, but it is still pre-1.0: expect rough
 edges, and see the [roadmap](#roadmap) for what is coming.
@@ -98,43 +101,31 @@ edges, and see the [roadmap](#roadmap) for what is coming.
 ## Installation
 
 Packages for macOS, Linux and Windows are attached to each
-[release](https://github.com/SklorGalore/nimbus/releases). None is
-signed (that needs paid developer accounts), so macOS and Windows warn
-the first time; the steps below get past the warning once.
+[release](https://github.com/SklorGalore/nimbus/releases):
 
-### macOS
+| System | Package |
+|---|---|
+| macOS | `.dmg` (drag `Nimbus.app` to Applications), `.zip`, or the Homebrew cask `nimbus.rb` |
+| Windows | `nimbus-VERSION-windows-x86_64-setup.exe`, the bare `nimbus.exe` in a `.zip`, or the winget manifest |
+| Linux | `.deb` for Debian and Ubuntu, an `.AppImage`, or a tarball with the bare binary |
 
-Open the `.dmg` and drag `Nimbus.app` to Applications (or unzip the
-`.zip`). The first time, open it with right-click > Open, or run:
+None is signed (that needs paid developer accounts), so macOS and Windows
+warn the first time you open Nimbus. The
+[installation guide](docs/manual/getting-started.md#installing) walks
+through each package and how to get past that warning once.
 
-```sh
-xattr -d com.apple.quarantine /Applications/Nimbus.app
-```
-
-With Homebrew, each release carries a cask file, `nimbus.rb`, and
-`brew install --cask --no-quarantine ./nimbus.rb` skips the warning.
-
-### Windows
-
-Run `nimbus-VERSION-windows-x86_64-setup.exe`. SmartScreen says "Windows
-protected your PC": click "More info", then "Run anyway". The installer
-adds a Start Menu entry and "Open with Nimbus" to the right-click menu,
-and uninstalls from Settings. The `.zip` is the bare `nimbus.exe` for no
-installer. Each release also carries a winget manifest
-(`winget-manifest.zip`) for `winget install --manifest DIR`.
-
-### Linux
-
-On Debian and Ubuntu:
+To run `nimbus` from a terminal: on macOS the binary is
+`/Applications/Nimbus.app/Contents/MacOS/nimbus`, so link it into a
+folder on your `PATH`:
 
 ```sh
-sudo apt install ./nimbus_VERSION_amd64.deb
+ln -s /Applications/Nimbus.app/Contents/MacOS/nimbus /usr/local/bin/nimbus
 ```
 
-Or make the `.AppImage` executable and run it (it needs FUSE, which most
-desktops have). The tarball is the bare binary: put `nimbus` on your
-`PATH`, and copy `nimbus.desktop` to `~/.local/share/applications` and
-`nimbus.png` to `~/.local/share/icons` for a menu entry.
+The Windows installer does not add `nimbus.exe` to your `PATH`; add its
+install folder yourself if you want it there. On Linux the `.deb` puts
+`nimbus` in `/usr/bin`; with the AppImage or tarball, put it on your
+`PATH` yourself.
 
 ### Checking a download
 
@@ -164,11 +155,10 @@ the one that was signed.
 
 ### Updates
 
-"Check for Updates" in the command palette asks GitHub whether a newer
-release exists, and "Open Latest Release Page" opens it. Nothing is
-downloaded or installed by the editor. Set `check_updates = true` in
-`config.toml` to run the check once at each start; it is off by default,
-so Nimbus never contacts the network unless you ask it to.
+Nimbus never contacts the network unless you ask it to. "Check for
+Updates" in the command palette asks GitHub whether a newer release
+exists; see [checking for updates](docs/manual/troubleshooting.md#checking-for-updates)
+for the startup option.
 
 ## Usage
 
@@ -237,9 +227,9 @@ soft_wrap = true
 theme = "light"
 ```
 
-[`docs/customizing.md`](docs/customizing.md) covers every setting,
-writing your own theme, adding a language, indentation rules, key
-bindings and changing a language's highlighting.
+The [user manual](docs/manual/README.md) covers every setting, writing
+your own theme, adding a language, indentation rules, key bindings and
+changing a language's highlighting.
 
 ## Building from source
 
