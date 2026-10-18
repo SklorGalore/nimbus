@@ -1,6 +1,6 @@
 # M19 — Workspace and search, second pass
 
-**Status: in progress, built 2026-10-18; waiting on the owner's Mac checks.** Written on 2026-10-18 from what M10 and M12
+**Status: done, 2026-10-18. The owner checked it on their Mac.** Written on 2026-10-18 from what M10 and M12
 deferred: drag and drop in the tree, multiple roots, named workspaces;
 searching outside the root, saved searches and history, multi-line
 patterns. Scheduled after M12 has been used for a while, so the tree
@@ -123,11 +123,10 @@ is cheaper and bounds memory tighter.
 
 ## Results
 
-Built on 2026-10-18 in a Linux container with no GPU, so nothing here was
-seen on screen: the drawing of extra roots, drag targets, saved-search
-rows and line spans waits on the owner's Mac. The `--smoke` first-frame
-times and the release binary size are left for that run too (CI's
-`release-size` job checks the 35 MB budget on all three systems).
+Built on 2026-10-18 in a Linux container with no GPU; the owner then
+checked the drawing and behaviour on their Mac the same day. The
+`--smoke` first-frame times were not recorded. CI's `release-size` job
+passed the 35 MB budget on all three systems.
 
 | Metric | Value |
 |---|---|
