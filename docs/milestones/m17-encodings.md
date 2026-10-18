@@ -1,11 +1,12 @@
 # M17 — Encodings and line endings
 
-**Status: proposed.** Written on 2026-10-18. Config and data files are
+**Status: planned, after M16.** Written on 2026-10-18. Config and data files are
 the third content type `DESIGN.md` §1 names, and logs, CSV exports and
 Windows-born text files are often not UTF-8. Today such a file opens
 through M7's byte path with every non-UTF-8 byte shown as `�` (SUB
 substitution), which is right for a binary file and wrong for a Latin-1
-or UTF-16 one.
+or UTF-16 one. Approved the same day: the Western set only, with the
+East Asian tables behind a cargo feature that is off (`DESIGN.md` §9).
 
 ## Goal
 

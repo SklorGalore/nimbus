@@ -1,15 +1,18 @@
 # M18 — Compare, second pass
 
-**Status: proposed.** Written on 2026-10-18 from the three items M9
-deferred: diff options (ignore whitespace and case), folder compare and
-long-line splitting. Each builds on machinery that exists: the interner,
-M10's walker and the compare view.
+**Status: planned, after M17.** Written on 2026-10-18 from the three
+items M9 deferred: diff options (ignore whitespace and case), folder
+compare and long-line splitting. Each builds on machinery that exists:
+the interner, M10's walker and the compare view. Approved the same day
+with one addition the owner chose: "Compare with HEAD", which runs git
+as a subprocess, the one exception to the git non-goal in `DESIGN.md`
+§2 (§9).
 
 ## Goal
 
 Make the compare view answer the questions M9 left: what changed apart
-from whitespace, what changed across two folders, and what changed in a
-file that is one long line.
+from whitespace, what changed across two folders, what changed in a
+file that is one long line, and what changed since the last commit.
 
 ## Done when
 
@@ -31,6 +34,13 @@ file that is one long line.
       changes. The view shows a split line's pieces as rows of their own
       with a continuation mark in the gutter; the pieces are never
       written back split.
+- [ ] **Compare with HEAD** (`diff.compareHead`): for a file inside a git
+      repository, runs `git show HEAD:PATH` as a subprocess on a worker
+      and opens the result against the tab in the compare view; "Compare
+      with Revision…" asks for a revision or ref instead. No git library
+      is linked; a missing `git` or a file outside a repository gives a
+      message, never an error dialog. Nimbus never runs git for anything
+      else (no status colours, no commits).
 - [ ] Budgets: toggling an option on the 10 MB bench pair re-diffs within
       M9's time; a 50 MB one-line file diffs against an edited copy in
       under two seconds and the view scrolls at frame rate.
@@ -39,11 +49,11 @@ file that is one long line.
 
 **In**: the three options, folder compare with its sidebar mode and
 command-line form, long-line splitting in the diff and the compare
-view.
+view, Compare with HEAD and with a named revision.
 
-**Deferred**: comparing against git revisions from inside the editor
-(git integration is a non-goal in `DESIGN.md` §2; `--diff` already lets
-git drive Nimbus); three-way folder merge; splitting in the merge views
+**Deferred**: any further git integration (status in the tree, blame,
+commits: still a non-goal in `DESIGN.md` §2, which now carries the one
+exception); three-way folder merge; splitting in the merge views
 (a merge result must stay byte-exact, so pieces would need re-joining
 on every edit).
 
@@ -71,6 +81,14 @@ over them; the view maps a piece back to its byte range in the line and
 draws it as a row flagged `continued`. Cursor movement and editing are
 unchanged because the buffer never sees the split.
 
+**Compare with HEAD is a subprocess, not a library.** `git` is run with
+`std::process::Command` on the saver's worker, with the repository root
+found by walking up from the file (no `.git` parsing: `git rev-parse
+--show-toplevel` answers it), a 10 s timeout and a 256 MB output cap, the
+same limit as a full diff. The output becomes a read-only `Document`
+named `PATH @ HEAD` and the pair opens in M9's compare view. The revision
+picker takes any ref and shows git's error text in the message line.
+
 ## Tasks
 
 1. Interner normalisation flags; tests that the option diffs equal the
@@ -84,7 +102,10 @@ unchanged because the buffer never sees the split.
    an insertion moves at most two cut points.
 6. Continuation rows in the compare view and the gutter mark; the
    prefix-sum alignment counts pieces.
-7. Benchmarks (`compare_bench` with each option and with the one-line
+7. `git show` subprocess with timeout and cap; `diff.compareHead` and
+   "Compare with Revision…"; the repository-root lookup; tests with a
+   temporary repository.
+8. Benchmarks (`compare_bench` with each option and with the one-line
    file); Results.
 
 ## Concepts
@@ -102,6 +123,7 @@ unchanged because the buffer never sees the split.
 |---|---|
 | Normalised hashes collide more (many lines become equal) | The byte verification already guards tokens; Myers handles repeated tokens |
 | Folder compare of a large tree reads every same-size file | Compare mtime and size first and show "probably same"; content on demand |
+| `git` hangs (a credential prompt, a slow filesystem) | The 10 s timeout kills it and the message line says so; `GIT_TERMINAL_PROMPT=0` is set |
 | Rows for pieces confuse line numbers | The gutter shows the line number on the first piece only and a `⤶` on the rest |
 
 ## Results

@@ -1,10 +1,12 @@
 # M16 — Rendering, second pass
 
-**Status: proposed.** Written on 2026-10-18 from the rendering items the
+**Status: planned, after M15.** Written on 2026-10-18 from the rendering items the
 backlog kept unscheduled since M8 (colour emoji, ligatures, scrollbar
 fade, the linear-blending experiment) plus the two things a user of a
 GPU editor asks for first: changing the font size without editing the
-config, and seeing whitespace and indentation.
+config, and seeing whitespace and indentation. Approved the same day:
+the zoom is remembered across sessions unless `remember_zoom = false`
+(`DESIGN.md` §9).
 
 ## Goal
 
@@ -30,7 +32,9 @@ still drawn on demand and within the typing budget.
       "Reset Zoom" (`Primary+0`) change the editor font size for the
       session in 1 pt steps between 6 and 72; the atlas is refilled once
       per step and the view keeps its first visible line. The zoom is
-      remembered in `state.toml`, never written to `config.toml`.
+      remembered in `state.toml`, never written to `config.toml`;
+      `remember_zoom = false` in the config makes every start use
+      `font_size` instead.
 - [ ] **Whitespace and guides**: `render_whitespace = "selection" |
       "all" | "none"` draws `·` for spaces and `→` for tabs in a muted
       theme colour (default `selection`, like VS Code); `indent_guides =
@@ -103,7 +107,8 @@ lines (over 64 KB) only the visible window is examined, as M7 requires.
 3. Ligature shaping behind the setting, cell-span glyphs, reshape on
    cursor-inside; property test that column math gives the same answers
    with ligatures on and off.
-4. Zoom actions, `state.toml` entry, atlas refill, anchor kept; measure
+4. Zoom actions, `state.toml` entry, the `remember_zoom` setting, atlas
+   refill, anchor kept; measure
    the refill time at 14 and 24 pt.
 5. Whitespace rendering with the three modes and the theme colour
    `ui.whitespace`; palette toggle.

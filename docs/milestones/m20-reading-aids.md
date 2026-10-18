@@ -1,9 +1,11 @@
 # M20 — Reading aids
 
-**Status: proposed.** Written on 2026-10-18 from what M13 and M14
+**Status: planned, after M19.** Written on 2026-10-18 from what M13 and M14
 deferred for the editor's second use, reading rather than typing: sticky
 scroll, a minimap, Markdown preview, and proportional fonts in UI chrome
-(which `DESIGN.md` §2 allows "later" and the preview needs).
+(which `DESIGN.md` §2 allows "later" and the preview needs). Approved
+the same day with the minimap included, windowed and off by default
+(`DESIGN.md` §9).
 
 ## Goal
 

@@ -1,14 +1,16 @@
 # M21 — Foundations and 1.0
 
-**Status: proposed.** Written on 2026-10-18. The last milestone of the
-set: bring the pinned dependencies forward, add the testing that a 1.0
-promise needs, decide on accessibility, and ship 1.0.
+**Status: planned, after M20.** Written on 2026-10-18. The last milestone
+of the set: bring the pinned dependencies forward, add the testing that
+a 1.0 promise needs, and ship 1.0. Approved the same day: screen-reader
+support (AccessKit) waits until after 1.0, and a panic writes a one-line
+`crash.log` with no user text (`DESIGN.md` §9).
 
 ## Goal
 
 Call Nimbus 1.0: current dependencies, a fuzzed and soak-tested editing
-path, a screen reader that can read the editor, and a release the owner
-would hand to someone else.
+path, a record of why it crashed if it ever does, and a release the
+owner would hand to someone else.
 
 ## Done when
 
@@ -25,10 +27,6 @@ would hand to someone else.
 - [ ] **Soak**: `--bench-typing` extended to a 100,000-keystroke session
       with saves, undo and find on the 100 MB file, memory sampled every
       1,000 keystrokes; growth under 10 MB over the run.
-- [ ] **Accessibility**: `accesskit` through winit exposes the window,
-      the editor's text and the cursor position to VoiceOver, NVDA and
-      Orca; the palette and pickers are lists a screen reader can walk.
-      Measured against the binary budget and `--smoke`.
 - [ ] **Crash record**: a panic (release builds abort) writes a one-line
       record with the version and the panic message to `crash.log` in the
       state directory before aborting, and the next start says it is
@@ -40,11 +38,12 @@ would hand to someone else.
 
 ## Scope
 
-**In**: the two upgrades, fuzzing and soak in CI, AccessKit, the crash
-record, the 1.0 release.
+**In**: the two upgrades, fuzzing and soak in CI, the crash record, the
+1.0 release.
 
-**Deferred**: semantic accessibility beyond text and lists (roles for
-every chrome element); crash upload; a plugin or scripting layer (still
+**Deferred**: screen-reader support through AccessKit (the owner chose
+to ship 1.0 without it; it is the first item after 1.0 in
+`backlog.md`); crash upload; a plugin or scripting layer (still
 a non-goal, §2).
 
 ## Design
@@ -65,11 +64,6 @@ arbitrary input instead of `proptest` strategies. The targets live in
 `fuzz/` at the workspace root (cargo-fuzz's layout) and are excluded
 from the normal build.
 
-**AccessKit is a tree we already have.** winit integrates `accesskit`
-through its platform adapters; the app publishes a node for the editor
-with the visible text and the caret, and list nodes for the palette and
-pickers, updated on the same redraw path (on demand, never a loop).
-
 **The crash record uses a panic hook** set in `main` that writes the
 message and version with `std::fs` (no allocation beyond the message)
 and then lets the abort proceed.
@@ -81,10 +75,8 @@ and then lets the abort proceed.
 2. winit upgrade; wgpu upgrade; `CLAUDE.md` gotchas updated; `--smoke`.
 3. Fuzz targets and the weekly CI job; first findings as tests.
 4. Soak run in `--bench-typing`; memory sampling; the growth check.
-5. AccessKit nodes for the editor, palette and pickers; tested with
-   VoiceOver by the owner and NVDA on Windows by hand.
-6. Panic hook and `crash.log`; the next-start message.
-7. `CHANGELOG.md`, version 1.0.0, release; Results.
+5. Panic hook and `crash.log`; the next-start message.
+6. `CHANGELOG.md`, version 1.0.0, release; Results.
 
 ## Concepts
 
@@ -92,15 +84,15 @@ and then lets the abort proceed.
   risk despite touching the lowest layer.
 - **Fuzzing versus property testing**: same idea, different source of
   inputs, different time budget.
-- **Accessibility trees**: what a screen reader asks the window for and
-  how a GPU-drawn app answers.
+- **A panic hook**: the one piece of code that runs between a panic and
+  the abort, and why it must not allocate much or touch the buffers.
 
 ## Risks
 
 | Risk | Fallback |
 |---|---|
 | winit 0.31 is still beta | Stay on 0.30; record it and move the task to a later point release |
-| AccessKit adds measurable startup time | Create the adapter lazily on the first accessibility request, which the platforms allow |
+| The panic hook itself fails (disk full, no state directory) | It ignores its own errors; the abort proceeds either way |
 | The fuzzers find more than one milestone can fix | Each finding is a test and a fix on its own commit; 1.0 waits for the buffer and save targets only |
 
 ## Results

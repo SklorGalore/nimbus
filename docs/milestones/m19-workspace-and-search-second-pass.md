@@ -1,10 +1,12 @@
 # M19 — Workspace and search, second pass
 
-**Status: proposed.** Written on 2026-10-18 from what M10 and M12
+**Status: planned, after M18.** Written on 2026-10-18 from what M10 and M12
 deferred: drag and drop in the tree, multiple roots, named workspaces;
 searching outside the root, saved searches and history, multi-line
 patterns. Scheduled after M12 has been used for a while, so the tree
-and session code it extends are settled.
+and session code it extends are settled. Approved the same day:
+workspace files live in the config directory, and also inside a root as
+`.nimbus/workspace.toml` when the user asks (`DESIGN.md` §9).
 
 ## Goal
 
@@ -22,8 +24,13 @@ needs.
 - [ ] **Named workspaces**: "Save Workspace As…" writes a `NAME.toml`
       under `workspaces/` in the config directory listing roots and the
       session; "Open Workspace…" lists them; `nimbus --workspace NAME`
-      opens one. The automatic per-root session from M12 is unchanged
-      for folders opened directly.
+      opens one. "Save Workspace Here" writes `.nimbus/workspace.toml` in
+      the first root instead, so the workspace travels with the
+      repository; opening a folder that holds one offers to load it.
+      Only that file is ever written inside a project, only on that
+      action, and `.nimbus/` is suggested for `.gitignore` in the docs.
+      The automatic per-root session from M12 is unchanged for folders
+      opened directly.
 - [ ] **Drag and drop**: dragging a file or folder in the tree moves it
       (copies with `Alt`), with the same conflict prompt as Rename; open
       tabs follow the moved file; a drop from the desktop onto the
@@ -63,9 +70,10 @@ walker per root on the shared pool. Path display is relative to the
 nearest root, prefixed with the root's folder name when more than one
 is open.
 
-**A workspace file is small**: roots, the saved-session fields from M12,
-and nothing else. It lives in the config directory so Nimbus never
-writes into the user's project folders.
+**A workspace file is small**: roots (relative to the file when it is
+project-local), the saved-session fields from M12, and nothing else. It
+lives in the config directory by default; the project-local form is the
+one place Nimbus writes inside a user's folder, and only when asked.
 
 **Drag and drop reuses the tree's rename machinery.** A drag is a tree
 selection plus a target folder; the drop issues the same rename-with-path
@@ -85,7 +93,8 @@ is cheaper and bounds memory tighter.
    prefixes; `nimbus DIR1 DIR2`.
 2. Opener and find in files over every root; tests with two temporary
    roots.
-3. Workspace files: save, open, `--workspace`; `customizing.md`.
+3. Workspace files: save, open, `--workspace`; "Save Workspace Here"
+   and the offer on opening a folder that has one; `customizing.md`.
 4. Tree drag and drop with the conflict prompt and the watcher pause;
    desktop drops.
 5. "Undo Move" for the session.
