@@ -38,18 +38,18 @@ alternative of encodings first declined.
 | 20 | [Reading aids](m20-reading-aids.md) | Sticky scroll, a windowed minimap, a proportional UI font, Markdown preview | What M13 and M14 deferred; needs M13's splits and M14's fold regions |
 | 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | Ropey 2, winit and wgpu upgrades, fuzzing and soak in CI, a crash record, 1.0.0 | Last, so 1.0 packages everything above |
 
-## Order, M22–M25 (after 1.0)
+## Order, M22–M24 (after 1.0)
 
 Drafted on 2026-10-18, after 1.0, from what M21 and the earlier plans
 deferred and the unscheduled list below; approved the same day in this
-order, with spell checking dropped from M24 (`DESIGN.md` §9).
+order. A fourth draft, Writing prose (spell checking, a word count,
+preview images, HTML export), was dropped whole (`DESIGN.md` §9).
 
 | # | Plan | One line | Why here |
 |---|---|---|---|
 | 22 | [Screen readers](m22-screen-readers.md) | An AccessKit tree for the editor and chrome, built only when a screen reader asks | The owner named it the first milestone after 1.0; `accesskit_winit` 0.34 works on winit 0.30, so it need not wait |
 | 23 | [Library upgrades](m23-library-upgrades.md) | Ropey 2, winit 0.31, current wgpu; Finder "Open With" and the emoji picker | Waits on stable releases; goes whenever they arrive, ahead of whatever is next |
-| 24 | [Writing prose](m24-writing-prose.md) | Word count, preview images, HTML export | Prose is the second kind of content in §1; finishes what M14 and M20 deferred |
-| 25 | [International text](m25-international-text.md) | Fallback fonts per script and language, variable fonts, tested East Asian encodings behind their feature, editable mapped files in single-byte encodings | What M16 and M17 deferred; the riskiest piece (the piece table) last |
+| 24 | [International text](m24-international-text.md) | Fallback fonts per script and language, variable fonts, tested East Asian encodings behind their feature, editable mapped files in single-byte encodings | What M16 and M17 deferred; the riskiest piece (the piece table) last |
 
 ## Where each deferred item went
 
@@ -83,10 +83,9 @@ order, with spell checking dropped from M24 (`DESIGN.md` §9).
 | winit 0.31, Finder "Open With", macOS emoji picker | M21 | M23 (Open With only if winit passes the files on) |
 | Screen-reader support (AccessKit) | M21 | M22 |
 | Hot keys the desktop grabs on Linux (a manual note) | Unscheduled | M22 |
-| Spell checking in prose | M14 | Declined for M24 (owner, 2026-10-18); below |
-| Images in the Markdown preview, export to HTML | M20 | M24 (local PNG and JPEG; no web images) |
-| Font fallback per script, variable fonts | M16 | M25 |
-| East Asian encodings, transcoding mapped files | M17 | M25 (encodings tested but still behind `east-asian`; mapped files: single-byte encodings only) |
+| Spell checking, images in the Markdown preview, export to HTML | M14, M20 | Declined (owner, 2026-10-18); below |
+| Font fallback per script, variable fonts | M16 | M24 |
+| East Asian encodings, transcoding mapped files | M17 | M24 (encodings tested but still behind `east-asian`; mapped files: single-byte encodings only) |
 
 ## Unscheduled
 
@@ -94,7 +93,7 @@ Small or speculative items, kept so they are not forgotten. Each could
 join a milestone above as a stretch task or make a short milestone of
 its own later.
 
-Items scheduled on 2026-10-18 moved to the M16–M21 and M22–M25 tables above; what is
+Items scheduled on 2026-10-18 moved to the M16–M21 and M22–M24 tables above; what is
 left is small or still speculative.
 
 - **Autosave of unsaved work** for crash recovery: the owner decided
@@ -103,10 +102,10 @@ left is small or still speculative.
 - **Subpixel (LCD) antialiasing** (M16 deferred): macOS no longer
   draws it and a composited surface cannot use it; kept here in case a
   Windows or Linux user asks.
-- **Spell checking**: the owner chose to leave it out of M24
-  (2026-10-18).
-- **Web images in the preview, PDF export** (M24 deferred).
-- **Vertical text, editable mapped files in multi-byte encodings** (M25
+- **Spell checking, a word count, images in the Markdown preview,
+  exporting it to HTML or PDF**: drafted as M24 (Writing prose) and
+  dropped by the owner on 2026-10-18 as not worth it.
+- **Vertical text, editable mapped files in multi-byte encodings** (M24
   deferred).
 
 ## Still non-goals

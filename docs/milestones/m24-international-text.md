@@ -1,4 +1,4 @@
-# M25 — International text
+# M24 — International text
 
 **Status: planned (2026-10-18).** Written on 2026-10-18 from what M16 and
 M17 deferred for text that is not Latin: font fallback per script
