@@ -54,6 +54,12 @@ impl FrameBuilder {
         self.clip = clip;
     }
 
+    /// The current layer's clip, as given to [`FrameBuilder::begin_layer`].
+    #[must_use]
+    pub fn clip(&self) -> Option<[u32; 4]> {
+        self.clip
+    }
+
     fn close_layer(&mut self) {
         let start = self
             .layers
@@ -172,5 +178,15 @@ mod tests {
             spans,
             vec![(None, 0..1), (Some([0, 10, 100, 50]), 1..3), (None, 3..4)]
         );
+    }
+
+    #[test]
+    fn clip_reports_the_current_layer() {
+        let mut f = FrameBuilder::default();
+        assert_eq!(f.clip(), None);
+        f.begin_layer(Some([1, 2, 3, 4]));
+        assert_eq!(f.clip(), Some([1, 2, 3, 4]));
+        f.clear();
+        assert_eq!(f.clip(), None);
     }
 }

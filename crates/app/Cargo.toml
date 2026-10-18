@@ -15,7 +15,7 @@ log = "0.4.34"
 memchr = "2.8.3"
 memmap2 = "0.9"
 nimbus-core = { version = "0.7.1", path = "../core" }
-nimbus-render = { version = "0.2.1", path = "../render" }
+nimbus-render = { version = "0.2.2", path = "../render" }
 nimbus-syntax = { version = "0.2.2", path = "../syntax" }
 notify = "8.2.0"
 nucleo = "0.5"
