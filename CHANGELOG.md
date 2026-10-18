@@ -24,7 +24,7 @@ aids all land here, along with the testing that a 1.0 promise needs.
   the config and theme parsers against their oracles, an hour per
   target every week in CI.
 - `--soak`, with `--bench-typing`: 100,000 keystrokes with undo, find
-  and saves on the 100 MB file, failing if memory grows over 10 MB
+  and saves on the 100 MB file, failing if memory grows over 20 MB
   (`bench/soak.sh`).
 
 - Reading aids: sticky scroll pins the function, impl, class or Markdown

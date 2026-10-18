@@ -86,6 +86,11 @@ left is small or still speculative.
   to release on ropey 1.6 and winit 0.30. Each moves to a 1.x point
   release once stable, measured as M21's plan describes (one commit
   each, `--smoke`, typing benchmark and binary size before and after).
+- **Compact typing in the undo history** (M21 soak): each typed
+  character is its own `Edit` inside an undo group, about 100 bytes, so
+  100,000 keystrokes keep about 10 MB. Merging a contiguous typing run
+  into one edit would cut that to the text itself; `undo_oracle.rs`
+  covers coalescing.
 - **Finder "Open With"** (M21 deferred): the bundle can declare document
   types, but receiving the files needs the macOS app delegate's
   open-files message, which winit 0.30 does not pass on; new `unsafe`

@@ -1,6 +1,6 @@
 # M21 — Foundations and 1.0
 
-**Status: in review (2026-10-18).** Started the day M20 landed. The
+**Status: done (2026-10-18).** Started the day M20 landed. The
 owner chose to ship 1.0 on ropey 1.6 and winit 0.30, since both upgrades
 were still betas; they move to a point release (`backlog.md`). Written on 2026-10-18. The last milestone
 of the set: bring the pinned dependencies forward, add the testing that
@@ -27,7 +27,7 @@ owner would hand to someone else.
       scripts against the `String` oracle), the diff, the search chunker
       and the config and theme parsers, run for an hour each in a weekly
       CI job; any crash found is a regression test.
-- [ ] **Soak** *(built: `bench/soak.sh`; the owner's Mac run is pending)*: `--bench-typing` extended to a 100,000-keystroke session
+- [x] **Soak** *(14.2 MB over 100,000 keystrokes on the owner's Mac, about 10 MB of it the undo history; the owner accepted it and the check's budget is now 20 MB, see Results)*: `--bench-typing` extended to a 100,000-keystroke session
       with saves, undo and find on the 100 MB file, memory sampled every
       1,000 keystrokes; growth under 10 MB over the run.
 - [x] **Crash record**: a panic (release builds abort) writes a one-line
@@ -35,7 +35,7 @@ owner would hand to someone else.
       state directory before aborting, and the next start says it is
       there. No text from the user's buffers is written (the M12 autosave
       decision stands).
-- [ ] **1.0** *(version, CHANGELOG, §8 and Results done; the owner tags v1.0.0 after merge)*: `Cargo.toml` at 1.0.0; `CHANGELOG.md` from M0 to here;
+- [x] **1.0** *(tagged v1.0.0 on merge; the release workflow makes a draft release to publish)*: `Cargo.toml` at 1.0.0; `CHANGELOG.md` from M0 to here;
       `DESIGN.md` §8 and this file's Results; the release workflow from
       M15 publishes it.
 
@@ -140,8 +140,29 @@ keystrokes, an undo every 50, a find every 2,500 and a save every 10,000
 into the typing, samples resident memory with `ps` every 1,000
 keystrokes (no new dependency and no `unsafe`), and exits 1 if it grew
 more than 10 MB from the first sample to the last. `bench/soak.sh` runs
-100,000 keystrokes on a scratch copy of the 100 MB file. Owner's run:
-_pending_.
+100,000 keystrokes on a scratch copy of the 100 MB file.
+
+Owner's runs on the M5 Pro, 2026-10-18 (p50 latency 8.25 ms, p99
+8.74 ms, frame-paced at 120 Hz):
+
+- First run: 395 → 521 MB (+125 MB), with one keystroke "taking" 76 s.
+  The screen locked mid-run; frames stop while it is locked, and the
+  keystroke waiting for its frame absorbed the lock. Afterwards macOS
+  stopped pacing the hidden window's frames, and the last 20,000
+  keystrokes ran in seconds; the growth came with that. Not reproduced
+  with the window on screen, so recorded rather than chased for 1.0.
+- Second run, window kept on screen: 395.3 → 409.5 MB, **+14.2 MB**.
+  About 10 MB of that is the undo history, which keeps every edit
+  (around 100 bytes per typed character: an `Edit` per keystroke within
+  a group). Replaying the same 100,000 edits on a `Document` with no
+  window or GPU grows it by 11 MB, by 5 MB with the undos. The owner
+  accepted the result for 1.0.
+
+The plan's 10 MB budget did not allow for undo history that is kept on
+purpose, so `SOAK_BUDGET_MB` is 20: still far below a leak of a frame's
+or a line's worth per keystroke (the first run's 125 MB would fail it).
+Storing a typing run as one edit instead of one per character would cut
+the undo share to a few hundred KB; it is in `backlog.md`.
 
 **Crash record.** `crates/app/src/crash.rs`. The hook removes anything
 between backticks from the message, because the standard library's

@@ -1,7 +1,7 @@
 #!/bin/sh
 # M21 soak: 100,000 keystrokes with line breaks, undo, find and saves on the
 # 100 MB file, memory sampled every 1,000 keystrokes. Fails (exit 1) if the
-# resident size grows more than 10 MB from the first sample to the last.
+# resident size grows more than 20 MB from the first sample to the last.
 #
 #   bench/soak.sh            # 100,000 keystrokes
 #   bench/soak.sh 20000      # a shorter run

@@ -70,7 +70,7 @@ need them for everyday use.
 | `--screenshot FILE.bmp` | Save the first frame as a BMP image and exit. |
 | `--smoke` | Open the window, print the time to the first frame (`first-frame-ms=…`) and exit. |
 | `--bench-typing N` | Type `N` characters through the normal editing path, print keystroke latency figures and exit. |
-| `--soak` | With `--bench-typing`: mix line breaks, undo, find and saves into the typing and report how much memory grew; exits 1 if it grew more than 10 MB. It saves into the file, so use a copy (`bench/soak.sh` does). |
+| `--soak` | With `--bench-typing`: mix line breaks, undo, find and saves into the typing and report how much memory grew; exits 1 if it grew more than 20 MB. It saves into the file, so use a copy (`bench/soak.sh` does). |
 | `--backend rope\|mapped` | Hold every file in memory (`rope`) or memory-mapped (`mapped`), whatever its size. |
 | `--wait-index` | With `--headless`: count all of a huge file's lines before drawing. |
 | `--debug-overlay` | Start with the debug overlay (`F12`) showing. |
@@ -83,7 +83,7 @@ need them for everyday use.
 | Code | Meaning |
 |---|---|
 | 0 | Normal exit. With `--merge`: the result was saved with no conflicts left. |
-| 1 | A file could not be opened; the window, the GPU or the font could not start (the reason is printed, and shown in a dialog when there is no terminal); with `--soak`, memory grew more than 10 MB; with `--screenshot` or `--smoke`, no frame could be drawn or saved; with `--merge`, the result was not saved or still had conflicts. |
+| 1 | A file could not be opened; the window, the GPU or the font could not start (the reason is printed, and shown in a dialog when there is no terminal); with `--soak`, memory grew more than 20 MB; with `--screenshot` or `--smoke`, no frame could be drawn or saved; with `--merge`, the result was not saved or still had conflicts. |
 | 2 | A mistake on the command line. |
 
 ## Environment variables

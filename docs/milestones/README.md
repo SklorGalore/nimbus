@@ -48,7 +48,7 @@ repeated in each file:
 | 18 | [Compare, second pass](m18-compare-second-pass.md) | Done |
 | 19 | [Workspace and search, second pass](m19-workspace-and-search-second-pass.md) | Done |
 | 20 | [Reading aids](m20-reading-aids.md) | Done |
-| 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | In review |
+| 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | Done |
 
 **Next** is the milestone to start; **Planned** plans are approved and
 queued in table order. M10–M15 were drafted after M8 and approved, with
