@@ -44,6 +44,8 @@ mod native {
                 "-",
                 "find.open",
                 "find.replace",
+                "search.inFiles",
+                "search.replaceInFiles",
             ],
         ),
         (

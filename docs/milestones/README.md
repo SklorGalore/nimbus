@@ -37,8 +37,8 @@ repeated in each file:
 | 7 | [Huge files](m7-huge-files.md) | Done |
 | 8 | [Polish](m8-polish.md) | Done |
 | 9 | [Compare and merge](m9-diff.md) | Done |
-| 10 | [Find in files](m10-find-in-files.md) | Next |
-| 11 | [Everyday editing](m11-everyday-editing.md) | Planned |
+| 10 | [Find in files](m10-find-in-files.md) | Done |
+| 11 | [Everyday editing](m11-everyday-editing.md) | Next |
 | 12 | [Workspace](m12-workspace.md) | Planned |
 | 13 | [Split views and folding](m13-splits-and-folding.md) | Planned |
 | 14 | [Languages, second pass](m14-languages.md) | Planned |

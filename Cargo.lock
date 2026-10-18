@@ -1417,14 +1417,16 @@ dependencies = [
 
 [[package]]
 name = "nimbus"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arboard",
  "dirs",
  "embed-resource",
  "env_logger",
+ "globset",
  "ignore",
  "log",
+ "memchr",
  "memmap2",
  "muda",
  "nimbus-core",
@@ -1442,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "nimbus-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "imara-diff",
  "memchr",
