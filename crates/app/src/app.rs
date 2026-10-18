@@ -31,6 +31,7 @@ use crate::columns::Click;
 use crate::compare::{Compare, DiffResult, Other};
 use crate::config::{self, Config};
 use crate::debug::Debug;
+use crate::docs::{DocId, Docs};
 use crate::document::{Carets, DiskChange, Document, Editor, MAX_COPY_BYTES, Occurrence, Solo};
 use crate::editing::Outcome;
 use crate::find::{self, Field, FindBar, SearchBatch};
@@ -193,8 +194,8 @@ const CHORD_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// One open file: its text and history, and where it is scrolled to.
 pub struct Tab {
-    /// The document.
-    pub doc: Document,
+    /// The document it shows, in [`App::docs`].
+    pub doc: DocId,
     /// This tab's cursors and selections in it.
     pub carets: Carets,
     /// Its scroll position and wrap setting.
@@ -215,14 +216,9 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// This tab's document and cursors, to edit.
-    pub fn ed(&mut self) -> Editor<'_> {
-        Editor::new(&mut self.doc, &mut self.carets)
-    }
-
     /// A tab showing `doc`, wrapped if `wrap`.
     #[must_use]
-    pub fn new(doc: Document, wrap: bool) -> Self {
+    pub fn new(doc: DocId, wrap: bool) -> Self {
         let mut view = View::default();
         view.set_wrap(wrap);
         Self {
@@ -370,6 +366,8 @@ pub struct App {
     /// conflicts left, which decides the exit code (0 then, else 1).
     merge_saved_clean: Option<bool>,
     frames: u64,
+    /// The open documents, which tabs name.
+    docs: Docs,
     tabs: Vec<Tab>,
     active: usize,
     blink: Blink,
@@ -506,16 +504,7 @@ impl App {
             started
         });
         let wrap = options.wrap || config.soft_wrap;
-        let mut tabs: Vec<Tab> = docs
-            .into_iter()
-            .map(|mut d| {
-                d.configure_indent(config.indent.for_language(d.language_key()));
-                Tab::new(d, wrap)
-            })
-            .collect();
-        if tabs.is_empty() {
-            tabs.push(Tab::new(Document::untitled(), wrap));
-        }
+        let (open, tabs) = first_tabs(docs, &config, wrap);
         let all_warnings: Vec<String> = warnings
             .into_iter()
             .chain(key_warnings)
@@ -547,6 +536,7 @@ impl App {
             exit_code: 0,
             merge_saved_clean: None,
             frames: 0,
+            docs: open,
             tabs,
             active: 0,
             blink: Blink::new(started),
@@ -616,17 +606,26 @@ impl App {
     }
 
     fn doc(&self) -> &Document {
-        &self.tabs[self.active].doc
+        &self.docs[self.tabs[self.active].doc]
     }
 
     fn doc_mut(&mut self) -> &mut Document {
-        &mut self.tabs[self.active].doc
+        &mut self.docs[self.tabs[self.active].doc]
+    }
+
+    /// Reload the active tab's file from disk, on request.
+    fn reload_active(&mut self) {
+        let tab = &mut self.tabs[self.active];
+        match self.docs[tab.doc].reload(&self.languages, &mut [&mut tab.carets]) {
+            Ok(()) => self.say("Reloaded from disk", false),
+            Err(e) => self.say(format!("Cannot reload: {e}"), true),
+        }
     }
 
     /// The active tab's document and cursors, to edit.
     fn ed(&mut self) -> Editor<'_> {
         let tab = &mut self.tabs[self.active];
-        Editor::new(&mut tab.doc, &mut tab.carets)
+        Editor::new(&mut self.docs[tab.doc], &mut tab.carets)
     }
 
     /// The active tab's cursors.
@@ -637,13 +636,13 @@ impl App {
     /// The active tab's cursor, snapped to its text.
     fn cursor(&self) -> usize {
         let tab = &self.tabs[self.active];
-        tab.carets.cursor(&tab.doc.buffer)
+        tab.carets.cursor(&self.docs[tab.doc].buffer)
     }
 
     /// The active tab's primary selection, snapped to its text.
     fn selection(&self) -> nimbus_core::Selection {
         let tab = &self.tabs[self.active];
-        tab.carets.selection(&tab.doc.buffer)
+        tab.carets.selection(&self.docs[tab.doc].buffer)
     }
 
     fn font_px(&self, scale: f64) -> f32 {
@@ -655,7 +654,7 @@ impl App {
         let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
         let scale = to_f32(effective_scale(window.scale_factor()));
         let tab = &self.tabs[self.active];
-        let mut lines = line_estimate(&tab.doc.buffer);
+        let mut lines = line_estimate(&self.docs[tab.doc].buffer);
         if let Some(c) = &tab.compare {
             lines = lines.max(line_estimate(&c.other.buffer));
         }
@@ -701,14 +700,26 @@ impl App {
             let tab = &mut self.tabs[self.active];
             match (tab.compare.as_mut(), tab.merge.as_mut()) {
                 (Some(c), _) => {
-                    c.ensure_cursor_visible(&tab.doc, tab.carets.cursor(&tab.doc.buffer), &layout);
+                    c.ensure_cursor_visible(
+                        &self.docs[tab.doc],
+                        tab.carets.cursor(&self.docs[tab.doc].buffer),
+                        &layout,
+                    );
                 }
                 (None, Some(m)) => {
-                    m.ensure_cursor_visible(&tab.doc, tab.carets.cursor(&tab.doc.buffer), &layout);
+                    m.ensure_cursor_visible(
+                        &self.docs[tab.doc],
+                        tab.carets.cursor(&self.docs[tab.doc].buffer),
+                        &layout,
+                    );
                 }
                 (None, None) => {
-                    tab.view
-                        .ensure_cursor_visible(&tab.doc, &tab.carets, &layout, tab_width);
+                    tab.view.ensure_cursor_visible(
+                        &self.docs[tab.doc],
+                        &tab.carets,
+                        &layout,
+                        tab_width,
+                    );
                 }
             }
         }
@@ -771,8 +782,11 @@ impl App {
             }
             Command::OpenFile => self.open_dialog(),
             Command::NewFile => {
-                let wrap = self.config.soft_wrap;
-                self.tabs.push(Tab::new(Document::untitled(), wrap));
+                let tab = Tab::new(
+                    self.docs.insert(Document::untitled()),
+                    self.config.soft_wrap,
+                );
+                self.tabs.push(tab);
                 self.switch_to(self.tabs.len() - 1);
             }
             Command::CloseTab => self.close_tab(self.active, event_loop),
@@ -839,14 +853,7 @@ impl App {
                 );
             }
             Command::ReloadFromDisk if self.waits_for_save() => {}
-            Command::ReloadFromDisk => {
-                let languages = &self.languages;
-                let tab = &mut self.tabs[self.active];
-                match tab.doc.reload(languages, &mut [&mut tab.carets]) {
-                    Ok(()) => self.say("Reloaded from disk", false),
-                    Err(e) => self.say(format!("Cannot reload: {e}"), true),
-                }
-            }
+            Command::ReloadFromDisk => self.reload_active(),
             Command::KeepMine => {
                 self.doc_mut().keep_mine();
                 self.say(
@@ -881,10 +888,10 @@ impl App {
             Command::DiffClose => {
                 let tab = &mut self.tabs[self.active];
                 if let Some(c) = tab.compare.take() {
-                    c.finish(&mut tab.doc);
+                    c.finish(&mut self.docs[tab.doc]);
                 }
                 if let Some(m) = tab.merge.take() {
-                    m.finish(&mut tab.doc);
+                    m.finish(&mut self.docs[tab.doc]);
                 }
             }
             Command::MergeFiles => self.merge_files(),
@@ -978,15 +985,16 @@ impl App {
         if reports {
             self.merge_saved_clean = Some(false);
         }
-        let mut tab = Tab::new(result, false);
+        let mut tab = Tab::new(self.docs.insert(result), false);
         tab.merge = Some(Box::new(merge));
         // An untouched empty tab, the one a bare start makes, gives way.
         let only_blank = self.tabs.len() == 1
-            && self.tabs[0].doc.path.is_none()
-            && !self.tabs[0].doc.is_dirty()
-            && self.tabs[0].doc.buffer.len_bytes() == 0;
+            && self.docs[self.tabs[0].doc].path.is_none()
+            && !self.docs[self.tabs[0].doc].is_dirty()
+            && self.docs[self.tabs[0].doc].buffer.len_bytes() == 0;
         if only_blank {
-            self.tabs[0] = tab;
+            let old = std::mem::replace(&mut self.tabs[0], tab);
+            self.docs.remove(old.doc);
             self.active = 0;
         } else {
             self.tabs.push(tab);
@@ -1014,8 +1022,8 @@ impl App {
             return;
         };
         let Some(m) = tab.merge.as_mut() else { return };
-        m.receive(&mut tab.doc, merged);
-        tab.doc.detect_language(&self.languages);
+        m.receive(&mut self.docs[tab.doc], merged);
+        self.docs[tab.doc].detect_language(&self.languages);
         let n = m.open_conflicts();
         let noun = if n == 1 { "conflict" } else { "conflicts" };
         let (note, is_error) = match m.failure() {
@@ -1065,9 +1073,9 @@ impl App {
         }
         let tab = &mut self.tabs[self.active];
         if let Some(c) = tab.compare.take() {
-            c.finish(&mut tab.doc);
+            c.finish(&mut self.docs[tab.doc]);
         }
-        tab.doc = result;
+        self.docs[tab.doc] = result;
         tab.view = View::default();
         tab.merge = Some(Box::new(merge));
         self.start_syntax();
@@ -1146,7 +1154,10 @@ impl App {
             self.say("Not merging; run Merge Files… first", false);
             return;
         };
-        if let Err(e) = m.take(&mut Editor::new(&mut tab.doc, &mut tab.carets), take) {
+        if let Err(e) = m.take(
+            &mut Editor::new(&mut self.docs[tab.doc], &mut tab.carets),
+            take,
+        ) {
             self.say(e, false);
         }
         self.changed(true);
@@ -1162,12 +1173,12 @@ impl App {
         };
         match m.step_conflict(
             forward,
-            &tab.doc,
-            tab.carets.cursor(&tab.doc.buffer),
+            &self.docs[tab.doc],
+            tab.carets.cursor(&self.docs[tab.doc].buffer),
             &layout,
         ) {
             Some(p) => {
-                tab.ed().click(p, false);
+                Editor::new(&mut self.docs[tab.doc], &mut tab.carets).click(p, false);
                 self.changed(true);
             }
             None => self.say("No more conflicts that way", false),
@@ -1180,7 +1191,7 @@ impl App {
             if let Some(c) = tab.compare.as_mut()
                 && c.wants(&result)
             {
-                c.receive(&tab.doc, result);
+                c.receive(&self.docs[tab.doc], result);
                 self.changed(false);
                 return;
             }
@@ -1227,10 +1238,15 @@ impl App {
         }
         let tab = &mut self.tabs[self.active];
         if let Some(old) = tab.compare.take() {
-            old.finish(&mut tab.doc);
+            old.finish(&mut self.docs[tab.doc]);
         }
         tab.view.set_wrap(false);
-        tab.compare = Some(Box::new(Compare::start(&mut tab.doc, other, what, send)));
+        tab.compare = Some(Box::new(Compare::start(
+            &mut self.docs[tab.doc],
+            other,
+            what,
+            send,
+        )));
         self.changed(true);
     }
 
@@ -1274,7 +1290,7 @@ impl App {
         if i == self.active || i >= self.tabs.len() {
             return;
         }
-        let src = &self.tabs[i].doc;
+        let src = &self.docs[self.tabs[i].doc];
         let name = src.display_name();
         match (src.copy_of(), src.path.clone()) {
             (Some(copy), _) => self.start_compare(copy, Other::Tab(name)),
@@ -1290,11 +1306,11 @@ impl App {
     fn diff_step(&mut self, forward: bool) {
         let Some(layout) = self.layout() else { return };
         let tab = &mut self.tabs[self.active];
-        let cursor = tab.carets.cursor(&tab.doc.buffer);
+        let cursor = tab.carets.cursor(&self.docs[tab.doc].buffer);
         let pos = match (tab.compare.as_mut(), tab.merge.as_mut()) {
-            (Some(c), _) if forward => c.next_change(&tab.doc, cursor, &layout),
-            (Some(c), _) => c.prev_change(&tab.doc, cursor, &layout),
-            (None, Some(m)) => m.step_change(forward, &tab.doc, cursor, &layout),
+            (Some(c), _) if forward => c.next_change(&self.docs[tab.doc], cursor, &layout),
+            (Some(c), _) => c.prev_change(&self.docs[tab.doc], cursor, &layout),
+            (None, Some(m)) => m.step_change(forward, &self.docs[tab.doc], cursor, &layout),
             (None, None) => {
                 self.say("Not comparing; run Compare with Saved first", false);
                 return;
@@ -1302,7 +1318,7 @@ impl App {
         };
         match pos {
             Some(p) => {
-                tab.ed().click(p, false);
+                Editor::new(&mut self.docs[tab.doc], &mut tab.carets).click(p, false);
                 self.changed(true);
             }
             None => self.say("No more changes", false),
@@ -1390,6 +1406,10 @@ impl App {
 
     /// The everyday editing commands of M11 (comments, lines, selection,
     /// text, indentation), on the active tab.
+    #[expect(
+        clippy::redundant_closure_for_method_calls,
+        reason = "a method path fixes the editor's lifetime; the closure is general over it"
+    )]
     fn run_everyday_edit(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
         match cmd {
             Command::ToggleLineComment => self.edit_op(|e| e.toggle_line_comment()),
@@ -1473,10 +1493,11 @@ impl App {
         match &layout {
             Some(layout) if tab.view.wrap => {
                 let mut w = tab.view.wrap_view(layout, tab_width);
-                Editor::new(&mut tab.doc, &mut tab.carets)
+                Editor::new(&mut self.docs[tab.doc], &mut tab.carets)
                     .move_cursor_wrapped(motion, extend, &mut w, page);
             }
-            _ => tab.ed().move_cursor(motion, extend, tab_width, page),
+            _ => Editor::new(&mut self.docs[tab.doc], &mut tab.carets)
+                .move_cursor(motion, extend, tab_width, page),
         }
         if matches!(motion, Motion::PageUp | Motion::PageDown)
             && let Some(layout) = layout
@@ -1485,7 +1506,8 @@ impl App {
             let dir = if motion == Motion::PageUp { -1.0 } else { 1.0 };
             #[expect(clippy::cast_precision_loss, reason = "page is a few hundred lines")]
             let dy = dir * page as f32 * layout.metrics.line_height;
-            tab.view.scroll_by(dy, &tab.doc, &layout, tab_width);
+            tab.view
+                .scroll_by(dy, &self.docs[tab.doc], &layout, tab_width);
         }
     }
 
@@ -1509,9 +1531,9 @@ impl App {
     /// last line it goes to the last line; in a huge file whose lines are
     /// still being counted, the jump waits until counting reaches it.
     fn go_to_line(&mut self, n: usize) {
-        let t = &self.tabs[self.active].doc.buffer;
+        let t = &self.docs[self.tabs[self.active].doc].buffer;
         let line = n.saturating_sub(1);
-        if line >= t.len_lines() && self.tabs[self.active].doc.counting_lines() {
+        if line >= t.len_lines() && self.docs[self.tabs[self.active].doc].counting_lines() {
             self.pending_line = Some(n);
             self.say(
                 format!("Going to line {n} once lines are counted that far"),
@@ -1530,7 +1552,7 @@ impl App {
     /// Start line counting for any mapped document that has not started.
     fn start_indexing(&mut self) {
         for tab in &mut self.tabs {
-            if let Some(job) = tab.doc.indexing.take() {
+            if let Some(job) = self.docs[tab.doc].indexing.take() {
                 let proxy = self.proxy.clone();
                 job.spawn(move |token, chunk, error| {
                     proxy
@@ -1547,19 +1569,19 @@ impl App {
         let Some(i) = self
             .tabs
             .iter_mut()
-            .position(|t| t.doc.index_token == Some(token))
+            .position(|t| self.docs[t.doc].index_token == Some(token))
         else {
             return; // closed or reloaded meanwhile
         };
-        let merged = self.tabs[i].doc.merge_index(token, chunk);
+        let merged = self.docs[self.tabs[i].doc].merge_index(token, chunk);
         if error.is_some() {
             // Nothing more comes: stop waiting for it.
-            self.tabs[i].doc.stop_indexing();
+            self.docs[self.tabs[i].doc].stop_indexing();
         }
         if !merged || i != self.active {
             return;
         }
-        let t = &self.tabs[i].doc.buffer;
+        let t = &self.docs[self.tabs[i].doc].buffer;
         if let Some(e) = error {
             #[expect(clippy::cast_precision_loss, reason = "a percentage for display")]
             let pct = t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64;
@@ -1570,8 +1592,8 @@ impl App {
         }
         // Progress meanwhile shows in the status bar.
         if let Some(n) = self.pending_line {
-            let t = &self.tabs[i].doc.buffer;
-            if n <= t.len_lines() || !self.tabs[i].doc.counting_lines() {
+            let t = &self.docs[self.tabs[i].doc].buffer;
+            if n <= t.len_lines() || !self.docs[self.tabs[i].doc].counting_lines() {
                 self.go_to_line(n);
             }
         }
@@ -1631,7 +1653,11 @@ impl App {
             .map(Path::to_path_buf)
             .collect();
         for tab in &self.tabs {
-            if let Some(parent) = tab.doc.canonical.as_deref().and_then(Path::parent) {
+            if let Some(parent) = self.docs[tab.doc]
+                .canonical
+                .as_deref()
+                .and_then(Path::parent)
+            {
                 wanted.insert(parent.to_path_buf());
             }
         }
@@ -1652,7 +1678,7 @@ impl App {
         let mut notes = Vec::new();
         let mut is_error = false;
         for tab in &mut self.tabs {
-            let Some(path) = tab.doc.canonical.as_deref() else {
+            let Some(path) = self.docs[tab.doc].canonical.as_deref() else {
                 continue;
             };
             if !changes.iter().any(|c| c.path == path) {
@@ -1662,8 +1688,8 @@ impl App {
             // most once per RELOAD_GAP; the rest wait for the timer. Not a
             // mapped one: it never reloads by itself unless cut short, and
             // that must be handled at once.
-            if let Some(at) = tab.doc.reloaded_at
-                && !tab.doc.buffer.is_mapped()
+            if let Some(at) = self.docs[tab.doc].reloaded_at
+                && !self.docs[tab.doc].buffer.is_mapped()
                 && now.duration_since(at) < RELOAD_GAP
             {
                 let due = at + RELOAD_GAP;
@@ -1673,44 +1699,42 @@ impl App {
                 }
                 continue;
             }
-            let name = tab.doc.display_name();
-            let note = match tab
-                .doc
-                .disk_changed(&self.languages, &mut [&mut tab.carets])
-            {
-                DiskChange::None => continue,
-                DiskChange::Reloaded => format!("{name} changed on disk; reloaded"),
-                DiskChange::Conflict => {
-                    is_error = true;
-                    format!(
-                        "{name} changed on disk. From the command palette: Reload from Disk, \
+            let name = self.docs[tab.doc].display_name();
+            let note =
+                match self.docs[tab.doc].disk_changed(&self.languages, &mut [&mut tab.carets]) {
+                    DiskChange::None => continue,
+                    DiskChange::Reloaded => format!("{name} changed on disk; reloaded"),
+                    DiskChange::Conflict => {
+                        is_error = true;
+                        format!(
+                            "{name} changed on disk. From the command palette: Reload from Disk, \
                          Keep My Version, Compare with Saved, or Merge with Disk"
-                    )
-                }
-                DiskChange::NotReloaded => format!(
-                    "{name} changed on disk; huge files do not reload by themselves. \
+                        )
+                    }
+                    DiskChange::NotReloaded => format!(
+                        "{name} changed on disk; huge files do not reload by themselves. \
                      Run Reload from Disk from the command palette to see the changes"
-                ),
-                DiskChange::Truncated { reloaded: true } => {
-                    is_error = true;
-                    format!("{name} was truncated on disk; reloaded it")
-                }
-                DiskChange::Truncated { reloaded: false } => {
-                    is_error = true;
-                    format!(
-                        "{name} was truncated on disk. Reload it now (Reload from Disk in the \
+                    ),
+                    DiskChange::Truncated { reloaded: true } => {
+                        is_error = true;
+                        format!("{name} was truncated on disk; reloaded it")
+                    }
+                    DiskChange::Truncated { reloaded: false } => {
+                        is_error = true;
+                        format!(
+                            "{name} was truncated on disk. Reload it now (Reload from Disk in the \
                          command palette): reading the missing part can crash Nimbus"
-                    )
-                }
-                DiskChange::Deleted => {
-                    is_error = true;
-                    format!("{name} was deleted on disk; saving recreates it")
-                }
-                DiskChange::Failed(e) => {
-                    is_error = true;
-                    format!("{name} changed on disk but cannot be read: {e}")
-                }
-            };
+                        )
+                    }
+                    DiskChange::Deleted => {
+                        is_error = true;
+                        format!("{name} was deleted on disk; saving recreates it")
+                    }
+                    DiskChange::Failed(e) => {
+                        is_error = true;
+                        format!("{name} changed on disk but cannot be read: {e}")
+                    }
+                };
             notes.push(note);
         }
         if !notes.is_empty() {
@@ -1764,7 +1788,7 @@ impl App {
         self.sidebar.focused = false;
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         if let Some(i) = self.tabs.iter().position(|t| {
-            t.doc.path.as_ref().is_some_and(|p| {
+            self.docs[t.doc].path.as_ref().is_some_and(|p| {
                 std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canonical
             })
         }) {
@@ -1777,11 +1801,12 @@ impl App {
                 self.configure_indent(&mut doc);
                 // Replace a lone untouched untitled tab rather than keeping it.
                 let replace = self.tabs.len() == 1
-                    && self.tabs[0].doc.path.is_none()
-                    && !self.tabs[0].doc.is_dirty();
-                let tab = Tab::new(doc, self.config.soft_wrap);
+                    && self.docs[self.tabs[0].doc].path.is_none()
+                    && !self.docs[self.tabs[0].doc].is_dirty();
+                let tab = Tab::new(self.docs.insert(doc), self.config.soft_wrap);
                 if replace {
-                    self.tabs[0] = tab;
+                    let old = std::mem::replace(&mut self.tabs[0], tab);
+                    self.docs.remove(old.doc);
                     self.active = 0;
                     self.title_key = None;
                     self.reveal_active();
@@ -1818,29 +1843,31 @@ impl App {
         if !self.confirm_conflicts(i) {
             return Saved::No;
         }
-        if self.tabs[i].doc.path.is_none() {
+        if self.docs[self.tabs[i].doc].path.is_none() {
             return self.save_as(i);
         }
-        if self.tabs[i].doc.is_saving() {
+        if self.docs[self.tabs[i].doc].is_saving() {
             self.say("Already saving; edits wait until it is done", false);
             return Saved::Started;
         }
-        if self.tabs[i].doc.saves_on_worker() {
+        if self.docs[self.tabs[i].doc].saves_on_worker() {
             return self.start_save(i);
         }
         let editing = self
             .config
             .editor
-            .for_language(self.tabs[i].doc.language_key());
-        if let Err(e) = self.tabs[i]
-            .ed()
-            .tidy_for_save(editing.trim_trailing_whitespace, editing.final_newline)
+            .for_language(self.docs[self.tabs[i].doc].language_key());
+        if let Err(e) = {
+            let tab = &mut self.tabs[i];
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets)
+        }
+        .tidy_for_save(editing.trim_trailing_whitespace, editing.final_newline)
         {
             log::error!("tidying before save refused: {e}");
         }
-        match self.tabs[i].doc.save() {
+        match self.docs[self.tabs[i].doc].save() {
             Ok(()) => {
-                let name = self.tabs[i].doc.display_name();
+                let name = self.docs[self.tabs[i].doc].display_name();
                 log::info!("saved {name}");
                 self.title_key = None;
                 self.note_merge_saved(i);
@@ -1888,7 +1915,7 @@ impl App {
 
     /// Start saving the mapped document in tab `i` on a worker.
     fn start_save(&mut self, i: usize) -> Saved {
-        let doc = &mut self.tabs[i].doc;
+        let doc = &mut self.docs[self.tabs[i].doc];
         let name = doc.display_name();
         let job = match doc.begin_save(ReplacePolicy::default()) {
             Ok(job) => job,
@@ -1907,7 +1934,7 @@ impl App {
                 step: "starting the save",
                 source: e,
             });
-            let step = self.tabs[i].doc.save_written(token, failed, Instant::now());
+            let step = self.docs[self.tabs[i].doc].save_written(token, failed, Instant::now());
             log::debug!("save of {name} ended before it began: {step:?}");
             self.dialog(
                 MessageLevel::Error,
@@ -1933,7 +1960,7 @@ impl App {
                     return;
                 };
                 if i == self.active {
-                    let name = self.tabs[i].doc.display_name();
+                    let name = self.docs[self.tabs[i].doc].display_name();
                     let pct = written.saturating_mul(100) / total.max(1);
                     self.say(format!("Saving {name}… {pct}%"), false);
                 }
@@ -1944,9 +1971,7 @@ impl App {
                 let Some(i) = self.tab_saving(token) else {
                     return;
                 };
-                let step = self.tabs[i]
-                    .doc
-                    .save_written(token, *result, Instant::now());
+                let step = self.docs[self.tabs[i].doc].save_written(token, *result, Instant::now());
                 self.save_step(i, step, event_loop);
             }
         }
@@ -1956,7 +1981,7 @@ impl App {
     fn tab_saving(&self, token: u64) -> Option<usize> {
         self.tabs
             .iter()
-            .position(|t| t.doc.save_token() == Some(token))
+            .position(|t| self.docs[t.doc].save_token() == Some(token))
     }
 
     /// A save of tab `i` moved on to `step`.
@@ -1979,8 +2004,8 @@ impl App {
         let now = Instant::now();
         // From the end: finishing a save may close its tab.
         for i in (0..self.tabs.len()).rev() {
-            if i < self.tabs.len() && self.tabs[i].doc.is_replacing() {
-                let step = self.tabs[i].doc.poll_replace(now);
+            if i < self.tabs.len() && self.docs[self.tabs[i].doc].is_replacing() {
+                let step = self.docs[self.tabs[i].doc].poll_replace(now);
                 self.save_step(i, step, event_loop);
             }
         }
@@ -1990,9 +2015,9 @@ impl App {
     /// the tab or quit if that was waiting for it.
     fn save_ended(&mut self, i: usize, step: SaveStep, event_loop: &ActiveEventLoop) {
         let after = std::mem::take(&mut self.tabs[i].after_save);
-        let name = self.tabs[i].doc.display_name();
+        let name = self.docs[self.tabs[i].doc].display_name();
         self.title_key = None;
-        if self.saves.search_stopped && !self.tabs.iter().any(|t| t.doc.is_replacing()) {
+        if self.saves.search_stopped && !self.tabs.iter().any(|t| self.docs[t.doc].is_replacing()) {
             self.saves.search_stopped = false;
             if self.find.open {
                 self.search(false);
@@ -2008,7 +2033,9 @@ impl App {
         if let Some(message) = failure {
             log::error!("{message}");
             if let Some(save_as) = &after.save_as {
-                self.tabs[i].doc.path.clone_from(&save_as.old_path);
+                self.docs[self.tabs[i].doc]
+                    .path
+                    .clone_from(&save_as.old_path);
             }
             // Whatever was waiting for this save must not go ahead.
             self.saves.quit_after = false;
@@ -2022,17 +2049,17 @@ impl App {
             self.say(format!("Saved {name}"), false);
             if after.save_as.is_some() {
                 // Saved under a new name (see App::save_as).
-                self.tabs[i].doc.detect_language(&self.languages);
-                let mut doc = std::mem::take(&mut self.tabs[i].doc);
+                self.docs[self.tabs[i].doc].detect_language(&self.languages);
+                let mut doc = std::mem::take(&mut self.docs[self.tabs[i].doc]);
                 self.configure_indent(&mut doc);
-                self.tabs[i].doc = doc;
+                self.docs[self.tabs[i].doc] = doc;
                 self.sync_watch();
                 self.reveal_active();
             }
         }
         // Changes on disk while it ran were set aside; look now, after the
         // report so that any warning stays on screen.
-        if let Some(path) = self.tabs[i].doc.canonical.clone() {
+        if let Some(path) = self.docs[self.tabs[i].doc].canonical.clone() {
             self.disk_changed(&[Change {
                 path,
                 structural: false,
@@ -2058,11 +2085,11 @@ impl App {
 
     /// Ask for a file name and save tab `i` there.
     fn save_as(&mut self, i: usize) -> Saved {
-        if self.tabs[i].doc.is_saving() {
+        if self.docs[self.tabs[i].doc].is_saving() {
             self.say("Already saving; edits wait until it is done", false);
             return Saved::Started;
         }
-        let doc = &self.tabs[i].doc;
+        let doc = &self.docs[self.tabs[i].doc];
         let dir = doc
             .path
             .as_ref()
@@ -2077,16 +2104,16 @@ impl App {
         let Some(path) = dialog.save_file() else {
             return Saved::No;
         };
-        let old = self.tabs[i].doc.path.replace(path);
+        let old = self.docs[self.tabs[i].doc].path.replace(path);
         self.title_key = None;
         let saved = self.save(i);
         match saved {
             Saved::Yes => {
                 // A new name can mean a new language: untitled to `notes.md`.
-                self.tabs[i].doc.detect_language(&self.languages);
-                let mut doc = std::mem::take(&mut self.tabs[i].doc);
+                self.docs[self.tabs[i].doc].detect_language(&self.languages);
+                let mut doc = std::mem::take(&mut self.docs[self.tabs[i].doc]);
                 self.configure_indent(&mut doc);
-                self.tabs[i].doc = doc;
+                self.docs[self.tabs[i].doc] = doc;
                 self.sync_watch();
                 self.reveal_active();
             }
@@ -2096,7 +2123,7 @@ impl App {
             Saved::No => {
                 // Keep pointing at the old file, so the next save does not
                 // silently retry the path that failed.
-                self.tabs[i].doc.path = old;
+                self.docs[self.tabs[i].doc].path = old;
             }
         }
         saved
@@ -2119,7 +2146,7 @@ impl App {
     /// the tab must stay open; [`Discard::Wait`] while a save runs.
     fn confirm_discard(&mut self, i: usize) -> Discard {
         let unattended = self.options.smoke || self.options.screenshot.is_some();
-        let doc = &self.tabs[i].doc;
+        let doc = &self.docs[self.tabs[i].doc];
         if doc.is_saving() {
             return Discard::Wait;
         }
@@ -2131,7 +2158,7 @@ impl App {
             return Discard::Yes; // answered earlier in this quit
         }
         self.switch_to(i);
-        let doc = &self.tabs[i].doc;
+        let doc = &self.docs[self.tabs[i].doc];
         let name = doc.display_name();
         let question = if doc.deleted {
             format!("{name} was deleted on disk. Save it before closing?")
@@ -2158,7 +2185,7 @@ impl App {
             _ => return Discard::Cancel, // Cancel or dismissed: keep editing.
         };
         if !save {
-            self.tabs[i].discard_at = Some(self.tabs[i].doc.history.top_id());
+            self.tabs[i].discard_at = Some(self.docs[self.tabs[i].doc].history.top_id());
             return Discard::Yes;
         }
         match self.save(i) {
@@ -2176,7 +2203,7 @@ impl App {
             Discard::Cancel => return,
             Discard::Wait => {
                 self.tabs[i].after_save.close = true;
-                let name = self.tabs[i].doc.display_name();
+                let name = self.docs[self.tabs[i].doc].display_name();
                 self.say(format!("Saving {name}; it closes when that is done"), false);
                 return;
             }
@@ -2185,7 +2212,8 @@ impl App {
             event_loop.exit();
             return;
         }
-        self.tabs.remove(i);
+        let closed = self.tabs.remove(i);
+        self.docs.remove(closed.doc);
         if self.active >= i && self.active > 0 {
             self.active -= 1;
         }
@@ -2215,7 +2243,7 @@ impl App {
                 }
                 Discard::Wait => {
                     self.saves.quit_after = true;
-                    let name = self.tabs[i].doc.display_name();
+                    let name = self.docs[self.tabs[i].doc].display_name();
                     self.say(format!("Saving {name}; quitting when that is done"), false);
                     return;
                 }
@@ -2243,10 +2271,9 @@ impl App {
         let (languages, language_warnings) = Languages::load(&config.languages);
         warnings.extend(language_warnings);
         self.languages = languages;
-        for tab in &mut self.tabs {
-            tab.doc.detect_language(&self.languages);
-            tab.doc
-                .configure_indent(config.indent.for_language(tab.doc.language_key()));
+        for (_, doc) in self.docs.iter_mut() {
+            doc.detect_language(&self.languages);
+            doc.configure_indent(config.indent.for_language(doc.language_key()));
         }
         self.keymap = keymap;
         self.config = config;
@@ -2367,7 +2394,7 @@ impl App {
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != self.active)
-                    .map(|(i, t)| (i, t.doc.display_name()))
+                    .map(|(i, t)| (i, self.docs[t.doc].display_name()))
                     .collect();
                 Picker::tabs(names, notify)
             }
@@ -2456,7 +2483,7 @@ impl App {
     /// first match from where the search started, as incremental search does.
     fn search(&mut self, jump: bool) {
         let proxy = self.proxy.clone();
-        let doc = &self.tabs[self.active].doc;
+        let doc = &self.docs[self.tabs[self.active].doc];
         let complete = self
             .find
             .search(doc, move |b| proxy.send_event(AppEvent::Search(b)).is_ok());
@@ -2473,8 +2500,12 @@ impl App {
             if let Some(layout) = self.layout() {
                 let tab_width = self.tab_width();
                 let tab = &mut self.tabs[self.active];
-                tab.view
-                    .ensure_cursor_visible(&tab.doc, &tab.carets, &layout, tab_width);
+                tab.view.ensure_cursor_visible(
+                    &self.docs[tab.doc],
+                    &tab.carets,
+                    &layout,
+                    tab_width,
+                );
             }
         }
     }
@@ -2610,7 +2641,7 @@ impl App {
             return;
         }
         if !self.find.complete && !self.find.capped {
-            let doc = &self.tabs[self.active].doc;
+            let doc = &self.docs[self.tabs[self.active].doc];
             if doc.buffer.is_mapped() {
                 // Finishing the search here could read gigabytes on the
                 // main thread.
@@ -2795,20 +2826,23 @@ impl App {
             self.grab_scrollbar(hit, y, &layout);
             return;
         }
-        let pos = tab.view.hit(x, y, &tab.doc, &layout, tab_width);
+        let pos = tab.view.hit(x, y, &self.docs[tab.doc], &layout, tab_width);
         let count = self.clicks.press(now, (x, y), layout.metrics.cell_width);
         // Shift+Alt+press: a column selection, grown by dragging.
         self.clicks.column = (count == 1 && self.modifiers.alt_key() && self.modifiers.shift_key())
-            .then(|| tab.view.hit_column(x, y, &tab.doc, &layout, tab_width));
+            .then(|| {
+                tab.view
+                    .hit_column(x, y, &self.docs[tab.doc], &layout, tab_width)
+            });
         if let Some(at) = self.clicks.column {
-            tab.ed().column_select(at, at, tab_width);
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets).column_select(at, at, tab_width);
             self.clicks.adding = false;
             self.clicks.dragging = true;
             self.blink.reset(now);
             self.changed(false);
             return;
         }
-        let mut doc = tab.ed();
+        let mut doc = Editor::new(&mut self.docs[tab.doc], &mut tab.carets);
         self.clicks.adding = count == 1 && self.modifiers.alt_key();
         match count {
             1 if self.clicks.adding => {
@@ -2865,7 +2899,7 @@ impl App {
             view::ScrollbarHit::Track => {
                 let half = tab.view.thumb_height() / 2.0;
                 tab.view
-                    .drag_scrollbar(y - half, &tab.doc, layout, tab_width);
+                    .drag_scrollbar(y - half, &self.docs[tab.doc], layout, tab_width);
                 half
             }
         };
@@ -2917,7 +2951,8 @@ impl App {
         if tab.compare.is_some() || tab.merge.is_some() {
             self.drag_columns_scrollbar(y, &layout);
         } else {
-            tab.view.drag_scrollbar(y, &tab.doc, &layout, tab_width);
+            tab.view
+                .drag_scrollbar(y, &self.docs[tab.doc], &layout, tab_width);
         }
         self.changed(false);
     }
@@ -2938,12 +2973,14 @@ impl App {
         let shift = self.modifiers.shift_key();
         let tab = &mut self.tabs[self.active];
         let click = match (tab.compare.as_mut(), tab.merge.as_mut()) {
-            (Some(c), _) => c.click(&tab.doc, &mut tab.view, layout, tab_width, x, y),
-            (None, Some(m)) => m.click(&tab.doc, &mut tab.view, layout, tab_width, x, y),
+            (Some(c), _) => c.click(&self.docs[tab.doc], &mut tab.view, layout, tab_width, x, y),
+            (None, Some(m)) => m.click(&self.docs[tab.doc], &mut tab.view, layout, tab_width, x, y),
             (None, None) => return,
         };
         match click {
-            Click::Cursor(pos) => tab.ed().click(pos, shift),
+            Click::Cursor(pos) => {
+                Editor::new(&mut self.docs[tab.doc], &mut tab.carets).click(pos, shift);
+            }
             Click::Toggled | Click::None => {}
         }
         self.clicks.dragging = false;
@@ -3034,7 +3071,9 @@ impl App {
             match (tab.compare.as_mut(), tab.merge.as_mut()) {
                 (Some(c), _) => c.scroll_by(-dy, &layout),
                 (None, Some(m)) => m.scroll_by(-dy, &layout),
-                (None, None) => tab.view.scroll_by(-dy, &tab.doc, &layout, tab_width),
+                (None, None) => tab
+                    .view
+                    .scroll_by(-dy, &self.docs[tab.doc], &layout, tab_width),
             }
             tab.view.scroll_x_by(-dx);
         }
@@ -3100,13 +3139,16 @@ impl App {
             return;
         }
         if let Some(from) = self.clicks.column {
-            let to = tab.view.hit_column(x, y, &tab.doc, &layout, tab_width);
-            tab.ed().column_select(from, to, tab_width);
+            let to = tab
+                .view
+                .hit_column(x, y, &self.docs[tab.doc], &layout, tab_width);
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets)
+                .column_select(from, to, tab_width);
             self.changed(true);
             return;
         }
-        let pos = tab.view.hit(x, y, &tab.doc, &layout, tab_width);
-        let t = &tab.doc.buffer;
+        let pos = tab.view.hit(x, y, &self.docs[tab.doc], &layout, tab_width);
+        let t = &self.docs[tab.doc].buffer;
         let unit = match self.clicks.count {
             1 => pos..pos,
             2 => nimbus_core::movement::word_at(t, pos),
@@ -3120,9 +3162,9 @@ impl App {
         };
         if self.clicks.adding {
             // Alt+drag: the added selection grows; the others stay.
-            tab.ed().drag_added(from, to);
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets).drag_added(from, to);
         } else {
-            tab.ed().select_span(from, to);
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets).select_span(from, to);
         }
         self.changed(true);
     }
@@ -3132,17 +3174,17 @@ impl App {
         self.tabs
             .iter()
             .map(|t| {
-                let name = t.doc.display_name();
-                let name = if t.doc.deleted {
+                let name = self.docs[t.doc].display_name();
+                let name = if self.docs[t.doc].deleted {
                     format!("{name} (deleted)")
-                } else if t.doc.conflict {
+                } else if self.docs[t.doc].conflict {
                     format!("{name} (changed on disk)")
                 } else {
                     name
                 };
                 TabLabel {
                     name,
-                    dirty: t.doc.is_dirty(),
+                    dirty: self.docs[t.doc].is_dirty(),
                 }
             })
             .collect()
@@ -3181,10 +3223,11 @@ impl App {
     /// once if its file is too large to highlight.
     fn start_syntax(&mut self) {
         let tab = &mut self.tabs[self.active];
-        if let Some(job) = tab.doc.syntax.take_job(&tab.doc.buffer) {
+        let d = &mut self.docs[tab.doc];
+        if let Some(job) = d.syntax.take_job(&d.buffer) {
             spawn_syntax(&self.proxy, job);
         }
-        if tab.doc.syntax.lexical().is_some() && !tab.noted_size {
+        if self.docs[tab.doc].syntax.lexical().is_some() && !tab.noted_size {
             tab.noted_size = true;
             let mb = MAX_HIGHLIGHT_BYTES / (1024 * 1024);
             self.say(format!("Over {mb} MB: simpler syntax colours"), false);
@@ -3203,17 +3246,18 @@ impl App {
         let tab = &mut self.tabs[self.active];
         // Bring the tree up to date with this frame's edits, or hand the
         // rest to a worker if that would take too long.
-        if let Some(job) = tab.doc.syntax.refresh(&tab.doc.buffer, SYNTAX_BUDGET) {
+        let d = &mut self.docs[tab.doc];
+        if let Some(job) = d.syntax.refresh(&d.buffer, SYNTAX_BUDGET) {
             spawn_syntax(&self.proxy, job);
         }
         if let Some(c) = tab.compare.as_mut() {
-            c.sync(&mut tab.doc);
+            c.sync(&mut self.docs[tab.doc]);
             if let Some(job) = c.other.syntax.refresh(&c.other.buffer, SYNTAX_BUDGET) {
                 spawn_syntax(&self.proxy, job);
             }
         }
         if let Some(m) = tab.merge.as_mut() {
-            if m.sync(&mut tab.doc) {
+            if m.sync(&mut self.docs[tab.doc]) {
                 for doc in m.inputs_mut() {
                     if let Some(job) = doc.syntax.refresh(&doc.buffer, SYNTAX_BUDGET) {
                         spawn_syntax(&self.proxy, job);
@@ -3223,7 +3267,7 @@ impl App {
                 // The result was reloaded from disk: the regions no longer
                 // describe it.
                 if let Some(m) = tab.merge.take() {
-                    m.finish(&mut tab.doc);
+                    m.finish(&mut self.docs[tab.doc]);
                 }
                 self.message = Some(Message {
                     text: "Merge ended: the file was reloaded".into(),
@@ -3234,12 +3278,12 @@ impl App {
         }
         // A text swapped wholesale (a save, a merge result) leaves the
         // cursors to be snapped to it before they are drawn.
-        tab.carets.fit(&tab.doc);
+        tab.carets.fit(&self.docs[tab.doc]);
         paint_scene(
             gpu,
             layout,
             &mut Scene {
-                doc: &tab.doc,
+                doc: &self.docs[tab.doc],
                 carets: &tab.carets,
                 view: &mut tab.view,
                 compare: tab.compare.as_deref_mut(),
@@ -3255,7 +3299,7 @@ impl App {
             },
         );
         view::draw_tabs(gpu, &self.theme.ui, layout, &labels, self.active);
-        let active = self.tabs[self.active].doc.canonical.as_deref();
+        let active = self.docs[self.tabs[self.active].doc].canonical.as_deref();
         sidebar::draw(
             gpu,
             &self.theme.ui,
@@ -3609,10 +3653,13 @@ impl App {
     fn snapshots(&self) -> find_files::Snapshots {
         let mut map = find_files::Snapshots::new();
         for tab in &self.tabs {
-            if let Some(path) = &tab.doc.canonical
-                && tab.doc.is_dirty()
+            if let Some(path) = &self.docs[tab.doc].canonical
+                && self.docs[tab.doc].is_dirty()
             {
-                map.insert(path.clone(), Arc::from(tab.doc.buffer.snapshot()));
+                map.insert(
+                    path.clone(),
+                    Arc::from(self.docs[tab.doc].buffer.snapshot()),
+                );
             }
         }
         map
@@ -3759,7 +3806,7 @@ impl App {
             let tab = self
                 .tabs
                 .iter()
-                .position(|t| t.doc.canonical.as_deref() == Some(canonical.as_path()));
+                .position(|t| self.docs[t.doc].canonical.as_deref() == Some(canonical.as_path()));
             let Some(ti) = tab else {
                 jobs.push(replace_files::Job {
                     path: file.path.clone(),
@@ -3770,11 +3817,11 @@ impl App {
             let ranges: Vec<std::ops::Range<usize>> =
                 hits.iter().map(|&j| file.hits[j].range.clone()).collect();
             let tab = &mut self.tabs[ti];
-            if tab.doc.is_saving() {
+            if self.docs[tab.doc].is_saving() {
                 summary.busy += 1;
                 continue;
             }
-            let mut ed = tab.ed();
+            let mut ed = Editor::new(&mut self.docs[tab.doc], &mut tab.carets);
             match replace_in_tab(&mut ed, &replacement, &ranges) {
                 Some(0) => summary.changed += 1,
                 Some(n) => {
@@ -3899,16 +3946,16 @@ impl App {
             let Some(tab) = self
                 .tabs
                 .iter_mut()
-                .find(|t| t.doc.canonical.as_deref() == Some(path.as_path()))
+                .find(|t| self.docs[t.doc].canonical.as_deref() == Some(path.as_path()))
             else {
                 problems.push(format!("{} (tab closed)", name_of(path)));
                 continue;
             };
-            if tab.doc.history.top_id() != *top || tab.doc.is_saving() {
+            if self.docs[tab.doc].history.top_id() != *top || self.docs[tab.doc].is_saving() {
                 problems.push(format!("{} (edited since)", name_of(path)));
                 continue;
             }
-            match tab.ed().undo() {
+            match Editor::new(&mut self.docs[tab.doc], &mut tab.carets).undo() {
                 Ok(true) => restored += 1,
                 Ok(false) => problems.push(name_of(path)),
                 Err(e) => {
@@ -3933,6 +3980,23 @@ impl App {
         self.say(text, !problems.is_empty());
         self.search_files();
     }
+}
+
+/// The tabs a start opens with, one per document in `docs` (an untitled
+/// one when there are none), and the list holding those documents.
+fn first_tabs(docs: Vec<Document>, config: &Config, wrap: bool) -> (Docs, Vec<Tab>) {
+    let mut open = Docs::default();
+    let mut tabs: Vec<Tab> = docs
+        .into_iter()
+        .map(|mut d| {
+            d.configure_indent(config.indent.for_language(d.language_key()));
+            Tab::new(open.insert(d), wrap)
+        })
+        .collect();
+    if tabs.is_empty() {
+        tabs.push(Tab::new(open.insert(Document::untitled()), wrap));
+    }
+    (open, tabs)
 }
 
 /// Replace `ranges` in an open tab's text as one undo step, each only
@@ -4600,11 +4664,11 @@ impl ApplicationHandler<AppEvent> for App {
                 let Some(i) = self
                     .tabs
                     .iter()
-                    .position(|t| t.doc.syntax.waiting_for(result.id()))
+                    .position(|t| self.docs[t.doc].syntax.waiting_for(result.id()))
                 else {
                     return; // the tab closed, or its file was reloaded
                 };
-                let doc = &mut self.tabs[i].doc;
+                let doc = &mut self.docs[self.tabs[i].doc];
                 if let Some(job) = doc.syntax.finish(result, &doc.buffer, SYNTAX_BUDGET) {
                     spawn_syntax(&self.proxy, job);
                 }
@@ -4769,7 +4833,7 @@ impl ApplicationHandler<AppEvent> for App {
             let found = self
                 .tabs
                 .iter()
-                .position(|t| t.doc.canonical.as_deref() == Some(b.as_path()));
+                .position(|t| self.docs[t.doc].canonical.as_deref() == Some(b.as_path()));
             if let Some(i) = found {
                 self.switch_to(i);
                 match Document::open(&a) {

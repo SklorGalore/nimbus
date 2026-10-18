@@ -10,6 +10,7 @@ mod columns;
 mod compare;
 mod config;
 mod debug;
+mod docs;
 mod document;
 mod editing;
 mod find;
