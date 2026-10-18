@@ -68,7 +68,7 @@ preview images, HTML export), was dropped whole (`DESIGN.md` §9).
 | Session restore | M8, DESIGN.md §2 | M12 |
 | Split views | M8 (M6 prepared the layout) | M13 |
 | Code signing and notarisation, installers | M8 | M15 |
-| Auto-update | M8 | M15, as an on-demand check; in-place updates stay deferred |
+| Auto-update | M8 | M15, as an on-demand check; in-place updates in M30 (owner, 2026-10-18) |
 | Linux run by hand (Wayland, X11) | M8 | M15 |
 | Bracket matching misled by strings | M8 known limitation | M14 |
 | Diff options (ignore whitespace), folder compare, git revisions | M9 | Unscheduled, below |
