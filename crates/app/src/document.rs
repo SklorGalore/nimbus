@@ -18,6 +18,7 @@ use nimbus_core::{long_line, movement, multi};
 
 use nimbus_syntax::state::SyntaxState;
 
+use crate::encoding::Encoding;
 use crate::indexer::Indexing;
 use crate::input::Motion;
 use crate::io::{self, OpenError, SaveError};
@@ -431,8 +432,19 @@ pub struct Document {
     /// to the new file, a merge result); panes' carets compare it with
     /// theirs and snap to the new text ([`Carets::fit`]).
     pub(crate) epoch: u64,
-    /// The file had a UTF-8 byte order mark, written back on save.
+    /// The file had its encoding's byte order mark, written back on save.
     pub bom: bool,
+    /// The encoding the file was read in and is saved in (M17).
+    pub encoding: Encoding,
+    /// The encoding was chosen rather than detected ("Reopen with
+    /// Encoding", `--encoding`): reloading after a change on disk keeps it.
+    pub chosen_encoding: Option<Encoding>,
+    /// Some bytes were not valid in the encoding and show as U+FFFD; the
+    /// next save asks first, since it writes U+FFFD in their place.
+    pub lossy: bool,
+    /// Why the text cannot be edited or saved, when it cannot: a huge file
+    /// in another encoding, shown as bytes.
+    pub read_only: Option<String>,
     /// Increments on every change to the text. Background work (search,
     /// parsing) records the version it read, so stale results can be
     /// recognised and dropped.
@@ -718,6 +730,22 @@ impl Document {
         Self::open_by(path, io::open)
     }
 
+    /// [`Document::open`] in `encoding`, skipping detection; reloading
+    /// keeps that encoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`OpenError`] for anything other than a missing file.
+    pub fn open_as(path: &Path, encoding: Encoding) -> Result<Self, OpenError> {
+        let mut doc = Self::open_by(path, |p| io::open_as(p, Some(encoding)))?;
+        doc.chosen_encoding = Some(encoding);
+        if doc.buffer.len_bytes() == 0 {
+            // A file still to be created is created in that encoding.
+            doc.encoding = encoding;
+        }
+        Ok(doc)
+    }
+
     /// Open `path` memory-mapped whatever its size, for tests of mapped
     /// documents.
     #[cfg(test)]
@@ -742,6 +770,9 @@ impl Document {
                 buffer: AnyBuffer::default(),
                 line_ending: LineEnding::default(),
                 bom: false,
+                encoding: Encoding::Utf8,
+                lossy: false,
+                read_only: None,
                 mapping: None,
                 indexing: None,
             },
@@ -753,6 +784,9 @@ impl Document {
             path: Some(path.to_path_buf()),
             line_ending: opened.line_ending,
             bom: opened.bom,
+            encoding: opened.encoding,
+            lossy: opened.lossy,
+            read_only: opened.read_only,
             disk,
             canonical: Some(io::canonical(path)),
             ..Self::default()
@@ -899,7 +933,7 @@ impl Document {
         #[cfg(test)]
         let opened = self.opener.unwrap_or(io::open)(&path)?;
         #[cfg(not(test))]
-        let opened = io::open(&path)?;
+        let opened = io::open_as(&path, self.chosen_encoding)?;
         // Where each pane's cursor was, to put it back. A rope keeps its line and
         // column. A mapped document keeps the byte offset instead: its file
         // may have been cut short, and working out the line could read the
@@ -921,6 +955,9 @@ impl Document {
         self.mapping = opened.mapping;
         self.line_ending = opened.line_ending;
         self.bom = opened.bom;
+        self.encoding = opened.encoding;
+        self.lossy = opened.lossy;
+        self.read_only = opened.read_only;
         self.disk = disk;
         self.reloaded_at = Some(Instant::now());
         self.history = History::default();
@@ -1009,14 +1046,19 @@ impl Document {
     }
 
     /// The encoding, as far as it is known, for the status bar. A rope
-    /// holds only UTF-8. A piece table held in memory holds a small file
-    /// that is not UTF-8. A huge mapped file's bytes are never checked as
-    /// a whole, so nothing is claimed for it.
+    /// holds text decoded from the file's encoding. A piece table held in
+    /// memory holds a small file that is not UTF-8 nor any text encoding
+    /// Nimbus recognises. A huge mapped file's bytes are never checked as a
+    /// whole, so nothing is claimed for it unless its start was not UTF-8
+    /// (it is then read-only).
     #[must_use]
     pub fn encoding_label(&self) -> Option<&'static str> {
+        if self.read_only.is_some() {
+            return Some(self.encoding.name());
+        }
         match (self.buffer.is_mapped(), self.mapping.is_some(), self.bom) {
-            (false, _, false) => Some("UTF-8"),
-            (false, _, true) => Some("UTF-8 BOM"),
+            (false, _, true) if self.encoding.is_utf8() => Some("UTF-8 BOM"),
+            (false, _, _) => Some(self.encoding.name()),
             (true, false, _) => Some("Not UTF-8"),
             (true, true, true) => Some("BOM"),
             (true, true, false) => None,
@@ -1092,7 +1134,13 @@ impl Document {
                 source: std::io::Error::other("it saves on a worker; nothing was written"),
             });
         }
-        let written = io::save(&path, &self.buffer, self.bom)?;
+        if let Some(why) = &self.read_only {
+            return Err(SaveError {
+                step: "saving a read-only document",
+                source: std::io::Error::other(why.clone()),
+            });
+        }
+        let written = io::save_encoded(&path, &self.buffer, self.encoding, self.bom)?;
         self.mark_saved(&written);
         Ok(())
     }
@@ -1108,6 +1156,7 @@ impl Document {
         // the saved step and the document would look clean.
         self.history.seal();
         self.saved_at = self.history.top_id();
+        self.lossy = false;
         self.remember_disk_text();
     }
 
@@ -1168,6 +1217,13 @@ impl Document {
         }
         if !self.saves_on_worker() {
             return Err(refuse("only mapped documents save on a worker"));
+        }
+        if let Some(why) = &self.read_only {
+            return Err(refuse(why));
+        }
+        if !self.encoding.is_utf8() {
+            // Huge files are written as they are, never converted.
+            return Err(refuse("files this large save only as UTF-8"));
         }
         // No undo step may stay open to absorb edits made after the save.
         self.history.seal();

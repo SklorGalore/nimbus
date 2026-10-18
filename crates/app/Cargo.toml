@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 arboard = { version = "3", default-features = false }
 dirs = "7"
+encoding_rs = "0.8.42"
 env_logger = "0.11.11"
 globset = "0.4"
 ignore = "0.4"
@@ -25,6 +26,14 @@ toml = "1"
 unicode-segmentation = "1.13.3"
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
 winit = "0.30"
+
+[features]
+default = []
+# East Asian encodings (Shift_JIS, EUC-JP, ISO-2022-JP, GBK, GB18030, Big5,
+# EUC-KR) in the encoding pickers, --encoding and the config's [encodings]
+# table. Off by default (DESIGN.md §9): sniffing them is unreliable, so
+# they are offered only by explicit choice.
+east-asian = []
 
 [lints]
 workspace = true

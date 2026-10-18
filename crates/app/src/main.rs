@@ -13,6 +13,7 @@ mod debug;
 mod docs;
 mod document;
 mod editing;
+mod encoding;
 mod find;
 mod find_files;
 mod folding;

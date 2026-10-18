@@ -11,16 +11,25 @@
 //! or power cut mid-save leaves the old file or the new file, never half of
 //! each. Mapped documents are saved the same way, but on a worker and with
 //! the document switching to the new file ([`crate::saver`]).
+//!
+//! Files in other encodings than UTF-8 (M17) are decoded into a rope when
+//! they open and encoded back when they save, in blocks; the buffer only
+//! ever holds UTF-8 ([`crate::encoding`]). Which encoding a file is in comes
+//! from an explicit choice (`--encoding`, the config's `[encodings]` table,
+//! "Reopen with Encoding"), else its byte order mark, else a guess from its
+//! first 64 KB.
 
+use std::collections::HashMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Instant;
 
 use nimbus_core::mapped::Limits;
 use nimbus_core::{AnyBuffer, Buffer, LineEnding, MappedBuffer, RopeBuffer, Source, Text};
 
+use crate::encoding::{self, Encoding, Sniffed};
 use crate::mapping::MappedFile;
 
 /// Files at or above this size open in the mapped backend instead of being
@@ -78,17 +87,75 @@ pub fn force_backend(backend: Backend) {
     let _ = FORCED_BACKEND.set(backend);
 }
 
+/// Encodings chosen by file pattern in the config's `[encodings]` table;
+/// see [`set_encoding_rules`].
+static ENCODING_RULES: RwLock<Vec<(globset::GlobMatcher, bool, Encoding)>> =
+    RwLock::new(Vec::new());
+
+/// Use the config's `[encodings]` table, pattern to encoding name
+/// (`"*.csv" = "windows-1252"`), for files opened from now on: a file whose
+/// name matches is read in that encoding, skipping detection. A pattern
+/// with a `/` is matched against the whole path, others against the file
+/// name. Returns a warning for each entry that is not understood.
+pub fn set_encoding_rules(table: &HashMap<String, String>) -> Vec<String> {
+    let mut rules = Vec::new();
+    let mut warnings = Vec::new();
+    let mut entries: Vec<_> = table.iter().collect();
+    // The table has no order; sorted, the first match is at least stable.
+    entries.sort();
+    for (pattern, name) in entries {
+        let Some(encoding) = Encoding::from_label(name) else {
+            warnings.push(format!("config: encodings: unknown encoding {name:?}"));
+            continue;
+        };
+        match globset::Glob::new(pattern) {
+            Ok(glob) => rules.push((glob.compile_matcher(), pattern.contains('/'), encoding)),
+            Err(e) => warnings.push(format!("config: encodings: pattern {pattern:?}: {e}")),
+        }
+    }
+    *ENCODING_RULES
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = rules;
+    warnings
+}
+
+/// The encoding the config's `[encodings]` table gives `path`, if any.
+fn configured_encoding(path: &Path) -> Option<Encoding> {
+    let rules = ENCODING_RULES.read().unwrap_or_else(PoisonError::into_inner);
+    let name = path.file_name()?;
+    rules
+        .iter()
+        .find(|(glob, whole, _)| {
+            if *whole {
+                glob.is_match(path)
+            } else {
+                glob.is_match(name)
+            }
+        })
+        .map(|(_, _, e)| *e)
+}
+
 /// A file opened for editing.
 #[derive(Debug)]
 pub struct Opened {
-    /// The file's text, without any byte order mark.
+    /// The file's text, without any byte order mark, as UTF-8.
     pub buffer: AnyBuffer,
     /// The line ending most of its lines use; Enter inserts this.
     pub line_ending: LineEnding,
-    /// The file started with a UTF-8 byte order mark. It is kept out of the
-    /// text, so it cannot be edited or typed in front of, and is written
-    /// back on save.
+    /// The file started with its encoding's byte order mark. It is kept out
+    /// of the text, so it cannot be edited or typed in front of, and is
+    /// written back on save.
     pub bom: bool,
+    /// The encoding the file was read in, and is saved back in. A file that
+    /// is not UTF-8 but was opened as bytes (M7's path) says UTF-8: its
+    /// bytes are kept as they are and written back unchanged.
+    pub encoding: Encoding,
+    /// Some bytes were not valid in `encoding` and show as U+FFFD; saving
+    /// would write that character in their place, so the first save asks.
+    pub lossy: bool,
+    /// Why the document cannot be edited, when it cannot: a huge file in
+    /// another encoding, shown as bytes rather than converted in memory.
+    pub read_only: Option<String>,
     /// The mapping behind a mapped buffer: its original bytes, readable
     /// without going through the mapping, and the length to compare the
     /// file on disk with. `None` for a rope.
@@ -140,15 +207,38 @@ impl std::error::Error for OpenError {}
 ///
 /// Returns an [`OpenError`] describing why the file cannot be edited.
 pub fn open(path: &Path) -> Result<Opened, OpenError> {
-    open_with(path, MAX_ROPE_BYTES, FORCED_BACKEND.get().copied())
+    open_as(path, None)
+}
+
+/// [`open`], in `encoding` if given (`--encoding`, "Reopen with
+/// Encoding"), else the one the config's `[encodings]` table gives, else
+/// the detected one.
+///
+/// # Errors
+///
+/// Returns an [`OpenError`] describing why the file cannot be edited.
+pub fn open_as(path: &Path, encoding: Option<Encoding>) -> Result<Opened, OpenError> {
+    let encoding = encoding.or_else(|| configured_encoding(path));
+    open_full(path, MAX_ROPE_BYTES, FORCED_BACKEND.get().copied(), encoding)
 }
 
 /// [`open`], with the size from which files are mapped and the forced
 /// backend as parameters, so tests can use tiny limits.
+#[cfg(test)]
 pub(crate) fn open_with(
     path: &Path,
     rope_limit: u64,
     forced: Option<Backend>,
+) -> Result<Opened, OpenError> {
+    open_full(path, rope_limit, forced, None)
+}
+
+/// [`open_with`] in a chosen encoding.
+pub(crate) fn open_full(
+    path: &Path,
+    rope_limit: u64,
+    forced: Option<Backend>,
+    chosen: Option<Encoding>,
 ) -> Result<Opened, OpenError> {
     let started = Instant::now();
     let meta = match fs::metadata(path) {
@@ -169,6 +259,39 @@ pub(crate) fn open_with(
     } else {
         Backend::Rope
     });
+    // The first 64 KB say whether there is a byte order mark and, if the
+    // file is not UTF-8, what it might be instead. Never more: a 4 GB file
+    // is not read to guess.
+    let mut sample = Vec::new();
+    (&file)
+        .take(encoding::SNIFF_BYTES as u64)
+        .read_to_end(&mut sample)
+        .and_then(|_| (&file).seek(SeekFrom::Start(0)))
+        .map_err(OpenError::Io)?;
+    let complete = sample.len() < encoding::SNIFF_BYTES;
+    let bom = encoding::bom_of(&sample);
+    // An explicit choice wins; else a UTF-16 byte order mark decides. A
+    // UTF-8 one is handled by the UTF-8 path below.
+    let decode_as = chosen.or(bom.map(|(e, _)| e)).filter(|e| !e.is_utf8());
+    if let Some(e) = decode_as {
+        let skip = bom.filter(|(b, _)| *b == e).map_or(0, |(_, n)| n);
+        log::debug!(
+            "open: {} in {} ({})",
+            path.display(),
+            e.name(),
+            if chosen.is_some() { "chosen" } else { "byte order mark" }
+        );
+        if backend == Backend::Mapped {
+            return open_read_only(path, file, e);
+        }
+        let opened = decode_rope(&file, e, skip).map_err(OpenError::Io)?;
+        log::debug!(
+            "open: {} decoded into a rope in {:?}",
+            path.display(),
+            started.elapsed()
+        );
+        return Ok(opened);
+    }
     if backend == Backend::Rope {
         // A forced rope has no limit: measuring big ropes is its purpose.
         let limit = if forced.is_some() {
@@ -188,6 +311,16 @@ pub(crate) fn open_with(
             // It grew past the limit while being read: map it instead.
             Ok(None) => {}
             Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                if chosen.is_none() && encoding::sniff_not_utf8(&sample) == Sniffed::Windows1252 {
+                    log::debug!(
+                        "open: {} is not UTF-8; its first {} bytes read as Windows-1252",
+                        path.display(),
+                        sample.len()
+                    );
+                    (&file).seek(SeekFrom::Start(0)).map_err(OpenError::Io)?;
+                    return decode_rope(&file, encoding::WINDOWS_1252, 0).map_err(OpenError::Io);
+                }
+                log::debug!("open: {} is not UTF-8 and not text: bytes", path.display());
                 if forced.is_some() {
                     return Err(OpenError::NotUtf8);
                 }
@@ -207,9 +340,105 @@ pub(crate) fn open_with(
             Err(e) => return Err(OpenError::Io(e)),
         }
     }
+    if chosen.is_none() && encoding::sniff(&sample, complete) == Sniffed::Windows1252 {
+        log::debug!(
+            "open: {}'s first {} bytes are not UTF-8 but read as Windows-1252",
+            path.display(),
+            sample.len()
+        );
+        return open_read_only(path, file, encoding::WINDOWS_1252);
+    }
     let opened = open_mapped(file)?;
     log::debug!("open: {} mapped in {:?}", path.display(), started.elapsed());
     Ok(opened)
+}
+
+/// Map a huge `file` in `encoding` as bytes, read-only: converting it would
+/// mean holding all of it in memory (DESIGN.md §9, M17), and editing its
+/// bytes as UTF-8 would mix two encodings in one file.
+fn open_read_only(path: &Path, file: fs::File, encoding: Encoding) -> Result<Opened, OpenError> {
+    let mut opened = open_mapped(file)?;
+    let name = path
+        .file_name()
+        .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    opened.encoding = encoding;
+    opened.read_only = Some(format!(
+        "{name} is {}, too large to convert (over {} MB): read-only, shown as bytes",
+        encoding.name(),
+        MAX_ROPE_BYTES / (1024 * 1024)
+    ));
+    log::debug!("open: {} read-only, in {}", path.display(), encoding.name());
+    Ok(opened)
+}
+
+/// Read `file` from where it is positioned, after skipping `skip` bytes (a
+/// byte order mark), decoding it from `encoding` into a rope a block at a
+/// time: no full-size copy of the bytes or of the text is held besides the
+/// rope itself.
+///
+/// # Errors
+///
+/// Returns the read error.
+fn decode_rope(file: &fs::File, encoding: Encoding, skip: usize) -> std::io::Result<Opened> {
+    let mut reader = Decoding {
+        file,
+        decoder: encoding.decoder(),
+        input: vec![0; DECODE_BLOCK],
+        text: String::new(),
+        pos: 0,
+        done: false,
+    };
+    std::io::copy(&mut (&mut reader.file).take(skip as u64), &mut std::io::sink())?;
+    let buffer = RopeBuffer::from_reader(&mut reader)?;
+    let line_ending = LineEnding::detect(buffer.chunks());
+    Ok(Opened {
+        buffer: buffer.into(),
+        line_ending,
+        bom: skip > 0,
+        encoding,
+        lossy: reader.decoder.lossy(),
+        read_only: None,
+        mapping: None,
+        indexing: None,
+    })
+}
+
+/// How many bytes of a file are decoded at a time: 4 MiB.
+const DECODE_BLOCK: usize = 4 * 1024 * 1024;
+
+/// A reader that hands out a file's text as UTF-8, decoding it from another
+/// encoding a block at a time; what [`RopeBuffer::from_reader`] reads from.
+struct Decoding<'a> {
+    file: &'a fs::File,
+    decoder: encoding::Decoder,
+    /// One block of the file's bytes, reused.
+    input: Vec<u8>,
+    /// The block decoded, handed out from `pos` on.
+    text: String,
+    pos: usize,
+    /// The end of the file was reached and the decoder told so.
+    done: bool,
+}
+
+impl Read for Decoding<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.pos == self.text.len() {
+            if self.done {
+                return Ok(0);
+            }
+            let n = self.file.read(&mut self.input)?;
+            self.text.clear();
+            self.pos = 0;
+            self.done = n == 0;
+            self.decoder
+                .decode(&self.input[..n], self.done, &mut self.text);
+        }
+        let rest = &self.text.as_bytes()[self.pos..];
+        let n = rest.len().min(buf.len());
+        buf[..n].copy_from_slice(&rest[..n]);
+        self.pos += n;
+        Ok(n)
+    }
 }
 
 /// Read `file` into a rope, streaming with no full-size intermediate
@@ -237,6 +466,9 @@ fn read_rope(file: &fs::File, limit: u64) -> std::io::Result<Option<Opened>> {
         buffer: buffer.into(),
         line_ending,
         bom,
+        encoding: Encoding::Utf8,
+        lossy: false,
+        read_only: None,
         mapping: None,
         indexing: None,
     }))
@@ -254,6 +486,9 @@ fn open_bytes(mut bytes: Vec<u8>) -> Opened {
         buffer: MappedBuffer::from_bytes(bytes).into(),
         line_ending,
         bom,
+        encoding: Encoding::Utf8,
+        lossy: false,
+        read_only: None,
         mapping: None,
         indexing: None,
     }
@@ -290,6 +525,9 @@ fn open_mapped(file: fs::File) -> Result<Opened, OpenError> {
         buffer: buffer.into(),
         line_ending,
         bom,
+        encoding: Encoding::Utf8,
+        lossy: false,
+        read_only: None,
         mapping: Some(mapped),
         indexing,
     })
@@ -311,6 +549,41 @@ impl std::fmt::Display for SaveError {
 }
 
 impl std::error::Error for SaveError {}
+
+impl SaveError {
+    /// The character that stopped the save, when the target encoding has
+    /// no bytes for it.
+    #[must_use]
+    pub fn unencodable(&self) -> Option<&Unencodable> {
+        self.source.get_ref()?.downcast_ref()
+    }
+}
+
+/// A character the file's encoding cannot hold (an emoji in a
+/// Windows-1252 file): the save stops there and writes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unencodable {
+    /// The character.
+    pub ch: char,
+    /// Its byte offset in the document.
+    pub offset: usize,
+    /// The encoding's name.
+    pub encoding: &'static str,
+}
+
+impl std::fmt::Display for Unencodable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} cannot hold the character {:?} (U+{:04X})",
+            self.encoding,
+            self.ch,
+            u32::from(self.ch)
+        )
+    }
+}
+
+impl std::error::Error for Unencodable {}
 
 /// Turns an I/O error into a [`SaveError`] at `step`, for `map_err`.
 pub(crate) fn step(step: &'static str) -> impl FnOnce(std::io::Error) -> SaveError {
@@ -357,12 +630,31 @@ pub fn canonical(path: &Path) -> std::path::PathBuf {
 /// Returns a [`SaveError`] naming the step that failed. The target file is
 /// untouched unless the final rename succeeded.
 pub fn save(path: &Path, text: &dyn Text, bom: bool) -> Result<fs::Metadata, SaveError> {
+    save_encoded(path, text, Encoding::Utf8, bom)
+}
+
+/// [`save`], encoding the text in `encoding`, preceded by its byte order
+/// mark if `bom` is set. For UTF-8 the bytes are written as they are, as
+/// [`save`] says; for any other encoding the document must be valid UTF-8
+/// (a rope always is).
+///
+/// # Errors
+///
+/// As for [`save`]; also a [`SaveError`] whose
+/// [`unencodable`](SaveError::unencodable) names the first character
+/// `encoding` cannot hold. The target is untouched then.
+pub fn save_encoded(
+    path: &Path,
+    text: &dyn Text,
+    encoding: Encoding,
+    bom: bool,
+) -> Result<fs::Metadata, SaveError> {
     // Write next to the real file, so the rename stays within one directory
     // (and one filesystem), and so a symlink is followed, not overwritten.
     let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let (tmp, mut file) = create_temp(&target)?;
 
-    let result = write_temp(&mut file, &target, text, bom).and_then(|()| {
+    let result = write_temp(&mut file, &target, text, (encoding, bom)).and_then(|()| {
         // The written file's size and time, read from the file itself before
         // it replaces the old one: a write by anyone else after this point
         // looks different. Renaming keeps both.
@@ -429,14 +721,18 @@ fn write_temp(
     file: &mut fs::File,
     target: &Path,
     text: &dyn Text,
-    bom: bool,
+    (encoding, bom): (Encoding, bool),
 ) -> Result<(), SaveError> {
     copy_permissions(file, target)?;
-    if bom {
-        file.write_all(BOM.as_bytes())
+    if bom && let Some(mark) = encoding.bom() {
+        file.write_all(mark)
             .map_err(step("writing the temporary file"))?;
     }
-    write_text(file, text, SAVE_CHUNK, |_| true)?;
+    if encoding.is_utf8() {
+        write_text(file, text, SAVE_CHUNK, |_| true)?;
+    } else {
+        write_encoded(file, text, encoding, SAVE_CHUNK)?;
+    }
     // Make sure the bytes are on disk before the rename makes them visible.
     file.sync_all().map_err(step("flushing to disk"))
 }
@@ -499,6 +795,77 @@ pub(crate) fn write_text(
         out.write_all(&buf)
             .map_err(step("writing the temporary file"))?;
         pos = end;
+    }
+    out.flush().map_err(step("writing the temporary file"))
+}
+
+/// Write `text` to `out` encoded in `encoding`, reading at most `chunk`
+/// bytes of it at a time. A character cut by the end of a chunk waits for
+/// the next one, since an encoder takes whole characters.
+///
+/// # Errors
+///
+/// Returns a [`SaveError`] for a failed read or write, for bytes in the
+/// document that are not UTF-8, or for a character `encoding` cannot hold
+/// (see [`SaveError::unencodable`]).
+pub(crate) fn write_encoded(
+    out: &mut impl Write,
+    text: &dyn Text,
+    encoding: Encoding,
+    chunk: usize,
+) -> Result<(), SaveError> {
+    let len = text.len_bytes();
+    let chunk = chunk.max(4);
+    let mut encoder = encoding.encoder();
+    let mut buf = Vec::with_capacity(len.min(chunk) + 4);
+    let mut bytes = Vec::new();
+    // Document offset of `buf[0]`.
+    let mut base = 0;
+    let mut pos = 0;
+    while pos < len || !buf.is_empty() {
+        let end = len.min(pos.saturating_add(chunk));
+        let before = buf.len();
+        text.read_into(pos..end, &mut buf)
+            .map_err(step("reading the document"))?;
+        if buf.len() - before != end - pos {
+            return Err(step("reading the document")(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "the document ended early",
+            )));
+        }
+        pos = end;
+        let last = pos == len;
+        let valid = match std::str::from_utf8(&buf) {
+            Ok(s) => s.len(),
+            Err(e) if e.error_len().is_none() && !last => e.valid_up_to(),
+            Err(_) => {
+                return Err(step("encoding the text")(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the document holds bytes that are not text",
+                )));
+            }
+        };
+        let s = std::str::from_utf8(&buf[..valid]).map_err(|e| {
+            step("encoding the text")(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
+        bytes.clear();
+        if let Err(u) = encoder.encode(s, last, &mut bytes) {
+            return Err(step("encoding the text")(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                Unencodable {
+                    ch: u.ch,
+                    offset: base + u.at,
+                    encoding: encoding.name(),
+                },
+            )));
+        }
+        out.write_all(&bytes)
+            .map_err(step("writing the temporary file"))?;
+        buf.drain(..valid);
+        base += valid;
+        if last {
+            break;
+        }
     }
     out.flush().map_err(step("writing the temporary file"))
 }
@@ -800,6 +1167,139 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
         assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+    }
+
+    #[test]
+    fn other_encodings_decode_and_save_back_byte_for_byte() {
+        let dir = TempDir::new("encodings");
+        let utf16le: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain("naïve 日本\r\nb".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        let utf16be: Vec<u8> = [0xFE, 0xFF]
+            .into_iter()
+            .chain("x 👩‍💻\n".encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        for (name, bytes, text, encoding, bom) in [
+            (
+                "le.txt",
+                utf16le,
+                "naïve 日本\r\nb",
+                Encoding::Utf16Le,
+                true,
+            ),
+            ("be.txt", utf16be, "x 👩‍💻\n", Encoding::Utf16Be, true),
+            (
+                "w.csv",
+                b"id,name\r\n1,caf\xe9 \x80 \x93ok\x94\r\n".to_vec(),
+                "id,name\r\n1,café € “ok”\r\n",
+                encoding::WINDOWS_1252,
+                false,
+            ),
+        ] {
+            let path = dir.0.join(name);
+            fs::write(&path, &bytes).unwrap();
+            let opened = open(&path).unwrap();
+            assert_eq!(
+                (opened.encoding, opened.bom, opened.lossy),
+                (encoding, bom, false),
+                "{name}"
+            );
+            assert!(!opened.buffer.is_mapped() && opened.read_only.is_none());
+            assert_eq!(opened.buffer.slice(0..opened.buffer.len_bytes()), text);
+            save_encoded(&path, &opened.buffer, opened.encoding, opened.bom).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), bytes, "{name}");
+        }
+    }
+
+    #[test]
+    fn decoding_crosses_block_boundaries() {
+        // Characters cut by the 4 MiB block edge, in UTF-16 and in
+        // Windows-1252 (one byte per character, so never cut).
+        let dir = TempDir::new("blocks");
+        let text = "é😀x".repeat(DECODE_BLOCK / 5);
+        let path = dir.0.join("big16.txt");
+        let bytes: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        fs::write(&path, &bytes).unwrap();
+        let opened = open(&path).unwrap();
+        assert_eq!(opened.buffer.len_bytes(), text.len());
+        assert!(opened.buffer.slice(0..opened.buffer.len_bytes()) == text);
+        let copy = dir.0.join("copy");
+        save_encoded(&copy, &opened.buffer, opened.encoding, opened.bom).unwrap();
+        assert!(fs::read(&copy).unwrap() == bytes);
+    }
+
+    #[test]
+    fn explicit_encodings_skip_detection_and_config_patterns_choose_one() {
+        let dir = TempDir::new("explicit");
+        // An extension no other test uses: the rules are global.
+        let path = dir.0.join("data.m17-test");
+        // Valid UTF-8, but meant as Latin-1.
+        fs::write(&path, "caf\u{e9}".as_bytes()).unwrap();
+        assert_eq!(open(&path).unwrap().encoding, Encoding::Utf8);
+        let latin = open_as(&path, Some(Encoding::Latin1)).unwrap();
+        assert_eq!(latin.encoding, Encoding::Latin1);
+        assert_eq!(latin.buffer.slice(0..latin.buffer.len_bytes()), "cafÃ©");
+
+        let warnings = set_encoding_rules(&HashMap::from([
+            ("*.m17-test".to_owned(), "latin1".to_owned()),
+            ("*.x".to_owned(), "klingon".to_owned()),
+        ]));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(configured_encoding(&path), Some(Encoding::Latin1));
+        assert_eq!(configured_encoding(&dir.0.join("a.txt")), None);
+        set_encoding_rules(&HashMap::new());
+        assert_eq!(configured_encoding(&path), None);
+    }
+
+    #[test]
+    fn unencodable_characters_stop_the_save_and_name_their_place() {
+        let dir = TempDir::new("unencodable");
+        let path = dir.0.join("w.txt");
+        fs::write(&path, b"caf\xe9\n").unwrap();
+        let mut opened = open(&path).unwrap();
+        assert_eq!(opened.encoding, encoding::WINDOWS_1252);
+        opened.buffer.replace(6..6, "\u{1F600}").unwrap();
+        let err = save_encoded(&path, &opened.buffer, opened.encoding, false).unwrap_err();
+        let u = err.unencodable().unwrap();
+        assert_eq!((u.ch, u.offset), ('\u{1F600}', 6));
+        assert_eq!(fs::read(&path).unwrap(), b"caf\xe9\n", "nothing written");
+        // As UTF-8 it saves.
+        save_encoded(&path, &opened.buffer, Encoding::Utf8, false).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "café\n\u{1F600}");
+    }
+
+    #[test]
+    fn invalid_utf16_opens_with_replacements_marked_lossy() {
+        let dir = TempDir::new("lossy");
+        let path = dir.0.join("bad16.txt");
+        fs::write(&path, b"\xFF\xFEa\x00\x00\xD8b\x00").unwrap();
+        let opened = open(&path).unwrap();
+        assert!(opened.lossy);
+        assert_eq!(opened.buffer.slice(0..opened.buffer.len_bytes()), "a\u{fffd}b");
+    }
+
+    #[test]
+    fn huge_files_in_other_encodings_open_read_only_as_bytes() {
+        let dir = TempDir::new("huge-enc");
+        let path = dir.0.join("w.log");
+        fs::write(&path, b"caf\xe9 au lait\n").unwrap();
+        let opened = open_with(&path, 0, None).unwrap();
+        assert!(opened.buffer.is_mapped());
+        assert_eq!(opened.encoding, encoding::WINDOWS_1252);
+        assert!(opened.read_only.as_deref().unwrap().contains("read-only"));
+        let utf16 = dir.0.join("u16.log");
+        fs::write(&utf16, b"\xFF\xFEa\x00").unwrap();
+        let opened = open_with(&utf16, 0, None).unwrap();
+        assert_eq!(opened.encoding, Encoding::Utf16Le);
+        assert!(opened.read_only.is_some());
+        // UTF-8 stays editable, as do bytes that are not text.
+        let fine = dir.0.join("fine.log");
+        fs::write(&fine, "café\n").unwrap();
+        assert!(open_with(&fine, 0, None).unwrap().read_only.is_none());
     }
 
     #[test]
