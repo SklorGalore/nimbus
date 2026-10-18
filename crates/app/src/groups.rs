@@ -62,6 +62,36 @@ impl Default for Groups {
 }
 
 impl Groups {
+    /// Groups as a session saved them: `shares` are their widths, left to
+    /// right, and `fronts` their active tabs; `focused` has the focus.
+    /// Widths that are not positive numbers are made equal, and the rest
+    /// are scaled to add up to 1, so a hand-edited file cannot make a
+    /// group vanish. At most [`MAX_GROUPS`], and always one.
+    #[must_use]
+    pub fn restored(shares: &[f32], fronts: &[usize], focused: usize) -> Self {
+        let n = shares.len().clamp(1, MAX_GROUPS);
+        let mut widths: Vec<f32> = (0..n)
+            .map(|g| shares.get(g).copied().unwrap_or(1.0))
+            .collect();
+        if widths.iter().any(|w| !w.is_finite() || *w <= 0.0) {
+            widths.fill(1.0);
+        }
+        let total: f32 = widths.iter().sum();
+        Self {
+            list: widths
+                .iter()
+                .enumerate()
+                .map(|(g, w)| Group {
+                    active: fronts.get(g).copied().unwrap_or(0),
+                    find: FindBar::default(),
+                    share: w / total,
+                })
+                .collect(),
+            focused: focused.min(n - 1),
+            dragging: None,
+        }
+    }
+
     /// How many groups there are.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -229,6 +259,19 @@ mod tests {
             g.insert_after(g.len() - 1);
         }
         g
+    }
+
+    #[test]
+    fn restored_widths_are_scaled_and_checked() {
+        let g = Groups::restored(&[2.0, 2.0], &[0, 3], 1);
+        assert_eq!(g.columns(0.0, 1000.0), vec![(0.0, 500.0), (500.0, 1000.0)]);
+        assert_eq!((g.focused, g.list[1].active), (1, 3));
+        // A broken width makes them equal; too many groups are cut.
+        let g = Groups::restored(&[0.5, f32::NAN, 0.2, 0.3], &[], 9);
+        assert_eq!(g.len(), MAX_GROUPS);
+        assert_eq!(g.focused, MAX_GROUPS - 1);
+        assert!((g.list[0].share - 1.0 / 3.0).abs() < 1e-6);
+        assert_eq!(Groups::restored(&[], &[], 0).len(), 1);
     }
 
     #[test]

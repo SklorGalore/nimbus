@@ -9,13 +9,21 @@
 //! - `--no-session` neither restores nor saves one, for a clean start that
 //!   does not overwrite what was there.
 //!
-//! Restoring opens only the tab that was in front before the first frame;
-//! the others start as [`Document::placeholder`]s and are read on a worker
-//! after the first frame, or when shown, whichever comes first.
+//! Restoring opens only the tabs in front, one per editor group, before
+//! the first frame; the others start as [`Document::placeholder`]s and are
+//! read on a worker after the first frame, or when shown, whichever comes
+//! first.
+//!
+//! Since M13 a session also keeps the editor groups (each tab's group and
+//! each group's width and front tab) and each tab's folds. A file open in
+//! two groups is listed once per group, and comes back as one document
+//! shown in both.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::document::Document;
+use crate::groups::MAX_GROUPS;
 use crate::io;
 use crate::state::{Session, SessionTab, State};
 
@@ -32,6 +40,9 @@ pub struct Restore {
     pub expanded: Vec<PathBuf>,
     /// Files of the session that are gone, for a message-line note.
     pub dropped: Vec<PathBuf>,
+    /// Each editor group's share of the width, left to right; the groups
+    /// are numbered with no gaps, and there is at least one.
+    pub shares: Vec<f32>,
 }
 
 /// One restored tab.
@@ -46,6 +57,15 @@ pub struct RestoredTab {
     pub cursor: usize,
     /// The byte the view's top row starts in.
     pub scroll: usize,
+    /// The editor group it goes in.
+    pub group: usize,
+    /// It is its group's active tab.
+    pub front: bool,
+    /// Its folds, to make once the file is read if it has not changed
+    /// since ([`RestoredTab::disk`]).
+    pub folds: Vec<Range<usize>>,
+    /// The file's size and time when the folds were saved.
+    pub disk: Option<[u64; 2]>,
 }
 
 /// How this run treats sessions.
@@ -76,10 +96,12 @@ pub fn launch(state: &State, folder: Option<&Path>, files: bool, no_session: boo
     }
 }
 
-/// Plan the restore of `session`: drop files that are gone, read the front
-/// tab, and make placeholders of the rest. `open` reads a file (the real
-/// [`Document::open`], or a stand-in in tests); a front file that cannot
-/// be read is dropped and the next tab is tried.
+/// Plan the restore of `session`: drop files that are gone, read the
+/// front tab of each editor group, and make placeholders of the rest.
+/// `open` reads a file (the real [`Document::open`], or a stand-in in
+/// tests); a front file that cannot be read is dropped and the next tab of
+/// its group is tried. A group left with no tabs goes, and the groups
+/// right of it move left.
 pub fn restore(
     session: &Session,
     mut open: impl FnMut(&Path) -> Result<Document, String>,
@@ -94,36 +116,97 @@ pub fn restore(
         ..Restore::default()
     };
     let mut warnings = Vec::new();
+    // A group number past the saved widths (or past the most groups) is
+    // read as the first group.
+    let groups = session.groups.len().clamp(1, MAX_GROUPS);
     let mut active = None;
     for t in &session.tabs {
-        if out.tabs.iter().any(|r| r.canonical == t.path) {
-            continue; // the same file twice
+        let group = if t.group < groups { t.group } else { 0 };
+        if out
+            .tabs
+            .iter()
+            .any(|r| r.canonical == t.path && r.group == group)
+        {
+            continue; // the same file twice in one group
         }
         if !t.path.is_file() {
-            out.dropped.push(t.path.clone());
+            if !out.dropped.contains(&t.path) {
+                out.dropped.push(t.path.clone());
+            }
             continue;
         }
         if t.active {
             active = Some(out.tabs.len());
         }
-        out.tabs.push(placeholder(t));
+        let mut tab = placeholder(t);
+        tab.group = group;
+        out.tabs.push(tab);
     }
-    // Read the front tab now; if it cannot be read, try the next.
-    let at = active.unwrap_or(0);
-    while at < out.tabs.len() {
-        let path = out.tabs[at].canonical.clone();
-        match open(&path) {
-            Ok(doc) => {
-                out.tabs[at].doc = doc;
-                break;
-            }
-            Err(e) => {
-                warnings.push(format!("Cannot open {}: {e}", path.display()));
-                out.tabs.remove(at);
+    let focused = active.map_or(0, |a| out.tabs[a].group);
+    // Each group's front tab: the one marked, else the focused group's
+    // active tab, else its first.
+    for g in 0..groups {
+        let marked = out
+            .tabs
+            .iter()
+            .position(|r| r.group == g && r.front)
+            .or(active.filter(|_| g == focused))
+            .or_else(|| out.tabs.iter().position(|r| r.group == g));
+        for (i, r) in out.tabs.iter_mut().enumerate() {
+            if r.group == g {
+                r.front = Some(i) == marked;
             }
         }
     }
-    out.active = at.min(out.tabs.len().saturating_sub(1));
+    // Read the front tabs now; one that cannot be read gives its place to
+    // the next tab of its group.
+    for g in 0..groups {
+        while let Some(at) = out.tabs.iter().position(|r| r.group == g && r.front) {
+            let path = out.tabs[at].canonical.clone();
+            if out
+                .tabs
+                .iter()
+                .any(|r| r.canonical == path && !r.doc.is_placeholder())
+            {
+                break; // read already for another group: they share it
+            }
+            match open(&path) {
+                Ok(doc) => {
+                    out.tabs[at].doc = doc;
+                    break;
+                }
+                Err(e) => {
+                    warnings.push(format!("Cannot open {}: {e}", path.display()));
+                    out.tabs.remove(at);
+                    if let Some(next) = out.tabs[at..].iter_mut().find(|r| r.group == g) {
+                        next.front = true;
+                    } else if let Some(prev) =
+                        out.tabs[..at].iter_mut().rev().find(|r| r.group == g)
+                    {
+                        prev.front = true;
+                    }
+                }
+            }
+        }
+    }
+    // Number the groups that still have tabs with no gaps.
+    let shares = |g: usize| session.groups.get(g).copied().unwrap_or(1.0);
+    let used: Vec<usize> = (0..groups)
+        .filter(|&g| out.tabs.iter().any(|r| r.group == g))
+        .collect();
+    for r in &mut out.tabs {
+        r.group = used.iter().position(|&g| g == r.group).unwrap_or(0);
+    }
+    out.shares = used.iter().map(|&g| shares(g)).collect();
+    if out.shares.is_empty() {
+        out.shares.push(1.0);
+    }
+    let focused = used.iter().position(|&g| g == focused).unwrap_or(0);
+    out.active = out
+        .tabs
+        .iter()
+        .position(|r| r.group == focused && r.front)
+        .unwrap_or(0);
     (out, warnings)
 }
 
@@ -133,6 +216,10 @@ fn placeholder(t: &SessionTab) -> RestoredTab {
         canonical: t.path.clone(),
         cursor: t.cursor,
         scroll: t.scroll,
+        group: t.group,
+        front: t.front,
+        folds: t.folds.iter().map(|&[a, b]| a..b).collect(),
+        disk: t.disk,
     }
 }
 
@@ -206,6 +293,7 @@ mod tests {
             cursor: 3,
             scroll: 0,
             active,
+            ..SessionTab::default()
         }
     }
 
@@ -225,6 +313,7 @@ mod tests {
                 tab(&b, true),
                 tab(&a, false),
             ],
+            groups: Vec::new(),
         };
         let mut opened = Vec::new();
         let (r, warnings) = restore(&session, |p| {
@@ -243,6 +332,49 @@ mod tests {
     }
 
     #[test]
+    fn groups_come_back_with_a_front_tab_read_in_each() {
+        let dir = Dir::new("groups");
+        let a = dir.file("a.txt", "aaa");
+        let b = dir.file("b.txt", "bbb");
+        let c = dir.file("c.txt", "ccc");
+        let gone = dir.0.join("gone.txt");
+        let in_group = |p: &Path, group, front, active| SessionTab {
+            group,
+            front,
+            ..tab(p, active)
+        };
+        let session = Session {
+            root: dir.0.clone(),
+            mode: SidebarMode::Files,
+            expanded: Vec::new(),
+            tabs: vec![
+                in_group(&a, 0, false, false),
+                in_group(&b, 0, true, false),
+                // Group 1 had only a file that is gone: it goes.
+                in_group(&gone, 1, true, false),
+                // The same file in two groups; group 2 has the focus.
+                in_group(&b, 2, false, false),
+                in_group(&c, 2, true, true),
+            ],
+            groups: vec![0.5, 0.2, 0.3],
+        };
+        let mut opened = Vec::new();
+        let (r, warnings) = restore(&session, |p| {
+            opened.push(p.to_path_buf());
+            Document::open(p).map_err(|e| e.to_string())
+        });
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(opened, vec![b.clone(), c.clone()], "one front per group");
+        assert_eq!(r.shares, vec![0.5, 0.3]);
+        let groups: Vec<usize> = r.tabs.iter().map(|t| t.group).collect();
+        assert_eq!(groups, [0, 0, 1, 1]);
+        let fronts: Vec<bool> = r.tabs.iter().map(|t| t.front).collect();
+        assert_eq!(fronts, [false, true, false, true]);
+        assert_eq!(r.active, 3);
+        assert_eq!(r.dropped, vec![gone]);
+    }
+
+    #[test]
     fn an_unreadable_front_tab_falls_back_to_the_next() {
         let d = Dir::new("fallback");
         let a = d.file("a.txt", "aaa");
@@ -252,6 +384,7 @@ mod tests {
             mode: SidebarMode::Files,
             expanded: Vec::new(),
             tabs: vec![tab(&a, true), tab(&b, false)],
+            groups: Vec::new(),
         };
         let (r, warnings) = restore(&session, |p| {
             if p.ends_with("a.txt") {
@@ -281,6 +414,7 @@ mod tests {
             mode: SidebarMode::Files,
             expanded: Vec::new(),
             tabs: Vec::new(),
+            groups: Vec::new(),
         });
         assert_eq!(
             launch(&state, None, false, false),

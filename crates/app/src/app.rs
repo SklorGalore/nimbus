@@ -293,8 +293,25 @@ impl Tab {
             session::clamp_offset(t, p.cursor),
             session::clamp_offset(t, p.scroll),
         );
+        // Saved folds are byte ranges into the file as it was: kept only
+        // when its size and time say it is the same file, and then only
+        // the ones that still run from a line's end to a later line's end.
+        let folds: Vec<std::ops::Range<usize>> = if p.disk.is_some() && doc.disk_stamp() == p.disk {
+            p.folds
+                .into_iter()
+                .filter(|f| f.end <= t.len_bytes())
+                .filter(|f| nimbus_core::fold::lines_range(t, f.start, f.end) == Some(f.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Editor::new(doc, &mut self.carets).click(cursor, false);
         self.view.scroll_top = scroll;
+        if !folds.is_empty() {
+            self.view.follow(doc);
+            self.view.folds.fold_many(folds);
+            self.view.folds.reveal(cursor);
+        }
     }
 }
 
@@ -572,7 +589,7 @@ impl App {
         );
         let wrap = options.wrap || config.soft_wrap;
         let mut open = Docs::default();
-        let (mut tabs, active, note) =
+        let (mut tabs, groups, active, note) =
             startup_tabs(docs, restore, &mut state, &mut sidebar, wrap, &mut open);
         configure_tabs(&mut tabs, &mut open, &config, options.wrap);
         // `--search`: the Search panel open, searching once the window is
@@ -606,7 +623,7 @@ impl App {
             merge_saved_clean: None,
             frames: 0,
             docs: open,
-            groups: Groups::default(),
+            groups,
             fold_hover_key: None,
             tabs,
             active,

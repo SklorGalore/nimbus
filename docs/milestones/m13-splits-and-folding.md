@@ -1,6 +1,6 @@
 # M13 — Split views and folding
 
-**Status: in progress** (everything but what needs M12's session, which waits for it to land).
+**Status: done** (2026-10-18).
 Planned after M12. Written on 2026-10-17 from items
 deferred by M5 (code folding) and M8 (split views); M6 prepared for
 splits by giving the `View` an origin and width. Approved the same day:
@@ -21,8 +21,7 @@ frame budget as a single view of any file size.
       to the right with the current tab; up to three groups side by side,
       with no nesting and no vertical stacking, each with its own
       tab strip, scrollbar and find bar state. Dividers drag; widths are
-      remembered in `state.toml` with the session (M12). *(Widths in
-      `state.toml` wait for M12, which owns that file.)*
+      remembered in `state.toml` with the session (M12).
 - [x] The same file can be open in two groups: edits in one show in the
       other at once, each group keeps its own cursor, selection and
       scroll, undo in either group undoes the document's last edit, and
@@ -47,9 +46,8 @@ frame budget as a single view of any file size.
       with a thousand folds, and typing in two groups showing the same
       file all stay under 8 ms per frame; folding memory is O(folds), not
       O(lines).
-- [ ] Folds are kept in the session (M12) by byte range, and dropped when
-      the file changed on disk. *(Waits for M12's session; `Folds::all`
-      is the list to save.)*
+- [x] Folds are kept in the session (M12) by byte range, and dropped when
+      the file changed on disk.
 
 ## Scope
 
@@ -217,7 +215,31 @@ Making the 1000 folds took 13 ms (`Folds::fold_many`); they take 16 KB,
   (`Primary+K Primary+0`, `… J`, `… 1` to `3`), as in VS Code; Toggle Fold
   is `Primary+K Primary+L`. Fold All is refused past the compare view's
   256 MB limit.
-- Versions: nimbus 0.5.0, nimbus-core 0.4.0, nimbus-syntax 0.2.1.
+- Versions: nimbus 0.5.0, nimbus-core 0.4.0, nimbus-syntax 0.2.1; the
+  session follow-up below made nimbus 0.6.0.
+
+**The session follow-up** (after M12 merged, on a fresh branch from main)
+
+- Each session tab now records its group, whether it was its group's
+  front tab, and its folds; the session records each group's width.
+  The new fields are left out of `state.toml` when they hold their
+  defaults, so a one-group session writes the file as M12 did, and an
+  M12 file reads as one group (`crates/app/src/state.rs`).
+- A file open in two groups is listed once per group and comes back as
+  one document shown in both, each tab with its own cursor
+  (`startup_tabs` in `crates/app/src/app/workspace.rs`). Each group's
+  front tab is read before the first frame, so at most three files; the
+  rest are read after it as before (`session::restore`).
+- Folds are byte ranges, so they are saved only for a tab with no
+  unsaved edits, together with the file's size and modification time
+  (`Document::disk_stamp`). On restore they come back only when both
+  still match, and each must still run from a line's end to a later
+  line's end (`Tab::apply_pending` in `app.rs`). At most 1000 folds a
+  tab are saved: past that only the outermost, and past that again none,
+  so Fold All on a big file cannot make the state file megabytes.
+- A group whose only files are gone is left out and the groups right of
+  it move left; widths that are not positive numbers are made equal
+  (`Groups::restored`).
 
 **Surprises**
 
