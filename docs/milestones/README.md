@@ -42,7 +42,7 @@ repeated in each file:
 | 12 | [Workspace](m12-workspace.md) | Next |
 | 13 | [Split views and folding](m13-splits-and-folding.md) | Planned |
 | 14 | [Languages, second pass](m14-languages.md) | In progress |
-| 15 | [Distribution](m15-distribution.md) | Planned |
+| 15 | [Distribution](m15-distribution.md) | Done |
 | 16 | [Rendering, second pass](m16-rendering-second-pass.md) | Planned |
 | 17 | [Encodings and line endings](m17-encodings.md) | Planned |
 | 18 | [Compare, second pass](m18-compare-second-pass.md) | Planned |

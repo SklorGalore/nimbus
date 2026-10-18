@@ -538,7 +538,7 @@ introduces and points at the code.
 | 12 | Workspace | **Next** | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
 | 13 | Split views and folding | Planned | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
 | 14 | Languages, second pass | In progress | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
-| 15 | Distribution | Planned | Signed, notarised, installable builds; an update check | [m15](docs/milestones/m15-distribution.md) |
+| 15 | Distribution | Done | Installers and packages for every platform (unsigned), an update check, signed checksums | [m15](docs/milestones/m15-distribution.md) |
 | 16 | Rendering, second pass | Planned | Colour emoji, ligatures, zoom, whitespace and indent guides | [m16](docs/milestones/m16-rendering-second-pass.md) |
 | 17 | Encodings and line endings | Planned | Open and save UTF-16 and Windows-1252; change encoding and line endings | [m17](docs/milestones/m17-encodings.md) |
 | 18 | Compare, second pass | Planned | Ignore whitespace, compare folders, diff one-line files, compare with HEAD | [m18](docs/milestones/m18-compare-second-pass.md) |
