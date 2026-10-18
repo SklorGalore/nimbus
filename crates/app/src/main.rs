@@ -82,6 +82,12 @@ pub struct Options {
     /// path, then print keystroke-to-present latency and exit. Measures
     /// typing cost without needing a person at the keyboard.
     pub bench_typing: usize,
+    /// With `--bench-typing`: a soak run instead of plain typing. Line
+    /// breaks, undo, find and saves are mixed in, and memory is sampled
+    /// every 1,000 keystrokes; the run fails if it grows more than
+    /// [`app::SOAK_BUDGET_MB`] (M21). It saves into the file, so give it a
+    /// scratch copy (`bench/soak.sh` does).
+    pub soak: bool,
     /// Open with the find bar searching for this pattern.
     pub find: Option<String>,
     /// Open with the sidebar's Search panel searching the project for this
@@ -218,7 +224,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]]] [--debug-overlay] [--preview] [--linear-blend] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]]] [--debug-overlay] [--preview] [--linear-blend] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -305,6 +311,7 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
                     std::process::exit(2);
                 });
         }
+        "--soak" => o.soak = true,
         "--wrap" => o.wrap = true,
         "--no-session" => o.no_session = true,
         "--wait-index" => o.wait_index = true,

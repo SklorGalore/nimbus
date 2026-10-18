@@ -19,6 +19,7 @@ bench/smoke.sh                                              # release build, pur
 cargo run -- --screenshot /tmp/frame.bmp                    # save the first frame; convert with `sips -s format png`
 NIMBUS_SCALE=1 cargo run -- --screenshot /tmp/1x.bmp         # debug builds: render at another scale factor
 ./target/release/nimbus FILE --bench-typing 300            # type 300 chars through the edit path; prints latency percentiles
+bench/soak.sh [N]                                           # M21 soak: N (100,000) keystrokes with undo, find and saves on a copy of the 100 MB file; fails if memory grows over 10 MB
 bench/gen.sh                                                # 10 MB / 100 MB test files in bench/out (also: logs, longline, sizes, diff, difflogs)
 bench/gen.sh diff && cargo run --release -- --diff bench/out/src-10mb.rs bench/out/src-10mb-edited.rs   # the compare view on the 10 MB bench pair
 NIMBUS_DIFF_FILES=$PWD/bench/out/src-10mb.rs:$PWD/bench/out/src-10mb-edited.rs cargo test --release -p nimbus-core -- --ignored --nocapture compare_bench   # time a comparison
