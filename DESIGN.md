@@ -483,9 +483,9 @@ introduces and points at the code.
 | 7 | Huge files | **Done** | Open, scroll, search, edit and save a 4 GB log | [m7](docs/milestones/m7-huge-files.md) |
 | 8 | Polish | **Done** | Multi-cursor, brackets, status bar, overlay, fallback fonts, release builds | [m8](docs/milestones/m8-polish.md) |
 | 9 | Compare and merge | **Done** | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
-| 10 | Find in files | **Next** | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
-| 11 | Everyday editing | Planned | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
-| 12 | Workspace | Planned | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
+| 10 | Find in files | **Done** | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
+| 11 | Everyday editing | **Done** | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
+| 12 | Workspace | **Next** | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
 | 13 | Split views and folding | Planned | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
 | 14 | Languages, second pass | Planned | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
 | 15 | Distribution | Planned | Signed, notarised, installable builds; an update check | [m15](docs/milestones/m15-distribution.md) |
@@ -493,7 +493,8 @@ introduces and points at the code.
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
 approved the six plans and their order on 2026-10-17 and answered their
-open questions (§9, §10): M10 is Next, and M11–M15 follow in that order.
+open questions (§9, §10). M10 landed the same day; M11 is Next, and
+M12–M15 follow in that order.
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -612,6 +613,7 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-17 | M9 long-line splitting (layer 4) deferred to the backlog: a view question (how a split line's pieces show) before a diff one | m9, backlog |
 | 2026-10-17 | M10–M15 approved in that order; M10 (find in files) is Next | §8, §9, backlog |
 | 2026-10-17 | Find in files lives in the sidebar as a Search mode; 10,000-match cap; 64 MB undo budget for replace across files | §9, m10 |
+| 2026-10-17 | M10 landed: the walk and the search share `ignore`'s parallel walker threads; files are read in 4 MB blocks with a line-tail carry; hits are counted against the cap as found | m10 |
 | 2026-10-17 | Auto-pairs on for code, off for Markdown and plain text; line operations refuse selections over 64 MB; chord timeout fixed at two seconds | §9, m11 |
 | 2026-10-17 | `nimbus` alone reopens the last session (`--no-session` skips); tree delete uses the `trash` crate; no autosave for crash recovery | §9, m12 |
 | 2026-10-17 | Up to three editor columns, no nesting; one file may be open in two columns, so documents and panes are split | §9, m13 |

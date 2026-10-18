@@ -19,6 +19,7 @@
 use std::cell::RefCell;
 use std::ops::Range;
 
+use nimbus_core::comment::Tokens;
 use nimbus_core::{Edit, LineSpan, Text, long_line};
 
 use crate::LanguageId;
@@ -253,6 +254,10 @@ const TYPESCRIPT: Rules = Rules {
 };
 
 const JSON: Rules = Rules {
+    // JSON has no comments, but JSONC files and "Toggle Line Comment"
+    // (M11) use JavaScript's.
+    line_comments: &["//"],
+    block_comment: Some(("/*", "*/")),
     strings: &[s("\"", "\"", true, false)],
     constants: &["true", "false", "null"],
     ..NONE
@@ -308,6 +313,29 @@ pub fn builtin(language: LanguageId) -> &'static Rules {
         LanguageId::TypeScript => &TYPESCRIPT,
         LanguageId::Bash => &BASH,
     }
+}
+
+impl Rules {
+    /// The language's comment syntax, for toggling comments (M11): the
+    /// first line-comment marker, and the block pair. Markdown, which has
+    /// no comment of its own, gets HTML's block comment.
+    #[must_use]
+    pub fn comment_tokens(&self) -> Tokens {
+        Tokens {
+            line: self.line_comments.first().copied(),
+            block: if self.markdown {
+                Some(("<!--", "-->"))
+            } else {
+                self.block_comment
+            },
+        }
+    }
+}
+
+/// The comment syntax of a built-in language.
+#[must_use]
+pub fn comment_tokens(language: LanguageId) -> Tokens {
+    builtin(language).comment_tokens()
 }
 
 /// A user-defined language's rules, as read from its file in the config
@@ -1064,5 +1092,26 @@ mod tests {
             let some = r.markdown || !r.strings.is_empty() || !r.line_comments.is_empty();
             assert!(some, "{}", id.name());
         }
+    }
+}
+
+#[cfg(test)]
+mod comment_token_tests {
+    use super::*;
+
+    #[test]
+    fn every_builtin_language_has_a_way_to_comment() {
+        for l in LanguageId::ALL {
+            let t = comment_tokens(l);
+            assert!(t.line.is_some() || t.block.is_some(), "{l:?}");
+        }
+        assert_eq!(comment_tokens(LanguageId::Rust).line, Some("//"));
+        assert_eq!(comment_tokens(LanguageId::Rust).block, Some(("/*", "*/")));
+        assert_eq!(comment_tokens(LanguageId::Markdown).line, None);
+        assert_eq!(
+            comment_tokens(LanguageId::Markdown).block,
+            Some(("<!--", "-->"))
+        );
+        assert_eq!(comment_tokens(LanguageId::Json).line, Some("//"));
     }
 }

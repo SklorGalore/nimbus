@@ -8,10 +8,12 @@ license.workspace = true
 arboard = { version = "3", default-features = false }
 dirs = "7"
 env_logger = "0.11.11"
+globset = "0.4"
 ignore = "0.4"
 log = "0.4.34"
+memchr = "2.8.3"
 memmap2 = "0.9"
-nimbus-core = { version = "0.2.0", path = "../core" }
+nimbus-core = { version = "0.3.0", path = "../core" }
 nimbus-render = { version = "0.1.0", path = "../render" }
 nimbus-syntax = { version = "0.1.0", path = "../syntax" }
 notify = "8.2.0"
@@ -28,7 +30,7 @@ winit = "0.30"
 workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-muda = "0.21"
+muda = { version = "0.21", default-features = false }
 
 [build-dependencies]
 embed-resource = "3.0.12"
