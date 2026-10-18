@@ -26,10 +26,11 @@ changes them.
 
 | What happened | What Nimbus does |
 |---|---|
-| The file changed, and you have no unsaved edits | Reloads it, keeping your cursor on the same line, and says "changed on disk; reloaded". A file written to continually (a growing log) reloads at most once a second. |
+| The file grew at its end, and you have no unsaved edits | Adds the new lines to the tab quietly: no message, no undo step, and the tab stays saved. **Follow Tail** appears in the status bar; see [Following a growing file](window.md#following-a-growing-file). |
+| The file changed in any other way, and you have no unsaved edits | Reloads it, keeping your cursor on the same line, and says "changed on disk; reloaded". A file rewritten over and over reloads at most once a second. |
 | The file changed, and you have unsaved edits | Marks the tab `(changed on disk)` and offers, in the palette: **Reload from Disk** (drop your edits), **Keep My Version** (saving overwrites the file), **Compare with Saved**, or **Merge with Disk** (see [Compare and merge](compare-and-merge.md#when-the-file-changes-on-disk-under-your-edits)). |
 | The file was deleted | Marks the tab `(deleted)`. Your text is still in the tab, and saving recreates the file. Closing the tab asks whether to save, even with no edits, since it holds the only copy. |
-| A huge, memory-mapped file changed | Does not reload by itself; run **Reload from Disk** to see the changes. |
+| A huge, memory-mapped file changed | Does not reload by itself; run **Reload from Disk** to see the changes. If it grew, turn on **Follow Tail** to have new lines added as they arrive. |
 | A huge, memory-mapped file got shorter | Reloads at once if you have no unsaved edits. Otherwise it warns you to run Reload from Disk straight away: reading the part of the file that disappeared can crash Nimbus. |
 
 Your own saves never trigger these messages.
@@ -71,9 +72,18 @@ work with your driver, try another, for example
 `WGPU_BACKEND=gl nimbus` on Linux or `WGPU_BACKEND=dx12 nimbus` on
 Windows.
 
+**Nimbus opens the wrong project, or old tabs.** Started with no
+arguments, Nimbus reopens the last project you worked in, not the
+folder your terminal is in. Name the folder (`nimbus .`) to open that
+one, or name files to open just those. See
+[Sessions](getting-started.md#sessions-picking-up-where-you-left-off).
+
 **Starting over.** Delete `state.toml` from the config folder to forget
-the sidebar's size and visibility. To try Nimbus with no settings at
-all, start it with `NIMBUS_CONFIG_DIR` pointing at an empty folder.
+your sessions, recent files, the window's position and the sidebar's
+size. To start once without reopening the last session (and without
+replacing it), run `nimbus --no-session`. To try Nimbus with no
+settings at all, start it with `NIMBUS_CONFIG_DIR` pointing at an empty
+folder.
 
 ## Logs and the debug overlay
 

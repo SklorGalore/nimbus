@@ -7,13 +7,27 @@ nimbus [FILE | FOLDER]... [OPTIONS]
 Files and folders may come in any order, mixed with options. Each file
 opens in a tab; a file that does not exist opens empty and is created
 when you save. The first folder becomes the project folder (see
-[Getting started](getting-started.md#opening-files-and-folders)). With
-no files, Nimbus opens an empty untitled tab.
+[Getting started](getting-started.md#opening-files-and-folders)).
+
+What you name also decides whether Nimbus uses a
+[session](getting-started.md#sessions-picking-up-where-you-left-off):
+
+| You run | Nimbus opens | Session |
+|---|---|---|
+| `nimbus FOLDER` | That folder as the project, with the tabs it had last time. | Restored and saved. |
+| `nimbus` | The last project you worked in, with its tabs. With no earlier session (or if its folder is gone), the current folder. | Restored and saved. |
+| `nimbus FILE...` (with or without a folder), `--diff`, `--merge` | Just those files. | Left alone. |
+| `nimbus --no-session` | An empty untitled tab, with the current folder (or the folder you name) as the project. | Neither restored nor saved. |
+
+The testing options below (`--headless`, `--screenshot`, `--smoke`,
+`--bench-typing`) never save anything Nimbus remembers, so measuring
+does not overwrite your session.
 
 ## Options
 
 | Option | What it does |
 |---|---|
+| `--no-session` | Start without reopening the last session, and do not save this run as one. |
 | `--find PATTERN` | Open with the find bar searching the first tab for `PATTERN`. |
 | `--search PATTERN` | Open with the sidebar's Search panel searching the project folder for `PATTERN`. |
 | `--wrap` | Start every tab with soft wrap on, whatever the config says. |
@@ -32,7 +46,7 @@ code 1.
 ## Examples
 
 ```sh
-nimbus .                                  # this folder as the project
+nimbus .                                  # this folder, with its tabs from last time
 nimbus src/main.rs --find TODO            # open a file, searching for TODO
 nimbus . --search 'fn \w+_test'           # search the project on start
 nimbus --diff old/config.toml config.toml # what changed?

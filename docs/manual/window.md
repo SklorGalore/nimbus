@@ -21,12 +21,19 @@ Each tab keeps its own cursor, scroll position and undo history.
 | Go to the last tab | `Cmd+9` | `Ctrl+9` |
 | New untitled tab | `Cmd+N` or `Cmd+T` | `Ctrl+N` or `Ctrl+T` |
 | Close the tab | `Cmd+W` | `Ctrl+W` |
+| Reopen the tab you closed last | `Cmd+Shift+T` | `Ctrl+Shift+T` |
 
 Opening a file that is already open in this group switches to its tab
 rather than opening it twice; if it is open only in another group, you
 get a second tab on the same text (see [Groups](#groups-tabs-side-by-side)).
 When the only tab is an untouched untitled one, the
 first file you open replaces it. Closing the last tab quits Nimbus.
+
+**Reopen Closed Tab** brings back the most recently closed tab, with its
+cursor and scroll position; press it again for the one before (up to 50
+in one run). Untitled tabs cannot be reopened. When you quit, the open
+tabs are remembered as the project's session (see
+[Getting started](getting-started.md#sessions-picking-up-where-you-left-off)).
 
 ## The sidebar
 
@@ -52,15 +59,48 @@ project tree:
 - Drag the sidebar's right edge to resize it.
 
 To use the tree from the keyboard, press `Cmd+Shift+E` / `Ctrl+Shift+E`
-(Focus Sidebar). Then Up and Down move, Page Up and Page Down move a
-screen, Home and End go to the first and last row, Right opens a folder
-(and steps into it when it is open), Left closes a folder (or goes to its
-parent), and Enter opens a file or toggles a folder. Escape gives the
-keyboard back to the text. Typing does nothing while the tree has focus.
+(Focus Sidebar), or click in it. Then Up and Down move, Page Up and Page
+Down move a screen, Home and End go to the first and last row, Right
+opens a folder (and steps into it when it is open), and Left closes a
+folder (or goes to its parent). To open a file or toggle a folder, press
+Enter on Windows and Linux, or `Cmd+Down` or Space on macOS, as in
+Finder. Escape gives the keyboard back to the text. Typing does nothing
+while the tree has focus.
+
+### Working with files in the tree
+
+The tree can create, rename and remove files:
+
+| Command | Keys in the tree | What it does |
+|---|---|---|
+| New File in Tree… | (palette, menu) | Asks for a name and creates an empty file, then opens it. |
+| New Folder in Tree… | (palette, menu) | Asks for a name and creates a folder. |
+| Rename in Tree… | `F2` everywhere; also `Enter` on macOS | Renames the selected file or folder. |
+| Move to Trash | `Delete`; also `Cmd+Backspace` on macOS | Moves the selected file or folder to the system's trash (the Recycle Bin on Windows), where you can restore it from. |
+| Reveal in Finder / Explorer / File Manager | (palette, menu) | Shows the selected item in your system's file manager. On Linux it opens the folder holding it. With the sidebar hidden, it reveals the active tab's file. |
+
+On macOS and Windows, **right-click** a row for a menu with all five. On
+Linux there is no context menu; run the commands from the palette.
+
+- A new file or folder goes into the selected folder, or next to the
+  selected file, or at the top of the project when nothing is selected.
+  A name can include folders, such as `src/util/new.rs`; missing folders
+  are created. It cannot leave the project with `..`.
+- The name is typed in a field right in the tree. Enter confirms and
+  Escape cancels. Renaming starts with the name selected without its
+  extension.
+- Renaming onto a name that already exists asks before replacing it.
+  Creating a file or folder that already exists is refused.
+- Open tabs follow a rename: they keep their text, unsaved edits and
+  undo history, and save under the new name. Recent files and closed
+  tabs follow too.
+- Moving a file to the trash closes its tabs. If one has unsaved
+  changes, Nimbus asks first, since the trash keeps the file but not
+  your edits.
 
 Whether the sidebar is shown, and how wide it is, are remembered between
-runs in `state.toml` (see [Settings](settings.md#statetoml)). The
-sidebar cannot create, rename or delete files yet.
+runs in `state.toml` (see [Settings](settings.md#statetoml)); the folders
+open in the tree are part of the project's session.
 
 ## The status bar and message line
 
@@ -77,6 +117,7 @@ right, each item appears only when it applies:
 | `UTF-8`, `UTF-8 BOM`, `Not UTF-8` | The encoding. `Not UTF-8` means the file has bytes that are not valid UTF-8; they show as `�` and are written back unchanged unless you edit them. |
 | `Rust`, `Markdown`, … | The language used for highlighting. |
 | `Counting lines 42%` | A huge file's lines are still being counted in the background. |
+| `Follow Tail` or `Following` | The file has grown on disk since it was opened (a log being written, say). Click it to keep the view at the end as new lines arrive; it then reads `Following`. See [Following a growing file](#following-a-growing-file). |
 
 In a compare or merge view the status bar also says where you are, such
 as `change 3 of 12` or how many conflicts are left.
@@ -88,10 +129,31 @@ shown in the theme's error colour. When you press the first half of a
 two-key shortcut such as `Cmd+K Cmd+0`, the status bar shows the first
 key while it waits (two seconds) for the second.
 
+## Following a growing file
+
+When another program adds to the end of an open file, such as a log
+being written, Nimbus adds just the new lines to the tab, as long as you
+have no unsaved changes in it. The tab does not become unsaved, the new
+text is not an undo step, and your cursor and scroll stay where they
+are. The status bar then shows `Follow Tail`.
+
+**Follow Tail** (click it in the status bar, or run it from the palette)
+moves the cursor to the end and keeps it there as more lines arrive; the
+status bar reads `Following`. Following stops when you scroll up, move
+the cursor away from the end, add a cursor or edit the text; click the
+item or run the command again to stop it yourself. It needs the file
+without unsaved edits, and works for huge memory-mapped files too, which
+otherwise do not pick up changes by themselves.
+
+If the file is rewritten or replaced instead (a rotated log, for
+example), Nimbus reloads it as described in
+[Updates and troubleshooting](troubleshooting.md#when-a-file-changes-on-disk).
+
 ## Menus
 
 On macOS and Windows, Nimbus has a menu bar: File, Edit, Selection, View
-and Help (and the Nimbus application menu on macOS). The menus run the
+and Help (and the Nimbus application menu on macOS). The File menu also
+has Open Recent, Reopen Closed Tab and Reopen Last Session. The menus run the
 same commands as the keys and the palette, and show your current
 shortcuts, including ones you changed in the config. Linux has no menu
 bar; the command palette lists every command instead.
@@ -122,7 +184,9 @@ side by side. Each group has its own tab strip, scrollbar and find bar.
 - **Resize** groups by dragging the divider between them. The scroll
   wheel scrolls whichever group is under the pointer.
 
-Compare and merge tabs work in a group like any other tab.
+Compare and merge tabs work in a group like any other tab. Groups and
+their widths are not saved in the session: a project reopens with its
+tabs in one group.
 
 On some Linux desktops `Ctrl+Alt+Left` and `Ctrl+Alt+Right` switch
 workspaces before Nimbus sees them; use the palette, or change the keys

@@ -1,6 +1,6 @@
 # Navigating
 
-Four *pickers* share one look: a box at the top of the window with a
+Five *pickers* share one look: a box at the top of the window with a
 query field and up to twelve rows below it. Typing narrows the list by
 *fuzzy* matching: the letters you type must appear in order, not
 necessarily together, so `gtl` finds "Go to Line…". Matching ignores case
@@ -34,6 +34,23 @@ opens the one you choose, in the focused group.
 - At most 300,000 files are listed, so opening your home folder by
   mistake cannot use unbounded memory.
 - Matching works on the path, so `src/main` finds `src/main.rs`.
+- Files in the project that you opened recently come first, most recent
+  at the top, so with nothing typed the list starts with what you were
+  just working on.
+
+## Open Recent
+
+`Cmd+Shift+O` / `Ctrl+Shift+O`. Lists the last 100 files you opened, in
+any project, most recent first, and opens the one you choose. Matching
+works on the whole path. Each row shows where the file is: relative to
+the project folder when it is inside it, otherwise with your home folder
+written as `~`. Files that no longer exist drop off the list on their
+own. **Clear Recent Files** (palette) empties it.
+
+Opening a file from Open Recent does not change the project folder; to
+switch projects, use **Reopen Last Session** (see
+[Getting started](getting-started.md#sessions-picking-up-where-you-left-off))
+or start Nimbus on the other folder.
 
 ## Go to Line
 
@@ -116,7 +133,8 @@ their marker. Click a fold's chip to unfold it.
   includes it.
 - Folding works with soft wrap on.
 - Folds belong to the tab: the same file in another group keeps its own.
-- Folds are not remembered after the tab closes.
+- Folds are not remembered after the tab closes, nor in the session
+  between runs.
 
 Compare and merge views do not fold this way; they hide long unchanged
 stretches instead (see [Compare and merge](compare-and-merge.md)).

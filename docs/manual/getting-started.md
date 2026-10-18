@@ -36,33 +36,82 @@ that folder to your `PATH`.
 ## Opening files and folders
 
 ```sh
-nimbus                       # an empty, untitled tab
-nimbus notes.txt             # one file
+nimbus                       # the last project you worked in, as you left it
+nimbus ~/project             # a folder: its session, or a fresh start there
+nimbus notes.txt             # just this file
 nimbus src/main.rs README.md # several files, one tab each
-nimbus .                     # a folder: the sidebar shows it, Go to File searches it
-nimbus ~/project a.rs b.rs   # a folder plus some files in tabs
+nimbus ~/project a.rs b.rs   # a folder for the sidebar, plus these files
 ```
 
-- A **file that does not exist yet** opens as an empty tab; saving creates
-  it at that path.
 - A **folder** becomes the *project folder*: the sidebar's file tree
-  shows it, and Go to File and Find in Files search it. Without a folder,
-  the project folder is the folder of the first file you named, or the
-  folder the terminal was in. The project folder is fixed for the
-  window's life.
+  shows it, and Go to File and Find in Files search it. When you name
+  files and no folder, the project folder is the folder of the first
+  file.
+- A **file that does not exist yet** opens as an empty tab; saving
+  creates it at that path.
 - If a file cannot be opened (no permission, a device rather than a
   file), Nimbus says why in the terminal and in a dialog, and does not
   start.
 
 Inside the editor you can open more files with Open File… (`Cmd+O` /
-`Ctrl+O`, a system file dialog), with Go to File… (`Cmd+P` / `Ctrl+P`,
-see [Navigating](navigation.md)), or by clicking a file in the sidebar.
-New File (`Cmd+N` or `Cmd+T` / `Ctrl+N` or `Ctrl+T`) opens an untitled
-tab; saving it asks for a name.
+`Ctrl+O`, a system file dialog), Go to File… (`Cmd+P` / `Ctrl+P`), Open
+Recent… (`Cmd+Shift+O` / `Ctrl+Shift+O`), or by clicking a file in the
+sidebar (see [Navigating](navigation.md)). New File (`Cmd+N` or `Cmd+T`
+/ `Ctrl+N` or `Ctrl+T`) opens an untitled tab; saving it asks for a
+name.
 
 On Windows, "Open with Nimbus" on a file opens that file. On macOS,
-opening files by dropping them on the app or with Finder's "Open With" is
-not supported yet: use the terminal, Open File…, or the sidebar.
+opening files by dropping them on the app or with Finder's "Open With"
+is not supported yet: use the terminal, Open File…, Open Recent or the
+sidebar. Opening the app itself (from the Dock or Launchpad) reopens
+your last project.
+
+## Sessions: picking up where you left off
+
+Nimbus remembers each project folder as you left it: its *session*.
+When you open the folder again, the session comes back:
+
+- the files that were open, in the same order, with the same tab in
+  front;
+- each file's cursor and scroll position;
+- the folders that were open in the file tree, and whether the sidebar
+  showed Files or Search.
+
+Which session a start uses:
+
+| You type | What opens |
+|---|---|
+| `nimbus FOLDER` | That folder's session, or the folder with one empty untitled tab if it has none yet. |
+| `nimbus` | The most recent session. The first time, the folder the terminal is in. |
+| `nimbus FILE…` (with or without a folder) | Just those files. Sessions are left alone, so a quick edit, or git asking for a commit message, does not disturb your project. |
+| `nimbus --no-session` (optionally with a folder) | One empty untitled tab, in that folder or the one the terminal is in. No session is restored, and this run's is not saved. |
+
+Notes:
+
+- Nimbus saves the session as you open and close tabs, and when it
+  quits. Sessions for the last 20 project folders are kept.
+- **Untitled tabs are not saved**, and neither is unsaved text: Nimbus
+  has no autosave, and quitting still asks about unsaved changes.
+- Only the front tab is read before the window appears; the other tabs
+  show their names at once and their text loads a moment later, or as
+  soon as you click one.
+- A file that has disappeared since is left out, with a note in the
+  message line. If a file changed, its cursor lands as near as it can to
+  where it was.
+- Tabs come back in one group: side-by-side groups and folds are not
+  part of the session.
+- **Reopen Last Session** (palette, and the File menu) switches the
+  window to the most recent session of a *different* project folder:
+  the current one is saved first, its tabs close (tabs with unsaved
+  changes stay open, so nothing is lost), and the other project's tabs,
+  tree and sidebar mode come back.
+
+The window's size and position, and whether it was maximized, are
+remembered too. The position is used again only when the same display
+is still connected; otherwise your system places the window.
+
+Sessions, recent files and the window's position are kept in
+`state.toml` in the config folder (see [Settings](settings.md#statetoml)).
 
 ## Your first few minutes
 

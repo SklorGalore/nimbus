@@ -15,7 +15,7 @@ What can be in it:
 | File or folder | What it is | Written by |
 |---|---|---|
 | `config.toml` | Your settings. | You. Nimbus creates it once from a template when you run "Open Config File", and never writes to it after that. |
-| `state.toml` | What Nimbus remembers between runs. | Nimbus. |
+| `state.toml` | What Nimbus remembers between runs: sessions, recent files, the window and sidebar. | Nimbus. |
 | `themes/NAME.toml` | Your colour themes. | You. See [customizing](customizing.md#themes). |
 | `languages/NAME.toml` | Your own simple languages. | You. See [customizing](customizing.md#your-own-languages). |
 | `queries/` | Changes to how built-in languages are highlighted, folded and listed in Go to Symbol. | You. See [customizing](customizing.md#changing-a-built-in-languages-highlighting). |
@@ -254,13 +254,21 @@ closed, `Alt+C` and `Alt+R` type their usual characters, and
 ## state.toml
 
 `state.toml`, beside `config.toml`, is where Nimbus remembers things by
-itself. It holds:
+itself. It holds only paths, positions and sizes, never any text from
+your files, so it stays small. It is written as you open and close
+tabs and when Nimbus quits, through a temporary file and a rename like
+any save. It is not written by `--smoke`, `--screenshot`, `--headless`
+or `--bench-typing` runs.
 
 | Key | Meaning |
 |---|---|
 | `sidebar_visible` | Whether the sidebar was shown (default `true`). |
 | `sidebar_width` | The sidebar's width in points (default `240`, at least `120`). |
+| `[window]` | The window's size and position in points, the name of the display it was on, and whether it was maximized. |
+| `[[recent]]` | The files opened lately, most recent first, at most 100. |
+| `[[sessions]]` | One session per project folder, most recent first, at most 20: the folder, the sidebar mode, the folders open in the tree, and each tab's file, cursor and scroll position (as byte offsets) and whether it was in front. |
 
-You can delete it at any time to go back to the defaults. Nimbus keeps
-it separate so that it never has to rewrite your hand-edited
-`config.toml`.
+You can delete it at any time to go back to the defaults: Nimbus forgets
+its sessions, recent files, window position and sidebar size. A broken
+file is treated the same way. Nimbus keeps all this separate so that it
+never has to rewrite your hand-edited `config.toml`.

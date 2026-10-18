@@ -76,7 +76,11 @@ Home and End, and find jumps to matches deep inside it.
 A file in memory reloads by itself when another program changes it (if
 you have no unsaved edits). A memory-mapped file does not, since
 reloading could mean gigabytes; the message line suggests Reload from
-Disk instead. If another program **cuts the file short**, Nimbus reloads
+Disk instead. For a log that keeps growing, turn on **Follow Tail**
+(click it in the status bar): new lines are then added at the end as
+they arrive, at most five times a second, without reading the file
+again. See [Following a growing file](window.md#following-a-growing-file).
+If another program **cuts the file short**, Nimbus reloads
 it at once when it can, or warns you to run Reload from Disk straight
 away, because reading the part that disappeared can crash the editor.
 See [Updates and troubleshooting](troubleshooting.md#when-a-file-changes-on-disk).

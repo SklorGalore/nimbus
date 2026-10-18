@@ -13,13 +13,14 @@ the repository instead.
 ## Chapters
 
 1. [Getting started](getting-started.md): installing, opening files and
-   folders, the first few minutes.
-2. [The window](window.md): tabs, the sidebar, the status bar and message
-   line, menus, and side-by-side groups.
+   folders, sessions, the first few minutes.
+2. [The window](window.md): tabs, the sidebar and its file operations,
+   the status bar and message line, following a growing file, menus, and
+   side-by-side groups.
 3. [Editing](editing.md): cursors and selection, several cursors at once,
    the clipboard, undo, indentation, comments and line operations.
-4. [Navigating](navigation.md): the command palette, Go to File, Go to
-   Line, Go to Symbol, brackets and folding.
+4. [Navigating](navigation.md): the command palette, Go to File, Open
+   Recent, Go to Line, Go to Symbol, brackets and folding.
 5. [Find and replace](find-and-replace.md): in the current file and
    across the project.
 6. [Compare and merge](compare-and-merge.md): side-by-side differences,

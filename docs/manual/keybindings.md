@@ -37,6 +37,24 @@ screen. Rebind them, or use the palette.
 | Unfold | click the `… N lines` chip | click the `… N lines` chip |
 | Change this file's indentation | click `Spaces: 4` or `Tabs` in the status bar | click `Spaces: 4` or `Tabs` in the status bar |
 | Resize the sidebar or a group | drag its edge | drag its edge |
+| Turn Follow Tail on or off | click `Follow Tail` or `Following` in the status bar | click `Follow Tail` or `Following` in the status bar |
+| New File, New Folder, Rename, Move to Trash, Reveal | right-click a row of the file tree | right-click a row of the file tree (Windows); the palette on Linux |
+
+## In the file tree
+
+These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
+`Ctrl+Shift+E`, or click in it). They follow Finder on macOS.
+
+| Action | macOS | Windows and Linux |
+|---|---|---|
+| Move | `Up`, `Down`, `PageUp`, `PageDown` | `Up`, `Down`, `PageUp`, `PageDown` |
+| First or last row | `Home`, `End` | `Home`, `End` |
+| Open a folder, or step into it | `Right` | `Right` |
+| Close a folder, or go to its parent | `Left` | `Left` |
+| Open a file, or open or close a folder | `Cmd+Down` or `Space` | `Enter` |
+| Rename | `Enter` or `F2` | `F2` |
+| Move to Trash | `Cmd+Backspace` or `Delete` (forward delete) | `Delete` |
+| Give the keyboard back to the text | `Escape` | `Escape` |
 
 ## Commands by area
 
@@ -48,6 +66,15 @@ screen. Rebind them, or use the palette.
 | Command Palette | `app.palette` | `Cmd+Shift+P` | `Ctrl+Shift+P` |
 | New File | `file.new` | `Cmd+N`, `Cmd+T` | `Ctrl+N`, `Ctrl+T` |
 | Open File… | `file.open` | `Cmd+O` | `Ctrl+O` |
+| Open Recent… | `file.openRecent` | `Cmd+Shift+O` | `Ctrl+Shift+O` |
+| Reopen Closed Tab | `file.reopenClosed` | `Cmd+Shift+T` | `Ctrl+Shift+T` |
+| Clear Recent Files | `file.clearRecent` | — | — |
+| New File in Tree… | `tree.newFile` | — | — |
+| New Folder in Tree… | `tree.newFolder` | — | — |
+| Rename in Tree… | `tree.rename` | `F2` | `F2` |
+| Move to Trash | `tree.delete` | — | — |
+| Reveal in Finder (macOS), Reveal in Explorer (Windows), Reveal in File Manager (Linux) | `tree.reveal` | — | — |
+| Reopen Last Session | `session.reopenLast` | — | — |
 | Save | `file.save` | `Cmd+S` | `Ctrl+S` |
 | Save As… | `file.saveAs` | `Cmd+Shift+S` | `Ctrl+Shift+S` |
 | Close Tab | `file.close` | `Cmd+W` | `Ctrl+W` |
@@ -174,6 +201,7 @@ screen. Rebind them, or use the palette.
 | Toggle Soft Wrap | `view.toggleWrap` | `Option+Z` | `Alt+Z` |
 | Go to Line… | `edit.goToLine` | `Cmd+G` | `Ctrl+G` |
 | Go to Symbol… | `edit.goToSymbol` | `Cmd+Shift+R` | `Ctrl+Shift+R` |
+| Follow Tail | `view.followTail` | — | — |
 | Toggle Sidebar | `view.toggleSidebar` | `Cmd+B` | `Ctrl+B` |
 | Split Right | `view.splitRight` | `Cmd+\` | `Ctrl+\` |
 | Close Group | `view.closeGroup` | — | — |
