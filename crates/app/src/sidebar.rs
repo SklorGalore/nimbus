@@ -294,6 +294,19 @@ impl Sidebar {
         self.activate(id)
     }
 
+    /// Select the tree row at physical `y` without opening it (a
+    /// right-click), focusing the tree. Returns whether there was a row.
+    pub fn select_at(&mut self, layout: &Layout, y: f32) -> bool {
+        if self.mode != Mode::Files {
+            return false;
+        }
+        self.edit = None;
+        self.focused = true;
+        let row = self.row_at(layout, y);
+        self.tree.selected = row.map(|r| self.tree.rows()[r].node);
+        true
+    }
+
     /// Enter, or a click, on node `id`.
     fn activate(&mut self, id: NodeId) -> Outcome {
         let Some(node) = self.tree.node(id) else {

@@ -35,6 +35,9 @@ pub enum Op {
         /// The new path.
         to: PathBuf,
     },
+    /// Move a file or folder to the system's trash (the Recycle Bin on
+    /// Windows), where it can be put back from.
+    Trash(PathBuf),
 }
 
 impl Op {
@@ -42,7 +45,9 @@ impl Op {
     #[must_use]
     pub fn result_path(&self) -> &Path {
         match self {
-            Self::NewFile(p) | Self::NewFolder(p) | Self::Rename { to: p, .. } => p,
+            Self::NewFile(p) | Self::NewFolder(p) | Self::Rename { to: p, .. } | Self::Trash(p) => {
+                p
+            }
         }
     }
 }
@@ -107,7 +112,75 @@ pub fn run(op: &Op) -> Result<(), String> {
             }
             std::fs::rename(from, to).map_err(|e| at(from, e))
         }
+        Op::Trash(p) => trash_context()
+            .delete(p)
+            .map_err(|e| format!("{}: {e}", p.display())),
     }
+}
+
+/// How the `trash` crate moves files to the trash. On macOS it asks
+/// `NSFileManager` directly, not Finder through an Apple script (its default),
+/// which would ask the user to let Nimbus control Finder first.
+fn trash_context() -> trash::TrashContext {
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(unused_mut, reason = "set on macOS only")
+    )]
+    let mut ctx = trash::TrashContext::default();
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        ctx.set_delete_method(DeleteMethod::NsFileManager);
+    }
+    ctx
+}
+
+/// Show `path` in Finder, Explorer, or the Linux file manager, selected
+/// where the platform allows. The file manager runs on its own; a thread
+/// waits for the launcher so it does not linger as a zombie process.
+///
+/// # Errors
+///
+/// Returns why the file manager could not be started.
+pub fn reveal(path: &Path) -> Result<(), String> {
+    let mut cmd = reveal_command(path);
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let _ = std::thread::Builder::new()
+        .name("nimbus-reveal".to_owned())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_command(path: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("open");
+    cmd.arg("-R").arg(path);
+    cmd
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_command(path: &Path) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    // Explorer reads its own command line: `/select,"path"` as one piece.
+    let mut cmd = std::process::Command::new("explorer");
+    cmd.raw_arg(format!("/select,\"{}\"", path.display()));
+    cmd
+}
+
+/// Linux and the rest: no portable way to select a file, so the folder
+/// holding it opens (the folder itself, for a folder).
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn reveal_command(path: &Path) -> std::process::Command {
+    let dir = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(dir);
+    cmd
 }
 
 /// Where `path` is after `from` moved to `to`: itself, or under `to` if it

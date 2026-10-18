@@ -4914,6 +4914,12 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
 
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => self.tree_context_menu(),
+
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
 
             WindowEvent::Focused(false) => {
