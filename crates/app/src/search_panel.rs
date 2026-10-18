@@ -1450,13 +1450,16 @@ mod tests {
 
     #[test]
     fn folders_in_the_include_field_set_the_scope() {
-        let home = Path::new("/home/me");
+        let home = Path::new("/no-such-nimbus-home");
         let (folders, globs) = scope("*.rs, ~/notes ,src/**", Some(home));
-        assert_eq!(folders, vec![PathBuf::from("/home/me/notes")]);
+        assert_eq!(folders, vec![PathBuf::from("/no-such-nimbus-home/notes")]);
         assert_eq!(globs, "*.rs,src/**");
         let (folders, globs) = scope("~", Some(home));
         assert_eq!((folders, globs.as_str()), (vec![home.to_path_buf()], ""));
-        assert_eq!(scope_text(Path::new("/home/me/a/b"), Some(home)), "~/a/b");
+        assert_eq!(
+            scope_text(Path::new("/no-such-nimbus-home/a/b"), Some(home)),
+            "~/a/b"
+        );
         assert_eq!(scope_text(home, Some(home)), "~");
         let elsewhere = Path::new("/srv/x");
         assert_eq!(
