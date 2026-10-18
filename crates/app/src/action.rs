@@ -959,6 +959,36 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::all(&["F12"]),
     ),
     act(
+        "view.zoomIn",
+        "Zoom In",
+        Command::ZoomIn,
+        Keys::all(&["Primary+=", "Primary+Shift+="]),
+    ),
+    act(
+        "view.zoomOut",
+        "Zoom Out",
+        Command::ZoomOut,
+        Keys::all(&["Primary+-"]),
+    ),
+    act(
+        "view.resetZoom",
+        "Reset Zoom",
+        Command::ResetZoom,
+        Keys::all(&["Primary+0"]),
+    ),
+    act(
+        "view.toggleWhitespace",
+        "Toggle Render Whitespace (selection, all, none)",
+        Command::ToggleWhitespace,
+        Keys::NONE,
+    ),
+    act(
+        "view.toggleIndentGuides",
+        "Toggle Indent Guides",
+        Command::ToggleIndentGuides,
+        Keys::NONE,
+    ),
+    act(
         "view.toggleIgnored",
         "Show/Hide Ignored Files in Sidebar",
         Command::ToggleIgnored,

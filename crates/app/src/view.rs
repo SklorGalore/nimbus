@@ -10,12 +10,16 @@
 use std::fmt::Write as _;
 
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use nimbus_core::wrap::{self, RowPos, RowStart, WrapCache, WrapView};
 use nimbus_core::{Folds, LineEnding, Selection, Selections, Text, column, long_line};
 use nimbus_render::{ColorRun, Gpu, Metrics, Style};
 use nimbus_syntax::highlight::{Highlighter, Span};
 
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::config::Whitespace;
 use crate::document::{Carets, Document, Solo, Tail};
 use crate::find::{Field, FindBar};
 use crate::theme::{Color, Theme, Ui};
@@ -84,6 +88,122 @@ pub struct Decorations<'a> {
     /// for the look of each syntax span. `None` when the document has no
     /// highlighting, so no spans are computed.
     pub looks: Option<&'a Theme>,
+    /// Where spaces and tabs show as `·` and `→` (M16).
+    pub whitespace: Whitespace,
+    /// Indent guides, with the columns per indentation level; `None`
+    /// draws none.
+    pub guides: Option<usize>,
+}
+
+/// How long the scrollbar stays after the last scroll before it hides
+/// (M16). One timer, like the cursor blink: an idle editor schedules
+/// nothing once it has fired.
+pub const SCROLLBAR_FADE: Duration = Duration::from_secs(1);
+
+/// Leading whitespace is measured over at most this many bytes of a line:
+/// 80 levels of 16 columns, past which guides are not drawn anyway. A
+/// 100 MB line costs the same as a short one (M7's long-line rule).
+const INDENT_SCAN: usize = 1280;
+
+/// Guides stop at this many levels: deeper indentation is generated code,
+/// where a fence of hairlines helps nobody.
+const MAX_GUIDES: usize = 80;
+
+/// A blank line takes its guides from the lines around it; it looks this
+/// far for a line with text, in each direction.
+const BLANK_LOOKAROUND: usize = 32;
+
+/// The active guide's block is looked for this many lines either side of
+/// the cursor.
+const ACTIVE_SCAN: usize = 2000;
+
+/// Columns of leading whitespace on the line at `span`; `None` when the
+/// line is blank (nothing but spaces and tabs).
+fn leading_cols(t: &dyn Text, span: nimbus_core::LineSpan, tab: usize) -> Option<usize> {
+    let end = span.end.min(span.start + INDENT_SCAN);
+    let mut col = 0;
+    for pos in span.start..end {
+        match t.byte_at(pos) {
+            Some(b' ') => col += 1,
+            Some(b'\t') => col += tab - col % tab,
+            Some(_) => return Some(col),
+            None => break,
+        }
+    }
+    // Only whitespace in the scanned part: blank if that was the whole line.
+    (end < span.end).then_some(col)
+}
+
+/// The indentation guides go by for the line at `span`: its own, or for a
+/// blank line the smaller of the nearest lines with text above and below,
+/// so a blank line inside a block keeps the block's guides.
+fn guide_cols(t: &dyn Text, span: nimbus_core::LineSpan, tab: usize) -> usize {
+    if let Some(c) = leading_cols(t, span, tab) {
+        return c;
+    }
+    let mut below = None;
+    let mut next = span.next;
+    for _ in 0..BLANK_LOOKAROUND {
+        let Some(at) = next else { break };
+        let s = t.line_span(at);
+        if let Some(c) = leading_cols(t, s, tab) {
+            below = Some(c);
+            break;
+        }
+        next = s.next;
+    }
+    let mut above = None;
+    let mut start = span.start;
+    for _ in 0..BLANK_LOOKAROUND {
+        let Some(prev) = start.checked_sub(1) else {
+            break;
+        };
+        let s = t.line_span(prev);
+        if let Some(c) = leading_cols(t, s, tab) {
+            above = Some(c);
+            break;
+        }
+        start = s.start;
+    }
+    above.unwrap_or(0).min(below.unwrap_or(0))
+}
+
+/// The guide drawn brighter: the innermost level enclosing the cursor's
+/// line, as `(level, bytes of the lines it spans)`. `None` at the top
+/// level.
+fn active_guide(
+    t: &dyn Text,
+    cursor: usize,
+    tab: usize,
+    width: usize,
+) -> Option<(usize, Range<usize>)> {
+    let span = t.line_span(cursor.min(t.len_bytes()));
+    let level = guide_cols(t, span, tab) / width.max(1);
+    if level == 0 || level > MAX_GUIDES {
+        return None;
+    }
+    let inside = |s: nimbus_core::LineSpan| guide_cols(t, s, tab) >= level * width;
+    let mut first = span;
+    for _ in 0..ACTIVE_SCAN {
+        let Some(prev) = first.start.checked_sub(1) else {
+            break;
+        };
+        let s = t.line_span(prev);
+        if !inside(s) {
+            break;
+        }
+        first = s;
+    }
+    let mut last = span;
+    for _ in 0..ACTIVE_SCAN {
+        let Some(at) = last.next else { break };
+        let s = t.line_span(at);
+        if !inside(s) {
+            break;
+        }
+        last = s;
+    }
+    Some((level - 1, first.start..last.end))
 }
 
 /// Pixel geometry for one frame, from the window size and font metrics.
@@ -564,14 +684,21 @@ pub struct View {
     shown: usize,
     /// Where the scrollbar was drawn in the last frame, for clicks.
     scrollbar: Option<Scrollbar>,
-    /// The pointer is over the scrollbar: it is drawn wider.
+    /// The pointer is over the scrollbar: it is drawn wider, and does not
+    /// fade.
     pub scrollbar_hover: bool,
+    /// The scroll position the scrollbar last saw, and when it changed:
+    /// the bar shows for [`SCROLLBAR_FADE`] after that (M16).
+    scroll_seen: Option<((usize, f32), Instant)>,
     /// The bracket pair at the cursor, as last worked out: for the text
     /// version, cursor and syntax revision it was worked out for. Each
     /// frame asks again only when one of those changed.
     brackets: Option<(BracketKey, Option<(usize, usize)>)>,
     /// Reused for reading around the cursor when counting brackets.
     bracket_window: Vec<u8>,
+    /// Reused for the cursor and selection edges on a row, where a
+    /// ligature must be drawn split.
+    splits: Vec<usize>,
     /// Characters in the selections, as last counted, with the version and
     /// selections they were counted for.
     selected_chars: Option<(u64, Selections, usize)>,
@@ -1142,8 +1269,12 @@ impl View {
             cursor,
             number: &mut self.number,
             spliced: &mut self.spliced,
+            splits: &mut self.splits,
             cursor_at: None,
             line_end: [0.0, 0.0],
+            active_guide: deco
+                .guides
+                .and_then(|w| active_guide(t, cursor, tab_width, w)),
         };
         let geom = (
             scroll_col_of(layout, scroll_x),
@@ -1254,8 +1385,10 @@ impl View {
             cursor,
             number: &mut self.number,
             spliced: &mut self.spliced,
+            splits: &mut self.splits,
             cursor_at: None,
             line_end: [0.0, 0.0],
+            active_guide: None,
         };
         let geom = (
             scroll_col_of(layout, scroll_x),
@@ -1310,9 +1443,22 @@ impl View {
 
     /// Draw the scrollbar for the frame just drawn, or nothing when the
     /// whole text fits on screen.
+    ///
+    /// The bar shows while the view scrolls and for [`SCROLLBAR_FADE`]
+    /// after, and while the pointer is over it; otherwise it is hidden but
+    /// still takes clicks, and hovering brings it back. A view drawn for the
+    /// first time counts as scrolled, so it shows its bar at first.
     pub fn draw_scrollbar(&mut self, gpu: &mut Gpu, doc: &Document, layout: &Layout, ui: &Ui) {
         self.scrollbar = self.scrollbar_geometry(doc.buffer.len_bytes(), layout);
+        let now = Instant::now();
+        let pos = (self.scroll_top, self.scroll_px);
+        if self.scroll_seen.is_none_or(|(p, _)| p != pos) {
+            self.scroll_seen = Some((pos, now));
+        }
         let Some(bar) = self.scrollbar else { return };
+        if !self.scrollbar_hover && self.scrollbar_hide_at().is_none_or(|t| now >= t) {
+            return;
+        }
         let cell = layout.metrics.cell_width;
         let w = (cell * if self.scrollbar_hover { 0.9 } else { 0.5 })
             .round()
@@ -1320,6 +1466,13 @@ impl View {
         let x = layout.width - w - 2.0 * layout.scale;
         gpu.begin_layer(None);
         gpu.push_rect([x, bar.thumb_top], [w, bar.thumb_h], ui.scrollbar);
+    }
+
+    /// When the scrollbar hides, if it is showing because of a recent
+    /// scroll: the app wakes then to draw the frame without it.
+    #[must_use]
+    pub fn scrollbar_hide_at(&self) -> Option<Instant> {
+        self.scroll_seen.map(|(_, at)| at + SCROLLBAR_FADE)
     }
 
     /// Where the scrollbar goes for a text of `len` bytes, as last drawn;
@@ -1397,6 +1550,15 @@ fn planned_ranges(t: &dyn Text, plans: &[RowPlan], out: &mut Vec<Range<usize>>) 
             _ => out.push(span.start..end),
         }
     }
+}
+
+/// The horizontal scroll in pixels, for drawing a line's column 0.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "guides sit in the first columns; past f32's range they are off screen anyway"
+)]
+fn row_shift(scroll_x: f64) -> f32 {
+    scroll_x as f32
 }
 
 /// The leftmost visible column of a line, from the horizontal scroll.
@@ -1483,10 +1645,19 @@ fn draw_line(
     let wrapping = painter.wrapping;
     let span = line.span;
     let has_break = span.next.is_some();
+    let guides = painter.deco.guides.map(|_| guide_cols(t, span, tab_width));
     if long_line::is_long(span) {
         let geom = (scroll_col, width_cols, scroll_x);
         let row = long_row(t, span, long_text, layout, geom, *top, tab_width);
         painter.gutter(line.number, line.has_cursor, *top);
+        if let Some(cols) = guides {
+            painter.guides(
+                cols,
+                span.start,
+                row.top,
+                layout.text_left - row_shift(scroll_x),
+            );
+        }
         if let Some((m, color)) = &line.mark {
             painter.mark(&row, m, *color);
         }
@@ -1521,6 +1692,9 @@ fn draw_line(
             };
             if r == 0 {
                 painter.gutter(line.number, line.has_cursor, *top);
+            }
+            if let Some(cols) = guides {
+                painter.guides(cols, span.start, row.top, layout.text_left - shift);
             }
             if let Some((m, color)) = &line.mark {
                 painter.mark(&row, m, *color);
@@ -1558,7 +1732,11 @@ struct Painter<'a, 'g> {
     cursor: usize,
     number: &'a mut String,
     spliced: &'a mut String,
+    /// Scratch for the cursor and selection edges on a row (ligatures).
+    splits: &'a mut Vec<usize>,
     cursor_at: Option<[f32; 2]>,
+    /// The guide enclosing the cursor: its level and the bytes it spans.
+    active_guide: Option<(usize, Range<usize>)>,
     /// Where the last row drawn ends, `[x, top]`: a fold chip goes after
     /// it.
     line_end: [f32; 2],
@@ -1684,6 +1862,7 @@ impl Painter<'_, '_> {
                 origin,
                 (first, width),
             );
+            self.whitespace(row, (first, width));
         }
         for i in self.next_sel..self.sels.len() {
             let head = self.sels[i].head;
@@ -1709,6 +1888,88 @@ impl Painter<'_, '_> {
             }
         }
         next
+    }
+
+    /// Indent guides on one row of a line indented `cols` columns, whose
+    /// column 0 is at `left`: a one-pixel line at the start of each level,
+    /// brighter for the level enclosing the cursor.
+    fn guides(&mut self, cols: usize, line_start: usize, top: f32, left: f32) {
+        let Some(width) = self.deco.guides.filter(|&w| w > 0) else {
+            return;
+        };
+        let cell = self.layout.metrics.cell_width;
+        let thin = self.layout.scale.round().max(1.0);
+        let lh = self.layout.metrics.line_height;
+        let levels = cols.div_ceil(width).min(MAX_GUIDES);
+        for level in 0..levels {
+            let x = (left + f(level * width) * cell).round();
+            if x < self.layout.text_left {
+                continue;
+            }
+            if x >= self.layout.width {
+                break;
+            }
+            let active = self
+                .active_guide
+                .as_ref()
+                .is_some_and(|(l, r)| *l == level && r.contains(&line_start));
+            let color = if active {
+                self.deco.ui.guide_active
+            } else {
+                self.deco.ui.guide
+            };
+            self.gpu.push_rect([x, top], [thin, lh], color);
+        }
+    }
+
+    /// Whether document byte `pos` is inside a selection.
+    fn selected_byte(&self, pos: usize) -> bool {
+        self.sels[self.next_sel..]
+            .iter()
+            .take_while(|s| s.range().start <= pos)
+            .any(|s| s.range().contains(&pos))
+    }
+
+    /// `·` on each space and `→` on each tab of the row's visible part:
+    /// everywhere, or only inside selections, as `render_whitespace` says.
+    fn whitespace(&mut self, row: &RowGeom<'_>, (first, width): (usize, usize)) {
+        let mode = self.deco.whitespace;
+        if mode == Whitespace::None {
+            return;
+        }
+        if mode == Whitespace::Selection
+            && !self.sels[self.next_sel..]
+                .iter()
+                .take_while(|s| s.range().start <= row.end())
+                .any(|s| !s.is_empty() && s.range().end > row.seg_start)
+        {
+            return;
+        }
+        let tab = self.tab_width;
+        let cell = self.layout.metrics.cell_width;
+        let (s, e, sc) = visible_span(row.seg, row.start_col, first, width, tab);
+        let Some(text) = row.seg.get(s..e) else {
+            return;
+        };
+        let mut col = sc;
+        for (off, g) in text.grapheme_indices(true) {
+            let w = column::grapheme_cols(g, col, tab);
+            let mark = match g {
+                " " => Some('·'),
+                "\t" => Some('→'),
+                _ => None,
+            };
+            if let Some(mark) = mark
+                && (mode == Whitespace::All || self.selected_byte(row.seg_start + s + off))
+            {
+                let x = row.left + f(col - row.start_col) * cell;
+                if x >= self.layout.text_left {
+                    self.gpu
+                        .push_char([x, row.top], mark, self.deco.ui.whitespace);
+                }
+            }
+            col += w;
+        }
     }
 
     fn rect(&mut self, x0: f32, x1: f32, top: f32, color: [f32; 4]) {
@@ -1813,18 +2074,39 @@ impl Painter<'_, '_> {
             return;
         }
         self.runs.clear();
+        self.splits.clear();
         if let Some(at) = seg_start {
             self.colour_runs(at + s..at + e);
+            if self.gpu.ligatures() {
+                self.edges(at + s..at + e);
+            }
         }
         let x = origin[0] + f(sc - start_col) * self.layout.metrics.cell_width;
         self.gpu.push_text_runs(
             [x, origin[1]],
             &seg[s..e],
             sc,
-            self.runs,
+            (self.runs, self.splits),
             self.deco.ui.text,
             self.layout.text_left,
         );
+    }
+
+    /// Fill `splits` with the cursors and selection edges inside document
+    /// bytes `range`, as offsets from its start: a ligature across one is
+    /// drawn as its separate characters.
+    fn edges(&mut self, range: Range<usize>) {
+        for sel in &self.sels[self.next_sel..] {
+            let r = sel.range();
+            if r.start > range.end {
+                break;
+            }
+            for at in [r.start, r.end, sel.head] {
+                if at > range.start && at < range.end {
+                    self.splits.push(at - range.start);
+                }
+            }
+        }
     }
 
     /// Fill `runs` with syntax colours for document bytes `range`, as
@@ -2340,6 +2622,115 @@ mod tests {
 
     fn doc(text: &str) -> Solo {
         Solo::from_text(text)
+    }
+
+    /// `NIMBUS_BENCH_FILE=$PWD/bench/out/src-10mb.rs cargo test --release -p nimbus -- --ignored --nocapture m16_typing_bench`
+    ///
+    /// M16 task 9: what a keystroke costs with whitespace (all), indent
+    /// guides and ligatures on, against all three off: the edit, queueing
+    /// the frame (`View::draw`) and drawing it on the GPU. Needs a GPU
+    /// (a software one such as llvmpipe will do for the queueing number).
+    #[test]
+    #[ignore = "benchmark: needs NIMBUS_BENCH_FILE, a GPU and a release build"]
+    fn m16_typing_bench() {
+        use std::time::Instant;
+        let Ok(path) = std::env::var("NIMBUS_BENCH_FILE") else {
+            return;
+        };
+        let context = nimbus_render::GpuContext::open().unwrap();
+        let font = nimbus_render::Font::bundled().unwrap();
+        let mut gpu = Gpu::headless(context, font, 28.0, (1600, 1000), false);
+        let mut doc = Solo::of(Document::open(std::path::Path::new(&path)).unwrap());
+        let theme = Theme::default();
+        let ui = theme.ui;
+        let lines = doc.buffer.len_lines();
+        let layout = Layout::new(gpu.metrics(), 1600, 1000, 2.0, lines);
+        let modes = [
+            ("off", Whitespace::None, None, false),
+            ("all on", Whitespace::All, Some(4), true),
+        ];
+        for (label, whitespace, guides, ligatures) in modes {
+            gpu.set_ligatures(ligatures);
+            let mut view = View::default();
+            let start = doc.buffer.line_to_byte(lines / 2);
+            doc.ed().click(start, false);
+            let mut queue = Vec::new();
+            let mut total = Vec::new();
+            for i in 0..300 {
+                let t = Instant::now();
+                doc.ed()
+                    .insert(if i % 7 == 6 { "\n    " } else { "x" })
+                    .unwrap();
+                view.ensure_cursor_visible(&doc.doc, &doc.carets, &layout, 4);
+                begin_frame(&mut gpu, &ui);
+                let deco = Decorations {
+                    cursor_visible: true,
+                    preedit: None,
+                    matches: &[],
+                    current: None,
+                    ui: &ui,
+                    looks: None,
+                    whitespace,
+                    guides,
+                };
+                view.draw(&mut gpu, &doc.doc, &doc.carets, &layout, 4, &deco);
+                queue.push(t.elapsed());
+                gpu.render().unwrap();
+                total.push(t.elapsed());
+            }
+            for (what, mut v) in [("edit + queue", queue), ("edit + queue + GPU", total)] {
+                v.sort();
+                let pick = |p: usize| v[(v.len() - 1) * p / 100];
+                println!(
+                    "{label:7} {what:20} p50 {:?} p99 {:?} max {:?}",
+                    pick(50),
+                    pick(99),
+                    v[v.len() - 1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn guides_follow_indentation_and_carry_over_blank_lines() {
+        use nimbus_core::RopeBuffer;
+        let text = "fn a() {\n    if x {\n        y;\n\n        z;\n    }\n\t\tw\n}\n";
+        let buf = RopeBuffer::from_text(text);
+        let cols = |line: usize| guide_cols(&buf, buf.line_span(buf.line_to_byte(line)), 4);
+        assert_eq!((cols(0), cols(1), cols(2)), (0, 4, 8));
+        // The blank line inside the block keeps the block's guides.
+        assert_eq!(cols(3), 8);
+        // Tabs count to the tab stop.
+        assert_eq!(cols(6), 8);
+        assert_eq!(
+            leading_cols(&buf, buf.line_span(buf.line_to_byte(3)), 4),
+            None
+        );
+        // The cursor on `y;` (level 2): the guide at level 1 is active,
+        // across lines 2 to 4 (the blank line included).
+        let (level, range) = active_guide(&buf, buf.line_to_byte(2) + 9, 4, 4).unwrap();
+        assert_eq!(level, 1);
+        assert_eq!(range, buf.line_to_byte(2)..buf.line_to_byte(5) - 1);
+        // At the top level nothing is active.
+        assert!(active_guide(&buf, 0, 4, 4).is_none());
+    }
+
+    #[test]
+    fn a_huge_indent_is_measured_in_bounded_time() {
+        use nimbus_core::RopeBuffer;
+        let text = format!("{}x\n", " ".repeat(10 * INDENT_SCAN));
+        let buf = RopeBuffer::from_text(&text);
+        // Only the first INDENT_SCAN bytes are looked at.
+        assert_eq!(leading_cols(&buf, buf.line_span(0), 4), Some(INDENT_SCAN));
+    }
+
+    #[test]
+    fn the_scrollbar_hides_a_second_after_the_last_scroll() {
+        let mut v = View::default();
+        assert!(v.scrollbar_hide_at().is_none());
+        let before = Instant::now();
+        v.scroll_seen = Some(((0, 0.0), before));
+        assert_eq!(v.scrollbar_hide_at(), Some(before + SCROLLBAR_FADE));
     }
 
     #[test]

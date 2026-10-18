@@ -126,6 +126,12 @@ ui_colors! {
     merge_conflict,
     /// Behind the chip after a folded line (M13).
     fold_chip,
+    /// The `·` and `→` of visible whitespace (M16).
+    whitespace,
+    /// Indent guides.
+    guide,
+    /// The indent guide enclosing the cursor.
+    guide_active,
 }
 
 /// A loaded theme.

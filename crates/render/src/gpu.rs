@@ -56,11 +56,35 @@ enum Target {
     Offscreen(wgpu::Texture),
 }
 
+/// The sRGB transfer curve undone: a colour channel as stored in an image
+/// (0–1, gamma-encoded) to light intensity (0–1, linear).
+fn srgb_to_linear(c: f64) -> f64 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+impl Gpu {
+    /// Whether frames blend in linear light (the `--linear-blend`
+    /// experiment took effect).
+    #[must_use]
+    pub fn linear_blend(&self) -> bool {
+        self.config.format.is_srgb()
+    }
+}
+
 /// Format of off-screen frames: the same 8-bit format windows use on macOS,
 /// so headless captures match on-screen ones.
 const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
-fn offscreen_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+fn offscreen_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen frame"),
         size: wgpu::Extent3d {
@@ -71,7 +95,7 @@ fn offscreen_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: OFFSCREEN_FORMAT,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     })
@@ -139,6 +163,9 @@ pub struct FrameStats {
     pub glyphs: usize,
     /// How full the glyph atlas is, from 0 to 1.
     pub atlas: f32,
+    /// GPU memory the colour (emoji) atlas page takes: 0 until the first
+    /// colour glyph is drawn, then 16 MB.
+    pub color_page_bytes: u64,
 }
 
 /// Unrecoverable (from inside `render`) per-frame failures.
@@ -279,6 +306,9 @@ impl Gpu {
     /// The surface keeps its own clone of `window` alive, because a surface
     /// must never outlive the window it draws into.
     ///
+    /// `linear_blend` is the M16 experiment (`--linear-blend`): draw to an
+    /// sRGB surface so that blending happens in linear light.
+    ///
     /// # Errors
     ///
     /// Returns a [`GpuError`] if no adapter can present to the window, the
@@ -288,6 +318,7 @@ impl Gpu {
         context: GpuContext,
         font: Font,
         font_size_px: f32,
+        linear_blend: bool,
     ) -> Result<Self, GpuError> {
         let GpuContext {
             instance,
@@ -326,6 +357,14 @@ impl Gpu {
         if caps.formats.contains(&plain) {
             config.format = plain;
         }
+        if linear_blend {
+            let srgb = plain.add_srgb_suffix();
+            if caps.formats.contains(&srgb) {
+                config.format = srgb;
+            } else {
+                log::warn!("--linear-blend: no sRGB surface format; blending in gamma space");
+            }
+        }
         // Fifo is present everywhere and never tears. We draw on demand, so
         // vsync latency is not a concern.
         config.present_mode = wgpu::PresentMode::AutoVsync;
@@ -355,20 +394,26 @@ impl Gpu {
     /// Render without a window, into an off-screen `width × height` texture.
     /// Every frame can be captured with [`Gpu::request_capture`]. Used for
     /// headless screenshots, which work with the screen locked.
+    /// `linear_blend` as for [`Gpu::new`].
     #[must_use]
     pub fn headless(
         context: GpuContext,
         font: Font,
         font_size_px: f32,
-        width: u32,
-        height: u32,
+        (width, height): (u32, u32),
+        linear_blend: bool,
     ) -> Self {
         let GpuContext { device, queue, .. } = context;
         device.on_uncaptured_error(Arc::new(|e| log::error!("wgpu: {e}")));
         let (width, height) = clamp_to_device(&device, width.max(1), height.max(1));
+        let format = if linear_blend {
+            OFFSCREEN_FORMAT.add_srgb_suffix()
+        } else {
+            OFFSCREEN_FORMAT
+        };
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            format: OFFSCREEN_FORMAT,
+            format,
             width,
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
@@ -378,7 +423,7 @@ impl Gpu {
             // Unused off-screen; only a window surface has a colour space.
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
-        let texture = offscreen_texture(&device, width, height);
+        let texture = offscreen_texture(&device, width, height, format);
         Self::assemble(
             Target::Offscreen(texture),
             device,
@@ -396,7 +441,7 @@ impl Gpu {
         (font, font_size_px): (Font, f32),
     ) -> Self {
         let atlas = Atlas::new(&device);
-        let globals = Globals::new(&device);
+        let globals = Globals::new(&device, config.format.is_srgb());
         globals.set_viewport(&queue, config.width, config.height);
         let pipelines = Pipelines {
             rect: RectPipeline::new(&device, config.format, &globals),
@@ -477,7 +522,12 @@ impl Gpu {
         match &mut self.target {
             Target::Surface(surface) => surface.configure(&self.device, &self.config),
             Target::Offscreen(texture) => {
-                *texture = offscreen_texture(&self.device, self.config.width, self.config.height);
+                *texture = offscreen_texture(
+                    &self.device,
+                    self.config.width,
+                    self.config.height,
+                    self.config.format,
+                );
             }
         }
     }
@@ -547,7 +597,9 @@ impl Gpu {
         }
         drop(view);
         buffer.unmap();
-        if self.config.format == wgpu::TextureFormat::Bgra8Unorm {
+        // An sRGB target's bytes are already encoded as sRGB: the same
+        // bytes a plain target holds, so they are saved as they are.
+        if self.config.format.remove_srgb_suffix() == wgpu::TextureFormat::Bgra8Unorm {
             for px in rgba.as_chunks_mut::<4>().0 {
                 px.swap(0, 2);
             }
@@ -563,6 +615,28 @@ impl Gpu {
     /// Clears the glyph cache and atlas when the size actually changes.
     pub fn set_font_size(&mut self, size_px: f32) {
         self.text.set_size(size_px, &mut self.atlas, &self.queue);
+    }
+
+    /// Draw the editor with `font` instead of the bundled one, bold text from
+    /// `font.bold` (or the regular weight). The atlas is refilled and the
+    /// grid measured again, so the caller should lay out and redraw.
+    pub fn set_font(&mut self, font: crate::EditorFont) {
+        self.text
+            .set_font(font.regular, font.bold, &mut self.atlas, &self.queue);
+    }
+
+    /// Let the font draw ligatures (`ligatures = true` in the config). Off
+    /// by default. Changing it needs no atlas reset: a ligature is just
+    /// another glyph id.
+    pub fn set_ligatures(&mut self, on: bool) {
+        self.text.set_ligatures(on);
+    }
+
+    /// Whether ligatures are on, so the caller knows to pass cursor
+    /// positions to [`Gpu::push_text_runs`].
+    #[must_use]
+    pub fn ligatures(&self) -> bool {
+        self.text.ligatures()
     }
 
     /// Columns per tab stop. Must match the value cursor movement uses, or
@@ -583,7 +657,7 @@ impl Gpu {
     pub fn request_capture(&mut self) -> bool {
         let readable = self.config.usage.contains(wgpu::TextureUsages::COPY_SRC)
             && matches!(
-                self.config.format,
+                self.config.format.remove_srgb_suffix(),
                 wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
             );
         self.capture_requested = readable;
@@ -599,7 +673,20 @@ impl Gpu {
     /// space as rectangle colours.
     pub fn set_background(&mut self, color: [f32; 4]) {
         let [r, g, b, a] = color.map(f64::from);
-        self.background = wgpu::Color { r, g, b, a };
+        // An sRGB target takes the clear colour in linear light.
+        let lin = |c: f64| {
+            if self.config.format.is_srgb() {
+                srgb_to_linear(c)
+            } else {
+                c
+            }
+        };
+        self.background = wgpu::Color {
+            r: lin(r),
+            g: lin(g),
+            b: lin(b),
+            a,
+        };
     }
 
     /// Start a new frame, discarding anything queued for the previous one.
@@ -647,18 +734,19 @@ impl Gpu {
         color: [f32; 4],
         clip_left: f32,
     ) {
-        self.push_text_runs(origin, text, start_col, &[], color, clip_left);
+        self.push_text_runs(origin, text, start_col, (&[], &[]), color, clip_left);
     }
 
     /// As [`Gpu::push_text_span`], with colours by byte range: each glyph
     /// takes the colour of the run covering its first byte, or `color` past
-    /// the last run.
+    /// the last run. `splits` are byte offsets in `text` where a cursor or
+    /// selection edge is, so a ligature across one is drawn split.
     pub fn push_text_runs(
         &mut self,
         origin: [f32; 2],
         text: &str,
         start_col: usize,
-        runs: &[ColorRun],
+        (runs, splits): (&[ColorRun], &[usize]),
         color: [f32; 4],
         clip_left: f32,
     ) {
@@ -673,7 +761,22 @@ impl Gpu {
                 runs,
                 clip_left,
                 start_col,
+                splits,
             },
+        );
+    }
+
+    /// Queue one character with its cell's top-left corner at `origin`,
+    /// skipping shaping: for markers drawn many times a frame, such as the
+    /// dots of visible whitespace.
+    pub fn push_char(&mut self, origin: [f32; 2], ch: char, color: [f32; 4]) {
+        self.text.push_char(
+            &self.queue,
+            &mut self.atlas,
+            &mut self.frame,
+            origin,
+            ch,
+            color,
         );
     }
 
@@ -704,6 +807,7 @@ impl Gpu {
         FrameStats {
             glyphs: self.frame.glyph_count(),
             atlas: self.atlas.occupancy(),
+            color_page_bytes: self.atlas.color_bytes(),
         }
     }
 

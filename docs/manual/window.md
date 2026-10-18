@@ -215,6 +215,23 @@ If the file is rewritten or replaced instead (a rotated log, for
 example), Nimbus reloads it as described in
 [Updates and troubleshooting](troubleshooting.md#when-a-file-changes-on-disk).
 
+## Zoom, whitespace and indent guides
+
+Zoom In (`Cmd+=` / `Ctrl+=`), Zoom Out (`Cmd+-` / `Ctrl+-`) and Reset
+Zoom (`Cmd+0` / `Ctrl+0`) change the text size by one point at a time,
+between 6 and 72. The top line on screen stays put. The size is
+remembered for the next start unless `remember_zoom = false`; it is never
+written to `config.toml`.
+
+Spaces show as `·` and tabs as `→` inside a selection by default; Toggle
+Render Whitespace in the palette cycles between selection, everywhere and
+never. Toggle Indent Guides draws a thin line at each indentation level,
+brighter for the level around the cursor. Both start from
+`render_whitespace` and `indent_guides` in the [settings](settings.md).
+
+The scrollbar fades out a second after you stop scrolling, and comes back
+when you scroll or point at it.
+
 ## Menus
 
 On macOS and Windows, Nimbus has a menu bar: File, Edit, Selection, View

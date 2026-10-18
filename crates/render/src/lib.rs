@@ -13,9 +13,10 @@ pub mod raster;
 pub mod shape;
 mod text;
 
+pub use fallback::{EditorFont, find_editor_font};
 pub use font::{Font, FontError, Metrics};
 pub use gpu::{
     BACKGROUND, Capture, FrameError, FrameStats, FrameStatus, Gpu, GpuContext, GpuError,
 };
-pub use pipeline::{GlyphInstance, RectInstance};
+pub use pipeline::{GLYPH_COLOR, GlyphInstance, RectInstance};
 pub use text::{ColorRun, Style};

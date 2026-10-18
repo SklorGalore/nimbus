@@ -102,7 +102,10 @@ edges, and see the [roadmap](#roadmap) for what is coming.
 - A command palette where every action lives, with its key binding.
 - Light and dark themes, plus your own themes that override only what
   they change.
-- Font fallback, bold and italic, and a bundled Nerd Font.
+- Font fallback, bold and italic, and a bundled Nerd Font, or any
+  installed font with optional ligatures.
+- Colour emoji, zoom that is remembered between runs, visible whitespace
+  and indent guides.
 
 ## Installation
 
@@ -333,9 +336,8 @@ measured results. The full table is in
 | Milestones | Status |
 |---|---|
 | M0 to M13: scaffold, GPU text, editing, tabs, highlighting, file tree, huge files, polish, compare and merge, find in files, everyday editing, workspace, splits and folding | Done |
-| M15 distribution, M17 encodings and line endings, M19 workspace and search, second pass | Done |
+| M15 distribution, M16 rendering second pass, M17 encodings and line endings, M19 workspace and search, second pass | Done |
 | M14 languages, second pass | In progress |
-| M16 rendering, second pass: colour emoji and finer text | Planned |
 | M18 compare, second pass, with Compare with HEAD | Planned |
 | M20 reading aids, such as a minimap | Planned |
 | M21 foundations and 1.0 | Planned |

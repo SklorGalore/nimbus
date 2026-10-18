@@ -43,16 +43,23 @@ pub struct GlyphInstance {
     pub uv_min: [f32; 2],
     /// Atlas texture coordinates of the bitmap's bottom-right corner.
     pub uv_max: [f32; 2],
-    /// Straight RGBA text colour.
+    /// Straight RGBA text colour. A colour glyph keeps its own colours and
+    /// takes only the alpha from here.
     pub color: [f32; 4],
+    /// Bit 0 ([`GLYPH_COLOR`]): the bitmap is on the colour page.
+    pub flags: u32,
 }
 
-const _: () = assert!(size_of::<RectInstance>() == 32 && size_of::<GlyphInstance>() == 48);
+/// [`GlyphInstance::flags`] bit: sample the colour page and draw the texel
+/// as it is, rather than tinting a coverage mask with the text colour.
+pub const GLYPH_COLOR: u32 = 1;
+
+const _: () = assert!(size_of::<RectInstance>() == 32 && size_of::<GlyphInstance>() == 52);
 
 const RECT_ATTRS: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
-const GLYPH_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
-    0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4
+const GLYPH_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Uint32
 ];
 
 fn instance_layout<T>(
@@ -69,19 +76,24 @@ fn instance_layout<T>(
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GlobalsUniform {
     viewport: [f32; 2],
-    pad: [f32; 2],
+    /// 1.0 when the target is sRGB (`--linear-blend`): the shaders turn
+    /// colours into linear light before blending. 0.0 otherwise.
+    linear: f32,
+    pad: f32,
 }
 
-/// Group 0: data every shader reads. Currently just the viewport size, which
-/// the shaders need to turn pixel positions into clip-space positions.
+/// Group 0: data every shader reads: the viewport size, which the shaders
+/// need to turn pixel positions into clip-space positions, and whether
+/// colours are blended in linear light.
 pub(crate) struct Globals {
     buffer: wgpu::Buffer,
+    linear: bool,
     pub(crate) layout: wgpu::BindGroupLayout,
     pub(crate) bind_group: wgpu::BindGroup,
 }
 
 impl Globals {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, linear: bool) -> Self {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals"),
             size: size_of::<GlobalsUniform>() as wgpu::BufferAddress,
@@ -92,7 +104,7 @@ impl Globals {
             label: Some("globals"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -111,6 +123,7 @@ impl Globals {
         });
         Self {
             buffer,
+            linear,
             layout,
             bind_group,
         }
@@ -123,7 +136,8 @@ impl Globals {
     pub(crate) fn set_viewport(&self, queue: &wgpu::Queue, width: u32, height: u32) {
         let u = GlobalsUniform {
             viewport: [width as f32, height as f32],
-            pad: [0.0; 2],
+            linear: if self.linear { 1.0 } else { 0.0 },
+            pad: 0.0,
         };
         queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&u));
     }
@@ -177,7 +191,7 @@ impl<T: bytemuck::Pod> InstanceBuffer<T> {
             self.capacity = cap;
             log::debug!("{} instance buffer grown to {cap}", self.label);
         }
-        // Instance structs are 32 or 48 bytes, so the 4-byte copy alignment holds.
+        // Instance structs are 32 or 52 bytes, so the 4-byte copy alignment holds.
         queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(data));
         self.len = len;
     }
@@ -280,7 +294,7 @@ impl RectPipeline {
     }
 }
 
-/// Draws [`GlyphInstance`]s, sampling coverage from the atlas.
+/// Draws [`GlyphInstance`]s, sampling coverage or colour from the atlas.
 pub(crate) struct GlyphPipeline {
     pipeline: wgpu::RenderPipeline,
     pub(crate) instances: InstanceBuffer<GlyphInstance>,

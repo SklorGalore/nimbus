@@ -50,6 +50,9 @@ pub(crate) struct LineStyle<'a> {
     pub(crate) clip_left: f32,
     /// Column within its line where this text starts (see [`Grid`]).
     pub(crate) start_col: usize,
+    /// Byte offsets in the text where a cursor or selection edge is: a
+    /// ligature across one is drawn as separate characters.
+    pub(crate) splits: &'a [usize],
 }
 
 /// A glyph already in the atlas, with its offset from the pen position.
@@ -118,6 +121,33 @@ impl TextRenderer {
             tab_width: self.tab_width,
             start_col: 0,
         }
+    }
+
+    /// Draw with another font (`font` in the config): every cached bitmap
+    /// belongs to the old one, so the cache and atlas are reset, and the
+    /// grid is measured again.
+    pub(crate) fn set_font(
+        &mut self,
+        regular: Font,
+        bold: Option<Font>,
+        atlas: &mut Atlas,
+        queue: &wgpu::Queue,
+    ) {
+        self.font = regular;
+        self.faces[0] = regular;
+        self.faces[1] = bold.unwrap_or(regular);
+        self.metrics = regular.metrics(self.metrics.size_px);
+        self.reset(atlas, queue);
+    }
+
+    /// Let the font join characters into ligatures.
+    pub(crate) fn set_ligatures(&mut self, on: bool) {
+        self.shaper.set_ligatures(on);
+    }
+
+    /// Whether ligatures are on.
+    pub(crate) fn ligatures(&self) -> bool {
+        self.shaper.ligatures()
     }
 
     pub(crate) fn set_tab_width(&mut self, tab_width: usize) {
@@ -200,6 +230,7 @@ impl TextRenderer {
                 start_col: style.start_col,
                 ..self.grid()
             },
+            style.splits,
             &mut self.shaped,
         );
 
@@ -267,10 +298,54 @@ impl TextRenderer {
 }
 
 impl TextRenderer {
+    /// Queue one character of the editor font with its cell's top-left
+    /// corner at `origin`, without shaping: for markers such as the `·` and
+    /// `→` of visible whitespace, drawn many times a frame. Nothing is drawn
+    /// if the font lacks the character.
+    pub(crate) fn push_char(
+        &mut self,
+        queue: &wgpu::Queue,
+        atlas: &mut Atlas,
+        frame: &mut FrameBuilder,
+        origin: [f32; 2],
+        ch: char,
+        color: [f32; 4],
+    ) {
+        let id = self.font.glyph_id(ch);
+        if id == 0 || self.reset_pending {
+            return;
+        }
+        let whole = origin[0].floor();
+        let key = GlyphKey::new(id, self.metrics.size_px, origin[0] - whole).styled(REGULAR, false);
+        let cached = if let Some(entry) = self.cache.get(&key) {
+            *entry
+        } else {
+            match load_glyph(&self.faces, &mut self.raster, atlas, queue, key) {
+                Loaded::Glyph(g) => {
+                    self.cache.insert(key, Some(g));
+                    Some(g)
+                }
+                Loaded::Blank => {
+                    self.cache.insert(key, None);
+                    None
+                }
+                Loaded::NoRoom => {
+                    self.reset_pending = true;
+                    None
+                }
+            }
+        };
+        if let Some(c) = cached {
+            let y = (origin[1] + self.metrics.baseline).round() - px(c.top);
+            frame.push_glyph([whole + px(c.left), y], &c.slot, color);
+        }
+    }
+
     /// For a character the bundled font lacks: the fallback face that has
     /// it, its glyph, its x from the start of the line, and the size to
     /// draw it at. `None` (draw the box) when the grapheme is more than one
-    /// character, or no font is known to have it yet.
+    /// character (a joined emoji sequence such as 👨‍👩‍👧), or no font is
+    /// known to have it yet.
     fn fallback_glyph(
         &mut self,
         line: &str,
@@ -280,7 +355,9 @@ impl TextRenderer {
         let text = line.get(cluster..cluster + usize::from(cells.len))?;
         let mut chars = text.chars();
         let c = chars.next()?;
-        if chars.next().is_some() {
+        // One character, or one followed by the emoji presentation selector
+        // (❤️ is U+2764 U+FE0F), which only asks for the colour form.
+        if !matches!(chars.as_str(), "" | "\u{fe0f}") {
             return None;
         }
         let face = self.fallback.face_for(c)?;
@@ -341,7 +418,12 @@ fn load_glyph(
     let Some(bitmap) = raster.rasterize(fonts, key) else {
         return Loaded::Blank;
     };
-    match atlas.insert(queue, bitmap.width, bitmap.height, bitmap.coverage) {
+    match atlas.insert(
+        queue,
+        bitmap.page,
+        (bitmap.width, bitmap.height),
+        bitmap.data,
+    ) {
         Ok(slot) => Loaded::Glyph(CachedGlyph {
             slot,
             left: bitmap.left,

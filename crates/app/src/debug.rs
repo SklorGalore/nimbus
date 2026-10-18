@@ -164,7 +164,7 @@ impl Debug {
         let cell = layout.metrics.cell_width;
         let lh = layout.metrics.line_height;
         let pad = layout.margin;
-        let cols = 34.0;
+        let cols = 42.0;
         let w = cols * cell + 2.0 * pad;
         #[expect(clippy::cast_precision_loss, reason = "a small line count")]
         let h = LINES as f32 * lh + 2.0 * pad;
@@ -201,6 +201,9 @@ impl Debug {
             stats.atlas * 100.0,
             stats.glyphs
         );
+        if stats.color_page_bytes > 0 {
+            let _ = write!(line, "  emoji {} MB", stats.color_page_bytes >> 20);
+        }
         put(gpu, line);
 
         line.clear();
