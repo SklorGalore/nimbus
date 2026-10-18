@@ -1,6 +1,6 @@
 # M12 — Workspace
 
-**Status: planned, after M11.** Written on 2026-10-17 from items
+**Status: done (2026-10-18), after M11.** Written on 2026-10-17 from items
 deferred by M4 (recently opened files), M6 (file operations in the tree),
 M7 (following a growing log) and M8 and DESIGN.md §2 (session restore).
 Approved the same day: `nimbus` alone reopens the last session, deletes
@@ -16,33 +16,33 @@ being written can be followed.
 
 ## Done when
 
-- [ ] **Session restore**: closing Nimbus remembers, per project root,
+- [x] **Session restore**: closing Nimbus remembers, per project root,
       the open files, their cursor and scroll positions, the active tab,
       the expanded folders in the tree and the sidebar mode. `nimbus
       FOLDER` reopens that folder's session; `nimbus` with no arguments
       reopens the last one; `nimbus FILE` opens just that file, and
       `--no-session` skips restoring. Untitled buffers with text are not
       restored (there is no autosave; see Scope).
-- [ ] Restoring does not pay for every file before the first frame: the
+- [x] Restoring does not pay for every file before the first frame: the
       active file opens as now, the other tabs show their names and load
       when first shown or within the first second on a worker, whichever
       is first. `--smoke` with a ten-file session stays within the startup
       budget, recorded in Results.
-- [ ] A file that no longer exists is dropped from the session with a
+- [x] A file that no longer exists is dropped from the session with a
       message-line note, not an error.
-- [ ] **Recent files**: "Open Recent" (`Primary+Shift+O`) lists the
+- [x] **Recent files**: "Open Recent" (`Primary+Shift+O`) lists the
       last 100 files opened in any session, fuzzy-matched like
       the file opener; the file opener itself lists recent files in the
       root first when the query is empty. "Reopen Closed Tab"
       (`Primary+Shift+T`) brings back the last closed tab with its cursor.
-- [ ] **Tree operations**: New File, New Folder, Rename (`F2`; `Enter` on
+- [x] **Tree operations**: New File, New Folder, Rename (`F2`; `Enter` on
       macOS, where Finder uses it), Delete, and Reveal in Finder/Explorer/file manager,
       from the tree's keyboard, a context menu on macOS and Windows, and
       the palette on Linux. Rename and Delete of an open file move or
       close its tab (Delete asks when the tab has unsaved edits); a
       rename over an existing name asks. Delete moves to the system
       trash through the `trash` crate, measured for binary size.
-- [ ] **Follow a growing file**: "Follow Tail" (`view.followTail`,
+- [x] **Follow a growing file**: "Follow Tail" (`view.followTail`,
       shown in the status bar for files whose size grew while open) keeps
       the view pinned to the end as new lines arrive, for both buffer
       backends, with no unsaved-edit dirtying and nothing in the undo
@@ -51,7 +51,7 @@ being written can be followed.
       appended bytes for the mapped backend. Turning it off (any scroll
       up, or the toggle) leaves the file as it was loaded plus what has
       arrived. A truncated or rotated file reloads as M6 does.
-- [ ] The window's size and position are remembered too, and restored
+- [x] The window's size and position are remembered too, and restored
       when that display is still present.
 
 ## Scope
@@ -176,3 +176,43 @@ every current monitor is ignored.
 | `trash` pulls in platform libraries that bloat the binary | Measure; fall back to a confirmed permanent delete |
 | A log writer appends faster than 1 MB/s | Debounce already batches; appends are O(new bytes); the view redraws at most once per frame |
 | Two Nimbus windows (not supported) overwrite each other's `state.toml` | Last writer wins; the file is small and never holds text |
+
+## Results
+
+Built on 2026-10-18 in a Linux container with four shared cores, with
+the window on a virtual display (Xvfb) drawn by llvmpipe, Mesa's software
+Vulkan; the owner's M5 Pro is faster and steadier, so the first-frame
+numbers below are for comparing with each other, not with M10's.
+
+| Metric | Value |
+|---|---|
+| Tests | 484 passing, plus 18 opt-in benchmarks or diagnostics |
+| Release binary | 22.4 MB on Linux (M15 recorded 21.7 MB; budget 35 MB). `trash` brings little on Linux (it is plain file moves there) and more on macOS and Windows, where it talks to the system's file manager APIs; CI's `release-size` job checks all three |
+| `--smoke` first frame, ten-file session | 84–105 ms warm (median 89 ms); 184 ms on the first, cold run |
+| `--smoke` first frame, one file named | 80–98 ms warm (median 86 ms) |
+| `--smoke` first frame, `--no-session` | 62–76 ms warm |
+| Restoring ten tabs before the first frame | one file read (the front tab, 0.4 ms for 200 KB); the other nine are read on a worker right after it |
+| 4 GB log, Follow Tail, writer appending 1 MB/s for 30 s | resident memory 132.7 MB before and 132.6 MB after 31 MB arrived; frame 3.1 ms, worst 6.5 ms (software rendering); line numbers counted to the new end (65,724,595 lines) |
+| New dependency | `trash` 5.2.9 |
+
+**Surprises.**
+
+- A file rewritten in place changes what its old mapping shows too, so
+  comparing the old mapping with the new one cannot tell a rewrite from
+  an append. `MappedFile` keeps a copy of the first and last 64 bytes it
+  mapped, and the new mapping is compared with that copy.
+- Undo runs (long deletions kept as pieces) named their document by the
+  source's address. A grown file has a new source, so runs recorded
+  before the growth would have been refused; a lineage number now names
+  the document, and is kept when the source grows.
+- The line index's scanner could not be restarted part way: a resumed
+  scanner (`Scanner::resume`) now continues from an index's last
+  checkpoint and gives the same checkpoints as indexing the file whole
+  (a test in `mapped.rs` checks this).
+- `--smoke` is unattended, so it restores a session to measure it but
+  never saves one; otherwise every measurement would overwrite the
+  owner's session.
+- On macOS the `trash` crate's default asks Finder through an Apple
+  script, which makes macOS ask the user to let Nimbus control Finder.
+  Asking `NSFileManager` directly (its other mode) needs no permission.
+
