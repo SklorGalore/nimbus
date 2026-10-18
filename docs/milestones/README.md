@@ -43,11 +43,19 @@ repeated in each file:
 | 13 | [Split views and folding](m13-splits-and-folding.md) | Planned |
 | 14 | [Languages, second pass](m14-languages.md) | Planned |
 | 15 | [Distribution](m15-distribution.md) | Done |
+| 16 | [Rendering, second pass](m16-rendering-second-pass.md) | Planned |
+| 17 | [Encodings and line endings](m17-encodings.md) | Planned |
+| 18 | [Compare, second pass](m18-compare-second-pass.md) | Planned |
+| 19 | [Workspace and search, second pass](m19-workspace-and-search-second-pass.md) | Planned |
+| 20 | [Reading aids](m20-reading-aids.md) | Planned |
+| 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | Planned |
 
 **Next** is the milestone to start; **Planned** plans are approved and
 queued in table order. M10–M15 were drafted after M8 and approved, with
 their order and the answers to their open questions, on 2026-10-17
-(`DESIGN.md` §9 and §10). [`backlog.md`](backlog.md) maps every item
-deferred by M1–M9 to the plan that picks it up, and lists what stays
-unscheduled. A plan becomes **In progress** when its first task lands and
+(`DESIGN.md` §9 and §10). M16–M21 were drafted on 2026-10-18 from what
+M9–M15 deferred and the backlog's unscheduled list, and approved the
+same day with their order and eight answers (`DESIGN.md` §9 and §10).
+[`backlog.md`](backlog.md) maps every deferred item to the plan that
+picks it up, and lists what stays unscheduled. A plan becomes **In progress** when its first task lands and
 **Done** when its checklist is ticked and its Results filled in.
