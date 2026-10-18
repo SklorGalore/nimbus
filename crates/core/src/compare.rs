@@ -21,9 +21,13 @@
 //!    smallest set that does, so [`Comparison::exact`] is `false` and the
 //!    diff bar can say so.
 //!
-//! Splitting very long lines into pieces for diffing (the plan's layer 4,
-//! for minified files) is not here yet: it changes what a "line" is for
-//! the views, so it lands with them (task 6).
+//! With [`Options::split`] (M18), texts within the limit have their lines
+//! over [`crate::split::SPLIT_AT`] cut into pieces before the diff, so a
+//! minified file shows its real changes. The hunks are then in *units*
+//! (lines and pieces) and [`Comparison::old_splits`] and
+//! [`Comparison::new_splits`] map units back to lines. Past the limit
+//! nothing is cut: finding the long lines would mean reading the whole of
+//! a huge file once more.
 //!
 //! Everything here is pure and reads through [`Text::chunk_at`], so it
 //! runs on a worker over snapshots (DESIGN.md §4.1).
@@ -31,7 +35,8 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::diff::{DIFF_LIMIT, DiffError, Hunk, Interner};
+use crate::diff::{DIFF_LIMIT, DiffError, Hunk, Interner, Normalize};
+use crate::split::Splits;
 use crate::{Snapshot, Text};
 
 /// How a comparison is done; the defaults are for real files, tests use
@@ -43,6 +48,10 @@ pub struct Options {
     /// Bytes per side per window past the limit. Memory for the windowed
     /// diff is proportional to this, times the widening below.
     pub window: usize,
+    /// What counts as an equal line.
+    pub normalize: Normalize,
+    /// Cut long lines into pieces (texts within `limit` only).
+    pub split: bool,
 }
 
 impl Default for Options {
@@ -50,6 +59,8 @@ impl Default for Options {
         Self {
             limit: DIFF_LIMIT,
             window: 32 << 20,
+            normalize: Normalize::default(),
+            split: false,
         }
     }
 }
@@ -74,6 +85,11 @@ pub struct Comparison {
     /// How many lines, both sides together, went through the diff
     /// algorithm: what trimming saved, for the debug overlay and tests.
     pub lines_diffed: usize,
+    /// The old text's cut lines. When either side has any, the hunks and
+    /// the line counts above are in units, not lines.
+    pub old_splits: Splits,
+    /// The new text's cut lines.
+    pub new_splits: Splits,
 }
 
 /// Compare `old` with `new`, in layers, within `options`.
@@ -99,10 +115,34 @@ pub fn compare(
         exact: true,
         ..Comparison::default()
     };
+    let split = options.split && old_len <= options.limit && new_len <= options.limit;
+    if split {
+        result.old_splits = Splits::scan(&**old);
+        result.new_splits = Splits::scan(&**new);
+    }
+    let split = split && !(result.old_splits.is_empty() && result.new_splits.is_empty());
+    if split {
+        // The common start is the same bytes on both sides, so the same
+        // cuts: its unit count is the same on both.
+        let prefix_units = result.old_splits.unit_of_line(trim.prefix_lines);
+        let mut interner = Interner::with_options(options.normalize, true);
+        let a = interner.intern_range(old, old_mid.clone())?;
+        let b = interner.intern_range(new, new_mid.clone())?;
+        result.lines_diffed = a.len() + b.len();
+        result.hunks = interner.diff(&a, &b);
+        shift(&mut result.hunks, prefix_units, prefix_units);
+        result.old_lines = result
+            .old_splits
+            .units(trim.prefix_lines + count_lines(&**old, old_mid.start..old_len));
+        result.new_lines = result
+            .new_splits
+            .units(trim.prefix_lines + count_lines(&**new, new_mid.start..new_len));
+        return Ok(result);
+    }
     let (mid_old_lines, mid_new_lines) = if old_mid.is_empty() && new_mid.is_empty() {
         (0, 0)
     } else if old_mid.len() <= options.limit && new_mid.len() <= options.limit {
-        let mut interner = Interner::new();
+        let mut interner = Interner::with_options(options.normalize, false);
         let a = interner.intern_range(old, old_mid.clone())?;
         let b = interner.intern_range(new, new_mid.clone())?;
         result.lines_diffed = a.len() + b.len();
@@ -320,7 +360,7 @@ fn windowed(
         loop {
             let old_end = window_end(&**old, old_pos, size, old_mid.end);
             let new_end = window_end(&**new, new_pos, size, new_mid.end);
-            let mut interner = Interner::new();
+            let mut interner = Interner::with_options(options.normalize, false);
             let a = interner.intern_range(old, old_pos..old_end)?;
             let b = interner.intern_range(new, new_pos..new_end)?;
             out.lines_diffed += a.len() + b.len();
@@ -519,6 +559,7 @@ mod tests {
         let small = Options {
             limit: 64,
             window: 512,
+            ..Options::default()
         };
         let c = compare(&snap(&old), &snap(&new), small).unwrap();
         assert!(!c.exact);
@@ -559,6 +600,7 @@ mod tests {
             Options {
                 limit: 16,
                 window: 64,
+                ..Options::default()
             },
         )
         .unwrap();

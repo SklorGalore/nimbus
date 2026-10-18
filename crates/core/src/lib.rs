@@ -30,6 +30,7 @@ pub mod rope;
 pub mod search;
 pub mod selection;
 pub mod source;
+pub mod split;
 pub mod transform;
 pub mod undo;
 pub mod wrap;
@@ -40,7 +41,7 @@ pub use buffer::{
     Buffer, Content, Edit, EditError, LineSpan, SUBSTITUTE, Snapshot, Text, report_sorted,
 };
 pub use compare::{Comparison, compare};
-pub use diff::{DIFF_LIMIT, DiffError, Hunk, Interner, Lines};
+pub use diff::{DIFF_LIMIT, DiffError, Hunk, Interner, Lines, Normalize, Whitespace};
 pub use fold::Folds;
 pub use line_ending::LineEnding;
 pub use live_diff::{EditSpan, LiveDiff, Region, Side};

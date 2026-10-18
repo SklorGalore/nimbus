@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use nimbus_core::{Normalize, Whitespace};
 use serde::{Deserialize, Serialize};
 
 use crate::sidebar::DEFAULT_WIDTH;
@@ -19,6 +20,13 @@ pub struct State {
     pub sidebar_visible: bool,
     /// Sidebar width in logical pixels.
     pub sidebar_width: f32,
+    /// The compare view ignores whitespace: `"off"`, `"ends"` (leading and
+    /// trailing) or `"all"` (M18).
+    pub diff_ignore_whitespace: String,
+    /// The compare view ignores ASCII case.
+    pub diff_ignore_case: bool,
+    /// The compare view drops changes made only of blank lines.
+    pub diff_ignore_blank_lines: bool,
 }
 
 impl Default for State {
@@ -26,7 +34,39 @@ impl Default for State {
         Self {
             sidebar_visible: true,
             sidebar_width: DEFAULT_WIDTH,
+            diff_ignore_whitespace: "off".to_owned(),
+            diff_ignore_case: false,
+            diff_ignore_blank_lines: false,
         }
+    }
+}
+
+impl State {
+    /// The compare options as the diff takes them. An unknown whitespace
+    /// word (a hand edit) means off.
+    #[must_use]
+    pub fn diff_options(&self) -> Normalize {
+        Normalize {
+            whitespace: match self.diff_ignore_whitespace.as_str() {
+                "ends" => Whitespace::Ends,
+                "all" => Whitespace::All,
+                _ => Whitespace::Exact,
+            },
+            case: self.diff_ignore_case,
+            blank_lines: self.diff_ignore_blank_lines,
+        }
+    }
+
+    /// Remember `n` as the compare options.
+    pub fn set_diff_options(&mut self, n: Normalize) {
+        self.diff_ignore_whitespace = match n.whitespace {
+            Whitespace::Exact => "off",
+            Whitespace::Ends => "ends",
+            Whitespace::All => "all",
+        }
+        .to_owned();
+        self.diff_ignore_case = n.case;
+        self.diff_ignore_blank_lines = n.blank_lines;
     }
 }
 
@@ -71,14 +111,24 @@ mod tests {
 
     #[test]
     fn round_trips_and_tolerates_partial_files() {
-        let s = State {
+        let mut s = State {
             sidebar_visible: false,
             sidebar_width: 300.0,
+            ..State::default()
         };
+        s.set_diff_options(Normalize {
+            whitespace: Whitespace::Ends,
+            case: true,
+            blank_lines: false,
+        });
         let text = toml::to_string(&s).unwrap();
         assert_eq!(toml::from_str::<State>(&text).unwrap(), s);
         let partial: State = toml::from_str("sidebar_width = 200.0\n").unwrap();
         assert!(partial.sidebar_visible);
         assert_eq!(partial.sidebar_width, 200.0);
+        assert!(partial.diff_options().is_exact());
+        let back: State = toml::from_str(&text).unwrap();
+        assert_eq!(back.diff_options().whitespace, Whitespace::Ends);
+        assert!(back.diff_options().case);
     }
 }

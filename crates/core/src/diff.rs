@@ -21,6 +21,15 @@
 //! extra empty line after it; a text that does not has a last line without
 //! an ending. Line numbers agree with [`Text::line_to_byte`] either way.
 //!
+//! **Options (M18).** An interner made with [`Interner::with_options`] can
+//! treat lines as equal when they differ only in whitespace or case, and
+//! can drop changes that only add or remove blank lines. That is a change
+//! to what "equal" means, not to the algorithm: each line is normalised
+//! (whitespace trimmed or removed, letters lowercased) before it is hashed
+//! and compared, so the diff below runs unchanged. It can also cut lines
+//! longer than [`SPLIT_AT`] into pieces ([`crate::split`]); each piece is
+//! then a token of its own.
+//!
 //! Memory: 4 bytes per line per side for the tokens, and about 40 bytes
 //! per *distinct* line in the interner (where a copy of it lives, its
 //! hash, its indentation). The texts are kept as snapshots, which share
@@ -34,7 +43,67 @@ use std::sync::Arc;
 
 use imara_diff::{Algorithm, Diff, IndentHeuristic, IndentLevel, Token};
 
+use crate::split::{self, SPLIT_AT};
 use crate::{Snapshot, Text};
+
+/// How whitespace counts when comparing lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum Whitespace {
+    /// Every byte counts.
+    #[default]
+    Exact,
+    /// Whitespace at the start and end of a line (its indentation, any
+    /// trailing spaces and the line ending) is ignored; inside the line
+    /// it counts.
+    Ends,
+    /// All whitespace is ignored: `a b` equals `ab`.
+    All,
+}
+
+/// What two lines must share to count as equal. The default is exact,
+/// which the merge views always use: a merge must not lose a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct Normalize {
+    /// How whitespace counts.
+    pub whitespace: Whitespace,
+    /// ASCII letters compare without case. Only ASCII, because a byte at a
+    /// time keeps hashing streaming; other scripts compare exactly.
+    pub case: bool,
+    /// Changes made only of blank (whitespace-only) lines are dropped, as
+    /// `git diff --ignore-blank-lines` does.
+    pub blank_lines: bool,
+}
+
+impl Normalize {
+    /// Every byte counts and nothing is dropped.
+    #[must_use]
+    pub fn is_exact(self) -> bool {
+        self == Self::default()
+    }
+
+    /// Normalise the line in `buf` in place: whitespace trimmed or
+    /// removed, then ASCII letters lowercased.
+    fn apply(self, buf: &mut Vec<u8>) {
+        match self.whitespace {
+            Whitespace::Exact => {}
+            Whitespace::Ends => {
+                let end = buf.iter().rposition(|&b| !is_space(b)).map_or(0, |i| i + 1);
+                buf.truncate(end);
+                let start = buf.iter().position(|&b| !is_space(b)).unwrap_or(buf.len());
+                buf.drain(..start);
+            }
+            Whitespace::All => buf.retain(|&b| !is_space(b)),
+        }
+        if self.case {
+            buf.make_ascii_lowercase();
+        }
+    }
+}
+
+/// ASCII whitespace, line endings included.
+fn is_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\r' | b'\n' | 0x0B | 0x0C)
+}
 
 /// The most text, per side, that gets a full line diff: 256 MB, the same
 /// as the rope threshold (DESIGN.md §4.1). Above it the layered diff (M9
@@ -130,6 +199,18 @@ pub struct Interner {
     reps: Vec<Rep>,
     /// Indentation per token, for sliding hunks to readable positions.
     indents: Vec<IndentLevel>,
+    /// Per token: its line is blank (whitespace only). Filled only when
+    /// blank-line changes are dropped.
+    blank: Vec<bool>,
+    /// What counts as equal.
+    normalize: Normalize,
+    /// Cut lines over [`SPLIT_AT`] into pieces.
+    split: bool,
+    /// A line (or piece) being normalised, and a representative's, reused.
+    line: Vec<u8>,
+    rep_line: Vec<u8>,
+    /// Cut points of the long line being interned, reused.
+    cuts: Vec<usize>,
 }
 
 impl fmt::Debug for Interner {
@@ -147,6 +228,18 @@ impl Interner {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An interner that compares lines by `normalize` and, when `split`
+    /// is set, cuts long lines into pieces. Tokens are then units: whole
+    /// lines and pieces ([`crate::split::Splits`] maps them back).
+    #[must_use]
+    pub fn with_options(normalize: Normalize, split: bool) -> Self {
+        Self {
+            normalize,
+            split,
+            ..Self::default()
+        }
     }
 
     /// How many distinct lines have been seen.
@@ -196,6 +289,15 @@ impl Interner {
         let text = Arc::clone(text);
         let len = range.end.min(text.len_bytes());
         let mut tokens = Vec::with_capacity(len.saturating_sub(range.start) / 32);
+        if !self.normalize.is_exact() {
+            let mut start = range.start;
+            while start < len {
+                let end = split::line_end(&*text, start, len);
+                self.intern_unit_or_pieces(&*text, text_idx, start..end, &mut tokens)?;
+                start = end;
+            }
+            return Ok(Lines { tokens });
+        }
         let mut hash = LineHash::default();
         let mut line_start = range.start;
         let mut head = LineHead::default();
@@ -218,6 +320,18 @@ impl Interner {
                 head = LineHead::default();
                 hash.write(piece);
                 let line_end = pos + end;
+                if self.split && line_end - line_start > SPLIT_AT {
+                    self.intern_unit_or_pieces(
+                        &*text,
+                        text_idx,
+                        line_start..line_end,
+                        &mut tokens,
+                    )?;
+                    hash = LineHash::default();
+                    line_start = line_end;
+                    off = end;
+                    continue;
+                }
                 // The whole line is in this chunk when it started here.
                 let contiguous = (line_start >= pos).then_some(piece);
                 let token = self.token_for(
@@ -243,7 +357,9 @@ impl Interner {
             }
             pos = base + chunk.len();
         }
-        if line_start < len {
+        if self.split && len - line_start > SPLIT_AT {
+            self.intern_unit_or_pieces(&*text, text_idx, line_start..len, &mut tokens)?;
+        } else if line_start < len {
             let token = self.token_for(
                 hash.finish(),
                 Rep {
@@ -291,12 +407,140 @@ impl Interner {
         let token = Token(id);
         self.reps.push(rep);
         self.indents.push(indent);
+        self.blank.push(false);
         if new_hash {
             self.table.insert(hash, token);
         } else {
             self.overflow.push((hash, token));
         }
         Ok(token)
+    }
+
+    /// Intern the line at `line` (its ending included): one token, or
+    /// one per piece when splitting is on and the line is long.
+    fn intern_unit_or_pieces(
+        &mut self,
+        text: &dyn Text,
+        text_idx: u32,
+        line: Range<usize>,
+        tokens: &mut Vec<Token>,
+    ) -> Result<(), DiffError> {
+        let content = split::content_end(text, line.start, line.end);
+        if !self.split || content - line.start <= SPLIT_AT {
+            tokens.push(self.unit_token(text, text_idx, line)?);
+            return Ok(());
+        }
+        let mut cuts = std::mem::take(&mut self.cuts);
+        cuts.clear();
+        split::cuts(text, line.start..content, &mut cuts);
+        let mut start = line.start;
+        for &k in &cuts {
+            let end = line.start + k;
+            tokens.push(self.unit_token(text, text_idx, start..end)?);
+            start = end;
+        }
+        // The last piece keeps the line ending.
+        let last = self.unit_token(text, text_idx, start..line.end);
+        self.cuts = cuts;
+        tokens.push(last?);
+        Ok(())
+    }
+
+    /// The token of the bytes `unit` (a line or a piece), read from the
+    /// text again: the slower path, for normalised compares and pieces.
+    fn unit_token(
+        &mut self,
+        text: &dyn Text,
+        text_idx: u32,
+        unit: Range<usize>,
+    ) -> Result<Token, DiffError> {
+        let rep = Rep {
+            text: text_idx,
+            start: unit.start,
+            len: unit.len(),
+        };
+        if self.normalize.is_exact() {
+            let mut hash = LineHash::default();
+            let mut head = LineHead::default();
+            for_each_chunk(text, unit, |bytes| {
+                head.write(bytes);
+                hash.write(bytes);
+            });
+            return self.token_for(hash.finish(), rep, head.indent(), text, None);
+        }
+        let mut line = std::mem::take(&mut self.line);
+        line.clear();
+        for_each_chunk(text, unit, |bytes| line.extend_from_slice(bytes));
+        let indent = IndentLevel::for_ascii_line(line.iter().take(64).copied(), 8);
+        let blank = self.normalize.blank_lines && line.iter().all(|&b| is_space(b));
+        self.normalize.apply(&mut line);
+        let mut hash = LineHash::default();
+        hash.write(&line);
+        let token = self.normalized_token(hash.finish(), rep, indent, blank, &line);
+        self.line = line;
+        token
+    }
+
+    /// Like [`token_for`](Interner::token_for) for a normalised line:
+    /// representatives are normalised again to compare, so nothing but
+    /// their place in the text is stored.
+    fn normalized_token(
+        &mut self,
+        hash: u64,
+        rep: Rep,
+        indent: IndentLevel,
+        blank: bool,
+        line: &[u8],
+    ) -> Result<Token, DiffError> {
+        let candidate = self.table.get(&hash).copied();
+        if let Some(token) = candidate {
+            if self.same_normalized(token, line) {
+                return Ok(token);
+            }
+            let overflow: Vec<Token> = self
+                .overflow
+                .iter()
+                .filter(|(h, _)| *h == hash)
+                .map(|&(_, t)| t)
+                .collect();
+            for token in overflow {
+                if self.same_normalized(token, line) {
+                    return Ok(token);
+                }
+            }
+        }
+        let Ok(id) = u32::try_from(self.reps.len()) else {
+            return Err(DiffError::TooManyLines);
+        };
+        let token = Token(id);
+        self.reps.push(rep);
+        self.indents.push(indent);
+        self.blank.push(blank);
+        if candidate.is_none() {
+            self.table.insert(hash, token);
+        } else {
+            self.overflow.push((hash, token));
+        }
+        Ok(token)
+    }
+
+    /// Whether `token`'s representative, normalised, equals `line`.
+    fn same_normalized(&mut self, token: Token, line: &[u8]) -> bool {
+        let Some(&known) = self.reps.get(token.0 as usize) else {
+            return false;
+        };
+        let Some(other) = self.texts.get(known.text as usize) else {
+            return false;
+        };
+        let mut buf = std::mem::take(&mut self.rep_line);
+        buf.clear();
+        for_each_chunk(&**other, known.start..known.start + known.len, |b| {
+            buf.extend_from_slice(b);
+        });
+        self.normalize.apply(&mut buf);
+        let same = buf == line;
+        self.rep_line = buf;
+        same
     }
 
     /// Whether the line at `rep` in `text` has the same bytes as `token`'s
@@ -360,12 +604,38 @@ impl Interner {
                 .unwrap_or_else(|| IndentLevel::for_ascii_line(std::iter::empty(), 8))
         };
         diff.postprocess_with(old, new, IndentHeuristic::new(indent_of));
+        let blank_only = |h: &Hunk| {
+            let blank = |t: &Token| self.blank.get(t.0 as usize).copied().unwrap_or(false);
+            old.get(h.old.clone())
+                .is_some_and(|ts| ts.iter().all(blank))
+                && new
+                    .get(h.new.clone())
+                    .is_some_and(|ts| ts.iter().all(blank))
+        };
         diff.hunks()
             .map(|h| Hunk {
                 old: h.before.start as usize..h.before.end as usize,
                 new: h.after.start as usize..h.after.end as usize,
             })
+            .filter(|h| !(self.normalize.blank_lines && blank_only(h)))
             .collect()
+    }
+}
+
+/// Call `f` on the bytes of `range` of `t`, chunk by chunk.
+fn for_each_chunk(t: &dyn Text, range: Range<usize>, mut f: impl FnMut(&[u8])) {
+    let mut pos = range.start;
+    while pos < range.end {
+        let (chunk, base) = t.chunk_at(pos);
+        let Some(bytes) = chunk.get(pos - base..) else {
+            return;
+        };
+        let bytes = &bytes[..bytes.len().min(range.end - pos)];
+        if bytes.is_empty() {
+            return;
+        }
+        f(bytes);
+        pos += bytes.len();
     }
 }
 
