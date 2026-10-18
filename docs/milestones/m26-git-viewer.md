@@ -1,13 +1,15 @@
 # M26 — Git window: viewing
 
-**Status: draft (2026-10-18).** The first of four plans (M26–M29) for a
+**Status: planned (2026-10-18).** The first of four plans (M26–M29) for a
 git client built from Nimbus's own parts, written at the owner's request
 after a feasibility study
 showed that the hard half (diff, merge, text) already exists.
 The owner chose *window mode*: the same `nimbus` binary opens a window
 laid out for git with `nimbus --git [DIR]`, the way `--diff` and
 `--merge` open their views today. This milestone is read-only: it shows
-a repository and changes nothing in it.
+a repository and changes nothing in it. The owner answered the plans'
+open questions the same day (`DESIGN.md` §9): the four run after M25,
+and the graph is drawn with smooth curves.
 
 ## Goal
 
@@ -34,7 +36,8 @@ files and diffs, fast on very large repositories.
       shows each file's diff against the index or HEAD in the compare
       view, highlighted. Read-only in M26; staging arrives in M27.
 - [ ] **History**: every commit reachable from all branches and tags,
-      newest first, with a graph of branch lines in the left of each row,
+      newest first, with a graph of smooth, anti-aliased branch lines
+      (curves where a branch forks or joins) in the left of each row,
       the subject, author, relative date and ref labels. Selecting a
       branch, tag or remote in the sidebar scrolls to its commit.
 - [ ] **Commit details**: a commit's changed files are listed (renames
@@ -43,8 +46,8 @@ files and diffs, fast on very large repositories.
       (ignore whitespace, case, blank lines). Merge commits pick the
       parent to compare against.
 - [ ] **Open in Nimbus**: double-clicking a file, or "Open in Editor",
-      opens the working copy in the Nimbus editor (the running one once
-      M25 lands; a new one before that).
+      opens the working copy in the Nimbus editor that is already
+      running, through M25's hand-off (which lands first).
 - [ ] **Live**: committing, checking out or editing files from a
       terminal or the editor updates the window within a second, by
       watching `.git` and the working tree.
@@ -103,10 +106,16 @@ screen" rule as the compare view's `Rows`.
 
 **The graph.** Lanes are assigned in one pass as rows arrive, the way
 `git log --graph` does: each row knows which lanes pass through it and
-which lines join or leave. Drawing uses the existing rect pipeline for
-straight segments and the bundled font's box-drawing and rounded-corner
-glyphs for joins, so no new render pipeline is needed (open question 2,
-DESIGN.md §9).
+which lines join or leave. The owner chose smooth curves over straight
+lines and box-drawing glyphs, so `render` gains a third instanced
+pipeline beside rects and glyph quads: one instance per segment (a
+straight line or a cubic Bézier curve, with width and colour), drawn as
+a quad around the segment whose fragment shader works out the distance
+to the curve and turns it into anti-aliased coverage. Only the rows on
+screen produce segments, so the instance count stays in the hundreds.
+Compatibility mode (M23) draws the same segment list on the CPU by
+flattening each curve into short lines and filling them with coverage;
+if M23 has not landed, that routine joins its plan instead.
 
 **Commit details reuse folder compare and the compare view.** The file
 list is `diff-tree` output; a selected file's two sides are read with
@@ -128,7 +137,8 @@ history without reloading it.
 3. `--git` and "Open Git Window"; the window layout with empty panes and
    the error states.
 4. History rows and the streaming load; scrolling; ref labels.
-5. Graph lanes and drawing.
+5. Graph lanes; the curve pipeline in `render` and its CPU twin for
+   compatibility mode.
 6. Commit details: file list, compare view on a worker, parent choice
    for merges.
 7. Changes view (read-only) and the sidebar sections.
@@ -143,6 +153,8 @@ history without reloading it.
   and why status has two columns.
 - **A commit graph**: commits as nodes with parent links, and how lanes
   turn that into lines on screen.
+- **Drawing curves on the GPU**: a Bézier curve, signed distance, and
+  why a quad with a distance shader gives smooth edges at any zoom.
 - **Streaming a child process**: reading output as it arrives instead of
   waiting for the end.
 
@@ -152,6 +164,7 @@ history without reloading it.
 |---|---|
 | `git status` takes seconds on a huge working tree | It never blocks a frame; the Changes view shows "reading…", and the manual points at git's own `core.fsmonitor` |
 | Starting a process per call is slow on Windows | Batch reads through one `cat-file --batch` process; refresh is debounced |
+| The curve shader looks wrong on some GPUs or costs too much | Measure it in the scroll benchmark; the fallback is straight segments in the same pipeline |
 | Graph lanes explode on histories with many parallel branches | Cap visible lanes and draw an overflow marker, as other clients do |
 | Different git versions print different output | Only stable plumbing formats are parsed; the minimum git version is checked once and named in the error |
 

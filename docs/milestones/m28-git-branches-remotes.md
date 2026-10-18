@@ -1,6 +1,6 @@
 # M28 — Git window: branches and remotes
 
-**Status: draft (2026-10-18).** Third of the git window plans
+**Status: planned (2026-10-18).** Third of the git window plans
 (M26–M29).
 
 ## Goal
@@ -55,8 +55,8 @@ as its argument and reads the answer from stdout. `nimbus --askpass
 PROMPT` connects back to the git window that started it over a socket
 named in an environment variable, the window shows the prompt in a
 dialog, and the answer goes back the same way. The password is never
-written to disk or logged. If M25's single-instance socket has landed,
-this reuses its transport.
+written to disk or logged. It reuses the transport of M25's
+single-instance socket, which lands first.
 
 **Checkout safety comes from git.** The window does not predict
 conflicts; it runs `git switch` and shows git's refusal in plain words,

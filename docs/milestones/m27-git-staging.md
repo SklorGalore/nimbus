@@ -1,6 +1,6 @@
 # M27 — Git window: staging and committing
 
-**Status: draft (2026-10-18).** Second of the git window plans
+**Status: planned (2026-10-18).** Second of the git window plans
 (M26–M29); builds on M26's read-only window.
 
 ## Goal
@@ -52,8 +52,10 @@ into context, the method other clients use.
 **Discard keeps a way back.** Before discarding tracked changes the
 window saves the file's current contents (`git hash-object -w`, which
 only writes an object, never a ref), so Undo Discard can restore them
-for the life of the window; how long a discard stays recoverable beyond
-that is open question 3 in DESIGN.md §9.
+for the life of the window. That is as long as it lasts: the owner
+chose not to keep discards under a Nimbus ref in the user's repository
+or as copies in the trash (`DESIGN.md` §9), so closing the window ends
+Undo Discard, and the confirmation says so.
 
 **Commit through git.** `git commit -F -` with the message on stdin,
 plus `--amend` when toggled, so `commit.gpgsign`, hooks and templates

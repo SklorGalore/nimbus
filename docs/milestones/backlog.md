@@ -56,8 +56,8 @@ preview images, HTML export), was dropped whole (`DESIGN.md` §9).
 
 Drafted on 2026-10-18 at the owner's request, after a feasibility study
 and the owner's choice of *window mode* (`nimbus --git`) over git inside
-the editor or a separate app. Drafts until the open questions in
-`DESIGN.md` §9 are answered.
+the editor or a separate app; approved the same day in this order,
+after M25, with five answers (`DESIGN.md` §9).
 
 | # | Plan | One line | Why here |
 |---|---|---|---|
@@ -110,6 +110,10 @@ the editor or a separate app. Drafts until the open questions in
 Small or speculative items, kept so they are not forgotten. Each could
 join a milestone above as a stretch task or make a short milestone of
 its own later.
+
+- **Interactive rebase in the git window** (reorder, squash, reword,
+  drop): left out of M29 by the owner on 2026-10-18 for a later plan of
+  its own once the git window has been used.
 
 Items scheduled on 2026-10-18 moved to the M16–M21 and M22–M24 tables above; what is
 left is small or still speculative.

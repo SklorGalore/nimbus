@@ -1,6 +1,6 @@
 # M29 — Git window: history tools and merging
 
-**Status: draft (2026-10-18).** Last of the git window plans
+**Status: planned (2026-10-18).** Last of the git window plans
 (M26–M29).
 
 ## Goal
@@ -39,7 +39,8 @@ conflicts in Nimbus's three-way merge view.
 conflict flow, reset.
 
 **Deferred**: interactive rebase (reordering, squashing and editing
-commits; open question 4 in DESIGN.md §9), bisect, submodules, worktrees,
+commits), which the owner left for a later plan of its own and
+`backlog.md` lists as unscheduled; bisect, submodules, worktrees,
 patches by email.
 
 ## Design
