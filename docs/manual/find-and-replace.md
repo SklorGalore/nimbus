@@ -63,7 +63,10 @@ The panel has, from the top:
 - **files to include** and **files to exclude**: comma-separated globs
   such as `*.rs, docs/**`. A glob matches either the path within the
   project folder or just the file name, so `*.rs` and `src/*.rs` both
-  work. An excluded folder is skipped with everything in it;
+  work. An excluded folder is skipped with everything in it. A full
+  path or one starting with `~/` in the include field is a folder to
+  search instead of the project, even one outside it, such as
+  `~/notes, *.md`;
 - a **count**, such as `12 matches in 4 files, still searching…`;
 - the **results**, grouped by file, each with its line number and the
   line's text with the match marked.
@@ -82,6 +85,23 @@ has one.
 | Give the keyboard back to the text | `Escape` |
 | Next or previous result, from anywhere | `F4`, `Shift+F4` |
 | Replace All | `Cmd+Option+Enter` / `Ctrl+Alt+Enter` |
+| Earlier or later patterns, or replacements | `Up`, `Down` in the query or replacement field |
+| Forget the selected saved search | `Delete` |
+
+**History and saved searches.** Each search you run (by Enter, or by
+opening a result) is remembered, and so is each replacement used: the
+last 50 of each, per workspace, in `state.toml`. Up and Down in the
+query or replacement field walk back and forward through them.
+**Save Search…** pins the current search with a name: its pattern,
+replacement, include and exclude fields and toggles. Saved searches are
+listed at the top of the results as `★ name`; Enter or a click on one
+fills in the fields and runs it.
+
+**Across lines.** With regular expressions on, a pattern containing `\n`
+matches across lines, such as `\}\n\nfn`. Such a result shows the lines
+it covers, as `12-14:`. A match is looked for within 1 MB of text, so
+memory stays small; a longer one is cut short, shown as `12-90+
+(truncated):`, and never ticked for Replace All.
 
 The palette also has Find in Files: Toggle Match Case, Toggle Regular
 Expression and Toggle Whole Word, and Clear Search Results. The results
@@ -89,8 +109,8 @@ stay when you switch the sidebar back to Files.
 
 What is searched:
 
-- Every file in the project folder, honouring `.gitignore` like the file
-  tree. "Show/Hide Ignored Files in Sidebar" includes ignored files in
+- Every file in the workspace's folders (or the folders named in the
+  include field), honouring `.gitignore` like the file tree. "Show/Hide Ignored Files in Sidebar" includes ignored files in
   the search too. The `.git` folder is never searched.
 - Tabs with **unsaved changes** are searched as you see them, not as they
   are on disk, and their results are marked with a dot.

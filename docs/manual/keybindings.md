@@ -3,7 +3,7 @@
 Every command in Nimbus, with its **id** (what you write in the `[keys]`
 table of `config.toml`), its **title** (what the command palette and
 menus show) and its default keys. This list is made from the editor's
-own command table, so it matches the build it describes (version 0.6.0).
+own command table, so it matches the build it describes (version 0.7.0).
 
 - Commands without a key are run from the command palette
   (`Cmd+Shift+P` / `Ctrl+Shift+P`).
@@ -76,6 +76,14 @@ These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
 | Rename in Tree… | `tree.rename` | `F2` | `F2` |
 | Move to Trash | `tree.delete` | — | — |
 | Reveal in Finder (macOS), Reveal in Explorer (Windows), Reveal in File Manager (Linux) | `tree.reveal` | — | — |
+| Undo Move | `tree.undoMove` | — | — |
+| Search in Folder | `tree.searchInFolder` | — | — |
+| Add Folder to Workspace… | `workspace.addFolder` | — | — |
+| Remove Folder from Workspace | `workspace.removeFolder` | — | — |
+| Save Workspace As… | `workspace.saveAs` | — | — |
+| Open Workspace… | `workspace.open` | — | — |
+| Save Workspace Here | `workspace.saveHere` | — | — |
+| Open Project Workspace | `workspace.openHere` | — | — |
 | Reopen Last Session | `session.reopenLast` | — | — |
 | Save | `file.save` | `Cmd+S` | `Ctrl+S` |
 | Save As… | `file.saveAs` | `Cmd+Shift+S` | `Ctrl+Shift+S` |
@@ -199,6 +207,7 @@ These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
 | Replace in Files: Replace All | `search.replaceAll` | `Cmd+Option+Enter` | `Ctrl+Alt+Enter` |
 | Undo Replace in Files | `search.undoReplace` | — | — |
 | Clear Search Results | `search.clear` | — | — |
+| Save Search… | `search.save` | — | — |
 
 ### View, groups and folding
 

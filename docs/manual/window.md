@@ -98,6 +98,70 @@ Linux there is no context menu; run the commands from the palette.
   changes, Nimbus asks first, since the trash keeps the file but not
   your edits.
 
+**Drag and drop.** Drag a row onto a folder to move it there; hold
+`Option` / `Alt` while dropping to copy it instead. Dropping below the
+last row moves it to the top of the project. The folder under the
+pointer is highlighted while you drag. Moving onto a name that already
+exists asks first, and open tabs follow a moved file as they do a
+rename. A copy into its own folder gets a new name such as `notes
+copy.txt`.
+
+**Undo Move** (palette, or the tree's right-click menu) takes back the
+last move, copy or trash of this run, newest first. A move goes back
+where it was and a copy is moved to the trash. Taking back a trash
+restores the item on Linux and Windows; on macOS the trash cannot be
+read back by a program, so use Finder's Put Back instead.
+
+**Search in Folder** (right-click a folder) opens the Search panel with
+that folder in its include field.
+
+Dragging a file from Finder or Explorer onto the window opens it.
+Dragging a folder adds it to the workspace.
+
+### Workspaces: several folders at once
+
+A workspace is the folders in the sidebar and the files you had open.
+Nimbus remembers one per project folder by itself (see
+[Sessions](getting-started.md#sessions-picking-up-where-you-left-off)).
+
+- **Add Folder to Workspace…** (File menu or palette) shows another
+  folder in the sidebar, as does dropping a folder on the window or
+  naming several on the command line (`nimbus app lib`). With more than
+  one, each folder is a row of its own. Go to File, Find in Files and
+  the tree's operations cover them all, and paths are shown with the
+  folder's name in front, such as `lib/src/x.rs`. A folder inside one
+  already shown is refused.
+- **Remove Folder from Workspace** takes out the folder holding the
+  selected row. Its open tabs stay open. The first folder stays; it names
+  the session.
+- **Save Workspace As…** keeps the workspace under a name, in
+  `workspaces/NAME.toml` in the config folder. **Open Workspace…** lists
+  them, and `nimbus --workspace NAME` opens one.
+- **Save Workspace Here** writes `.nimbus/workspace.toml` in the first
+  folder instead, with paths relative to it, so the workspace travels
+  with the project's repository. It is the only file Nimbus ever writes
+  inside a project, and only when you run this command. Add `.nimbus/`
+  to `.gitignore` unless the project should share it. Opening a folder
+  that has one, when this computer has no session for it yet, shows a
+  note offering **Open Project Workspace**. It never loads by itself.
+
+A workspace file holds the folders, the sidebar's mode, the folders open
+in the tree, the editor groups and the tabs. Settings stay in
+`config.toml`:
+
+```toml
+# A Nimbus workspace: its folders and the files it had open.
+roots = [".", "/Users/me/src/shared-lib"]
+mode = "files"
+expanded = ["src"]
+
+[[tabs]]
+path = "src/main.rs"
+cursor = 120
+scroll = 0
+active = true
+```
+
 Whether the sidebar is shown, and how wide it is, are remembered between
 runs in `state.toml` (see [Settings](settings.md#statetoml)); the folders
 open in the tree are part of the project's session.

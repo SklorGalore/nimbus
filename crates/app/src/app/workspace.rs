@@ -33,6 +33,11 @@ pub struct Startup {
     /// The project folder whose session this run saves; `None` when files
     /// were named, with `--no-session`, and in unattended runs.
     pub session_root: Option<PathBuf>,
+    /// Further folders named on the command line (`nimbus DIR1 DIR2`):
+    /// roots of the workspace beside the first, in place of the session's.
+    pub more_roots: Vec<PathBuf>,
+    /// The named workspace opened with `--workspace`, for the header.
+    pub workspace: Option<String>,
 }
 
 /// How long after a tab opens or closes the state file is written: a burst
@@ -77,6 +82,63 @@ pub(super) struct Workspace {
     /// Paths being renamed from the tree: their disappearance on disk is
     /// the rename, not a deletion, until it reports back.
     pub(super) moving: Vec<PathBuf>,
+    /// The tree's moves, copies and trashes in this run, oldest first, for
+    /// Undo Move (M19).
+    pub(super) undo_moves: Vec<UndoMove>,
+    /// Operations Undo Move started, still running: not recorded again.
+    pub(super) undo_ops: Vec<crate::tree_ops::Op>,
+}
+
+impl Workspace {
+    /// A workspace at startup, nothing done yet.
+    pub(super) fn new(state: State, session_root: Option<PathBuf>) -> Self {
+        Self {
+            state,
+            session_root,
+            save_at: None,
+            restore_started: false,
+            closed: Vec::new(),
+            moving: Vec::new(),
+            undo_moves: Vec::new(),
+            undo_ops: Vec::new(),
+        }
+    }
+}
+
+/// Most tree operations Undo Move remembers.
+pub(super) const MAX_UNDO_MOVES: usize = 50;
+
+/// One tree operation Undo Move can take back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum UndoMove {
+    /// Moved (dragged or renamed) from `from` to `to`.
+    Moved {
+        /// Where it was.
+        from: PathBuf,
+        /// Where it went.
+        to: PathBuf,
+    },
+    /// A copy made at this path.
+    Copied(PathBuf),
+    /// Moved to the trash from this path.
+    Trashed(PathBuf),
+}
+
+impl UndoMove {
+    /// What undoes `op`, if anything does: creating a file or folder is
+    /// not a move.
+    pub(super) fn of(op: &crate::tree_ops::Op) -> Option<Self> {
+        use crate::tree_ops::Op;
+        match op {
+            Op::Rename { from, to } => Some(Self::Moved {
+                from: from.clone(),
+                to: to.clone(),
+            }),
+            Op::Copy { to, .. } => Some(Self::Copied(to.clone())),
+            Op::Trash(p) => Some(Self::Trashed(p.clone())),
+            Op::NewFile(_) | Op::NewFolder(_) | Op::Restore(_) => None,
+        }
+    }
 }
 
 /// Most closed tabs remembered for Reopen Closed Tab.
@@ -149,12 +211,19 @@ impl App {
         self.ws.state.save();
     }
 
-    /// The session as it stands: the open files with their cursors,
-    /// views and folds, the editor groups, the expanded folders and the
-    /// sidebar's mode. Untitled tabs are left out; there is no autosave to
-    /// bring their text back. A file open in two groups is listed in each.
+    /// The session as it stands, for the project folder this run saves:
+    /// see [`App::snapshot_session`].
     pub(super) fn capture_session(&self) -> Option<Session> {
         let root = self.ws.session_root.clone()?;
+        Some(self.snapshot_session(root))
+    }
+
+    /// The session as it stands, named after `root`: the open files with
+    /// their cursors, views and folds, the editor groups, the workspace's
+    /// other roots, the expanded folders, the sidebar's mode and the Search
+    /// panel's history. Untitled tabs are left out; there is no autosave to
+    /// bring their text back. A file open in two groups is listed in each.
+    pub(super) fn snapshot_session(&self, root: PathBuf) -> Session {
         let fronts: Vec<usize> = (0..self.groups.len())
             .map(|g| self.group_active(g))
             .collect();
@@ -193,26 +262,32 @@ impl App {
                 })
             })
             .collect();
-        let tree_root = self.sidebar.tree.root();
-        let expanded = self
-            .sidebar
-            .tree
+        let tree = &self.sidebar.tree;
+        let tree_root = tree.root();
+        // Relative to the first root; a folder in another root keeps its
+        // full path, which `join` on restore leaves as it is.
+        let expanded = tree
             .expanded_dirs()
             .into_iter()
-            .filter_map(|p| p.strip_prefix(tree_root).ok().map(Path::to_path_buf))
+            .map(|p| {
+                p.strip_prefix(tree_root)
+                    .map_or_else(|_| p.clone(), Path::to_path_buf)
+            })
             .collect();
         let groups = if self.groups.len() > 1 {
             self.groups.list.iter().map(|g| g.share).collect()
         } else {
             Vec::new()
         };
-        Some(Session {
+        Session {
+            roots: tree.roots().into_iter().skip(1).collect(),
             root,
             mode: self.sidebar.mode.into(),
             expanded,
             tabs,
             groups,
-        })
+            search: self.sidebar.search.history.clone(),
+        }
     }
 
     /// Read tab `i`'s file if it is still a restored placeholder, so it can
@@ -290,21 +365,26 @@ impl App {
             }
             Command::ReopenLastSession => self.reopen_last_session(),
             Command::FollowTail => self.toggle_follow(),
-            _ => return self.run_tree_command(cmd) || self.run_compare_command(cmd),
+            _ => {
+                return self.run_tree_command(cmd)
+                    || self.run_roots_command(cmd)
+                    || self.run_compare_command(cmd);
+            }
         }
         self.changed(false);
         true
     }
 
-    /// Recent files under the project folder, relative to it, most recent
-    /// first: the file opener lists them first.
-    pub(super) fn recent_under_root(&self) -> Vec<PathBuf> {
-        let root = self.sidebar.tree.root();
+    /// Recent files in any of the workspace's roots, most recent first:
+    /// the file opener lists them first.
+    pub(super) fn recent_in_workspace(&self) -> Vec<PathBuf> {
+        let tree = &self.sidebar.tree;
         self.ws
             .state
             .recent
             .iter()
-            .filter_map(|r| r.path.strip_prefix(root).ok().map(Path::to_path_buf))
+            .filter(|r| tree.root_of(&r.path).is_some())
+            .map(|r| r.path.clone())
             .collect()
     }
 
@@ -399,11 +479,29 @@ impl App {
             self.say("No other project's session to reopen", false);
             return;
         };
+        let name = session.root.file_name().map_or_else(
+            || session.root.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        self.switch_session(&session, None, &name);
+    }
+
+    /// Switch to `session`: this one's is saved first, tabs without
+    /// unsaved work close, and the other's roots, tabs, tree, sidebar mode
+    /// and search history come back. Tabs with unsaved work stay open, so
+    /// nothing is lost. `workspace` is the named workspace it came from,
+    /// for the sidebar's header; `label` names it in the message.
+    pub(super) fn switch_session(
+        &mut self,
+        session: &Session,
+        workspace: Option<String>,
+        label: &str,
+    ) {
         if let Some(s) = self.capture_session() {
             self.ws.state.put_session(s);
         }
         let languages = &self.languages;
-        let (restore, warnings) = session::restore(&session, |p| {
+        let (restore, warnings) = session::restore(session, |p| {
             Document::open(p)
                 .map(|mut d| {
                     d.detect_language(languages);
@@ -427,6 +525,7 @@ impl App {
         self.root.clone_from(&session.root);
         let (visible, width) = (self.sidebar.visible, self.sidebar.width);
         self.sidebar = Sidebar::new(session.root.clone(), visible, width);
+        self.sidebar.workspace = workspace;
         if !self.options.unattended() {
             self.ws.session_root = Some(session.root.clone());
         }
@@ -478,11 +577,7 @@ impl App {
             self.show_sidebar();
         }
         self.sync_watch();
-        let name = session.root.file_name().map_or_else(
-            || session.root.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
-        let mut text = format!("Reopened {name}: {opened} tab(s)");
+        let mut text = format!("Reopened {label}: {opened} tab(s)");
         text.extend(note.map(|n| format!("; {n}")));
         text.extend(warnings.iter().map(|w| format!("; {w}")));
         self.say(text, !warnings.is_empty());
@@ -555,6 +650,13 @@ pub(super) fn startup_tabs(
         if let Some(mode) = r.mode {
             sidebar.mode = mode;
         }
+        for root in r.roots {
+            // A root that now overlaps another is left out quietly: the
+            // outer one shows it.
+            let _ = sidebar.tree.add_root(root);
+        }
+        sidebar.search.history = r.search;
+        // After the roots, so an open second root opens again.
         sidebar.tree.expand_later(r.expanded);
         note = session::dropped_note(&r.dropped);
         let groups_saved = r.shares.len().max(1);
@@ -628,6 +730,27 @@ pub(super) fn startup_tabs(
     (tabs, groups, active, note)
 }
 
+/// `nimbus DIR1 DIR2`: the folders after the first become the workspace's
+/// other roots, in place of any the session had. One that overlaps another
+/// is left out with a warning.
+pub(super) fn set_more_roots(
+    sidebar: &mut Sidebar,
+    roots: Vec<PathBuf>,
+    warnings: &mut Vec<String>,
+) {
+    if roots.is_empty() {
+        return;
+    }
+    for id in sidebar.tree.root_ids().to_vec() {
+        sidebar.tree.remove_root(id);
+    }
+    for r in roots {
+        if let Err(e) = sidebar.tree.add_root(r) {
+            warnings.push(e);
+        }
+    }
+}
+
 /// Set each read tab's indentation and wrap from the config and its
 /// language; `wrap` (`--wrap`) turns wrap on for all of them.
 pub(super) fn configure_tabs(tabs: &mut [Tab], docs: &mut Docs, config: &Config, wrap: bool) {
@@ -691,8 +814,8 @@ mod tests {
             active: 2,
             mode: None,
             expanded: Vec::new(),
-            dropped: Vec::new(),
             shares: vec![1.0],
+            ..Restore::default()
         };
         let mut state = State::default();
         let mut sidebar = Sidebar::new(PathBuf::from("/p"), false, 200.0);

@@ -27,6 +27,7 @@ does not overwrite your session.
 
 | Option | What it does |
 |---|---|
+| `--workspace NAME` | Open the workspace saved as `NAME` (see [Workspaces](window.md#workspaces-several-folders-at-once)): its folders and its tabs. |
 | `--no-session` | Start without reopening the last session, and do not save this run as one. |
 | `--find PATTERN` | Open with the find bar searching the first tab for `PATTERN`. |
 | `--search PATTERN` | Open with the sidebar's Search panel searching the project folder for `PATTERN`. |
@@ -36,7 +37,7 @@ does not overwrite your session.
 | `--diff OLD NEW` | Open `NEW` in a tab, compared with `OLD` (see [Compare and merge](compare-and-merge.md#comparing)). |
 | `--merge BASE LOCAL REMOTE` | Open a three-way merge of the three files. The result saves to `LOCAL` unless `-o` says otherwise. The exit code is 0 only if the result was saved with no conflicts left, 1 otherwise. |
 | `-o FILE`, `--output FILE` | With `--merge`: where the result saves. |
-| `--version`, `-V` | Print the version (`nimbus 0.6.0`) and exit. |
+| `--version`, `-V` | Print the version (`nimbus 0.7.0`) and exit. |
 | `--help`, `-h` | Print a one-line usage summary and exit. |
 
 An unknown option, or an option missing its value, prints an error and
@@ -48,6 +49,8 @@ code 1.
 
 ```sh
 nimbus .                                  # this folder, with its tabs from last time
+nimbus app lib                            # two folders side by side in the sidebar
+nimbus --workspace work                   # a workspace saved as "work"
 nimbus src/main.rs --find TODO            # open a file, searching for TODO
 nimbus . --search 'fn \w+_test'           # search the project on start
 nimbus --encoding windows-1252 export.csv # skip the encoding guess

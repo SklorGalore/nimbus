@@ -39,6 +39,7 @@ mod tree_ops;
 mod update;
 mod view;
 mod watch;
+mod workspace_file;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -111,6 +112,8 @@ pub struct Options {
     pub merge: Option<MergeArgs>,
     /// `--no-session`: neither restore the last session nor save this one.
     pub no_session: bool,
+    /// `--workspace NAME`: open the workspace saved under that name (M19).
+    pub workspace: Option<String>,
 }
 
 impl Options {
@@ -177,7 +180,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index]] [--debug-overlay] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index]] [--debug-overlay] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -271,6 +274,13 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
         "--cursors" => o.cursors = numbers(args.next()),
         "--picker" => o.picker = args.next().and_then(|p| p.into_string().ok()),
         "--theme" => o.theme = args.next().and_then(|t| t.into_string().ok()),
+        "--workspace" => {
+            let Ok(name) = value(args, flag, "a workspace name").into_string() else {
+                print_err("nimbus: --workspace needs a UTF-8 name");
+                std::process::exit(2);
+            };
+            o.workspace = Some(name);
+        }
         "--backend" => {
             let Some(b) = args
                 .next()
@@ -383,14 +393,20 @@ pub fn save_screenshot(path: &Path, capture: Option<&nimbus_render::Capture>) ->
 
 /// Open the files named on the command line. A folder becomes the project
 /// root for the file opener; otherwise the root is the first file's folder,
-/// or the current directory. A file that cannot be opened is reported and
-/// exits, as there is no window yet to show the error in.
-fn open_files(options: &Options, languages: &Languages) -> (Vec<Document>, PathBuf) {
+/// or the current directory. Further folders become further roots of the
+/// workspace (M19), returned canonical. A file that cannot be opened is
+/// reported and exits, as there is no window yet to show the error in.
+fn open_files(options: &Options, languages: &Languages) -> (Vec<Document>, PathBuf, Vec<PathBuf>) {
     let mut docs = Vec::new();
     let mut root = None;
+    let mut more = Vec::new();
     for path in &options.files {
         if path.is_dir() {
-            root.get_or_insert_with(|| path.clone());
+            if root.is_none() {
+                root = Some(path.clone());
+            } else {
+                more.push(io::canonical(path));
+            }
             continue;
         }
         let opened = match options.encoding {
@@ -427,7 +443,7 @@ fn open_files(options: &Options, languages: &Languages) -> (Vec<Document>, PathB
     let root = root
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    (docs, root)
+    (docs, root, more)
 }
 
 /// The project folder whose session this run restores and saves, if any
@@ -450,6 +466,75 @@ fn plan_session(
     }
 }
 
+/// What a headless run draws besides the command line's files: with
+/// `--workspace`, the workspace's front tab and its other roots.
+fn headless_inputs(
+    mut docs: Vec<Document>,
+    startup: app::Startup,
+) -> (Vec<Document>, Vec<PathBuf>) {
+    let mut more = startup.more_roots;
+    if let Some(r) = startup.restore {
+        if more.is_empty() {
+            more = r.roots;
+        }
+        if docs.is_empty()
+            && let Some(front) = r.tabs.into_iter().nth(r.active)
+        {
+            docs.push(front.doc);
+        }
+    }
+    (docs, more)
+}
+
+/// `--workspace NAME`: read the named workspace, or exit with why not.
+fn load_workspace(name: &str) -> state::Session {
+    let loaded = workspace_file::named(name).and_then(|p| workspace_file::load(&p, None));
+    match loaded {
+        Ok(s) if s.root.is_dir() => s,
+        Ok(s) => {
+            print_err(&format!(
+                "nimbus: workspace {name}: {} is gone",
+                s.root.display()
+            ));
+            std::process::exit(1);
+        }
+        Err(e) => {
+            print_err(&format!("nimbus: workspace {name}: {e}"));
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Plan a run of the named workspace `session`: its first root is the
+/// session's folder, its tabs are restored, its other roots come back. It
+/// saves its session in the state file like any folder's; the workspace
+/// file itself changes only with Save Workspace As.
+fn start_workspace(
+    options: &Options,
+    languages: &Languages,
+    name: &str,
+    session: &state::Session,
+    warnings: &mut Vec<String>,
+) -> app::Startup {
+    let (restore, w) = session::restore(session, |p| {
+        Document::open(p)
+            .map(|mut d| {
+                d.detect_language(languages);
+                d
+            })
+            .map_err(|e| e.to_string())
+    });
+    warnings.extend(w);
+    app::Startup {
+        state: State::load(),
+        restore: Some(restore),
+        session_root: (options.headless.is_none() && !options.no_session)
+            .then(|| session.root.clone()),
+        more_roots: Vec::new(),
+        workspace: Some(name.to_owned()),
+    }
+}
+
 /// Load what earlier runs remembered and, when this run is a session's,
 /// plan restoring it: the front tab read now, the rest later. Returns the
 /// project root, which is the session's folder for one.
@@ -466,6 +551,8 @@ fn start_session(
             state,
             restore: None,
             session_root: None,
+            more_roots: Vec::new(),
+            workspace: None,
         };
         return (root, startup);
     };
@@ -485,6 +572,8 @@ fn start_session(
         state,
         restore,
         session_root: Some(folder.clone()),
+        more_roots: Vec::new(),
+        workspace: None,
     };
     (folder, startup)
 }
@@ -521,8 +610,16 @@ fn main() {
     let (languages, language_warnings) = Languages::load(&config.languages);
     warnings.extend(language_warnings);
     warnings.extend(io::set_encoding_rules(&config.encodings));
-    let (docs, root) = open_files(&options, &languages);
-    let (root, startup) = start_session(&options, &languages, &docs, root, &mut warnings);
+    let (docs, root, more_roots) = open_files(&options, &languages);
+    let (root, startup) = if let Some(name) = &options.workspace {
+        let session = load_workspace(name);
+        let startup = start_workspace(&options, &languages, name, &session, &mut warnings);
+        (session.root, startup)
+    } else {
+        let (root, mut startup) = start_session(&options, &languages, &docs, root, &mut warnings);
+        startup.more_roots = more_roots;
+        (root, startup)
+    };
     log::debug!(
         "startup: config and {} file(s) loaded at {:?}",
         docs.len(),
@@ -535,7 +632,10 @@ fn main() {
             print_err(&format!("nimbus: {w}"));
         }
         let code = match gpu_init.join() {
-            Ok(Ok(context)) => app::run_headless(&options, &config, (docs, root), size, context),
+            Ok(Ok(context)) => {
+                let (docs, more) = headless_inputs(docs, startup);
+                app::run_headless(&options, &config, (docs, root, more), size, context)
+            }
             Ok(Err(e)) => {
                 print_err(&format!("nimbus: {e}"));
                 1
