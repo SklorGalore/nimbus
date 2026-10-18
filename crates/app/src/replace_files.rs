@@ -59,6 +59,9 @@ pub struct Replacement {
     pub expand: bool,
     /// The replacement text, or template.
     pub template: String,
+    /// The pattern can match across lines (M19), so it is checked against
+    /// the text past the match's first line too.
+    pub multi_line: bool,
 }
 
 impl Replacement {
@@ -71,9 +74,14 @@ impl Replacement {
         if range.end > hay.len() || range.start > range.end {
             return None;
         }
-        // The line's end: an anchor must not see the next line.
-        let line_end =
-            memchr::memchr(b'\n', &hay[range.start..]).map_or(hay.len(), |i| range.start + i);
+        // The line's end: an anchor must not see the next line. A
+        // multi-line pattern was searched over the whole text, so it is
+        // checked against the whole text.
+        let line_end = if self.multi_line {
+            hay.len()
+        } else {
+            memchr::memchr(b'\n', &hay[range.start..]).map_or(hay.len(), |i| range.start + i)
+        };
         let caps = self.re.captures_at(&hay[..line_end], range.start)?;
         if caps.get(0).map(|m| m.range()) != Some(range) {
             return None;
@@ -291,6 +299,7 @@ mod tests {
             re,
             expand: regex,
             template: template.into(),
+            multi_line: pattern.contains("\\n"),
         }
     }
 
@@ -298,6 +307,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nimbus-replace-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
+    }
+
+    #[test]
+    fn multi_line_patterns_replace_across_lines() {
+        let r = rep(r"a\nb", "X", true);
+        assert!(r.multi_line);
+        assert_eq!(r.at(b"za\nbz", 1..4), Some(b"X".to_vec()));
+        let single = Replacement {
+            multi_line: false,
+            ..rep(r"a\nb", "X", true)
+        };
+        assert_eq!(single.at(b"za\nbz", 1..4), None);
     }
 
     #[test]

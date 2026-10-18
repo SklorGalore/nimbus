@@ -8,6 +8,59 @@ section before tagging.
 
 ### Added
 
+- Workspaces of several folders: Add Folder to Workspace… (or drop a
+  folder on the window, or `nimbus DIR1 DIR2`); Go to File and Find in
+  Files cover every folder. Save Workspace As… and Open Workspace…, with
+  `--workspace NAME`; Save Workspace Here writes `.nimbus/workspace.toml`
+  so a workspace travels with its repository.
+- Drag and drop in the file tree (Option/Alt copies), Undo Move, Search
+  in Folder, and files dropped on the window open.
+- Find in Files: folders outside the project in the include field
+  (`~/notes`), the last 50 patterns and replacements on Up and Down,
+  Save Search…, and regex patterns with `\n` that match across lines.
+- A user manual in `docs/manual/`, with a keyboard shortcut and command
+  reference, every setting, and the command-line options.
+- Compare and merge: Compare with Saved, Compare with File… and Compare
+  with Tab…, and `--diff A B`, side by side with changed words marked
+  (F7 / Shift+F7 step through changes; Toggle Unified Compare). Two-way
+  Merge Files…, three-way Merge with Base… and `--merge BASE LOCAL
+  REMOTE -o RESULT` for git's mergetool, with Take Left, Take Right and
+  Take Both; F8 / Shift+F8 step through conflicts. Resolve Conflicts
+  turns a file with git conflict markers into a merge, and Merge with
+  Disk merges unsaved edits with a file changed on disk.
+- Find in Files (`Primary+Shift+F`) in the sidebar's new Search panel:
+  case, regex and whole-word toggles, include and exclude globs,
+  results streaming in, unsaved tabs searched as shown, F4 / Shift+F4 to
+  step through results. Replace in Files (`Primary+Shift+H`) with a
+  preview and a checkbox per match and file, and Undo Replace in Files.
+- Everyday editing: Toggle Line Comment (`Primary+/`) and Toggle Block
+  Comment; Duplicate, Move Line Up and Down, Delete Line, Join Lines,
+  Insert Line Above and Below; Select Line (`Primary+L`); Expand and
+  Shrink Selection; Go to and Select to Matching Bracket; case changes,
+  Sort Lines, Remove Duplicate Lines, Trim Trailing Whitespace.
+- Auto-pairs for brackets and quotes (on for code, off for Markdown and
+  plain text), and the `[editor]` settings `auto_pairs`,
+  `trim_trailing_whitespace` and `final_newline`, per language too.
+- Indentation detected from each file, shown in the status bar
+  ("Spaces: 4"), with `[indent]` settings per language; Enter after an
+  opening bracket indents, a closing bracket typed first on a line
+  dedents.
+- Two-key shortcuts in `[keys]`, such as `"Ctrl+K Ctrl+C"`.
+- Split Right (`Primary+\`): up to three editor groups side by side, the
+  same file editable in two of them; Focus Left/Right Group, Move Tab to
+  Next Group, Close Group.
+- Folding: markers in the gutter and a `… N lines` chip; Fold, Unfold,
+  Toggle Fold, Fold All, Unfold All and Fold Level 1–3. Regions come from
+  the language's grammar, else brackets or indentation.
+- Languages: C, Go, HTML, CSS and TSX (fourteen in all); Markdown inline
+  highlighting and fenced code blocks coloured in their own language;
+  `<script>` and `<style>` in HTML. Go to Symbol (`Primary+Shift+R`).
+  Expand Selection, bracket matching and folding use the syntax tree.
+  User query files can also be `NAME.injections.scm`, `NAME.tags.scm`
+  and `NAME.folds.scm`.
+- Markdown editing: Enter continues lists and quotes, Tab and Shift+Tab
+  indent list items, and Markdown files open with soft wrap on (`wrap`
+  in `[editor.LANGUAGE]`).
 - Check for Updates: a palette action that asks GitHub for the latest
   release and says whether it is newer than the running version; Open
   Latest Release Page opens it in the browser. The check also runs at
@@ -24,7 +77,8 @@ section before tagging.
   the files that were open with their cursors and scroll positions, the
   open folders in the tree and the sidebar's mode. `nimbus FILE` and
   `--no-session` leave sessions alone. Only the front tab is read before
-  the window appears.
+  the window appears. Editor groups, their widths and each tab's folds
+  come back too.
 - Open Recent (`Primary+Shift+O`), recent files first in the file opener,
   and Reopen Closed Tab (`Primary+Shift+T`).
 - New File, New Folder, Rename (`F2`; `Enter` on macOS), Move to Trash and
@@ -42,6 +96,23 @@ section before tagging.
 - Visible whitespace (`render_whitespace`, default `selection`) and indent
   guides (`indent_guides`), both toggles in the palette.
 - The scrollbar fades out a second after the last scroll.
+- Encodings: files in UTF-16 (by their byte order mark) and Windows-1252
+  (guessed from the first 64 KB) open, edit and save back in their own
+  encoding, with ISO-8859-1, the other Windows and ISO-8859 tables, KOI8
+  and Mac Roman by choice. The encoding and line ending show in the status
+  bar; click them, or run Reopen with Encoding…, Save with Encoding… and
+  Change Line Endings to LF/CRLF (one undo step). `--encoding NAME` and
+  the `[encodings]` table in `config.toml` skip the guess. A character the
+  encoding cannot hold stops the save and offers UTF-8 instead. Files of
+  256 MB or more in a known other encoding open read-only. East Asian
+  encodings are in builds with `--features east-asian`.
+
+### Changed
+
+- Go to Line is `Primary+G` on every platform (it was `Primary+L` on
+  macOS, which is now Select Line).
+- A new file, or one whose indentation cannot be detected, indents with
+  four spaces rather than a tab; `[indent]` can change that.
 
 ## 0.2.1
 

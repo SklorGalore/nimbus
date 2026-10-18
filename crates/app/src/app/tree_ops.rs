@@ -6,6 +6,7 @@ use std::path::Path;
 
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 
+use super::workspace::{MAX_UNDO_MOVES, UndoMove};
 use super::{App, AppEvent, edit_field};
 use crate::input::{Command, Motion};
 use crate::io;
@@ -43,6 +44,8 @@ impl App {
             Command::TreeRename => self.begin_tree_edit(EditKind::Rename),
             Command::TreeDelete => self.tree_delete(),
             Command::TreeReveal => self.tree_reveal(),
+            Command::SearchInFolder => self.search_in_folder(),
+            Command::UndoMove => self.undo_move(),
             _ => return false,
         }
         self.changed(false);
@@ -182,23 +185,43 @@ impl App {
         if let Op::Rename { from, .. } | Op::Trash(from) = op {
             self.ws.moving.retain(|p| p != from);
         }
+        // An operation Undo Move started is not itself one to undo.
+        let undoing = self.ws.undo_ops.iter().position(|o| o == op);
+        if let Some(i) = undoing {
+            self.ws.undo_ops.remove(i);
+        }
         if let Err(e) = result {
             let what = match op {
                 Op::NewFile(_) => "create the file",
                 Op::NewFolder(_) => "create the folder",
-                Op::Rename { .. } => "rename",
+                Op::Rename { .. } => "move",
                 Op::Trash(_) => "move to the trash",
+                Op::Copy { .. } => "copy",
+                Op::Restore(_) => "put it back",
             };
             self.say(format!("Cannot {what}: {e}"), true);
             return;
+        }
+        if undoing.is_none()
+            && let Some(undo) = UndoMove::of(op)
+        {
+            self.ws.undo_moves.push(undo);
+            if self.ws.undo_moves.len() > MAX_UNDO_MOVES {
+                self.ws.undo_moves.remove(0);
+            }
         }
         if let Op::Trash(path) = op {
             let requests = self.sidebar.tree.affected_by(path);
             self.start_listings(requests);
             self.close_tabs_under(path);
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            let undo = if tree_ops::can_restore() && undoing.is_none() {
+                "; Undo Move puts it back"
+            } else {
+                ""
+            };
             self.say(
-                format!("Moved {} to the trash", name.unwrap_or_default()),
+                format!("Moved {} to the trash{undo}", name.unwrap_or_default()),
                 false,
             );
             return;
@@ -216,9 +239,85 @@ impl App {
                 self.start_listings(requests);
                 self.open_path(path);
             }
-            Op::NewFolder(_) | Op::Trash(_) => self.start_listings(requests),
+            Op::NewFolder(_) | Op::Trash(_) | Op::Copy { .. } | Op::Restore(_) => {
+                self.start_listings(requests);
+            }
+        }
+        if undoing.is_some() {
+            self.say("Undone", false);
         }
         self.changed(false);
+    }
+
+    /// Undo Move: undo the tree's last move, copy or trash in this run. A
+    /// move goes back with a reverse rename, a copy goes to the trash, and
+    /// a trashed item is put back (Windows and Linux).
+    fn undo_move(&mut self) {
+        let Some(last) = self.ws.undo_moves.pop() else {
+            self.say("Nothing to undo: no file moved in the tree yet", false);
+            return;
+        };
+        let op = match last {
+            UndoMove::Moved { from, to } => {
+                if from.exists() {
+                    self.say(
+                        format!("Cannot undo the move: {} exists again", from.display()),
+                        true,
+                    );
+                    return;
+                }
+                self.ws.moving.push(to.clone());
+                Op::Rename { from: to, to: from }
+            }
+            UndoMove::Copied(to) => {
+                self.ws.moving.push(to.clone());
+                Op::Trash(to)
+            }
+            UndoMove::Trashed(path) => Op::Restore(path),
+        };
+        self.ws.undo_ops.push(op.clone());
+        spawn_op(&self.proxy, op);
+    }
+
+    /// The pointer let go of a tree drag over folder `dir`: move `from`
+    /// there, or copy it with `copy` (Alt held). A name already taken asks,
+    /// as Rename does; a copy into its own folder is named "… copy".
+    pub(super) fn drop_in_tree(&mut self, from: &Path, dir: &Path, copy: bool) {
+        let Some(name) = from.file_name() else {
+            return;
+        };
+        let same_folder = from.parent() == Some(dir);
+        if dir.starts_with(from) || (same_folder && !copy) {
+            return; // into itself, or where it already is
+        }
+        let shown = name.to_string_lossy().into_owned();
+        let to = if copy && same_folder {
+            tree_ops::copy_name(dir, &shown, from.is_dir())
+        } else {
+            dir.join(name)
+        };
+        if to.exists() {
+            if copy {
+                self.say(format!("{shown} already exists there"), true);
+                return;
+            }
+            if !self.confirm_replace(&shown) {
+                return;
+            }
+        }
+        let op = if copy {
+            Op::Copy {
+                from: from.to_path_buf(),
+                to,
+            }
+        } else {
+            self.ws.moving.push(from.to_path_buf());
+            Op::Rename {
+                from: from.to_path_buf(),
+                to,
+            }
+        };
+        spawn_op(&self.proxy, op);
     }
 
     /// The path the tree's commands act on: the selected node, not the
@@ -315,6 +414,29 @@ impl App {
         };
         if let Err(e) = tree_ops::reveal(&path) {
             self.say(format!("Cannot open the file manager: {e}"), true);
+        }
+    }
+
+    /// Search in the selected folder (a selected file's folder; the first
+    /// root when nothing is selected): its path goes in the Search panel's
+    /// include field, which then searches it alone.
+    fn search_in_folder(&mut self) {
+        let tree = &self.sidebar.tree;
+        let node = tree.selected.and_then(|s| tree.node(s));
+        let dir = match node {
+            Some(n) if n.is_dir => n.path.clone(),
+            Some(n) => n
+                .path
+                .parent()
+                .map_or_else(|| tree.root().to_path_buf(), Path::to_path_buf),
+            None => tree.root().to_path_buf(),
+        };
+        let shown = crate::search_panel::scope_text(&dir, dirs::home_dir().as_deref());
+        self.open_search_panel(false);
+        let panel = &mut self.sidebar.search;
+        panel.set_include(&shown);
+        if !panel.query().pattern.is_empty() {
+            self.search_files_at = Some(std::time::Instant::now());
         }
     }
 

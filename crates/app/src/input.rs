@@ -252,6 +252,24 @@ pub enum Command<'a> {
     ClearRecent,
     /// Switch to the most recent other project's session.
     ReopenLastSession,
+    /// Add a folder to the workspace as another root (M19).
+    AddRoot,
+    /// Take the selected root out of the workspace.
+    RemoveRoot,
+    /// Save the workspace under a name in the config folder.
+    SaveWorkspaceAs,
+    /// List the named workspaces and open one.
+    OpenWorkspace,
+    /// Save the workspace as `.nimbus/workspace.toml` in the first root.
+    SaveWorkspaceHere,
+    /// Open the first root's `.nimbus/workspace.toml`.
+    OpenProjectWorkspace,
+    /// Undo the tree's last move, copy or trash in this session.
+    UndoMove,
+    /// Search in the selected folder of the tree.
+    SearchInFolder,
+    /// Pin the Search panel's search with a name.
+    SaveSearch,
     /// Keep the view at the end of a growing file, or stop.
     FollowTail,
     /// Open the command palette.
@@ -355,6 +373,34 @@ impl Command<'_> {
                 | Command::ReplaceInFilesAll
                 | Command::UndoReplaceInFiles
                 | Command::ClearSearch
+                | Command::SaveSearch
+        )
+    }
+
+    /// Whether the command is about the workspace, its tree, sessions or
+    /// recent files: never text for a focused field to take.
+    #[must_use]
+    pub fn is_workspace(self) -> bool {
+        matches!(
+            self,
+            Command::OpenRecent
+                | Command::ReopenClosedTab
+                | Command::ClearRecent
+                | Command::ReopenLastSession
+                | Command::FollowTail
+                | Command::TreeNewFile
+                | Command::TreeNewFolder
+                | Command::TreeRename
+                | Command::TreeDelete
+                | Command::TreeReveal
+                | Command::AddRoot
+                | Command::RemoveRoot
+                | Command::SaveWorkspaceAs
+                | Command::OpenWorkspace
+                | Command::SaveWorkspaceHere
+                | Command::OpenProjectWorkspace
+                | Command::UndoMove
+                | Command::SearchInFolder
         )
     }
 

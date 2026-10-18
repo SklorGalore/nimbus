@@ -29,6 +29,11 @@ mod native {
                 "file.reopenClosed",
                 "session.reopenLast",
                 "-",
+                "workspace.addFolder",
+                "workspace.open",
+                "workspace.saveAs",
+                "workspace.saveHere",
+                "-",
                 "file.save",
                 "file.saveAs",
                 "file.saveWithEncoding",
@@ -209,8 +214,13 @@ mod native {
         "-",
         "tree.rename",
         "tree.delete",
+        "tree.undoMove",
         "-",
+        "tree.searchInFolder",
         "tree.reveal",
+        "-",
+        "workspace.addFolder",
+        "workspace.removeFolder",
     ];
 
     /// Show the tree's context menu at the pointer. A chosen item arrives
