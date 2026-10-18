@@ -207,6 +207,18 @@ pub fn scope(include: &str, home: Option<&Path>) -> (Vec<PathBuf>, String) {
     (folders, globs.join(","))
 }
 
+/// How a folder is written in the include field: under the home folder as
+/// `~/…`, which is shorter and reads the same on every machine of the
+/// user's; elsewhere its full path. [`scope`] reads either back.
+#[must_use]
+pub fn scope_text(dir: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|h| dir.strip_prefix(h).ok()) {
+        Some(rel) if rel.as_os_str().is_empty() => "~".to_owned(),
+        Some(rel) => format!("~/{}", rel.to_string_lossy().replace('\\', "/")),
+        None => dir.to_string_lossy().into_owned(),
+    }
+}
+
 /// Replace a field's text with `text`, the cursor at its end.
 fn set_text(field: &mut Solo, text: &str) {
     *field = Solo::default();
@@ -562,6 +574,11 @@ impl Panel {
         self.whole_word = saved.whole_word;
         self.history_at = None;
         true
+    }
+
+    /// Put `text` in the include field (Search in Folder).
+    pub fn set_include(&mut self, text: &str) {
+        set_text(&mut self.include, text);
     }
 
     /// Forget saved search `i`.
@@ -1141,7 +1158,12 @@ fn draw_list(
                     gpu.push_text_line([geo.left, y], mark, ui.gutter);
                 }
                 let preview = results.preview(hit);
-                let number = format!("{}:", hit.line + 1);
+                // A match across lines shows the span of lines it covers.
+                let number = match (hit.last_line > hit.line, hit.truncated) {
+                    (_, true) => format!("{}-{}+ (truncated):", hit.line + 1, hit.last_line + 1),
+                    (true, false) => format!("{}-{}:", hit.line + 1, hit.last_line + 1),
+                    (false, false) => format!("{}:", hit.line + 1),
+                };
                 let x0 = geo.left + indent;
                 gpu.push_text_line([x0, y], &number, ui.gutter);
                 let tx = x0 + f(number.len() + 1) * cell;
@@ -1210,6 +1232,8 @@ mod tests {
             range: start..start + 3,
             preview: "a foo b".into(),
             mark: 2..5,
+            last_line: line,
+            truncated: false,
         }
     }
 
@@ -1424,6 +1448,13 @@ mod tests {
         assert_eq!(globs, "*.rs,src/**");
         let (folders, globs) = scope("~", Some(home));
         assert_eq!((folders, globs.as_str()), (vec![home.to_path_buf()], ""));
+        assert_eq!(scope_text(Path::new("/home/me/a/b"), Some(home)), "~/a/b");
+        assert_eq!(scope_text(home, Some(home)), "~");
+        let elsewhere = Path::new("/srv/x");
+        assert_eq!(
+            scope_text(elsewhere, Some(home)),
+            elsewhere.to_string_lossy()
+        );
         let (folders, _) = scope("~/x", None);
         assert!(folders.is_empty(), "no home folder: a glob");
         #[cfg(unix)]

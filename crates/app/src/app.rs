@@ -646,6 +646,8 @@ impl App {
                 restore_started: false,
                 closed: Vec::new(),
                 moving: Vec::new(),
+                undo_moves: Vec::new(),
+                undo_ops: Vec::new(),
             },
             resize_cursor: false,
             watching: false,
@@ -4687,6 +4689,10 @@ impl App {
             re,
             expand: panel.regex,
             template: panel.replacement(),
+            multi_line: panel
+                .params
+                .as_ref()
+                .is_some_and(|p| nimbus_core::search::spans_lines(&p.query)),
         };
         let mut summary = ReplaceSummary::default();
         let mut undo = ReplaceUndo::default();
@@ -5961,6 +5967,14 @@ impl ApplicationHandler<AppEvent> for App {
                     self.drag_group_divider(d, to_f32(position.x));
                 } else if let Some(grab) = self.clicks.scrollbar_grab {
                     self.drag_scrollbar_to(to_f32(position.y) - grab);
+                } else if self.sidebar.drag.is_some() {
+                    let at = (to_f32(position.x), to_f32(position.y));
+                    let copy = self.modifiers.alt_key();
+                    if let Some(layout) = self.window_layout()
+                        && self.sidebar.drag_over(&layout, at, copy)
+                    {
+                        self.changed(false);
+                    }
                 } else if self.clicks.dragging {
                     self.mouse_drag();
                 }
@@ -5990,6 +6004,13 @@ impl ApplicationHandler<AppEvent> for App {
                     self.clicks.dragging = false;
                     self.clicks.scrollbar_grab = None;
                     self.groups.dragging = None;
+                    let dragged = self.sidebar.drag.is_some_and(|d| d.moving);
+                    if let Some((from, dir)) = self.sidebar.end_drag() {
+                        self.drop_in_tree(&from, &dir, self.modifiers.alt_key());
+                    }
+                    if dragged {
+                        self.changed(false);
+                    }
                     if self.sidebar.resizing {
                         self.sidebar.resizing = false;
                         self.remember();
@@ -6004,6 +6025,17 @@ impl ApplicationHandler<AppEvent> for App {
             } => self.tree_context_menu(),
 
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
+
+            // A file dragged in from the desktop opens; a folder joins the
+            // workspace (M19).
+            WindowEvent::DroppedFile(path) => {
+                if path.is_dir() {
+                    self.add_root(&path);
+                } else {
+                    self.open_path(&path);
+                }
+                self.changed(false);
+            }
 
             WindowEvent::Focused(false) => {
                 // Show the cursor solid in the background; it may have been

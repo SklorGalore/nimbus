@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry, WalkBuilder, WalkState};
-use nimbus_core::search::{Generation, LineHit, LineMatcher, Query};
+use nimbus_core::search::{Generation, LineHit, LineMatcher, MultiLineMatcher, Query, spans_lines};
 use nimbus_core::{Snapshot, Text};
 use regex::bytes::Regex;
 
@@ -138,6 +138,10 @@ pub struct RawHit {
     pub preview: String,
     /// The match within `preview`.
     pub mark: Range<usize>,
+    /// The line the match ends on (a multi-line match, M19), from 0.
+    pub last_line: usize,
+    /// The match was longer than the multi-line window and is cut short.
+    pub truncated: bool,
 }
 
 /// The hits of one file in a batch.
@@ -181,6 +185,10 @@ pub struct Hit {
     pub preview: Range<usize>,
     /// The match within the preview.
     pub mark: Range<usize>,
+    /// The line the match ends on: `line` unless it spans lines.
+    pub last_line: usize,
+    /// Cut short at the multi-line window: shown, never replaced.
+    pub truncated: bool,
     /// Chosen for Replace All.
     pub ticked: bool,
 }
@@ -272,7 +280,9 @@ impl Results {
                     range: hit.range,
                     preview: start..self.previews.len(),
                     mark: hit.mark,
-                    ticked: true,
+                    last_line: hit.last_line,
+                    truncated: hit.truncated,
+                    ticked: !hit.truncated,
                 });
                 self.hits += 1;
             }
@@ -339,6 +349,37 @@ fn preview_of(line: &[u8], line_start: usize, range: &Range<usize>) -> (String, 
     (text, mark)
 }
 
+/// The line-by-line matcher, or the multi-line one for a pattern that
+/// names a line break (M19). Both take a file in blocks.
+enum Matcher<'r> {
+    Line(LineMatcher<'r>),
+    Multi(MultiLineMatcher<'r>),
+}
+
+impl<'r> Matcher<'r> {
+    fn new(re: &'r Regex, multi: bool) -> Self {
+        if multi {
+            Self::Multi(MultiLineMatcher::new(re))
+        } else {
+            Self::Line(LineMatcher::new(re))
+        }
+    }
+
+    fn feed(&mut self, block: &[u8], found: &mut dyn FnMut(&LineHit<'_>) -> bool) -> bool {
+        match self {
+            Self::Line(m) => m.feed(block, found),
+            Self::Multi(m) => m.feed(block, found),
+        }
+    }
+
+    fn finish(&mut self, found: &mut dyn FnMut(&LineHit<'_>) -> bool) -> bool {
+        match self {
+            Self::Line(m) => m.finish(found),
+            Self::Multi(m) => m.finish(found),
+        }
+    }
+}
+
 /// Snapshots of open tabs with unsaved edits, by canonical path: searched
 /// instead of the file on disk.
 pub type Snapshots = HashMap<PathBuf, Arc<dyn Snapshot>>;
@@ -346,6 +387,8 @@ pub type Snapshots = HashMap<PathBuf, Arc<dyn Snapshot>>;
 /// What every worker thread shares.
 struct Shared {
     re: Regex,
+    /// The pattern can match across lines.
+    multi: bool,
     filter: Filter,
     roots: Vec<PathBuf>,
     snapshots: Snapshots,
@@ -454,7 +497,7 @@ impl<S: Fn(Batch) -> bool> Worker<S> {
     /// Search one file, in its tab's unsaved text if it has one.
     fn search_one(&mut self, path: &Path) -> WalkState {
         let shared = Arc::clone(&self.shared);
-        let mut matcher = LineMatcher::new(&shared.re);
+        let mut matcher = Matcher::new(&shared.re, shared.multi);
         let mut hits = Vec::new();
         let mut keep = |h: &LineHit<'_>| {
             // Count against the cap as found, so every worker stops
@@ -469,6 +512,8 @@ impl<S: Fn(Batch) -> bool> Worker<S> {
                 range: h.range.clone(),
                 preview,
                 mark,
+                last_line: h.last_line,
+                truncated: h.truncated,
             });
             true
         };
@@ -527,7 +572,7 @@ enum Fed {
 fn feed_file(
     path: &Path,
     block: &mut Vec<u8>,
-    matcher: &mut LineMatcher<'_>,
+    matcher: &mut Matcher<'_>,
     found: &mut dyn FnMut(&LineHit<'_>) -> bool,
 ) -> std::io::Result<Fed> {
     let mut file = std::fs::File::open(path)?;
@@ -565,7 +610,7 @@ fn feed_file(
 fn feed_text(
     text: &dyn Text,
     block: &mut Vec<u8>,
-    matcher: &mut LineMatcher<'_>,
+    matcher: &mut Matcher<'_>,
     found: &mut dyn FnMut(&LineHit<'_>) -> bool,
 ) -> bool {
     let len = text.len_bytes();
@@ -614,6 +659,7 @@ pub fn start(
     let ours = generation.bump();
     let shared = Arc::new(Shared {
         re,
+        multi: spans_lines(&params.query),
         filter,
         roots: params.roots.clone(),
         snapshots,
@@ -833,6 +879,24 @@ mod tests {
         assert!(start(&p, Snapshots::new(), &g, |_| true).is_err());
         p.roots.clear();
         assert!(start(&p, Snapshots::new(), &g, |_| true).is_err());
+    }
+
+    #[test]
+    fn regex_with_a_line_break_matches_across_lines() {
+        let dir = tree();
+        let mut p = params(dir.path(), r"needle one\nhay");
+        p.query.regex = true;
+        let r = search(&p, Snapshots::new());
+        assert_eq!(rels(&r), vec!["a.txt"]);
+        let h = &r.files[0].hits[0];
+        assert_eq!(
+            (h.line, h.last_line, h.truncated, h.ticked),
+            (0, 1, false, true)
+        );
+        assert_eq!(r.preview(h), "needle one");
+        // Without regex, `\n` is two characters to find: no hits.
+        p.query.regex = false;
+        assert_eq!(search(&p, Snapshots::new()).hits, 0);
     }
 
     #[test]

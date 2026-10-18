@@ -290,6 +290,11 @@ pub struct LineHit<'a> {
     pub text: &'a [u8],
     /// Offset of `text` in the whole text.
     pub line_start: usize,
+    /// The line the match ends on: `line` unless the match spans lines
+    /// ([`MultiLineMatcher`]).
+    pub last_line: usize,
+    /// The match was longer than [`MULTI_WINDOW`] and is cut short there.
+    pub truncated: bool,
 }
 
 /// Searches a text fed to it in blocks of any size, finding the same
@@ -435,6 +440,8 @@ fn search_lines(
             range: offset + start..offset + end,
             text: &hay[line_start..line_end],
             line_start: offset + line_start,
+            last_line: line,
+            truncated: false,
         };
         if !found(&hit) {
             return false;
@@ -443,9 +450,295 @@ fn search_lines(
     true
 }
 
+/// Longest match a [`MultiLineMatcher`] finds whole, in bytes; longer
+/// ones are cut here and marked [`LineHit::truncated`].
+pub const MULTI_WINDOW: usize = 1024 * 1024;
+
+/// Whether `query` is meant to match across lines: a regular expression
+/// that names a line break (`\n`, or a literal one pasted in). Such a
+/// query needs a [`MultiLineMatcher`]; anything else stays on the cheaper
+/// line-by-line [`LineMatcher`].
+#[must_use]
+pub fn spans_lines(query: &Query) -> bool {
+    query.regex && (query.pattern.contains("\\n") || query.pattern.contains('\n'))
+}
+
+/// Searches a text fed in blocks for matches that may span lines, holding
+/// at most [`MULTI_WINDOW`] of it past the block being searched.
+///
+/// The idea: a match near the end of a block might continue into the next
+/// one, so it cannot be reported yet. Every match that *starts* more than
+/// the window before the end of what has arrived is final, because a match
+/// starting there and running past the end would be longer than the
+/// window anyway. Those are reported; the last window's worth of text (and
+/// a few bytes before it, so `^` and `\b` see what precedes it) is carried
+/// to the front of the next block. A match longer than the window is cut
+/// at the window and marked truncated, so one pattern like `(?s).*` cannot
+/// make a match, or the memory held for it, grow without bound.
+///
+/// For a text whose matches are all shorter than the window, the matches
+/// are the same as searching the whole text at once, wherever the blocks
+/// are cut; the tests check that against a whole-text oracle. A longer
+/// match is found only when it arrives within one window plus one block,
+/// and is then cut; otherwise it is missed, which is the price of never
+/// holding more than that.
+#[derive(Debug)]
+pub struct MultiLineMatcher<'r> {
+    re: &'r Regex,
+    /// Text kept from earlier blocks.
+    carry: Vec<u8>,
+    /// Where in `carry` the next match may start; before it is context.
+    resume: usize,
+    /// Offset in the whole text of `carry[0]`.
+    offset: usize,
+    /// Line number at `carry[0]`.
+    line: usize,
+    /// Where the last reported match ended, as an offset in the whole
+    /// text: an empty match there is not reported (as the regex crate's
+    /// own iterator does).
+    last_end: Option<usize>,
+    /// The carry plus the current block, reused between blocks.
+    window: Vec<u8>,
+    limit: usize,
+}
+
+impl<'r> MultiLineMatcher<'r> {
+    /// A matcher for `re`, positioned at the start of the text.
+    #[must_use]
+    pub fn new(re: &'r Regex) -> Self {
+        Self::with_window(re, MULTI_WINDOW)
+    }
+
+    /// [`MultiLineMatcher::new`] with another window, so tests can use a
+    /// small one.
+    #[must_use]
+    pub fn with_window(re: &'r Regex, limit: usize) -> Self {
+        Self {
+            re,
+            carry: Vec::new(),
+            resume: 0,
+            offset: 0,
+            line: 0,
+            last_end: None,
+            window: Vec::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    /// Search the next block of the text. `found` is called for each match
+    /// in order; it returns `false` to stop, and then so does this.
+    pub fn feed(&mut self, block: &[u8], found: &mut dyn FnMut(&LineHit<'_>) -> bool) -> bool {
+        self.window.clear();
+        self.window.append(&mut self.carry);
+        self.window.extend_from_slice(block);
+        let last = self.window.len().saturating_sub(self.limit);
+        self.search(last, found)
+    }
+
+    /// The text has ended: report what is left. The matcher is then back
+    /// at the start, ready for another text.
+    pub fn finish(&mut self, found: &mut dyn FnMut(&LineHit<'_>) -> bool) -> bool {
+        self.window.clear();
+        self.window.append(&mut self.carry);
+        let len = self.window.len();
+        let ok = self.search(len + 1, found);
+        *self = Self::with_window(self.re, self.limit);
+        ok
+    }
+
+    /// Report the matches in the window that start before `before`, then
+    /// keep what a later match could still need.
+    fn search(&mut self, before: usize, found: &mut dyn FnMut(&LineHit<'_>) -> bool) -> bool {
+        let hay = &self.window;
+        let mut pos = self.resume;
+        let mut line = self.line;
+        let mut counted = 0;
+        while pos <= hay.len() {
+            // No match before `before` now means none: one starting there
+            // that more text would complete is longer than the window.
+            let Some(m) = self.re.find_at(hay, pos) else {
+                break;
+            };
+            let (start, mut end) = (m.start(), m.end());
+            if start >= before {
+                break;
+            }
+            let truncated = end - start > self.limit;
+            if truncated {
+                end = start + self.limit;
+            }
+            pos = if end > start { end } else { end + 1 };
+            if start == end && self.last_end == Some(self.offset + start) {
+                continue;
+            }
+            self.last_end = Some(self.offset + end);
+            line += memchr::memchr_iter(b'\n', &hay[counted..start]).count();
+            counted = start;
+            let line_start = memchr::memrchr(b'\n', &hay[..start]).map_or(0, |i| i + 1);
+            let mut line_end =
+                memchr::memchr(b'\n', &hay[start..]).map_or(hay.len(), |i| start + i);
+            if line_end > line_start && hay[line_end - 1] == b'\r' {
+                line_end -= 1;
+            }
+            let hit = LineHit {
+                line,
+                range: self.offset + start..self.offset + end,
+                text: &hay[line_start..line_end],
+                line_start: self.offset + line_start,
+                last_line: line + memchr::memchr_iter(b'\n', &hay[start..end]).count(),
+                truncated,
+            };
+            if !found(&hit) {
+                return false;
+            }
+        }
+        // Keep from where the next match may start (never before the
+        // window's worth at the end), with a little context before it.
+        let keep_at = pos.max(before.min(hay.len())).min(hay.len());
+        let keep_from = keep_at.saturating_sub(CONTEXT);
+        self.line += memchr::memchr_iter(b'\n', &hay[..keep_from]).count();
+        self.offset += keep_from;
+        self.resume = keep_at - keep_from;
+        self.carry.extend_from_slice(&hay[keep_from..]);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every match of `pattern` in `text` fed in blocks of `block` bytes
+    /// with a window of `window`: (range, first line, last line).
+    fn multi(
+        pattern: &str,
+        text: &str,
+        block: usize,
+        window: usize,
+    ) -> Vec<(Range<usize>, usize, usize, bool)> {
+        let re = Query {
+            pattern: pattern.into(),
+            regex: true,
+            case_sensitive: true,
+            whole_word: false,
+        }
+        .compile()
+        .unwrap()
+        .unwrap();
+        let mut m = MultiLineMatcher::with_window(&re, window);
+        let mut out = Vec::new();
+        let mut keep = |h: &LineHit<'_>| {
+            out.push((h.range.clone(), h.line, h.last_line, h.truncated));
+            true
+        };
+        for chunk in text.as_bytes().chunks(block.max(1)) {
+            assert!(m.feed(chunk, &mut keep));
+        }
+        assert!(m.finish(&mut keep));
+        out
+    }
+
+    /// The same, all at once with the regex crate: the oracle.
+    fn oracle(pattern: &str, text: &str) -> Vec<(Range<usize>, usize, usize, bool)> {
+        let re = Query {
+            pattern: pattern.into(),
+            regex: true,
+            case_sensitive: true,
+            whole_word: false,
+        }
+        .compile()
+        .unwrap()
+        .unwrap();
+        re.find_iter(text.as_bytes())
+            .map(|m| {
+                let line = text[..m.start()].matches('\n').count();
+                let last = line + text[m.range()].matches('\n').count();
+                (m.range(), line, last, false)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn multi_line_matches_cross_lines_and_blocks() {
+        let text = "fn a() {\n    x\n}\nfn b() {\n}\n";
+        let want = oracle(r"\{\n\s*\}", text);
+        assert_eq!(want.len(), 1);
+        assert_eq!(want[0].1, 3);
+        assert_eq!(want[0].2, 4);
+        for block in 1..text.len() + 1 {
+            assert_eq!(multi(r"\{\n\s*\}", text, block, 16), want, "block {block}");
+        }
+        assert!(spans_lines(&Query {
+            pattern: r"a\nb".into(),
+            regex: true,
+            ..Query::default()
+        }));
+        assert!(!spans_lines(&Query {
+            pattern: r"a\nb".into(),
+            ..Query::default()
+        }));
+    }
+
+    #[test]
+    fn multi_line_matches_longer_than_the_window_are_cut() {
+        let text = format!("start{}end\n", "x\n".repeat(50));
+        // Found whole in one block: reported, cut at the window.
+        let found = multi(r"start[\s\S]*end", &text, 200, 32);
+        assert_eq!(found.len(), 1);
+        let (range, line, last, truncated) = found[0].clone();
+        assert_eq!((range.start, range.end - range.start), (0, 32));
+        assert_eq!((line, last), (0, 13));
+        assert!(truncated);
+        // Spread over blocks smaller than itself, it is never seen whole:
+        // the window bounds memory, so such a match is missed.
+        assert_eq!(multi(r"start[\s\S]*end", &text, 7, 32), Vec::new());
+    }
+
+    #[test]
+    fn multi_line_agrees_with_a_whole_text_oracle() {
+        // A small deterministic generator: texts of a few letters and line
+        // breaks, patterns whose matches stay short, every block size.
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let patterns = [
+            r"a\nb",
+            r"^b",
+            r"a$",
+            r"\bab\b",
+            r"\n\n",
+            r"a\n?b",
+            r"(?m)^$",
+            r"b*",
+            r"a[^\n]{0,3}\n[ab]{1,2}",
+            r"\r?\n",
+        ];
+        for _ in 0..300 {
+            let len = usize::try_from(next(60)).unwrap();
+            let text: String = (0..len)
+                .map(|_| match next(5) {
+                    0 => 'a',
+                    1 => 'b',
+                    2 => '\n',
+                    3 => ' ',
+                    _ => '\r',
+                })
+                .collect();
+            for p in patterns {
+                let want = oracle(p, &text);
+                let block = usize::try_from(next(9) + 1).unwrap();
+                assert_eq!(
+                    multi(p, &text, block, 12),
+                    want,
+                    "pattern {p:?} in {text:?}, blocks of {block}"
+                );
+            }
+        }
+    }
     use crate::RopeBuffer;
     use std::fmt::Write as _;
 

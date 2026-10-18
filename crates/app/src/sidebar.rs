@@ -60,6 +60,26 @@ pub struct Sidebar {
     /// The open named workspace, shown in the header instead of the
     /// root's name.
     pub workspace: Option<String>,
+    /// A press on a tree row that may become a drag (M19).
+    pub drag: Option<Drag>,
+}
+
+/// A row pressed in the tree, and where a drag of it would drop.
+///
+/// A press only becomes a drag once the pointer has moved half a row, so
+/// an ordinary click never moves anything. While dragging, the folder
+/// under the pointer is the target: a folder row itself, or the folder
+/// holding a file row, or the first root below the last row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Drag {
+    /// The node pressed.
+    pub node: NodeId,
+    /// Where the press was, in physical pixels.
+    start_y: f32,
+    /// The pointer has moved far enough to be a drag.
+    pub moving: bool,
+    /// The folder a drop would go in, when it can take one.
+    pub target: Option<NodeId>,
 }
 
 /// The tree's inline text field: New File, New Folder or Rename. The field
@@ -104,6 +124,7 @@ impl Sidebar {
             wheel: 0.0,
             edit: None,
             workspace: None,
+            drag: None,
         }
     }
 
@@ -300,7 +321,70 @@ impl Sidebar {
         };
         let id = self.tree.rows()[row].node;
         self.tree.selected = Some(id);
+        // Any row but a root can be dragged somewhere else.
+        self.drag = (!self.tree.is_root(id)).then_some(Drag {
+            node: id,
+            start_y: y,
+            moving: false,
+            target: None,
+        });
         self.activate(id)
+    }
+
+    /// The pointer moved to `(x, y)` with the button held after a press in
+    /// the tree; `copy` is whether `Alt` is held. Returns whether the drag
+    /// changed what is drawn.
+    pub fn drag_over(&mut self, layout: &Layout, (x, y): (f32, f32), copy: bool) -> bool {
+        let Some(mut drag) = self.drag else {
+            return false;
+        };
+        if !drag.moving && (y - drag.start_y).abs() < layout.metrics.line_height / 2.0 {
+            return false;
+        }
+        drag.moving = true;
+        drag.target = if self.contains(layout, x) {
+            self.drop_target(layout, y, drag.node, copy)
+        } else {
+            None
+        };
+        let changed = self.drag != Some(drag);
+        self.drag = Some(drag);
+        changed
+    }
+
+    /// The folder a drop at `y` would go in, for a drag of `node`: none
+    /// when that folder is `node` itself or inside it, or, for a move, the
+    /// folder it is already in.
+    fn drop_target(&self, layout: &Layout, y: f32, node: NodeId, copy: bool) -> Option<NodeId> {
+        if y < Self::header_h(layout) {
+            return None;
+        }
+        let folder = match self.row_at(layout, y) {
+            Some(row) => {
+                let id = self.tree.rows()[row].node;
+                let n = self.tree.node(id)?;
+                if n.is_dir {
+                    id
+                } else {
+                    // A file's folder; at the top of a single root, the root.
+                    self.tree.parent(id).unwrap_or(crate::tree::ROOT)
+                }
+            }
+            None => crate::tree::ROOT,
+        };
+        let (from, to) = (&self.tree.node(node)?.path, &self.tree.node(folder)?.path);
+        let stays = from.parent() == Some(to.as_path());
+        (!to.starts_with(from) && (copy || !stays)).then_some(folder)
+    }
+
+    /// The button was let go: the drag ends. Returns what was dragged and
+    /// the folder it was dropped on, when it was a drag onto a folder.
+    pub fn end_drag(&mut self) -> Option<(PathBuf, PathBuf)> {
+        let drag = self.drag.take()?;
+        let target = drag.target.filter(|_| drag.moving)?;
+        let from = self.tree.node(drag.node)?.path.clone();
+        let to = self.tree.node(target)?.path.clone();
+        Some((from, to))
     }
 
     /// Select the tree row at physical `y` without opening it (a
@@ -529,7 +613,12 @@ fn draw_tree(
             y += lh;
             continue;
         }
-        if sidebar.tree.selected == Some(row.node) {
+        let drag = sidebar.drag.filter(|d| d.moving);
+        if drag.is_some_and(|d| d.target == Some(row.node)) {
+            // The folder a drop goes in, with an outline-like accent.
+            gpu.push_rect([0.0, y], [w, lh], ui.search_match);
+            gpu.push_rect([0.0, y], [accent, lh], ui.tab_accent);
+        } else if sidebar.tree.selected == Some(row.node) {
             let color = if sidebar.focused {
                 ui.picker_selected
             } else {
@@ -542,7 +631,10 @@ fn draw_tree(
         }
         let x = pad + cols(row.depth * 2) * cell;
         gpu.push_text_line([x, y], mark, ui.gutter);
-        gpu.push_text_span([x + 2.0 * cell, y], &node.name, 0, ui.text, 0.0);
+        // The row being dragged reads as lifted out: dimmed.
+        let dragged = drag.is_some_and(|d| d.node == row.node);
+        let color = if dragged { ui.gutter } else { ui.text };
+        gpu.push_text_span([x + 2.0 * cell, y], &node.name, 0, color, 0.0);
         y += lh;
         if let Some(e) = edit.filter(|_| new_after == Some(Some(row.node))) {
             draw_edit_row(gpu, ui, layout, e, (y, row.depth + 1), new_mark, cursor);
@@ -664,6 +756,42 @@ mod tests {
         );
         assert_eq!(e.dir, PathBuf::from("/p/src"));
         assert!(s.focused);
+    }
+
+    #[test]
+    fn dragging_a_row_drops_it_on_a_folder() {
+        let l = layout();
+        let mut s = sidebar();
+        let row_y = |row: f32| Sidebar::header_h(&l) + row * l.metrics.line_height + 1.0;
+        // Press README, move a little: still a click.
+        s.click(&l, 50.0, row_y(1.0));
+        assert!(!s.drag_over(&l, (50.0, row_y(1.0) + 3.0), false));
+        // Onto src: the target.
+        assert!(s.drag_over(&l, (50.0, row_y(0.0)), false));
+        let src = s.tree.rows()[0].node;
+        assert_eq!(s.drag.unwrap().target, Some(src));
+        // Its own folder (the root, below the rows): only for a copy.
+        s.drag_over(&l, (50.0, row_y(5.0)), false);
+        assert_eq!(s.drag.unwrap().target, None);
+        s.drag_over(&l, (50.0, row_y(5.0)), true);
+        assert_eq!(s.drag.unwrap().target, Some(crate::tree::ROOT));
+        // Outside the sidebar: nowhere.
+        s.drag_over(&l, (500.0, row_y(0.0)), false);
+        assert_eq!(s.end_drag(), None);
+        // Dropped on src.
+        s.click(&l, 50.0, row_y(1.0));
+        s.drag_over(&l, (50.0, row_y(0.0)), false);
+        assert_eq!(
+            s.end_drag(),
+            Some((PathBuf::from("/p/README"), PathBuf::from("/p/src")))
+        );
+        // A folder cannot go into itself.
+        s.click(&l, 50.0, row_y(0.0));
+        s.drag_over(&l, (50.0, row_y(0.0) + 15.0), false);
+        assert_eq!(s.drag.unwrap().target, None);
+        // A plain click ends with no drop.
+        s.click(&l, 50.0, row_y(1.0));
+        assert_eq!(s.end_drag(), None);
     }
 
     #[test]

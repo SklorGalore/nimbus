@@ -81,6 +81,47 @@ pub(super) struct Workspace {
     /// Paths being renamed from the tree: their disappearance on disk is
     /// the rename, not a deletion, until it reports back.
     pub(super) moving: Vec<PathBuf>,
+    /// The tree's moves, copies and trashes in this run, oldest first, for
+    /// Undo Move (M19).
+    pub(super) undo_moves: Vec<UndoMove>,
+    /// Operations Undo Move started, still running: not recorded again.
+    pub(super) undo_ops: Vec<crate::tree_ops::Op>,
+}
+
+/// Most tree operations Undo Move remembers.
+pub(super) const MAX_UNDO_MOVES: usize = 50;
+
+/// One tree operation Undo Move can take back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum UndoMove {
+    /// Moved (dragged or renamed) from `from` to `to`.
+    Moved {
+        /// Where it was.
+        from: PathBuf,
+        /// Where it went.
+        to: PathBuf,
+    },
+    /// A copy made at this path.
+    Copied(PathBuf),
+    /// Moved to the trash from this path.
+    Trashed(PathBuf),
+}
+
+impl UndoMove {
+    /// What undoes `op`, if anything does: creating a file or folder is
+    /// not a move.
+    pub(super) fn of(op: &crate::tree_ops::Op) -> Option<Self> {
+        use crate::tree_ops::Op;
+        match op {
+            Op::Rename { from, to } => Some(Self::Moved {
+                from: from.clone(),
+                to: to.clone(),
+            }),
+            Op::Copy { to, .. } => Some(Self::Copied(to.clone())),
+            Op::Trash(p) => Some(Self::Trashed(p.clone())),
+            Op::NewFile(_) | Op::NewFolder(_) | Op::Restore(_) => None,
+        }
+    }
 }
 
 /// Most closed tabs remembered for Reopen Closed Tab.
