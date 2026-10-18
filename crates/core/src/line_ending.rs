@@ -52,9 +52,72 @@ impl LineEnding {
     }
 }
 
+/// Where the line endings in `text` that are not `to` are, as byte
+/// offsets in order: for [`LineEnding::Lf`], the `\r` of each `\r\n`
+/// (to delete); for [`LineEnding::CrLf`], each `\n` with no `\r` before
+/// it (to put one in front of). A lone `\r` is ordinary text and stays.
+///
+/// The text is read a chunk at a time, never as whole lines, so this works
+/// on any backend. `None` when there are more than `max`, so a huge file
+/// is not turned into a huge list.
+pub fn mismatched<T: crate::Text + ?Sized>(
+    text: &T,
+    to: LineEnding,
+    max: usize,
+) -> Option<Vec<usize>> {
+    let mut found = Vec::new();
+    let mut prev = 0u8;
+    let mut pos = 0;
+    let len = text.len_bytes();
+    while pos < len {
+        let (chunk, start) = text.chunk_at(pos);
+        let from = pos - start;
+        if chunk.len() <= from {
+            break;
+        }
+        for (i, &b) in chunk[from..].iter().enumerate() {
+            if b == b'\n' {
+                let at = pos + i;
+                match (to, prev == b'\r') {
+                    (LineEnding::Lf, true) => found.push(at - 1),
+                    (LineEnding::CrLf, false) => found.push(at),
+                    _ => {}
+                }
+                if found.len() > max {
+                    return None;
+                }
+            }
+            prev = b;
+        }
+        pos += chunk.len() - from;
+    }
+    Some(found)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::LineEnding;
+    use super::{LineEnding, mismatched};
+    use crate::RopeBuffer;
+
+    #[test]
+    fn finds_the_endings_to_change() {
+        let t = RopeBuffer::from_text("a\r\nb\nc\rd\r\n\n");
+        assert_eq!(mismatched(&t, LineEnding::Lf, 10), Some(vec![1, 8]));
+        assert_eq!(mismatched(&t, LineEnding::CrLf, 10), Some(vec![4, 10]));
+        assert_eq!(mismatched(&t, LineEnding::Lf, 1), None);
+        let empty = RopeBuffer::from_text("");
+        assert_eq!(mismatched(&empty, LineEnding::CrLf, 0), Some(vec![]));
+    }
+
+    #[test]
+    fn a_crlf_split_between_chunks_is_seen() {
+        // Many chunks: a long text with endings at every position mod 7.
+        let text = "abcdef\r\n".repeat(20_000);
+        let t = RopeBuffer::from_text(&text);
+        let found = mismatched(&t, LineEnding::Lf, usize::MAX).unwrap();
+        assert_eq!(found.len(), 20_000);
+        assert!(found.iter().all(|&p| &text[p..p + 2] == "\r\n"));
+    }
 
     #[test]
     fn majority_wins_and_ties_go_to_lf() {

@@ -17,7 +17,9 @@ use nimbus_core::expand::expand;
 use nimbus_core::indent::Indent;
 use nimbus_core::lines::{self, Batch, LineError};
 use nimbus_core::transform::{self, Case, Lines};
-use nimbus_core::{Bias, EditError, Selection, Selections, Text, brackets, movement};
+use nimbus_core::{
+    Bias, EditError, LineEnding, Selection, Selections, Text, brackets, line_ending, movement,
+};
 use nimbus_syntax::structure;
 
 use crate::config::Indenting;
@@ -26,6 +28,10 @@ use crate::document::{Document, Editor, MAX_COPY_BYTES};
 /// Line operations refuse selections whose lines hold more than this:
 /// the same 64 MiB as Copy, for the same reason.
 pub const LINE_OP_LIMIT: usize = MAX_COPY_BYTES;
+
+/// Change Line Endings changes at most this many in one edit: each is
+/// a separate replacement held in memory and in the undo step.
+pub const LINE_ENDING_LIMIT: usize = 4 * 1024 * 1024;
 
 /// How far bracket matching and expansion look when there is no syntax
 /// tree: enough for any function, cheap on a huge file.
@@ -418,6 +424,32 @@ impl Editor<'_> {
         let batch =
             transform::trim_trailing(&self.doc.buffer, &self.carets.selections).into_owned();
         self.apply_batch(batch, (Bias::Before, Bias::Before))
+    }
+
+    /// Change every line ending in the file to `to`, as one undo step, and
+    /// make Enter insert `to` from now on (M17). Refused, as other
+    /// whole-file operations are, for a file over [`LINE_OP_LIMIT`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Document::replace`].
+    pub fn change_line_endings(&mut self, to: LineEnding) -> Result<Outcome, EditError> {
+        if self.doc.buffer.len_bytes() > LINE_OP_LIMIT {
+            return Ok(Outcome::TooLarge);
+        }
+        let Some(at) = line_ending::mismatched(&self.doc.buffer, to, LINE_ENDING_LIMIT) else {
+            return Ok(Outcome::TooLarge);
+        };
+        self.doc.line_ending = to;
+        let items = at
+            .into_iter()
+            .map(|p| match to {
+                LineEnding::Lf => (p..p + 1, Cow::Borrowed("")),
+                LineEnding::CrLf => (p..p, Cow::Borrowed("\r")),
+            })
+            .collect();
+        // A cursor at the end of a line stays before the ending.
+        self.apply_batch(Batch { items, after: None }, (Bias::Before, Bias::Before))
     }
 
     /// The limit check for operations that take the whole text when
@@ -884,6 +916,35 @@ mod tests {
             line: Some("//"),
             block: Some(("/*", "*/")),
         };
+    }
+
+    #[test]
+    fn changing_line_endings_is_one_undo_step_and_enter_follows() {
+        let mut d = doc("a\nb\r\nc\rd\n");
+        cursors(&mut d, &[1, 8]);
+        assert_eq!(
+            d.ed().change_line_endings(LineEnding::CrLf).unwrap(),
+            Outcome::Done
+        );
+        assert_eq!(text(&d), "a\r\nb\r\nc\rd\r\n");
+        // Each cursor stays at the end of its line, before the ending.
+        assert_eq!(heads(&d), [1, 9]);
+        assert_eq!(d.doc.line_ending, LineEnding::CrLf);
+        d.ed().insert_newline().unwrap();
+        assert!(text(&d).starts_with("a\r\n\r\nb"));
+        d.ed().undo().unwrap();
+        d.ed().undo().unwrap();
+        assert_eq!(text(&d), "a\nb\r\nc\rd\n", "one step");
+
+        assert_eq!(
+            d.ed().change_line_endings(LineEnding::Lf).unwrap(),
+            Outcome::Done
+        );
+        assert_eq!(text(&d), "a\nb\nc\rd\n");
+        assert_eq!(
+            d.ed().change_line_endings(LineEnding::Lf).unwrap(),
+            Outcome::Nothing
+        );
     }
 
     #[test]
