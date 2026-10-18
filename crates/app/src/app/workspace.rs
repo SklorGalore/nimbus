@@ -180,9 +180,9 @@ fn saved_folds(folds: &[Range<usize>]) -> Vec<[usize; 2]> {
 
 impl App {
     /// Write the state file a moment from now, so a burst of changes
-    /// writes once. Never in an unattended run.
+    /// writes once. Never in an unattended run or with `--no-session`.
     pub(super) fn save_state_soon(&mut self) {
-        if !self.options.unattended() {
+        if self.options.remembers() {
             self.ws
                 .save_at
                 .get_or_insert_with(|| Instant::now() + STATE_SAVE_DELAY);
@@ -199,7 +199,7 @@ impl App {
     /// Write the state file now, with this run's session in it.
     pub(super) fn save_state(&mut self) {
         self.ws.save_at = None;
-        if self.options.unattended() {
+        if !self.options.remembers() {
             return;
         }
         if let Some(session) = self.capture_session() {

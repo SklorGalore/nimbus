@@ -66,7 +66,7 @@ alternative of encodings first declined.
 | Sticky scroll, minimap | M13 | M20 |
 | Markdown preview | M14 | M20 |
 | Proportional fonts in UI chrome | DESIGN.md §2 | M20 |
-| Ropey 2.0 | DESIGN.md §4.1 | M21 |
+| Ropey 2.0 | DESIGN.md §4.1 | M21, then after 1.0 (still beta), below |
 
 ## Unscheduled
 
@@ -81,6 +81,23 @@ left is small or still speculative.
   to ship 1.0 without it (2026-10-18). The first milestone after 1.0,
   since a GPU-drawn editor is invisible to VoiceOver, NVDA and Orca
   without it; the adapter can be created lazily so startup is unchanged.
+- **Ropey 2 and winit 0.31** (M21): both were still betas when 1.0
+  shipped (ropey 2.0.0-beta.1, winit 0.31.0-beta.3), so the owner chose
+  to release on ropey 1.6 and winit 0.30. Each moves to a 1.x point
+  release once stable, measured as M21's plan describes (one commit
+  each, `--smoke`, typing benchmark and binary size before and after).
+- **Compact typing in the undo history** (M21 soak): each typed
+  character is its own `Edit` inside an undo group, about 100 bytes, so
+  100,000 keystrokes keep about 10 MB. Merging a contiguous typing run
+  into one edit would cut that to the text itself; `undo_oracle.rs`
+  covers coalescing.
+- **Finder "Open With"** (M21 deferred): the bundle can declare document
+  types, but receiving the files needs the macOS app delegate's
+  open-files message, which winit 0.30 does not pass on; new `unsafe`
+  code, so it waits for winit 0.31 or a later point release.
+- **macOS emoji picker input** (Ctrl+Cmd+Space): winit 0.30 drops text
+  inserted without a preceding compose; the fix is in winit, so it
+  waits for 0.31 rather than a patched copy of winit.
 - **Autosave of unsaved work** for crash recovery: the owner decided
   against it when approving M12 (it would write the user's text
   somewhere they did not choose); it stays here in case that changes.

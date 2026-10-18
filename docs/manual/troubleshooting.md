@@ -100,6 +100,19 @@ replacing it), run `nimbus --no-session`. To try Nimbus with no
 settings at all, start it with `NIMBUS_CONFIG_DIR` pointing at an empty
 folder.
 
+## If Nimbus quits unexpectedly
+
+If Nimbus ever hits an internal error it cannot recover from, it writes
+one line to `crash.log` in the config folder (beside `config.toml`) just
+before it quits: the time, the version, where in Nimbus's code it
+happened, and the error message. Nothing from your files is written to
+it. The next time Nimbus starts it says so in the message line and
+renames the record to `crash.log.old`. Please attach that file when you
+report the problem.
+
+Unsaved changes are lost in a crash: Nimbus does not keep copies of your
+text anywhere you did not choose.
+
 ## Logs and the debug overlay
 
 Nimbus writes a log to the terminal it was started from. `RUST_LOG`

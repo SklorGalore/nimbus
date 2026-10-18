@@ -33,8 +33,9 @@ opens the one you choose, in the focused group.
 
 - Results appear while the folder is still being listed, so even a large
   repository is usable at once.
-- Files excluded by `.gitignore` and hidden files and folders (names
-  starting with a dot) are left out.
+- Files excluded by `.gitignore` are left out, and so is the `.git`
+  folder. Other dotfiles, such as `.github/` or `.env.example`, are
+  listed.
 - At most 300,000 files are listed, so opening your home folder by
   mistake cannot use unbounded memory.
 - Matching works on the path, so `src/main` finds `src/main.rs`.

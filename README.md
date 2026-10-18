@@ -7,7 +7,7 @@
 **A fast, lightweight text editor for macOS, Linux and Windows, with its own GPU text renderer.**
 
 [![CI](https://github.com/SklorGalore/nimbus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SklorGalore/nimbus/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/badge/latest%20release-v0.2.0-blue)](https://github.com/SklorGalore/nimbus/releases)
+[![Latest release](https://img.shields.io/badge/latest%20release-v1.0.0-blue)](https://github.com/SklorGalore/nimbus/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#installation)
@@ -39,9 +39,8 @@ quickly and looks the same on every platform.
 It is built for source code first, then Markdown prose and notes, then
 config files, data and logs.
 
-Nimbus is in active development and has not reached 1.0. It is stable
-enough for daily use, and the [roadmap](#roadmap) shows what is still
-to come. The [user manual](docs/manual/README.md) covers everything
+Nimbus 1.0 is out: everything in the [roadmap](#roadmap)'s plan has
+landed, and the editing path is fuzz-tested and soak-tested. The [user manual](docs/manual/README.md) covers everything
 from opening your first file to themes, languages and key bindings.
 
 ## Features
@@ -145,10 +144,9 @@ Download Nimbus from the
 | Linux | `nimbus-VERSION-linux-x86_64.tar.gz`, containing the `nimbus` binary |
 
 > [!NOTE]
-> The current release, v0.2.0, predates many of the features listed
-> above. To use them today, [build from source](#building-from-source).
-> The next release adds a macOS `.dmg` and Homebrew cask, a Windows
-> installer and winget manifest, and a Linux `.deb` and AppImage.
+> From v1.0.0 on, each release also has a macOS `.dmg` and Homebrew
+> cask, a Windows installer and winget manifest, and a Linux `.deb` and
+> AppImage.
 
 The builds are not code-signed yet, so macOS and Windows show a warning
 the first time you open Nimbus. On macOS, right-click `Nimbus.app` and
@@ -367,14 +365,14 @@ milestone lands, move its line up to "Available now". -->
   files, and Compare with HEAD
 - Reading aids: sticky scroll, a minimap, a Markdown preview and an
   interface font
-
-**In progress**
-
 - Languages, second pass: better Markdown and embedded code
+- Foundations for 1.0: fuzzing, a soak test and a crash record
 
-**Planned**
+**After 1.0**
 
-- Foundations for 1.0
+- Screen-reader support
+- Newer versions of the text and window libraries (ropey 2, winit 0.31)
+  once they are stable
 
 Some things are out of scope for now, including a Vim mode, plugins,
 LSP, a built-in terminal, collaborative editing and right-to-left text.

@@ -9,10 +9,11 @@
 //!
 //! Each chunk is searched together with a little text before it
 //! ([`CONTEXT`]), so `^` and `\b` see what precedes the chunk, and a little
-//! after it ([`OVERLAP`]), so a match that starts near the end of one chunk
-//! is still found. Matches are only *kept* if they start inside the chunk,
-//! so none are reported twice. The honest limit: a match longer than the
-//! overlap that crosses a chunk boundary is missed.
+//! after it ([`OVERLAP`], and a character more), so a match that starts
+//! near the end of one chunk is still found. Matches are only *kept* if
+//! they start inside the chunk, so none are reported twice, and the next
+//! chunk resumes where the last match ended. The honest limit: a match
+//! longer than the overlap that crosses a chunk boundary is missed.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,6 +33,15 @@ pub const OVERLAP: usize = 4096;
 /// look at the real text before it; one character is enough, and this is
 /// a few.
 pub const CONTEXT: usize = 16;
+
+/// Text read past the furthest point a reported match may end, so that an
+/// assertion there looks at the real text after it rather than at the end
+/// of what was read: `\b` decodes the whole next character, which is up to
+/// four bytes, and `$` reads the next byte. Without it, a character cut in
+/// two by the end of a window looks like an invalid byte, which is not a
+/// word character, so `\b` before it gives the wrong answer (found by the
+/// `search` fuzz target).
+const LOOKAHEAD: usize = 4;
 
 /// What to search for.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -136,7 +146,7 @@ fn find_all_in_chunks(
     let len = text.len_bytes();
     let mut start: usize = 0;
     let mut batch = Vec::new();
-    let mut window = Vec::with_capacity(CONTEXT + chunk + OVERLAP);
+    let mut window = Vec::with_capacity(CONTEXT + chunk + OVERLAP + LOOKAHEAD);
     // End of the last match kept. A match that ran past a chunk boundary
     // ends inside the next chunk; anything found there that starts before
     // this point would overlap it, and replacing overlapping ranges would
@@ -145,14 +155,14 @@ fn find_all_in_chunks(
     // End of the last match found, kept or not, as an offset in the text.
     // It carries over from chunk to chunk: an empty match right where a
     // match in the previous chunk ended is not reported, as in one search.
-    let mut last_end = None;
+    let mut last_end: Option<usize> = None;
     loop {
         if !keep_going() {
             return false;
         }
         let end = start.saturating_add(chunk).min(len);
         let window_start = start.saturating_sub(CONTEXT);
-        let window_end = end.saturating_add(OVERLAP).min(len);
+        let window_end = end.saturating_add(OVERLAP + LOOKAHEAD).min(len);
         window.clear();
         if text
             .read_into(window_start..window_end, &mut window)
@@ -162,7 +172,11 @@ fn find_all_in_chunks(
         }
         let at = start - window_start;
         batch.clear();
-        let mut pos = at;
+        // Resume where the last match ended when it ran into this chunk,
+        // as one search of the whole text would; searching from the
+        // chunk's start would find a match overlapping it instead, and
+        // skipping that one would step past a match starting at its end.
+        let mut pos = last_end.map_or(at, |e| e.saturating_sub(window_start).max(at));
         while pos <= window.len() {
             let Some(m) = re.find_at(&window, pos) else {
                 break;
@@ -468,13 +482,14 @@ pub fn spans_lines(query: &Query) -> bool {
 ///
 /// The idea: a match near the end of a block might continue into the next
 /// one, so it cannot be reported yet. Every match that *starts* more than
-/// the window before the end of what has arrived is final, because a match
-/// starting there and running past the end would be longer than the
-/// window anyway. Those are reported; the last window's worth of text (and
-/// a few bytes before it, so `^` and `\b` see what precedes it) is carried
-/// to the front of the next block. A match longer than the window is cut
-/// at the window and marked truncated, so one pattern like `(?s).*` cannot
-/// make a match, or the memory held for it, grow without bound.
+/// the window (plus one character, for a `\b` after it) before the end of
+/// what has arrived is final, because a match starting there and running
+/// past the end would be longer than the window anyway. Those are
+/// reported; the last window's worth of text (and a few bytes before it,
+/// so `^` and `\b` see what precedes it) is carried to the front of the
+/// next block. A match longer than the window is cut at the window and
+/// marked truncated, so one pattern like `(?s).*` cannot make a match, or
+/// the memory held for it, grow without bound.
 ///
 /// For a text whose matches are all shorter than the window, the matches
 /// are the same as searching the whole text at once, wherever the blocks
@@ -531,7 +546,10 @@ impl<'r> MultiLineMatcher<'r> {
         self.window.clear();
         self.window.append(&mut self.carry);
         self.window.extend_from_slice(block);
-        let last = self.window.len().saturating_sub(self.limit);
+        let last = self
+            .window
+            .len()
+            .saturating_sub(self.limit.saturating_add(LOOKAHEAD));
         self.search(last, found)
     }
 
@@ -677,6 +695,83 @@ mod tests {
             pattern: r"a\nb".into(),
             ..Query::default()
         }));
+    }
+
+    /// Found by the `search` fuzz target: `\b` before a character cut in
+    /// two by a block edge was judged on the half that had arrived, which
+    /// is not a word character, so a boundary there was missed (or one
+    /// that is not there found) and never looked at again.
+    #[test]
+    fn word_boundaries_before_a_cut_character_are_found() {
+        for (pattern, text) in [
+            (r"\b", "👩\u{200d}💻"),
+            (r"\b", "a 日"),
+            (r"\b(?:\z?)\b", "👩\u{200d}💻"),
+            (r"x\b", "x日 xé x"),
+        ] {
+            let want = oracle(pattern, text);
+            for block in 1..=4 {
+                for window in 1..=4 {
+                    assert_eq!(
+                        multi(pattern, text, block, window),
+                        want,
+                        "{pattern:?} in {text:?}, blocks of {block}, window {window}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Found by the `search` fuzz target: "vvv" in a run of `v`s across a
+    /// chunk edge. A match kept from one chunk ran into the next, which
+    /// then searched from its own start, found a match overlapping the
+    /// kept one, dropped it, and went on after *that* match, so the match
+    /// starting where the kept one ended was never found.
+    #[test]
+    fn a_match_starting_where_one_from_the_last_chunk_ended_is_found() {
+        let re = Regex::new("vvv").unwrap();
+        for len in 3..20 {
+            let text = "v".repeat(len);
+            let expected: Vec<_> = re.find_iter(text.as_bytes()).map(|m| m.range()).collect();
+            let t = RopeBuffer::from_text(&text);
+            for chunk in 1..=len {
+                let mut got = Vec::new();
+                find_all_in_chunks(
+                    &t,
+                    &re,
+                    chunk,
+                    || true,
+                    |b| {
+                        got.extend_from_slice(b);
+                        true
+                    },
+                );
+                assert_eq!(got, expected, "{len} v's in chunks of {chunk}");
+            }
+        }
+    }
+
+    /// The same for the chunked search: a match as long as the overlap,
+    /// starting just before a chunk edge, must not end in a `\b` judged on
+    /// half a character.
+    #[test]
+    fn a_match_as_long_as_the_overlap_sees_the_whole_next_character() {
+        let text = "a".repeat(OVERLAP) + "é";
+        let re = Regex::new(&format!(r"a{{{OVERLAP}}}\b")).unwrap();
+        let t = RopeBuffer::from_text(&text);
+        let mut got = Vec::new();
+        find_all_in_chunks(
+            &t,
+            &re,
+            1,
+            || true,
+            |b| {
+                got.extend_from_slice(b);
+                true
+            },
+        );
+        let expected: Vec<_> = re.find_iter(text.as_bytes()).map(|m| m.range()).collect();
+        assert_eq!(got, expected);
     }
 
     #[test]
@@ -1120,6 +1215,9 @@ mod tests {
                 // Patterns that can match nothing, next to a match that
                 // ended at a chunk boundary.
                 "a*", "b?", r"\s*",
+                // Matches that can start inside the one before (in a run
+                // of `a`s), where one runs over a chunk edge.
+                "aa", "a{3}",
             ]),
             chunk in 1usize..12,
         ) {

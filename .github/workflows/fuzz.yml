@@ -1,0 +1,85 @@
+name: Fuzz
+
+# Runs every cargo-fuzz target in fuzz/ for an hour each, once a week
+# (M21 task 3). One job per target, so each gets its hour and no job comes
+# near the 6 hour limit. A crash fails that job and uploads the input that
+# caused it as an artifact; reproduce it locally with
+#   cargo +nightly fuzz run TARGET path/to/crash-file
+# (see fuzz/README.md) and turn it into a regression test.
+#
+# The corpus (the inputs that reached new code) is cached between runs, so
+# each week starts where the last one stopped instead of from nothing.
+
+on:
+  schedule:
+    - cron: "0 3 * * 0" # Sundays 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target
+        required: false
+        default: "3600"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: buffer
+          - target: diff
+          - target: search
+          - target: merge
+          # The parser targets compile the app's config.rs and theme.rs in,
+          # so they need those files' dependencies, behind a feature.
+          - target: config
+            features: app-config
+            seeds: fuzz/seeds/config
+          - target: theme
+            features: app-theme
+            seeds: crates/app/themes
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: ${{ matrix.target }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Restore the corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Seed the corpus
+        if: matrix.seeds
+        run: |
+          mkdir -p "fuzz/corpus/${{ matrix.target }}"
+          cp ${{ matrix.seeds }}/*.toml "fuzz/corpus/${{ matrix.target }}/"
+
+      - name: Fuzz
+        working-directory: fuzz
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds || '3600' }}
+          FEATURES: ${{ matrix.features }}
+        run: |
+          cargo +nightly fuzz run "${{ matrix.target }}" ${FEATURES:+--features "$FEATURES"} -- \
+            -max_total_time="$SECONDS_PER_TARGET" -timeout=60
+
+      - name: Upload the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

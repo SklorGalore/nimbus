@@ -1,0 +1,54 @@
+# A config using every setting, from docs/manual/settings.md, as a seed
+# for the `config` fuzz target: the fuzzer mutates real-looking files
+# faster than it would find TOML syntax by itself.
+font_size = 14.0
+tab_width = 4
+soft_wrap = false
+theme = "dark"
+check_updates = false
+font = "JetBrains Mono"
+ligatures = false
+remember_zoom = true
+render_whitespace = "selection"
+indent_guides = false
+sticky_scroll = true
+minimap = false
+minimap_width = 100
+ui_font = "Inter"
+
+[keys]
+"view.toggleWrap" = ["Alt+W"]
+"file.quickOpen" = ["Primary+P", "Primary+E"]
+"edit.toggleLineComment" = ["Primary+/", "Ctrl+K Ctrl+C"]
+"app.quit" = []
+
+[languages]
+"Justfile" = "bash"
+"*.jsonc" = "json"
+"*.conf" = "lua"
+
+[encodings]
+"*.csv" = "windows-1252"
+"legacy/*.txt" = "latin1"
+"export.dat" = "utf-16le"
+
+[editor]
+auto_pairs = true
+trim_trailing_whitespace = true
+final_newline = false
+
+[editor.markdown]
+wrap = false
+auto_pairs = true
+
+[indent]
+width = 2
+tabs = false
+detect = true
+
+[indent.python]
+width = 4
+
+[indent.go]
+tabs = true
+detect = false
