@@ -640,6 +640,48 @@ mod tests {
     }
 
     #[test]
+    fn zoom_keys_resolve_to_zoom_commands() {
+        let km = km();
+        let eq = ch("=");
+        assert_eq!(
+            resolve(&km, press(&eq, KeyCode::Equal, Some("="), primary()), false),
+            Some(Command::ZoomIn)
+        );
+        let plus = ch("+");
+        assert_eq!(
+            resolve(
+                &km,
+                press(
+                    &plus,
+                    KeyCode::Equal,
+                    Some("+"),
+                    primary() | ModifiersState::SHIFT
+                ),
+                false
+            ),
+            Some(Command::ZoomIn)
+        );
+        let minus = ch("-");
+        assert_eq!(
+            resolve(
+                &km,
+                press(&minus, KeyCode::Minus, Some("-"), primary()),
+                false
+            ),
+            Some(Command::ZoomOut)
+        );
+        let zero = ch("0");
+        assert_eq!(
+            resolve(
+                &km,
+                press(&zero, KeyCode::Digit0, Some("0"), primary()),
+                false
+            ),
+            Some(Command::ResetZoom)
+        );
+    }
+
+    #[test]
     fn alt_z_toggles_wrap_by_physical_key() {
         let km = km();
         let omega = ch("Ω");
