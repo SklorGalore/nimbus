@@ -10,7 +10,7 @@
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native {
-    use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+    use muda::{ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use winit::window::Window;
 
     use crate::action;
@@ -23,7 +23,11 @@ mod native {
             &[
                 "file.new",
                 "file.open",
+                "file.openRecent",
                 "file.quickOpen",
+                "-",
+                "file.reopenClosed",
+                "session.reopenLast",
                 "-",
                 "file.save",
                 "file.saveAs",
@@ -192,6 +196,79 @@ mod native {
         Some(MenuBar { _menu: menu, items })
     }
 
+    /// The tree's context menu (M12), by action id.
+    const TREE_MENU: &[&str] = &[
+        "tree.newFile",
+        "tree.newFolder",
+        "-",
+        "tree.rename",
+        "tree.delete",
+        "-",
+        "tree.reveal",
+    ];
+
+    /// Show the tree's context menu at the pointer. A chosen item arrives
+    /// as a menu event with its action id, like the menu bar's, so it runs
+    /// through the same path.
+    pub fn show_tree_menu(window: &Window, keymap: &Keymap) {
+        let menu = Menu::new();
+        let mut items = Vec::new();
+        for id in TREE_MENU {
+            let result = if *id == "-" {
+                menu.append(&PredefinedMenuItem::separator())
+            } else if let Some(it) = item(id, keymap, &mut items) {
+                menu.append(&it)
+            } else {
+                Ok(())
+            };
+            if let Err(e) = result {
+                log::warn!("context menu item {id}: {e}");
+            }
+        }
+        popup(&menu, window);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[expect(
+        unsafe_code,
+        reason = "muda shows a context menu through the raw NSView"
+    )]
+    fn popup(menu: &Menu, window: &Window) {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = window.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+            return;
+        };
+        // SAFETY: the view comes from the live winit window borrowed for
+        // this call, so it is a valid NSView for as long as the menu is
+        // shown, which is what `show_context_menu_for_nsview` requires.
+        // The call returns when the menu closes.
+        unsafe {
+            menu.show_context_menu_for_nsview(h.ns_view.as_ptr().cast_const(), None);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[expect(unsafe_code, reason = "muda shows a context menu through the raw HWND")]
+    fn popup(menu: &Menu, window: &Window) {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = window.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::Win32(h) = handle.as_raw() else {
+            return;
+        };
+        // SAFETY: the HWND comes from the live winit window borrowed for
+        // this call, so it is valid while the menu is shown, which is what
+        // `show_context_menu_for_hwnd` requires. The call returns when the
+        // menu closes.
+        unsafe {
+            menu.show_context_menu_for_hwnd(h.hwnd.get(), None);
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[expect(
         clippy::unnecessary_wraps,
@@ -218,7 +295,12 @@ mod native {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub use native::{MenuBar, install};
+pub use native::{MenuBar, install, show_tree_menu};
+
+/// No context menus without native menus; the palette lists the tree's
+/// actions instead.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn show_tree_menu(_window: &winit::window::Window, _keymap: &crate::keymap::Keymap) {}
 
 /// No native menus on this platform.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

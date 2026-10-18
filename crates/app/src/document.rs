@@ -28,6 +28,9 @@ use crate::saver::{self, ReplacePolicy, SaveJob, SaveStep, Written};
 use nimbus_core::line_index::{IndexChunk, LineIndex};
 use nimbus_core::mapped::Limits;
 
+mod tail;
+pub use tail::Tail;
+
 /// Copy and Cut refuse selections longer than this: 64 MiB. The text is
 /// copied into memory, then again by the system clipboard, and Select All
 /// in a 4 GB file must not try.
@@ -61,6 +64,9 @@ pub enum DiskChange {
     None,
     /// Reloaded: there were no unsaved edits.
     Reloaded,
+    /// The file grew at its end, and the new bytes were appended
+    /// ([`Document::append_external`]): no undo step, still clean.
+    Appended,
     /// Changed on disk, and there are unsaved edits here.
     Conflict,
     /// Changed on disk, but a mapped document does not reload by itself
@@ -76,6 +82,9 @@ pub enum DiskChange {
         /// Whether it was reloaded.
         reloaded: bool,
     },
+    /// A following mapped document's file grew again soon after it was
+    /// last extended: look again at this time.
+    Later(Instant),
     /// Deleted on disk.
     Deleted,
     /// Changed on disk, but reading it failed.
@@ -414,7 +423,7 @@ impl Solo {
 #[derive(Debug, Default)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "independent facts about one open file, not a state machine"
+    reason = "independent facts about the document, not a state machine"
 )]
 pub struct Document {
     /// The text: a rope, or a piece table over a mapped file (see
@@ -500,6 +509,20 @@ pub struct Document {
     /// shares storage with the buffer until edits part them, so this costs
     /// little; mapped documents keep none.
     disk_text: DiskText,
+    /// A stand-in for a restored tab whose file has not been read yet
+    /// ([`Document::placeholder`]).
+    placeholder: bool,
+    /// Whether the file grew on disk while open, and whether the view
+    /// follows its end (M12's Follow Tail).
+    pub tail: Tail,
+    /// When a following mapped document last mapped its grown file, so a
+    /// log written in many small pieces is mapped again a few times a
+    /// second, not on every write.
+    extended_at: Option<Instant>,
+    /// Earlier, shorter mappings of the file that Follow Tail replaced,
+    /// which snapshots or undo steps may still hold. On Windows a save
+    /// waits for these too before replacing the file.
+    superseded: Vec<std::sync::Weak<MappedFile>>,
 }
 
 /// A snapshot of the text as the file held it, or none; a wrapper only
@@ -678,10 +701,15 @@ impl Document {
         let Some(mapped) = self.buffer.as_mapped_mut() else {
             return false;
         };
+        let last = chunk.is_done();
         match mapped.merge_index(chunk) {
             Ok(()) => {
                 // Line numbers changed under the highlighter's checkpoints.
                 self.syntax.touch();
+                if last {
+                    // The file may have grown while it was counted.
+                    self.count_the_rest();
+                }
                 true
             }
             Err(e) => {
@@ -695,6 +723,42 @@ impl Document {
     #[must_use]
     pub fn untitled() -> Self {
         Self::default()
+    }
+
+    /// A stand-in for `path` in a restored tab that has not been shown yet:
+    /// the name for the tab bar and nothing else, no text read and no
+    /// syntax state. Restoring ten tabs then costs one file's work before
+    /// the first frame; the app swaps in the real document when the tab is
+    /// first shown, or when a worker has read it.
+    ///
+    /// It has no [`Document::canonical`] path, so everything that finds
+    /// open files by path (file watching, find and replace in files, the
+    /// tree's marker) treats the file as not open and reads the disk. It is
+    /// never dirty, so saving all and the quit prompt pass it by.
+    #[must_use]
+    pub fn placeholder(path: PathBuf) -> Self {
+        Self {
+            path: Some(path),
+            placeholder: true,
+            ..Self::default()
+        }
+    }
+
+    /// The file was moved to `path` (renamed in the tree): save there from
+    /// now on. Its contents did not change, so nothing is read again and
+    /// the edits and history stay.
+    pub fn moved_to(&mut self, path: PathBuf) {
+        if !self.placeholder {
+            self.canonical = Some(io::canonical(&path));
+            self.deleted = false;
+        }
+        self.path = Some(path);
+    }
+
+    /// Whether this is a [`Document::placeholder`].
+    #[must_use]
+    pub fn is_placeholder(&self) -> bool {
+        self.placeholder
     }
 
     /// An untitled document holding `text`, unmodified.
@@ -862,11 +926,57 @@ impl Document {
             return DiskChange::None; // our own save, or no real change
         }
         self.deleted = false;
+        let grew = self.disk.is_some_and(|d| stamp.len > d.len);
+        if grew && self.tail == Tail::Fixed {
+            self.tail = Tail::Grew;
+        }
+        if grew
+            && !self.buffer.is_mapped()
+            && !self.is_dirty()
+            && let Some(old) = self.disk
+        {
+            match self.append_external(&path, old, stamp) {
+                Ok(true) => return DiskChange::Appended,
+                Ok(false) => {} // not a plain append: reload as before
+                Err(e) => return DiskChange::Failed(e.to_string()),
+            }
+        }
         if let Some(mapping) = &self.mapping {
             // A document still reading the temp file of a save that could
             // not replace this file is not reading this file: cutting it
             // short takes nothing from under the document.
             let truncated = mapping.temp_path().is_none() && stamp.len < mapping.file_len();
+            if grew
+                && !truncated
+                && self.tail == Tail::Following
+                && mapping.temp_path().is_none()
+                && !self.is_dirty()
+            {
+                let now = Instant::now();
+                if let Some(at) = self.extended_at
+                    && now.duration_since(at) < tail::EXTEND_GAP
+                {
+                    return DiskChange::Later(at + tail::EXTEND_GAP);
+                }
+                // Every attempt counts, so a file that keeps failing is not
+                // mapped again on every write.
+                self.extended_at = Some(now);
+                match self.extend_mapping(&path, stamp) {
+                    Ok(tail::Extended::Appended) => return DiskChange::Appended,
+                    Ok(tail::Extended::Shrunk) => {
+                        return self.mapped_disk_changed(true, languages, carets);
+                    }
+                    // Rewritten or replaced (a rotated log) while followed:
+                    // read it again, as a rope document would be.
+                    Ok(tail::Extended::NotAppended) => {
+                        return match self.reload(languages, carets) {
+                            Ok(()) => DiskChange::Reloaded,
+                            Err(e) => DiskChange::Failed(e.to_string()),
+                        };
+                    }
+                    Err(e) => return DiskChange::Failed(e),
+                }
+            }
             return self.mapped_disk_changed(truncated, languages, carets);
         }
         if self.is_dirty() {
@@ -1390,10 +1500,9 @@ impl Document {
         };
         // One reference is `replace.old` itself. More means a search (or a
         // line counter on its way out) still maps the old file.
-        let held = replace
-            .old
-            .as_ref()
-            .is_some_and(|o| Arc::strong_count(o) > 1);
+        let held = replace.old.as_ref().is_some_and(|o| {
+            Arc::strong_count(o) > 1 || self.superseded.iter().any(|w| w.strong_count() > 0)
+        });
         if !held {
             return self.replace_now();
         }

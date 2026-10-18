@@ -16,7 +16,7 @@ use nimbus_core::{Folds, LineEnding, Selection, Selections, Text, column, long_l
 use nimbus_render::{ColorRun, Gpu, Metrics, Style};
 use nimbus_syntax::highlight::{Highlighter, Span};
 
-use crate::document::{Carets, Document, Solo};
+use crate::document::{Carets, Document, Solo, Tail};
 use crate::find::{Field, FindBar};
 use crate::theme::{Color, Theme, Ui};
 
@@ -518,6 +518,8 @@ pub enum StatusItem {
     LineEnding,
     /// The encoding: "UTF-8", "Windows-1252", …
     Encoding,
+    /// "Follow Tail" or "Following" (M12), once the file has grown.
+    Follow,
 }
 
 /// Scroll state and per-frame scratch space.
@@ -552,10 +554,10 @@ pub struct View {
     runs: Vec<ColorRun>,
     /// Reused for the right side of the status bar.
     status: String,
-    /// The character columns of the items that open choices when clicked,
-    /// within `status`: indentation ("Spaces: 4"), line ending ("CRLF")
-    /// and encoding ("UTF-8").
-    status_items: [(StatusItem, Range<usize>); 3],
+    /// The character columns of the items that act when clicked, within
+    /// `status`: indentation ("Spaces: 4"), line ending ("CRLF"), encoding
+    /// ("UTF-8") and Follow Tail (M12). Empty ranges are items not shown.
+    status_items: [(StatusItem, Range<usize>); 4],
     /// How many bytes of text the last frame showed, for the scrollbar's
     /// thumb. Kept as a count rather than an end, so it stays right while
     /// a drag moves the scroll before the next frame.
@@ -848,6 +850,7 @@ impl View {
             (StatusItem::Indent, 0..0),
             (StatusItem::LineEnding, 0..0),
             (StatusItem::Encoding, 0..0),
+            (StatusItem::Follow, 0..0),
         ];
         let from = out.chars().count();
         out.push_str(&doc.indent.label());
@@ -868,7 +871,6 @@ impl View {
         if doc.read_only.is_some() {
             out.push_str("   Read-only");
         }
-        self.status_items = items;
         if let Some(name) = doc.language_name() {
             out.push_str("   ");
             out.push_str(name);
@@ -878,6 +880,19 @@ impl View {
             let pct = t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64;
             let _ = write!(out, "   Counting lines {pct:.0}%");
         }
+        // Offered once the file has grown on disk; a click toggles it.
+        let follow = match doc.tail {
+            Tail::Fixed => None,
+            Tail::Grew => Some("Follow Tail"),
+            Tail::Following => Some("Following"),
+        };
+        if let Some(label) = follow {
+            out.push_str("   ");
+            let from = out.chars().count();
+            out.push_str(label);
+            items[3].1 = from..out.chars().count();
+        }
+        self.status_items = items;
         &self.status
     }
 

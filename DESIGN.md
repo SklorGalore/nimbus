@@ -47,8 +47,6 @@ after a rebuild, in each milestone's Results.
 - Bidirectional and right-to-left text. Decided at approval; the renderer
   assumes left-to-right runs.
 - Multiple windows. One window with tabs.
-- Session restore, until M12 (drafted): reopening the last files is a
-  nice-to-have after M9.
 - Native menu bar on Linux (§4.4).
 
 ## 3. Platform
@@ -107,6 +105,14 @@ the only backend. A narrow `Buffer` trait has two implementations:
    threshold the same piece table sits over the file's bytes in memory
    instead of a mapping, since the rope attempt has already read them and
    a mapping could crash if another program truncates the file.
+
+A file that grows at its end while open and has no unsaved edits (a log
+being written) is appended to rather than reloaded (M12): a rope reads
+only the new bytes; a mapped document that follows the file's end maps
+it again at its new length and swaps that mapping in as the piece
+table's source (`MappedBuffer::extend_source`), after checking that the
+file still holds the old mapping's first and last bytes. Neither marks
+the document dirty or records undo. A file that shrank reloads, as in M6.
 
 The interface is intentionally narrow so both backends stay honest. Built
 in M2 and extended in M7 (`crates/core/src/buffer.rs`), reading and editing
@@ -432,9 +438,13 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
   through edits by tracked regions (line ranges shifted per edit, no
   re-diff), so taking a side is one undoable `replace`; merges, like
   compares, are computed on a worker while the tab shows its texts.
-- **Window state**: the sidebar's visibility and width are remembered in
-  `state.toml` beside the config. Nimbus never writes the user's
-  `config.toml`.
+- **Window state and sessions**: the sidebar's visibility and width, the
+  window's size and place (with its display's name, M12), recent files and
+  one session per project folder (open files with cursors and views,
+  expanded folders, the sidebar's mode) are remembered in `state.toml`
+  beside the config. Nimbus never writes the user's `config.toml`.
+  `nimbus FOLDER` and `nimbus` alone restore a session; `nimbus FILE` and
+  `--no-session` neither restore nor save one.
 - **Find / replace** (`Primary+F`, `Primary+H` on Windows and Linux,
   `Primary+Alt+F` on macOS where `Cmd+H` hides the app): an inline bar at the
   top of the view, incremental, with match count and regex and case toggles.
@@ -522,6 +532,7 @@ it.
 | `fontdb` | 0.24 | system font discovery and fallback | M8 |
 | `imara-diff` | 0.2 | line diff (Myers) over our own tokens | M9 |
 | `ureq` | 3 | HTTPS for the update check; rustls with the system's certificate store | M15 |
+| `trash` | 5 | the system trash for Delete in the tree | M12 |
 
 ## 8. Milestones
 
@@ -543,7 +554,7 @@ introduces and points at the code.
 | 9 | Compare and merge | **Done** | Compare files side by side; two-way and three-way merge; `--diff` and `--merge` for git | [m9](docs/milestones/m9-diff.md) |
 | 10 | Find in files | **Done** | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
 | 11 | Everyday editing | **Done** | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
-| 12 | Workspace | **Next** | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
+| 12 | Workspace | **Done** | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
 | 13 | Split views and folding | In progress | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
 | 14 | Languages, second pass | In progress | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
 | 15 | Distribution | Done | Installers and packages for every platform (unsigned), an update check, signed checksums | [m15](docs/milestones/m15-distribution.md) |
@@ -712,5 +723,7 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-17 | Injections: child trees keyed by host node id, kept one screen either side of the view, parsed within the frame's 2 ms budget at one child per frame at least; Rust's injection query not used | §4.2, m14 |
 | 2026-10-17 | Spans carry a capture table per grammar so the inner language's colours win inside injections; wide nodes are queried child by child | §4.2, m14 |
 | 2026-10-18 | Per-language soft wrap is `[editor.NAME] wrap`, following M11's `[editor.NAME]` and `[indent.NAME]` tables rather than the planned `[languages.NAME]` (that table maps file patterns); Markdown wraps by default | §4.4, m14 |
+| 2026-10-18 | M12: `nimbus FILE` leaves sessions alone and `--no-session` neither restores nor saves; restored tabs other than the front one load after the first frame; on macOS the tree renames with Enter and opens with `Cmd+Down`; the trash crate asks `NSFileManager`, not Finder, so no automation prompt | §4.4, m12 |
+| 2026-10-18 | M12 Follow Tail: a grown file is appended to, not reloaded; a following mapped document maps the file again and swaps the mapping in, checked by its first and last 64 bytes; undo runs belong to a document by lineage number, not source pointer | §4.1, m12 |
 | 2026-10-18 | M17: a huge file whose start only *looks* like Windows-1252 keeps M7's editable byte path; read-only is for huge files whose encoding is known (UTF-16 byte order mark, explicit choice), since a guess should not take editing away | §4.1, m17 |
 | 2026-10-18 | M17: ISO-8859-1 is true Latin-1 (byte = code point), separate from Windows-1252, which `encoding_rs` substitutes for it per the web standard | §4.1, m17 |
