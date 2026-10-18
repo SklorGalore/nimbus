@@ -31,6 +31,8 @@ mod mapping;
 mod menu;
 mod merge_view;
 mod minimap;
+#[cfg(target_os = "macos")]
+mod open_with;
 mod picker;
 mod preview;
 mod replace_files;
@@ -706,6 +708,9 @@ fn main() {
     log::debug!("startup: event loop ready at {:?}", started.elapsed());
 
     let proxy = event_loop.create_proxy();
+    // Finder's Open With and Dock drops (open_with.rs).
+    #[cfg(target_os = "macos")]
+    open_with::install(proxy.clone());
     let mut app = App::new(
         options,
         started,
