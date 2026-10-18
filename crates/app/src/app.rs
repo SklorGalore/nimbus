@@ -6606,6 +6606,15 @@ fn edit_field(
 }
 
 impl App {
+    /// Starting the window failed: say why (stderr, and a dialog when
+    /// launched without a terminal) and quit with exit code 1, so scripts
+    /// and the Dock both see the failure instead of a silent exit.
+    fn fail_start(&mut self, event_loop: &ActiveEventLoop, msg: &str) {
+        crate::fatal(&self.options, msg);
+        self.exit_code = 1;
+        event_loop.exit();
+    }
+
     /// The pointer moved: carry on whatever drag is under way, then
     /// update what hovering shows.
     fn cursor_moved(&mut self, position: PhysicalPosition<f64>) {
@@ -6796,8 +6805,7 @@ impl ApplicationHandler<AppEvent> for App {
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
-                log::error!("could not create window: {e}");
-                event_loop.exit();
+                self.fail_start(event_loop, &format!("Could not create a window: {e}"));
                 return;
             }
         };
@@ -6809,13 +6817,11 @@ impl ApplicationHandler<AppEvent> for App {
         let context = match self.gpu_init.take().map(JoinHandle::join) {
             Some(Ok(Ok(context))) => context,
             Some(Ok(Err(e))) => {
-                log::error!("{e}");
-                event_loop.exit();
+                self.fail_start(event_loop, &format!("Could not start the GPU: {e}"));
                 return;
             }
             Some(Err(_)) | None => {
-                log::error!("GPU setup thread did not complete");
-                event_loop.exit();
+                self.fail_start(event_loop, "GPU setup thread did not complete");
                 return;
             }
         };
@@ -6824,8 +6830,7 @@ impl ApplicationHandler<AppEvent> for App {
         let font = match Font::bundled() {
             Ok(f) => f,
             Err(e) => {
-                log::error!("{e}");
-                event_loop.exit();
+                self.fail_start(event_loop, &format!("Could not load the font: {e}"));
                 return;
             }
         };
@@ -6839,8 +6844,7 @@ impl ApplicationHandler<AppEvent> for App {
         ) {
             Ok(gpu) => self.gpu_ready(gpu),
             Err(e) => {
-                log::error!("{e}");
-                event_loop.exit();
+                self.fail_start(event_loop, &format!("Could not set up drawing: {e}"));
                 return;
             }
         }

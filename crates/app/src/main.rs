@@ -10,6 +10,7 @@ mod columns;
 mod compare;
 mod compare_panel;
 mod config;
+mod crash;
 mod debug;
 mod docs;
 mod document;
@@ -123,7 +124,8 @@ pub struct Options {
     /// result saves to `RESULT`; the exit code says whether it was saved
     /// with no conflicts left.
     pub merge: Option<MergeArgs>,
-    /// `--no-session`: neither restore the last session nor save this one.
+    /// `--no-session`: neither restore the last session nor save this one,
+    /// and leave `state.toml` alone (recent files, window position) too.
     pub no_session: bool,
     /// `--workspace NAME`: open the workspace saved under that name (M19).
     pub workspace: Option<String>,
@@ -136,6 +138,13 @@ impl Options {
     #[must_use]
     pub fn unattended(&self) -> bool {
         self.smoke || self.screenshot.is_some() || self.bench_typing > 0 || self.headless.is_some()
+    }
+
+    /// Whether this run writes `state.toml`: not when unattended, and not
+    /// with `--no-session`, which promises to leave no trace.
+    #[must_use]
+    pub fn remembers(&self) -> bool {
+        !self.unattended() && !self.no_session
     }
 }
 
@@ -167,6 +176,22 @@ pub fn print_err(line: &str) {
     eprintln!("{line}");
 }
 
+/// Report an error that stops Nimbus from starting: on stderr, and, when
+/// the run is interactive, in a dialog too, since an app launched from a
+/// file manager or the Dock has no terminal to print to. The caller exits
+/// with a non-zero code.
+pub fn fatal(options: &Options, msg: &str) {
+    print_err(&format!("nimbus: {msg}"));
+    if !options.smoke && options.screenshot.is_none() && options.headless.is_none() {
+        MessageDialog::new()
+            .set_level(MessageLevel::Error)
+            .set_title("Nimbus")
+            .set_description(msg)
+            .set_buttons(MessageButtons::Ok)
+            .show();
+    }
+}
+
 /// The scale factor to render at: the window's, unless a debug build sets
 /// `NIMBUS_SCALE` to test another density on one display (winit's own
 /// override only works on X11).
@@ -193,7 +218,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index]] [--debug-overlay] [--preview] [--linear-blend] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]]] [--debug-overlay] [--preview] [--linear-blend] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -439,18 +464,7 @@ fn open_files(options: &Options, languages: &Languages) -> (Vec<Document>, PathB
                 docs.push(doc);
             }
             Err(e) => {
-                let msg = format!("Cannot open {}: {e}", path.display());
-                print_err(&format!("nimbus: {msg}"));
-                // Launched from a file manager there is no terminal, so also
-                // show the reason in a dialog.
-                if !options.smoke && options.screenshot.is_none() && options.headless.is_none() {
-                    MessageDialog::new()
-                        .set_level(MessageLevel::Error)
-                        .set_title("Nimbus")
-                        .set_description(msg)
-                        .set_buttons(MessageButtons::Ok)
-                        .show();
-                }
+                fatal(options, &format!("Cannot open {}: {e}", path.display()));
                 std::process::exit(1);
             }
         }
@@ -600,6 +614,7 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("nimbus=info"))
         .format_timestamp_millis()
         .init();
+    crash::install();
     let options = parse_options();
     if let Some(backend) = options.backend {
         io::force_backend(backend);
@@ -616,6 +631,7 @@ fn main() {
     };
 
     let (mut config, mut warnings) = Config::load();
+    warnings.extend(crash::take_report());
     if let Some(theme) = &options.theme {
         config.theme.clone_from(theme);
     }

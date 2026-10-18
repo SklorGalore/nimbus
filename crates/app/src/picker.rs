@@ -207,32 +207,38 @@ impl Picker {
                 for r in roots.iter().skip(1) {
                     walk.add(r);
                 }
-                walk.hidden(true).build_parallel().run(|| {
-                    let injector = injector.clone();
-                    let (roots, stop, count, recent) = (
-                        Arc::clone(&roots),
-                        Arc::clone(&stop),
-                        Arc::clone(&count),
-                        Arc::clone(&recent),
-                    );
-                    Box::new(move |entry| {
-                        if stop.load(Ordering::Relaxed)
-                            || count.load(Ordering::Relaxed) >= MAX_FILES
-                        {
-                            return ignore::WalkState::Quit;
-                        }
-                        let Ok(entry) = entry else {
-                            return ignore::WalkState::Continue;
-                        };
-                        if entry.file_type().is_some_and(|t| t.is_file()) {
-                            count.fetch_add(1, Ordering::Relaxed);
-                            if !recent.contains(entry.path()) {
-                                push_file(&injector, &roots, entry.into_path());
+                // Dotfiles (`.github/`, `.gitignore`, `.env.example`) are files
+                // people open, so they are listed; `.git` is git's own store
+                // and is not, as in Find in Files. Ignored files stay out.
+                walk.hidden(false)
+                    .filter_entry(not_git_dir)
+                    .build_parallel()
+                    .run(|| {
+                        let injector = injector.clone();
+                        let (roots, stop, count, recent) = (
+                            Arc::clone(&roots),
+                            Arc::clone(&stop),
+                            Arc::clone(&count),
+                            Arc::clone(&recent),
+                        );
+                        Box::new(move |entry| {
+                            if stop.load(Ordering::Relaxed)
+                                || count.load(Ordering::Relaxed) >= MAX_FILES
+                            {
+                                return ignore::WalkState::Quit;
                             }
-                        }
-                        ignore::WalkState::Continue
-                    })
-                });
+                            let Ok(entry) = entry else {
+                                return ignore::WalkState::Continue;
+                            };
+                            if entry.file_type().is_some_and(|t| t.is_file()) {
+                                count.fetch_add(1, Ordering::Relaxed);
+                                if !recent.contains(entry.path()) {
+                                    push_file(&injector, &roots, entry.into_path());
+                                }
+                            }
+                            ignore::WalkState::Continue
+                        })
+                    });
                 done.store(true, Ordering::Relaxed);
                 // Wake the app once more so "loading" can end on screen.
                 notify_done();
@@ -664,6 +670,11 @@ fn push_file(injector: &nucleo::Injector<Item>, roots: &[PathBuf], path: PathBuf
     });
 }
 
+/// For the Go to File walk: skip the `.git` folder, list everything else.
+fn not_git_dir(entry: &ignore::DirEntry) -> bool {
+    entry.file_name() != ".git"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,13 +738,19 @@ mod tests {
         std::fs::write(dir.join("README.md"), "").unwrap();
         std::fs::write(dir.join("target/junk.rs"), "").unwrap();
         std::fs::write(dir.join(".ignore"), "target/\n").unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git/config"), "").unwrap();
         let mut p = Picker::files(
             std::slice::from_ref(&dir),
             vec![dir.join("README.md")],
             no_notify(),
         );
         settle(&mut p);
-        assert_eq!(p.match_count(), 2, "target/ is ignored; README listed once");
+        assert_eq!(
+            p.match_count(),
+            3,
+            "target/ is ignored and .git skipped; the .ignore dotfile is listed; README once"
+        );
         match p.chosen() {
             Some(Item::File(path)) => assert_eq!(path, dir.join("README.md"), "recent first"),
             other => panic!("{other:?}"),
