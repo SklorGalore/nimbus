@@ -2271,7 +2271,7 @@ fn field_selection(field: &Solo, text: &str) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::Solo;
+    use crate::document::{Editor, Solo};
 
     fn layout(len_lines: usize) -> Layout {
         let metrics = Metrics {
@@ -2568,6 +2568,97 @@ mod tests {
         ed.insert("z").unwrap();
         v.follow(&d);
         assert!(v.folds.is_empty());
+    }
+
+    /// `NIMBUS_FOLD_FILE=$PWD/bench/out/log-4gb.log cargo test --release -p nimbus -- --ignored --nocapture fold_bench`
+    ///
+    /// M13 task 8: on a huge file, the CPU side of what the done-when
+    /// list times per frame (drawing itself needs a GPU, and costs what
+    /// one unfolded screen costs): folding and unfolding one region,
+    /// scrolling a screen at a time through a thousand folds, and a
+    /// keystroke in one pane with a second pane on the same document
+    /// following it.
+    #[test]
+    #[ignore = "benchmark: needs NIMBUS_FOLD_FILE and a release build"]
+    fn fold_bench() {
+        use std::time::{Duration, Instant};
+        let Ok(path) = std::env::var("NIMBUS_FOLD_FILE") else {
+            return;
+        };
+        let report = |what: &str, mut samples: Vec<Duration>| {
+            samples.sort();
+            let pick = |p: usize| samples[(samples.len() - 1) * p / 100];
+            println!(
+                "{what}: p50 {:?}, p99 {:?}, max {:?} ({} samples)",
+                pick(50),
+                pick(99),
+                samples[samples.len() - 1],
+                samples.len()
+            );
+        };
+        let mut doc = Document::open(std::path::Path::new(&path)).unwrap();
+        doc.journal_mut().keep = true;
+        let len = doc.buffer.len_bytes();
+        println!("{} MB, mapped: {}", len >> 20, doc.buffer.is_mapped());
+        let screen = layout(1_000_000);
+        let fold_at = |t: &dyn Text, p: usize| {
+            let first = t.line_span(p);
+            let mut last = first;
+            for _ in 0..20 {
+                last = t.line_span(last.next.unwrap_or(last.start));
+            }
+            nimbus_core::fold::lines_range(t, first.start, last.start)
+        };
+        // One region, folded and unfolded.
+        let mut view = View::default();
+        let mut samples = Vec::new();
+        for i in 1..200 {
+            let p = len / 200 * i;
+            let t0 = Instant::now();
+            let f = fold_at(&doc.buffer, p).unwrap();
+            view.folds.fold(f.clone());
+            view.folds.unfold_line(doc.buffer.line_span(f.start));
+            samples.push(t0.elapsed());
+        }
+        report("fold + unfold one region", samples);
+        // A thousand folds, then scrolling a screen at a time.
+        let t0 = Instant::now();
+        let regions: Vec<_> = (1..=1000)
+            .filter_map(|i| fold_at(&doc.buffer, len / 1001 * i))
+            .collect();
+        view.folds.fold_many(regions);
+        println!(
+            "1000 folds made in {:?}, {} bytes",
+            t0.elapsed(),
+            view.folds.len() * 16
+        );
+        let mut samples = Vec::new();
+        for i in 0..300 {
+            view.scroll_top = len / 300 * i;
+            let t0 = Instant::now();
+            view.scroll_by(screen.bottom - screen.top, &doc, &screen, 4);
+            let _ = view.hit(screen.text_left, screen.bottom - 1.0, &doc, &screen, 4);
+            samples.push(t0.elapsed());
+        }
+        report("scroll a screen with 1000 folds (walk + hit)", samples);
+        // Two panes on one document: type in one, the other follows.
+        let (mut typing, mut watching) = (Carets::default(), Carets::default());
+        let mut other = View::default();
+        let mut samples = Vec::new();
+        for i in 0..300 {
+            let at = doc.buffer.line_span(len / 301 * i).start;
+            Editor::new(&mut doc, &mut watching).click(at, false);
+            Editor::new(&mut doc, &mut typing).click(at, false);
+            let t0 = Instant::now();
+            Editor::new(&mut doc, &mut typing).insert("x").unwrap();
+            view.follow(&doc);
+            other.follow(&doc);
+            let _ = watching.fit(&doc);
+            doc.journal_mut().trim();
+            samples.push(t0.elapsed());
+        }
+        report("keystroke with a second pane following", samples);
+        println!("folds left after typing: {}", view.folds.len());
     }
 
     #[test]

@@ -3967,10 +3967,10 @@ impl App {
                 theme: &mut self.theme,
                 find,
                 message: chord_message.as_ref().or(self.message.as_ref()),
-                cursor_visible: is_focused
-                    && self.blink.visible
-                    && self.picker.is_none()
-                    && !self.sidebar.focused,
+                // Only the focused group's cursor blinks; another group
+                // showing the same file shows its cursor still.
+                cursor_visible: !is_focused
+                    || (self.blink.visible && self.picker.is_none() && !self.sidebar.focused),
                 preedit: if is_focused {
                     self.preedit.as_ref()
                 } else {

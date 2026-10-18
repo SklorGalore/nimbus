@@ -66,7 +66,8 @@ comment = { italic = true }
 The compare view (M9) has its own `[ui]` keys: `diff_added`,
 `diff_removed` and `diff_changed` for the row backgrounds, `diff_word` for
 the changed words within a line, `diff_filler` for the rows one side has
-no line for, and `merge_conflict` for the merge view.
+no line for, and `merge_conflict` for the merge view. `fold_chip` (M13) is
+the background of the `… 12 lines` chip after a folded line.
 
 Markdown prose uses `text.title` for headings, `text.emphasis` (italic in
 the built-in themes) and `text.strong` (bold), `text.literal` for code
