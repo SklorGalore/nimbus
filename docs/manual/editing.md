@@ -200,9 +200,12 @@ wrapped.
 
 Save (`Cmd+S` / `Ctrl+S`) writes the file atomically. Save As…
 (`Cmd+Shift+S` / `Ctrl+Shift+S`) picks a new name. Nimbus keeps the
-file's line endings, a byte order mark if it had one, and any bytes that
-are not valid UTF-8, so a file you open and save without editing comes
-back byte for byte.
+file's encoding, its line endings, a byte order mark if it had one, and
+any bytes it could not read as text, so a file you open and save without
+editing comes back byte for byte. If the file's encoding cannot hold a
+character you typed, the save stops and offers to save as UTF-8 instead;
+Save with Encoding and Change Line Endings convert a file on purpose.
+See [Encodings and line endings](encodings.md).
 
 Two settings change the file on save, both off by default:
 `trim_trailing_whitespace` and `final_newline` (see

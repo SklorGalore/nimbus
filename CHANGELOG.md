@@ -67,7 +67,8 @@ section before tagging.
   the files that were open with their cursors and scroll positions, the
   open folders in the tree and the sidebar's mode. `nimbus FILE` and
   `--no-session` leave sessions alone. Only the front tab is read before
-  the window appears.
+  the window appears. Editor groups, their widths and each tab's folds
+  come back too.
 - Open Recent (`Primary+Shift+O`), recent files first in the file opener,
   and Reopen Closed Tab (`Primary+Shift+T`).
 - New File, New Folder, Rename (`F2`; `Enter` on macOS), Move to Trash and
@@ -77,6 +78,16 @@ section before tagging.
   lines, without becoming unsaved, and Follow Tail in the status bar keeps
   the view at the end. Works on the 4 GB mapped files too.
 - The window comes back at its size and place.
+- Encodings: files in UTF-16 (by their byte order mark) and Windows-1252
+  (guessed from the first 64 KB) open, edit and save back in their own
+  encoding, with ISO-8859-1, the other Windows and ISO-8859 tables, KOI8
+  and Mac Roman by choice. The encoding and line ending show in the status
+  bar; click them, or run Reopen with Encoding…, Save with Encoding… and
+  Change Line Endings to LF/CRLF (one undo step). `--encoding NAME` and
+  the `[encodings]` table in `config.toml` skip the guess. A character the
+  encoding cannot hold stops the save and offers UTF-8 instead. Files of
+  256 MB or more in a known other encoding open read-only. East Asian
+  encodings are in builds with `--features east-asian`.
 
 ### Changed
 

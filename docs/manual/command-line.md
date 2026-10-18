@@ -32,10 +32,11 @@ does not overwrite your session.
 | `--search PATTERN` | Open with the sidebar's Search panel searching the project folder for `PATTERN`. |
 | `--wrap` | Start every tab with soft wrap on, whatever the config says. |
 | `--theme NAME` | Use this theme instead of the config's `theme`: `dark`, `light`, or one of your own. |
+| `--encoding NAME` | Read the files named on the command line in this encoding instead of guessing, and save them in it: `utf-8`, `utf-16le`, `windows-1252`, `latin1`, … (see [Encodings](encodings.md#encoding-names)). An unknown name is an error. |
 | `--diff OLD NEW` | Open `NEW` in a tab, compared with `OLD` (see [Compare and merge](compare-and-merge.md#comparing)). |
 | `--merge BASE LOCAL REMOTE` | Open a three-way merge of the three files. The result saves to `LOCAL` unless `-o` says otherwise. The exit code is 0 only if the result was saved with no conflicts left, 1 otherwise. |
 | `-o FILE`, `--output FILE` | With `--merge`: where the result saves. |
-| `--version`, `-V` | Print the version (`nimbus 0.5.0`) and exit. |
+| `--version`, `-V` | Print the version (`nimbus 0.6.0`) and exit. |
 | `--help`, `-h` | Print a one-line usage summary and exit. |
 
 An unknown option, or an option missing its value, prints an error and
@@ -49,6 +50,7 @@ code 1.
 nimbus .                                  # this folder, with its tabs from last time
 nimbus src/main.rs --find TODO            # open a file, searching for TODO
 nimbus . --search 'fn \w+_test'           # search the project on start
+nimbus --encoding windows-1252 export.csv # skip the encoding guess
 nimbus --diff old/config.toml config.toml # what changed?
 nimbus --merge base.rs mine.rs theirs.rs -o merged.rs; echo $?
 ```

@@ -74,6 +74,10 @@ When you open the folder again, the session comes back:
 - the files that were open, in the same order, with the same tab in
   front;
 - each file's cursor and scroll position;
+- side-by-side editor groups, their widths and which tab was in front of
+  each; a file open in two groups comes back shown in both;
+- folds, for files that have not changed on disk since (Nimbus checks
+  the file's size and time);
 - the folders that were open in the file tree, and whether the sidebar
   showed Files or Search.
 
@@ -92,14 +96,15 @@ Notes:
   quits. Sessions for the last 20 project folders are kept.
 - **Untitled tabs are not saved**, and neither is unsaved text: Nimbus
   has no autosave, and quitting still asks about unsaved changes.
-- Only the front tab is read before the window appears; the other tabs
-  show their names at once and their text loads a moment later, or as
-  soon as you click one.
+- Only the front tabs (one per group) are read before the window
+  appears; the other tabs show their names at once and their text loads
+  a moment later, or as soon as you click one.
 - A file that has disappeared since is left out, with a note in the
   message line. If a file changed, its cursor lands as near as it can to
   where it was.
-- Tabs come back in one group: side-by-side groups and folds are not
-  part of the session.
+- Folds are saved only for a tab with no unsaved changes. A tab with
+  more than 1,000 folds keeps only the outermost ones, and none if there
+  are still too many.
 - **Reopen Last Session** (palette, and the File menu) switches the
   window to the most recent session of a *different* project folder:
   the current one is saved first, its tabs close (tabs with unsaved

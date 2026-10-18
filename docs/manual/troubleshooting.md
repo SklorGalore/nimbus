@@ -6,8 +6,8 @@ Nimbus never contacts the network unless you ask it to.
 
 - **Check for Updates** (palette, or Help menu on macOS and Windows)
   asks GitHub for the latest release and says in the message line
-  whether it is newer than the version you are running ("Nimbus 0.6.0 is
-  available (you have 0.5.0)…") or that you are up to date. If GitHub
+  whether it is newer than the version you are running ("Nimbus 0.7.0 is
+  available (you have 0.6.0)…") or that you are up to date. If GitHub
   cannot be reached within 10 seconds, it says so.
 - **Open Latest Release Page** opens the releases page in your browser.
 - Set `check_updates = true` in `config.toml` to run the check once at
@@ -71,6 +71,21 @@ Vulkan, Metal, DirectX 12 or OpenGL; if the default choice does not
 work with your driver, try another, for example
 `WGPU_BACKEND=gl nimbus` on Linux or `WGPU_BACKEND=dx12 nimbus` on
 Windows.
+
+**Accented letters look wrong (`Ã©` for `é`, or `�`).** Nimbus guessed
+the file's encoding wrong. Click the encoding in the status bar, choose
+Reopen with Encoding, and pick the right one; to make it stick for
+files like it, add them to `[encodings]` in `config.toml`. See
+[Encodings and line endings](encodings.md).
+
+**A save says a character is not in the encoding.** The file is in an
+encoding such as Windows-1252 that has no bytes for a character you
+typed. Remove it, or let Nimbus save the file as UTF-8 instead. See
+[Saving](encodings.md#saving).
+
+**A huge file says it is read-only.** It is 256 MB or more and in an
+encoding other than UTF-8, which Nimbus does not convert at that size.
+See [Huge files in another encoding](encodings.md#huge-files-in-another-encoding).
 
 **Nimbus opens the wrong project, or old tabs.** Started with no
 arguments, Nimbus reopens the last project you worked in, not the

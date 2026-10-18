@@ -81,6 +81,28 @@ own. See [Languages](languages.md#how-a-files-language-is-chosen).
 "*.conf" = "lua"       # a language of your own
 ```
 
+### `[encodings]`
+
+Maps a file name or pattern to the encoding such files are read and
+saved in, skipping Nimbus's guess. A pattern without a `/` is matched
+against the file name. One with a `/` is matched against the file's
+whole path, usually a full path, so start it with `**/`. Encoding names
+are listed in [Encodings](encodings.md#encoding-names).
+
+```toml
+[encodings]
+"*.csv" = "windows-1252"
+"**/legacy/*.txt" = "latin1"
+"export.dat" = "utf-16le"
+```
+
+The table applies to files opened after Reload Config; tabs already
+open keep their encoding (use Reopen with Encoding for those). An
+unknown encoding name or a broken pattern is reported in the message
+line and that entry is skipped. A file of 256 MB or more given an
+encoding other than UTF-8 here opens read-only (see
+[Encodings](encodings.md#huge-files-in-another-encoding)).
+
 ### `[editor]`
 
 Editing behaviour. Each of these can also be set for one language in a
@@ -266,7 +288,7 @@ or `--bench-typing` runs.
 | `sidebar_width` | The sidebar's width in points (default `240`, at least `120`). |
 | `[window]` | The window's size and position in points, the name of the display it was on, and whether it was maximized. |
 | `[[recent]]` | The files opened lately, most recent first, at most 100. |
-| `[[sessions]]` | One session per project folder, most recent first, at most 20: the folder, the sidebar mode, the folders open in the tree, and each tab's file, cursor and scroll position (as byte offsets) and whether it was in front. |
+| `[[sessions]]` | One session per project folder, most recent first, at most 20: the folder, the sidebar mode, the folders open in the tree, the editor groups' widths, and each tab's file, cursor and scroll position (as byte offsets), its group, whether it was in front, and its folds with the file's size and time when they were saved. |
 
 You can delete it at any time to go back to the defaults: Nimbus forgets
 its sessions, recent files, window position and sidebar size. A broken

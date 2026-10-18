@@ -6,7 +6,7 @@ no separate command mode. It opens a multi-gigabyte log in a fraction of a
 second, edits with several cursors, highlights fourteen languages, and
 can compare and merge files.
 
-This manual is for people who use Nimbus. It describes version 0.5.0. If
+This manual is for people who use Nimbus. It describes version 0.6.0. If
 you want to work on Nimbus itself, start with `DESIGN.md` at the root of
 the repository instead.
 
@@ -27,16 +27,19 @@ the repository instead.
    two- and three-way merges, conflict markers.
 7. [Large files](large-files.md): what changes for huge files and very
    long lines.
-8. [Languages and highlighting](languages.md): the built-in languages,
+8. [Encodings and line endings](encodings.md): files that are not
+   UTF-8, how their encoding is found, converting encodings and line
+   endings.
+9. [Languages and highlighting](languages.md): the built-in languages,
    how a file's language is chosen, Markdown helpers.
-9. [Settings](settings.md): the config folder, every setting in
-   `config.toml`, changing key bindings, `state.toml`.
-10. [Themes, your own languages and queries](customizing.md): colour
+10. [Settings](settings.md): the config folder, every setting in
+    `config.toml`, changing key bindings, `state.toml`.
+11. [Themes, your own languages and queries](customizing.md): colour
     themes, simple languages of your own, and tree-sitter query files.
-11. [Keyboard shortcuts and commands](keybindings.md): every command with
+12. [Keyboard shortcuts and commands](keybindings.md): every command with
     its id and default keys on each platform.
-12. [Command line](command-line.md): every option `nimbus` accepts.
-13. [Updates and troubleshooting](troubleshooting.md): checking for new
+13. [Command line](command-line.md): every option `nimbus` accepts.
+14. [Updates and troubleshooting](troubleshooting.md): checking for new
     versions, files changing on disk, logs and environment variables.
 
 ## A note on keys

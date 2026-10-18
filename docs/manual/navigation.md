@@ -133,8 +133,11 @@ their marker. Click a fold's chip to unfold it.
   includes it.
 - Folding works with soft wrap on.
 - Folds belong to the tab: the same file in another group keeps its own.
-- Folds are not remembered after the tab closes, nor in the session
-  between runs.
+- Folds are kept in the
+  [session](getting-started.md#sessions-picking-up-where-you-left-off),
+  so they come back when you reopen the project, as long as the file
+  has not changed on disk. They are not kept when you close a tab and
+  reopen it.
 
 Compare and merge views do not fold this way; they hide long unchanged
 stretches instead (see [Compare and merge](compare-and-merge.md)).

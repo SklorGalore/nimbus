@@ -113,8 +113,10 @@ right, each item appears only when it applies:
 | `12 selected` | Characters selected, across all cursors (a size such as `80 MB` for very large selections). |
 | `Ln 120, Col 8` | The cursor's line and column. In a huge file, `Ln ~` means that line has not been counted yet. |
 | `Spaces: 4` or `Tabs` | How Tab and Enter indent in this file. Click it to change it (see [Editing](editing.md#indentation)). |
-| `LF` or `CRLF` | The file's line endings. Nimbus keeps whatever the file uses. |
-| `UTF-8`, `UTF-8 BOM`, `Not UTF-8` | The encoding. `Not UTF-8` means the file has bytes that are not valid UTF-8; they show as `�` and are written back unchanged unless you edit them. |
+| `LF` or `CRLF` | The file's line endings. Nimbus keeps whatever the file uses. Click it to change them (see [Line endings](encodings.md#line-endings)). |
+| `UTF-8`, `UTF-8 BOM`, `UTF-16 LE`, `Windows-1252`, … | The encoding the file is read and saved in. Click it to reopen or save the file in another one (see [Encodings](encodings.md)). |
+| `Not UTF-8` | The file is held as bytes: bytes that are not valid UTF-8 show as `�` and are written back unchanged unless you edit them. |
+| `Read-only` | A huge file in another encoding, which Nimbus shows but does not convert (see [Encodings](encodings.md#huge-files-in-another-encoding)). |
 | `Rust`, `Markdown`, … | The language used for highlighting. |
 | `Counting lines 42%` | A huge file's lines are still being counted in the background. |
 | `Follow Tail` or `Following` | The file has grown on disk since it was opened (a log being written, say). Click it to keep the view at the end as new lines arrive; it then reads `Following`. See [Following a growing file](#following-a-growing-file). |
@@ -153,7 +155,7 @@ example), Nimbus reloads it as described in
 
 On macOS and Windows, Nimbus has a menu bar: File, Edit, Selection, View
 and Help (and the Nimbus application menu on macOS). The File menu also
-has Open Recent, Reopen Closed Tab and Reopen Last Session. The menus run the
+has Open Recent, Reopen Closed Tab, Reopen Last Session, Save with Encoding and Reopen with Encoding. The menus run the
 same commands as the keys and the palette, and show your current
 shortcuts, including ones you changed in the config. Linux has no menu
 bar; the command palette lists every command instead.
@@ -184,9 +186,10 @@ side by side. Each group has its own tab strip, scrollbar and find bar.
 - **Resize** groups by dragging the divider between them. The scroll
   wheel scrolls whichever group is under the pointer.
 
-Compare and merge tabs work in a group like any other tab. Groups and
-their widths are not saved in the session: a project reopens with its
-tabs in one group.
+Compare and merge tabs work in a group like any other tab. Groups, their
+widths and each group's front tab are part of the
+[session](getting-started.md#sessions-picking-up-where-you-left-off), so
+a project reopens split the way you left it.
 
 On some Linux desktops `Ctrl+Alt+Left` and `Ctrl+Alt+Right` switch
 workspaces before Nimbus sees them; use the palette, or change the keys

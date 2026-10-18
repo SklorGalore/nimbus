@@ -3,7 +3,7 @@
 Every command in Nimbus, with its **id** (what you write in the `[keys]`
 table of `config.toml`), its **title** (what the command palette and
 menus show) and its default keys. This list is made from the editor's
-own command table, so it matches the build it describes (version 0.5.0).
+own command table, so it matches the build it describes (version 0.6.0).
 
 - Commands without a key are run from the command palette
   (`Cmd+Shift+P` / `Ctrl+Shift+P`).
@@ -36,6 +36,8 @@ screen. Rebind them, or use the palette.
 | Fold or unfold a line | click the marker in the gutter | click the marker in the gutter |
 | Unfold | click the `… N lines` chip | click the `… N lines` chip |
 | Change this file's indentation | click `Spaces: 4` or `Tabs` in the status bar | click `Spaces: 4` or `Tabs` in the status bar |
+| Change line endings | click `LF` or `CRLF` in the status bar | click `LF` or `CRLF` in the status bar |
+| Reopen or save in another encoding | click the encoding (`UTF-8`) in the status bar | click the encoding (`UTF-8`) in the status bar |
 | Resize the sidebar or a group | drag its edge | drag its edge |
 | Turn Follow Tail on or off | click `Follow Tail` or `Following` in the status bar | click `Follow Tail` or `Following` in the status bar |
 | New File, New Folder, Rename, Move to Trash, Reveal | right-click a row of the file tree | right-click a row of the file tree (Windows); the palette on Linux |
@@ -77,6 +79,8 @@ These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
 | Reopen Last Session | `session.reopenLast` | — | — |
 | Save | `file.save` | `Cmd+S` | `Ctrl+S` |
 | Save As… | `file.saveAs` | `Cmd+Shift+S` | `Ctrl+Shift+S` |
+| Reopen with Encoding… | `file.reopenWithEncoding` | — | — |
+| Save with Encoding… | `file.saveWithEncoding` | — | — |
 | Close Tab | `file.close` | `Cmd+W` | `Ctrl+W` |
 | Quit | `app.quit` | `Cmd+Q` | `Ctrl+Q` |
 | Next Tab | `tab.next` | `Ctrl+Tab` | `Ctrl+Tab` |
@@ -168,6 +172,8 @@ These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
 | Indent Using Spaces | `edit.indentUsingSpaces` | — | — |
 | Indent Using Tabs | `edit.indentUsingTabs` | — | — |
 | Detect Indentation from File | `edit.detectIndent` | — | — |
+| Change Line Endings to LF | `edit.lineEndingsLf` | — | — |
+| Change Line Endings to CRLF | `edit.lineEndingsCrlf` | — | — |
 
 ### Find in the file
 

@@ -119,6 +119,10 @@ a whole file out. Then click **Replace All** or press `Cmd+Option+Enter` /
   written.
 - Replace All waits for the search to finish, and refuses when the
   results were capped at 10,000.
+- Files that are not UTF-8 are handled carefully: open tabs in another
+  encoding are left alone (the summary counts them), and a file on disk
+  that is not UTF-8 only takes replacements in plain ASCII. See
+  [Encodings](encodings.md#find-and-replace-in-other-encodings).
 
 **Undo Replace in Files** (palette) puts back the files on disk that the
 last Replace All wrote, as long as none has changed since (checked by

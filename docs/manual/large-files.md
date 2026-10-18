@@ -9,9 +9,10 @@ behind the scenes, and the few limits you may meet.
 
 | File | How Nimbus holds it |
 |---|---|
-| Under 256 MB, valid UTF-8 | Read into memory. Everything works without limits worth mentioning. |
+| Under 256 MB | Read into memory. Everything works without limits worth mentioning. A file in another encoding, such as UTF-16 or Windows-1252, is converted to UTF-8 as it is read (see [Encodings](encodings.md)). |
 | 256 MB or larger | *Memory-mapped*: the file stays on disk and Nimbus reads only the parts on screen, so a 4 GB log shows its first screen at once and uses little memory. Your edits are kept separately and written out when you save. |
-| Not valid UTF-8, any size | Held byte for byte (in memory under 256 MB, mapped above). Invalid bytes show as `�`, the status bar says `Not UTF-8`, and the bytes are written back unchanged unless you edit them. |
+| 256 MB or larger, in a known other encoding | Not converted, since that would mean holding it all in memory: opens **read-only**, its bytes shown as they are. "Known" means a UTF-16 byte order mark, `--encoding`, the `[encodings]` setting or Reopen with Encoding. |
+| Not valid UTF-8 and not recognised as another encoding, any size | Held byte for byte (in memory under 256 MB, mapped above). Invalid bytes show as `�`, the status bar says `Not UTF-8`, and the bytes are written back unchanged unless you edit them. A huge file that only looks like Windows-1252 is held this way too, so it stays editable. |
 
 ## Counting lines
 
