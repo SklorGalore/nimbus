@@ -1934,19 +1934,27 @@ impl Document {
 
     /// Tab when a selection spans lines: indent every line touched by any
     /// selection by one tab, as one undo step, and select those whole
-    /// lines. Returns `false` (doing nothing) when every selection is
-    /// within one line; the caller then types a tab at each cursor.
+    /// lines. In Markdown a cursor on a list item indents the item the
+    /// same way (M14). Returns `false` (doing nothing) when every
+    /// selection is within one line; the caller then types a tab at each
+    /// cursor.
     ///
     /// # Errors
     ///
     /// See [`Document::replace`].
     pub fn indent_lines(&mut self) -> Result<bool, EditError> {
         let t = &self.buffer;
-        if !self
+        let spans_lines = self
             .selections
             .iter()
-            .any(|s| lines_of(t, s.range()).len() > 1)
-        {
+            .any(|s| lines_of(t, s.range()).len() > 1);
+        let items = self.language_key() == Some("markdown")
+            && self.selections.iter().all(|s| {
+                let start = movement::line_start(t, s.range().start);
+                let end = movement::line_end(t, start).min(start + long_line::NEAR);
+                crate::editing::list_prefix(&t.slice(start..end)).is_some()
+            });
+        if !spans_lines && !items {
             return Ok(false);
         }
         let unit = self.indent.unit();

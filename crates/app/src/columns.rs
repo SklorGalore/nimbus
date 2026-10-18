@@ -396,9 +396,11 @@ impl<T: Copy> Columns<T> {
         for (c, (doc, view)) in docs.iter().zip(views.iter_mut()).enumerate() {
             let col_layout = &layouts[c.min(layouts.len() - 1)];
             view.scroll_x = scroll_x;
-            let captures = match doc.syntax.capture_names() {
-                Some((key, names)) => theme.capture_looks(key, names),
-                None => &[],
+            let looks = if doc.syntax.capture_names().is_some() {
+                theme.resolve_tables();
+                Some(&*theme)
+            } else {
+                None
             };
             let is_live = c == self.live;
             let deco = Decorations {
@@ -411,7 +413,7 @@ impl<T: Copy> Columns<T> {
                     None
                 },
                 ui: &ui,
-                captures,
+                looks,
             };
             view.draw_rows(
                 gpu,

@@ -18,6 +18,7 @@ use nimbus_core::indent::Indent;
 use nimbus_core::lines::{self, Batch, LineError};
 use nimbus_core::transform::{self, Case, Lines};
 use nimbus_core::{Bias, EditError, Selection, Selections, Text, brackets, movement};
+use nimbus_syntax::structure;
 
 use crate::config::Indenting;
 use crate::document::{Document, MAX_COPY_BYTES};
@@ -227,12 +228,13 @@ impl Document {
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
-    /// Grow every selection one step: word, pair, line, everything.
+    /// Grow every selection one step: word, pair, line, everything; with
+    /// an up-to-date syntax tree the pair step becomes every node on the
+    /// way out (identifier, expression, statement, block, function).
     pub fn expand_selection(&mut self) -> Outcome {
-        let t = &self.buffer;
         let before = self.selections.clone();
         let mut after = before.clone();
-        after.transform(|_, s| expand(t, s, BRACKET_LIMIT).unwrap_or(s));
+        after.transform(|_, s| self.expand_step(s).unwrap_or(s));
         if after == before {
             return Outcome::Nothing;
         }
@@ -240,6 +242,49 @@ impl Document {
         self.set_selections(after);
         self.history.seal();
         Outcome::Done
+    }
+
+    /// The selection one step larger than `s`. Without a tree that is
+    /// `core`'s counting (`expand`). With one, the candidates are the word
+    /// at the start, the smallest named node strictly containing `s` (and
+    /// the inside of it when it is bracketed or quoted, so `{ body }`
+    /// first selects the body), the line and the whole text; the smallest
+    /// wins, so each step is one node up. `None` when `s` is everything.
+    fn expand_step(&self, s: Selection) -> Option<Selection> {
+        let t: &dyn Text = &self.buffer;
+        if !structure::ready(&self.syntax) {
+            return expand(t, s, BRACKET_LIMIT);
+        }
+        let r = s.range();
+        let mut best: Option<Range<usize>> = None;
+        let mut offer = |c: Range<usize>| {
+            let contains = c.start <= r.start && c.end >= r.end && c != r;
+            if contains && best.as_ref().is_none_or(|b| c.len() < b.len()) {
+                best = Some(c);
+            }
+        };
+        let word = movement::word_at(t, r.start);
+        if !word.is_empty() {
+            offer(word);
+        }
+        if let Some(node) = structure::expand(&self.syntax, r.clone()) {
+            if node.len() >= 2 && delimited(t, &node) {
+                offer(node.start + 1..node.end - 1);
+            }
+            offer(node);
+        }
+        let span = t.line_span(r.start);
+        let line_end = if r.end > span.end {
+            t.line_span(r.end).end
+        } else {
+            span.end
+        };
+        offer(span.start..line_end);
+        offer(0..t.len_bytes());
+        best.map(|range| Selection {
+            anchor: range.start,
+            head: range.end,
+        })
     }
 
     /// Undo the last Expand Selection, if nothing else moved since.
@@ -399,6 +444,9 @@ impl Document {
     /// so a new line starts where the previous one did. After an opening
     /// bracket the new line is one level deeper; and when its closer
     /// follows the cursor, the closer goes on a line of its own below.
+    /// In Markdown a list item or quote continues on the new line (a
+    /// numbered item counts up, a task box starts unticked), and Enter on
+    /// an item with nothing on it ends the list instead.
     ///
     /// # Errors
     ///
@@ -406,6 +454,7 @@ impl Document {
     pub fn insert_newline(&mut self) -> Result<(), EditError> {
         let ending = self.line_ending.as_str();
         let unit = self.indent.unit();
+        let lists = self.language_key() == Some("markdown");
         let mut after = Vec::new();
         let mut grown = 0usize;
         let mut items: Vec<(Range<usize>, Cow<'_, str>)> = Vec::new();
@@ -416,29 +465,29 @@ impl Document {
             // Only the indentation before the cursor carries over, so only
             // the line up to the cursor (and at most a few KB of it) is read.
             let head = t.slice(line_start..r.start.min(line_start + nimbus_core::long_line::NEAR));
-            let indent_len = head.len() - head.trim_start_matches([' ', '\t']).len();
-            let indent = &head[..indent_len];
-            let opens = r.start > 0
-                && t.byte_at(r.start - 1)
-                    .and_then(brackets::partner)
-                    .is_some_and(|(_, opens)| opens);
-            let closes_next = opens
-                && t.byte_at(r.start - 1)
-                    .and_then(brackets::partner)
-                    .is_some_and(|(close, _)| t.byte_at(r.end) == Some(close));
-            let mut text = format!("{ending}{indent}");
-            if opens {
-                text.push_str(&unit);
-            }
-            let cursor = r.start + grown + text.len() - r.len();
-            if closes_next {
-                text.push_str(ending);
-                text.push_str(indent);
-            }
-            grown += text.len();
-            grown = grown.wrapping_sub(r.len());
+            let prefix = if lists { list_prefix(&head) } else { None };
+            let (range, text, cursor_at) = match prefix {
+                // An item with nothing on it: Enter ends the list by
+                // taking the marker away.
+                Some((len, _))
+                    if head[len..].trim().is_empty() && r.end == movement::line_end(t, r.start) =>
+                {
+                    (line_start..r.end, String::new(), 0)
+                }
+                Some((_, next)) => {
+                    let text = format!("{ending}{next}");
+                    let at = text.len();
+                    (r, text, at)
+                }
+                None => {
+                    let (text, at) = newline_after_bracket(t, &r, &head, ending, &unit);
+                    (r, text, at)
+                }
+            };
+            let cursor = range.start + grown + cursor_at;
+            grown = grown.wrapping_add(text.len()).wrapping_sub(range.len());
             after.push(Selection::cursor(cursor));
-            items.push((r, Cow::Owned(text)));
+            items.push((range, Cow::Owned(text)));
         }
         let after = Selections::from_vec(after, self.selections.primary_index());
         self.pairs = None;
@@ -681,12 +730,118 @@ impl Document {
     }
 }
 
+/// The text Enter inserts at `r`, whose line up to the cursor is `head`,
+/// and where the cursor lands within it: the line ending and the line's
+/// indentation, one level deeper after an opening bracket, and a line of
+/// its own for a closer that follows the cursor.
+fn newline_after_bracket(
+    t: &dyn Text,
+    r: &Range<usize>,
+    head: &str,
+    ending: &str,
+    unit: &str,
+) -> (String, usize) {
+    let indent_len = head.len() - head.trim_start_matches([' ', '\t']).len();
+    let indent = &head[..indent_len];
+    let before = r.start.checked_sub(1).and_then(|p| t.byte_at(p));
+    let opens = before
+        .and_then(brackets::partner)
+        .is_some_and(|(_, opens)| opens);
+    let closes_next = opens
+        && before
+            .and_then(brackets::partner)
+            .is_some_and(|(close, _)| t.byte_at(r.end) == Some(close));
+    let mut text = format!("{ending}{indent}");
+    if opens {
+        text.push_str(unit);
+    }
+    let cursor_at = text.len();
+    if closes_next {
+        text.push_str(ending);
+        text.push_str(indent);
+    }
+    (text, cursor_at)
+}
+
+/// Whether `node` starts with an opening bracket or a quote and ends with
+/// its partner, so that its inside is worth selecting on its own.
+fn delimited(t: &dyn Text, node: &Range<usize>) -> bool {
+    let (Some(first), Some(last)) = (t.byte_at(node.start), t.byte_at(node.end - 1)) else {
+        return false;
+    };
+    match brackets::partner(first) {
+        Some((close, true)) => close == last,
+        Some(_) => false,
+        None => matches!(first, b'"' | b'\'' | b'`') && first == last,
+    }
+}
+
+/// The Markdown list or quote marker at the start of `head`, a line up
+/// to the cursor: how many bytes it takes (indentation included) and
+/// what the next line starts with to continue it. Quotes (`>`, nested
+/// or not) carry over as they are; a bullet (`-`, `*`, `+`) too; a
+/// number counts up and keeps its `.` or `)`; a task box (`[ ]`, `[x]`)
+/// comes back empty. `None` for a line that is none of these.
+pub(crate) fn list_prefix(head: &str) -> Option<(usize, String)> {
+    let bytes = head.as_bytes();
+    let mut i = head.len() - head.trim_start_matches([' ', '\t']).len();
+    let mut next = head[..i].to_owned();
+    let mut found = false;
+    while bytes.get(i) == Some(&b'>') {
+        i += 1;
+        next.push('>');
+        if bytes.get(i) == Some(&b' ') {
+            i += 1;
+            next.push(' ');
+        }
+        found = true;
+    }
+    let rest = &head[i..];
+    let marker = if let [b @ (b'-' | b'*' | b'+'), b' ', ..] = rest.as_bytes() {
+        Some((format!("{} ", *b as char), 2))
+    } else {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        match (
+            digits,
+            rest.as_bytes().get(digits),
+            rest.as_bytes().get(digits + 1),
+        ) {
+            (1..=9, Some(&d @ (b'.' | b')')), Some(b' ')) => {
+                let n: u64 = rest[..digits].parse().ok()?;
+                Some((format!("{}{} ", n + 1, d as char), digits + 2))
+            }
+            _ => None,
+        }
+    };
+    if let Some((marker, len)) = marker {
+        next.push_str(&marker);
+        i += len;
+        let after = &head[i..];
+        if after.starts_with("[ ] ") || after.starts_with("[x] ") || after.starts_with("[X] ") {
+            next.push_str("[ ] ");
+            i += 4;
+        }
+        found = true;
+    }
+    found.then_some((i, next))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn doc(text: &str) -> Document {
         Document::from_text(text)
+    }
+
+    /// A document parsed as `language` (by a file name's extension), with
+    /// its tree ready.
+    fn parsed(text: &str, ext: &str) -> Document {
+        let mut d = doc(text);
+        d.path = Some(std::path::PathBuf::from(format!("x.{ext}")));
+        d.detect_language(&crate::languages::Languages::default());
+        d.syntax.parse_now(&d.buffer);
+        d
     }
 
     fn text(d: &Document) -> String {
@@ -948,5 +1103,96 @@ mod tests {
         let mut e = doc("a\n");
         e.tidy_for_save(true, true).unwrap();
         assert_eq!(text(&e), "a\n", "nothing to do");
+    }
+    #[test]
+    fn expand_selection_walks_the_syntax_tree_when_there_is_one() {
+        let src = "fn main() {\n    let x = foo(1, \"a)b\");\n}\n";
+        let mut d = parsed(src, "rs");
+        assert_eq!(d.syntax.phase_name(), "ready");
+        let b = src.find("b\"").unwrap();
+        d.click(b, false);
+        let mut steps = Vec::new();
+        while d.expand_selection() == Outcome::Done {
+            steps.push(d.buffer.slice(d.selection().range()).into_owned());
+        }
+        // Counting brackets would stop at the `)` inside the string; the
+        // tree knows it is text and goes on to the call.
+        assert_eq!(
+            steps,
+            [
+                "b",
+                "a)b",
+                "\"a)b\"",
+                "1, \"a)b\"",
+                "(1, \"a)b\")",
+                "foo(1, \"a)b\")",
+                "let x = foo(1, \"a)b\");",
+                "    let x = foo(1, \"a)b\");",
+                "\n    let x = foo(1, \"a)b\");\n",
+                "{\n    let x = foo(1, \"a)b\");\n}",
+                "fn main() {\n    let x = foo(1, \"a)b\");\n}",
+                src,
+            ]
+        );
+        // Shrinking retraces every step.
+        let mut back = 0;
+        while d.shrink_selection() == Outcome::Done {
+            back += 1;
+        }
+        assert_eq!(back, steps.len());
+        assert_eq!(d.selection().range(), b..b);
+    }
+
+    #[test]
+    fn markdown_lists_and_quotes_continue_on_enter() {
+        let mut d = parsed("- one\n", "md");
+        d.click(5, false);
+        d.insert_newline().unwrap();
+        assert_eq!(text(&d), "- one\n- \n");
+        // Enter on the empty item ends the list.
+        d.insert_newline().unwrap();
+        assert_eq!(text(&d), "- one\n\n");
+        assert_eq!(d.selection().range(), 6..6);
+
+        let mut d = parsed("  3) x\n1. [x] done\n> q", "md");
+        cursors(&mut d, &[6, 18, 22]);
+        d.insert_newline().unwrap();
+        assert_eq!(text(&d), "  3) x\n  4) \n1. [x] done\n2. [ ] \n> q\n> ");
+        assert_eq!(heads(&d), [12, 32, 39]);
+
+        // Plain text keeps the ordinary behaviour.
+        let mut p = doc("- one");
+        p.click(5, false);
+        p.insert_newline().unwrap();
+        assert_eq!(text(&p), "- one\n");
+    }
+
+    #[test]
+    fn list_prefixes_are_recognised() {
+        assert_eq!(list_prefix("- a"), Some((2, "- ".to_owned())));
+        assert_eq!(list_prefix("  * "), Some((4, "  * ".to_owned())));
+        assert_eq!(list_prefix("9. x"), Some((3, "10. ".to_owned())));
+        assert_eq!(
+            list_prefix("> > - [ ] t"),
+            Some((10, "> > - [ ] ".to_owned()))
+        );
+        assert_eq!(list_prefix(">"), Some((1, ">".to_owned())));
+        assert_eq!(list_prefix("-a"), None);
+        assert_eq!(list_prefix("1.a"), None);
+        assert_eq!(list_prefix("text"), None);
+    }
+
+    #[test]
+    fn tab_indents_a_markdown_item_under_the_cursor() {
+        let mut d = parsed("- a\nb", "md");
+        d.click(3, false);
+        assert!(d.indent_lines().unwrap());
+        assert_eq!(text(&d), "    - a\nb");
+        assert_eq!(d.selection().range(), 7..7);
+        d.click(9, false);
+        assert!(!d.indent_lines().unwrap(), "not an item: a tab is typed");
+        let mut p = doc("- a");
+        p.click(3, false);
+        assert!(!p.indent_lines().unwrap(), "plain text");
     }
 }

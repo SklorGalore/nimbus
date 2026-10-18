@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use nimbus_render::Style;
-use nimbus_syntax::LanguageId;
 
 /// Straight RGBA, each channel 0–1.
 pub type Color = [f32; 4];
@@ -135,8 +134,10 @@ pub struct Theme {
     /// Interface colours.
     pub ui: Ui,
     syntax: HashMap<String, Look>,
-    /// Look per capture index, per language, built on first use.
-    resolved: [Option<Vec<Option<Look>>>; LanguageId::ALL.len() + 1],
+    /// Look per capture index, per capture table (one per grammar, one
+    /// for the simple rules; `nimbus_syntax::registry::TABLES`), built on
+    /// first use.
+    resolved: [Option<Vec<Option<Look>>>; nimbus_syntax::registry::TABLES],
 }
 
 impl Default for Theme {
@@ -306,10 +307,34 @@ impl Theme {
         lookup(&self.syntax, capture).and_then(|l| l.color)
     }
 
+    /// The look of `capture` in capture table `table`, once
+    /// [`Theme::capture_looks`] has resolved that table; `None` (the text
+    /// colour) before, or for a capture the theme does not name.
+    #[must_use]
+    pub fn look(&self, table: usize, capture: u32) -> Option<Look> {
+        self.resolved
+            .get(table)?
+            .as_ref()?
+            .get(capture as usize)
+            .copied()
+            .flatten()
+    }
+
+    /// Resolve every capture table whose grammar is loaded, so
+    /// [`Theme::look`] answers for spans from any of them (a Markdown
+    /// file's fenced Rust block is coloured by Rust's table).
+    pub fn resolve_tables(&mut self) {
+        for table in 0..nimbus_syntax::registry::TABLES {
+            if let Some(names) = nimbus_syntax::registry::capture_table(table) {
+                let _ = self.capture_looks(table, names);
+            }
+        }
+    }
+
     /// Looks by capture index for a list of capture names, cached under
-    /// `key` (from `SyntaxState::capture_names`: one per grammar, plus one
-    /// for the simple rules large files use). Worked out once per key, so
-    /// each frame only indexes an array.
+    /// `key` (a capture table: one per grammar, plus one for the simple
+    /// rules large files use). Worked out once per key, so each frame only
+    /// indexes an array.
     pub fn capture_looks(&mut self, key: usize, names: &[&str]) -> &[Option<Look>] {
         let Some(slot) = self.resolved.get_mut(key) else {
             return &[];
@@ -421,7 +446,7 @@ mod tests {
         let mut t = t;
         let names = ["variable", "function.method", "function.macro"];
         let colors: Vec<_> = t
-            .capture_looks(LanguageId::Rust.index(), &names)
+            .capture_looks(nimbus_syntax::LanguageId::Rust.index(), &names)
             .iter()
             .map(|l| l.and_then(|l| l.color))
             .collect();

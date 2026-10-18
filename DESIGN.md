@@ -37,9 +37,13 @@ after a rebuild, in each milestone's Results.
 
 - Vim keybindings or any modal layer.
 - Plugins or a scripting language.
-- LSP, debugging, terminals, git integration.
+- LSP, debugging, terminals, git integration. One exception, chosen on
+  2026-10-18: M18's "Compare with HEAD" runs `git show` as a subprocess
+  to open a file's committed version in the compare view. Nothing else
+  runs git.
 - Collaborative editing.
-- Rich text, or proportional fonts in the editor area. UI chrome may use them later.
+- Rich text, or proportional fonts in the editor area. UI chrome gets a
+  proportional font setting in M20.
 - Bidirectional and right-to-left text. Decided at approval; the renderer
   assumes left-to-right runs.
 - Multiple windows. One window with tabs.
@@ -195,8 +199,12 @@ JavaScript, TypeScript, Bash. Each grammar sits behind a cargo feature so a
 grammar that costs too much binary size can be dropped. M5 measured each
 (macOS release binary): TypeScript 1.42 MB, Bash 1.37 MB, Python 0.46 MB,
 Markdown 0.38 MB, YAML 0.18 MB; the tree-sitter runtime plus Rust about
-1.8 MB. TSX is not included: it would add about 1.5 MB. If the binary
-budget is ever tight, Bash goes first, then TypeScript.
+1.8 MB. M14 added C, Go, HTML, CSS and TSX (Linux release binary, stripped:
+TSX 1.39 MB, C 0.60 MB, Go 0.22 MB, CSS 0.12 MB, HTML 0.03 MB; all five
+together 2.3 MB, taking Linux from 19.1 MB to 21.4 MB of the 35 MB
+budget). TSX shares the TypeScript crate, so it is a second compiled
+grammar for one set of queries. If the binary budget is ever tight, TSX
+goes first, then Bash, then TypeScript.
 
 Highlighting runs our own query loop rather than `tree-sitter-highlight`:
 that crate wants the whole document as one `&[u8]`, and our text lives in a
@@ -256,9 +264,51 @@ grammars still need a rebuild: loading compiled grammars at runtime means
 `unsafe` code and per-platform libraries, and WebAssembly grammars a
 runtime of 10 MB or more.
 
-Markdown needs a second, inline grammar injected into each paragraph. M5
-ships block-level Markdown highlighting; inline emphasis and code spans are
-an M8 stretch item.
+**Injections** (`crates/syntax/src/inject.rs`, M14). A grammar's
+`injections.scm` names regions of a tree that belong to another language:
+Markdown's block grammar marks each paragraph for the inline grammar
+(`tree_sitter_md::INLINE_LANGUAGE`, in the binary already) and each fenced
+block for the language its fence names; HTML marks `<script>` and
+`<style>`; JavaScript and TypeScript mark tagged template strings
+(`html\`…\``, `css\`…\``) with the tag as the language name. Rust's query is deliberately not used: it would parse every `format!` and
+`vec!` argument as a second Rust tree for no visible gain. The host tree
+is queried for regions over the visible range plus one screen each side,
+and each region gets a child tree parsed with `set_included_ranges` over
+those bytes only, through the same `Text::chunk_at` callback as the host.
+Children are kept in a map keyed by the host node's `id()` (stable across
+incremental reparses), nest one level further (a code span inside a
+paragraph), take `Tree::edit` for every edit the host sees, and are
+dropped when scrolled out of the kept range. Parsing new or edited
+children shares the frame's 2 ms budget: at least one child is parsed per
+frame, the rest wait and the host's colours show meanwhile, and the app
+keeps requesting frames while `injections_pending()`. An inline Markdown
+parse costs about 0.3 ms per paragraph, so a screen settles over a few
+frames and a frame with no edit and no scroll returns the cached spans in
+under a microsecond. Each loaded grammar is a **capture table**: a span
+carries the table and the capture index, the theme resolves every table
+it has seen, and the inner language's capture wins over the host's where
+they overlap, so a Rust keyword in a fenced block takes the keyword
+colour.
+
+**Wide trees** (`crates/syntax/src/split.rs`). A Markdown document is one
+node with thousands of blocks under it, and tree-sitter's query cursor
+walks the children of every node it enters, so querying the root for one
+screen cost the whole file. Queries now descend to the nodes covering the
+range, and a node with more than 64 children is queried child by child
+over the range with the node itself queried alone, so a frame's query cost
+follows what is on screen.
+
+**Beyond colour** (M14). The tree also gives: Go to Symbol
+(`symbols.rs`, a `tags.scm`-style query over the whole tree listing
+functions, types, constants and Markdown headings, run on first use);
+structural selection (`structure::expand`, the smallest named node
+larger than the selection, which Expand Selection takes over its
+bracket-counting step whenever the tree is up to date, so `{ body }`
+grows to the body, the block, the function); fold regions (`structure::fold_regions`, a `folds.scm` per
+language over the visible range, for M13's fold model); and bracket
+matching that skips strings and comments (`SyntaxState::matching_bracket`).
+Each query kind can be replaced or extended by a user file
+(`docs/customizing.md`).
 
 The `app` crate maps capture names to colours via the theme, with
 longest-prefix matching (`keyword.control` falls back to `keyword`),
@@ -498,14 +548,21 @@ introduces and points at the code.
 | 11 | Everyday editing | **Done** | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
 | 12 | Workspace | **Done** | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
 | 13 | Split views and folding | Planned | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
-| 14 | Languages, second pass | Planned | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
-| 15 | Distribution | Planned | Signed, notarised, installable builds; an update check | [m15](docs/milestones/m15-distribution.md) |
+| 14 | Languages, second pass | In progress | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
+| 15 | Distribution | Done | Installers and packages for every platform (unsigned), an update check, signed checksums | [m15](docs/milestones/m15-distribution.md) |
+| 16 | Rendering, second pass | Planned | Colour emoji, ligatures, zoom, whitespace and indent guides | [m16](docs/milestones/m16-rendering-second-pass.md) |
+| 17 | Encodings and line endings | Planned | Open and save UTF-16 and Windows-1252; change encoding and line endings | [m17](docs/milestones/m17-encodings.md) |
+| 18 | Compare, second pass | Planned | Ignore whitespace, compare folders, diff one-line files, compare with HEAD | [m18](docs/milestones/m18-compare-second-pass.md) |
+| 19 | Workspace and search, second pass | Planned | Several roots, named workspaces, drag and drop, search history and multi-line patterns | [m19](docs/milestones/m19-workspace-and-search-second-pass.md) |
+| 20 | Reading aids | Planned | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
+| 21 | Foundations and 1.0 | Planned | Ropey 2, current winit and wgpu, fuzzing, a crash record, version 1.0 | [m21](docs/milestones/m21-foundations-and-1-0.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
 approved the six plans and their order on 2026-10-17 and answered their
-open questions (§9, §10). M10 landed the same day; M11 is Next, and
-M12–M15 follow in that order.
+open questions (§9, §10). M10 and M11 landed; M12 is Next, and M13–M15
+follow in that order. M16–M21 were drafted on 2026-10-18 from what
+M9–M15 deferred and approved the same day (§9, §10); they follow M15.
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -514,8 +571,27 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-None open. The questions the drafts of M10–M15 raised were answered on
-2026-10-17, when the owner approved the six plans and their order:
+None open. The questions the drafts of M16–M21 raised were answered on
+2026-10-18, when the owner approved the six plans and their order:
+
+- Order: M16 (rendering) to M21 (1.0) as drafted; encodings first was
+  declined.
+- M16: the zoom is remembered in `state.toml` across sessions unless
+  `remember_zoom = false`.
+- M17: the Western encodings only (UTF-8, UTF-16, Windows-1252,
+  ISO-8859-1); East Asian tables behind a cargo feature that is off.
+- M18: "Compare with HEAD" is in, running git as a subprocess; the git
+  non-goal in §2 carries that one exception.
+- M19: workspace files live in the config directory, and also as
+  `.nimbus/workspace.toml` inside a root on "Save Workspace Here".
+- M20: the minimap is in, windowed to the lines around the view, off by
+  default.
+- M21: screen-reader support (AccessKit) waits until after 1.0; a panic
+  writes a one-line `crash.log` with the version and message and no
+  user text.
+
+The questions the drafts of M10–M15 raised were answered on 2026-10-17,
+when the owner approved those six plans and their order:
 
 - Order: M10 (find in files), then M11 (everyday editing), then M12 to
   M15 as drafted. M10 is Next.
@@ -631,5 +707,13 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-17 | Grammars to add: C, Go, HTML, CSS, TSX, each measured against the 35 MB budget; Go to Symbol is `Primary+Shift+R` | §9, m14 |
 | 2026-10-17 | No signing accounts: builds stay unsigned and the README keeps its `xattr` step; update check off unless `check_updates = true`; checksums signed with `minisign` | §9, m15 |
 | 2026-10-17 | Update check over `ureq` with rustls and the platform verifier (+1.7 MB), the one JSON field scanned by hand; packages built by shell scripts and Inno Setup in the workflow, manifests generated from the tag | §7, m15 |
+| 2026-10-18 | M16–M21 drafted from what M9–M15 deferred and approved in order: rendering, encodings, compare, workspace and search, reading aids, foundations and 1.0 | §8, §9, backlog |
+| 2026-10-18 | Zoom remembered across sessions unless `remember_zoom = false`; Western encodings only, East Asian behind an off feature | §9, m16, m17 |
+| 2026-10-18 | "Compare with HEAD" through a git subprocess is the one exception to the git non-goal; workspace files may also live in a root as `.nimbus/workspace.toml` | §2, §9, m18, m19 |
+| 2026-10-18 | Minimap in, windowed and off by default; AccessKit after 1.0; a panic writes a one-line `crash.log` with no user text | §9, m20, m21 |
+| 2026-10-17 | M14 grammars all kept: C, Go, HTML, CSS and TSX add 2.3 MB on Linux (21.4 MB of 35); drop order is now TSX, Bash, TypeScript | §4.2, m14 |
+| 2026-10-17 | Injections: child trees keyed by host node id, kept one screen either side of the view, parsed within the frame's 2 ms budget at one child per frame at least; Rust's injection query not used | §4.2, m14 |
+| 2026-10-17 | Spans carry a capture table per grammar so the inner language's colours win inside injections; wide nodes are queried child by child | §4.2, m14 |
+| 2026-10-18 | Per-language soft wrap is `[editor.NAME] wrap`, following M11's `[editor.NAME]` and `[indent.NAME]` tables rather than the planned `[languages.NAME]` (that table maps file patterns); Markdown wraps by default | §4.4, m14 |
 | 2026-10-18 | M12: `nimbus FILE` leaves sessions alone and `--no-session` neither restores nor saves; restored tabs other than the front one load after the first frame; on macOS the tree renames with Enter and opens with `Cmd+Down`; the trash crate asks `NSFileManager`, not Finder, so no automation prompt | §4.4, m12 |
 | 2026-10-18 | M12 Follow Tail: a grown file is appended to, not reloaded; a following mapped document maps the file again and swaps the mapping in, checked by its first and last 64 bytes; undo runs belong to a document by lineage number, not source pointer | §4.1, m12 |

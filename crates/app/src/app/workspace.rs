@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use winit::event_loop::EventLoopProxy;
 
-use super::{App, AppEvent, MESSAGE_TIME, Message, Tab};
+use super::{App, AppEvent, MESSAGE_TIME, Message, Tab, wrap_for};
 use crate::document::Document;
 use crate::input::Command;
 use crate::picker::Kind;
@@ -191,7 +191,9 @@ impl App {
     pub(super) fn adopt_restored(&mut self, i: usize, mut doc: Document) {
         doc.detect_language(&self.languages);
         self.configure_indent(&mut doc);
+        let wrap = self.options.wrap || wrap_for(&self.config, &doc);
         let tab = &mut self.tabs[i];
+        tab.view.set_wrap(wrap);
         tab.doc = doc;
         tab.apply_pending();
         self.title_key = None;
@@ -366,6 +368,7 @@ impl App {
         let mut tabs = tabs;
         for tab in tabs.iter_mut().filter(|t| !t.doc.is_placeholder()) {
             self.configure_indent(&mut tab.doc);
+            tab.view.set_wrap(wrap_for(&self.config, &tab.doc));
         }
         self.tabs = keep;
         let first_new = self.tabs.len();

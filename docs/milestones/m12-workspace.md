@@ -186,7 +186,7 @@ numbers below are for comparing with each other, not with M10's.
 
 | Metric | Value |
 |---|---|
-| Tests | 484 passing, plus 18 opt-in benchmarks or diagnostics |
+| Tests | 504 passing with M14 merged in, plus 20 opt-in benchmarks or diagnostics |
 | Release binary | 22.4 MB on Linux (M15 recorded 21.7 MB; budget 35 MB). `trash` brings little on Linux (it is plain file moves there) and more on macOS and Windows, where it talks to the system's file manager APIs; CI's `release-size` job checks all three |
 | `--smoke` first frame, ten-file session | 84–105 ms warm (median 89 ms); 184 ms on the first, cold run |
 | `--smoke` first frame, one file named | 80–98 ms warm (median 86 ms) |
