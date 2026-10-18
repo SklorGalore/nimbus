@@ -6,6 +6,9 @@ version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
+    # Updates are ordinary changes, so they go to development like a
+    # feature branch and reach main with the next release.
+    target-branch: development
     schedule:
       interval: weekly
     # One pull request for all action updates in a week.

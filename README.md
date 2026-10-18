@@ -348,9 +348,9 @@ request.
 ## Roadmap
 
 <!-- Mirrors the status column of docs/milestones/README.md. When a
-milestone lands, move its line up to "Available now". -->
+milestone lands on development, move its line up to "Available now". -->
 
-**Available now** (on `main`)
+**Available now**
 
 - GPU text rendering, editing, tabs, syntax highlighting and the file tree
 - Huge files, multiple cursors, compare and merge

@@ -145,6 +145,10 @@ The project uses wgpu 30, whose API differs from older examples and from model t
 
 `.github/workflows/ci.yml` runs fmt, clippy, and tests on macOS, Ubuntu, and Windows, plus the release-size check. Linux needs `libwayland-dev` and `libxkbcommon-dev`. Remote: `github.com/SklorGalore/nimbus` (private).
 
+## Branches
+
+Git flow, as `CONTRIBUTING.md` describes: work branches from `development` as `feature/<name>` or `bugfix/<name>` and its pull request targets `development`; `main` holds only releases, reached through `release/X.Y.Z` (from `development`) and `hotfix/X.Y.Z` (from `main`). Before marking a pull request ready, merge the latest base branch into it and resolve every conflict. Release steps are in `docs/releasing.md`.
+
 ## Crate Versioning
 
 Bump crate versions as appropriate when making patches, minor changes, or major changes, following semantic versioning.
