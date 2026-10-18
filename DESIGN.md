@@ -292,8 +292,9 @@ follows what is on screen.
 (`symbols.rs`, a `tags.scm`-style query over the whole tree listing
 functions, types, constants and Markdown headings, run on first use);
 structural selection (`structure::expand`, the smallest named node
-larger than the selection; wired into M11's Expand Selection when that
-lands); fold regions (`structure::fold_regions`, a `folds.scm` per
+larger than the selection, which Expand Selection takes over its
+bracket-counting step whenever the tree is up to date, so `{ body }`
+grows to the body, the block, the function); fold regions (`structure::fold_regions`, a `folds.scm` per
 language over the visible range, for M13's fold model); and bracket
 matching that skips strings and comments (`SyntaxState::matching_bracket`).
 Each query kind can be replaced or extended by a user file
@@ -666,3 +667,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-17 | M14 grammars all kept: C, Go, HTML, CSS and TSX add 2.3 MB on Linux (21.4 MB of 35); drop order is now TSX, Bash, TypeScript | §4.2, m14 |
 | 2026-10-17 | Injections: child trees keyed by host node id, kept one screen either side of the view, parsed within the frame's 2 ms budget at one child per frame at least; Rust's injection query not used | §4.2, m14 |
 | 2026-10-17 | Spans carry a capture table per grammar so the inner language's colours win inside injections; wide nodes are queried child by child | §4.2, m14 |
+| 2026-10-18 | Per-language soft wrap is `[editor.NAME] wrap`, following M11's `[editor.NAME]` and `[indent.NAME]` tables rather than the planned `[languages.NAME]` (that table maps file patterns); Markdown wraps by default | §4.4, m14 |

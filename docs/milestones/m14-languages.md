@@ -3,11 +3,11 @@
 **Status: in progress.** Started on 2026-10-17 alongside M10, M11 and
 M15, for the parts that do not depend on them: the injection layer, Go to
 Symbol, the tree-side of structural selection and folds, syntax-aware
-brackets, the five grammars and the user query kinds. Markdown editing
-and the per-language settings table wait for M11's `[indent.NAME]`
-tables; wiring `structure::expand` into Expand Selection and
-`structure::fold_regions` into the fold model are one task each in M11
-and M13. Written on 2026-10-17 from the items
+brackets, the five grammars and the user query kinds. Once M11 merged
+(2026-10-18), Expand Selection took the tree, and Markdown editing and
+per-language wrap followed. What is left waits for M13: feeding
+`structure::fold_regions` into the fold model. Written on 2026-10-17
+from the items
 deferred by M5 and M8: Markdown inline highlighting and language
 injections, and the features a syntax tree enables (M8's bracket
 matching misled by strings, M11's expand selection, M13's fold regions).
@@ -40,11 +40,9 @@ string is.
       functions, types, constants and Markdown headings in the current
       file from a `tags.scm`-style query, fuzzy matched, jumping on
       Enter; built lazily on first use from the existing tree.
-- [ ] **Structural selection**: M11's Expand Selection grows through
+- [x] **Structural selection**: M11's Expand Selection grows through
       syntax nodes (identifier, expression, statement, block, function)
       between its "bracket pair" and "line" steps when a tree exists.
-      The tree side (`structure::expand`) is done; the step in the
-      selection stack lands with M11's Expand Selection.
 - [x] **Syntax-aware brackets**: the M8 matcher skips brackets inside
       strings and comments when a tree exists, fixing the M8 known
       limitation.
@@ -53,12 +51,12 @@ string is.
       over the visible range plus a margin, like highlighting. The
       queries and `structure::fold_regions` are done; M13's fold model
       consumes them.
-- [ ] **Markdown editing** (waits for M11's per-language tables): Enter continues a list item or quote,
+- [x] **Markdown editing**: Enter continues a list item or quote,
       Enter on an empty item ends the list; Tab and Shift+Tab indent and
       outdent an item; soft wrap defaults on for Markdown through the new
-      per-language settings (`[languages.markdown] wrap = true`, extending
-      M11's `[indent.LANGUAGE]` tables into a general per-language
-      table).
+      per-language settings (`[editor.markdown] wrap`, in M11's
+      `[editor.LANGUAGE]` table rather than a new `[languages.NAME]` one;
+      see Results).
 - [x] **More grammars**: C, Go, HTML, CSS and TSX, each measured for
       binary size against the 35 MB budget before it stays (TSX was left
       out in M5 at about 1.5 MB; the budget has room now). Each gets the
@@ -158,8 +156,7 @@ the total passes 30 MB on Linux, Bash goes first as DESIGN.md §4.2 says.
 
 ## Results
 
-_In progress; Markdown editing and the per-language settings table wait
-for M11, and the Expand Selection and fold-model hookups for M11 and M13._
+_In progress; the fold-model hookup waits for M13._
 
 Measured on 2026-10-17 in a Linux container with a shared, noisy CPU and
 no GPU (Mesa's software Vulkan for the rendering checks), so the owner's
@@ -233,6 +230,23 @@ host reparse in 200 keystrokes went over 2 ms and took the worker path.
   a separate file combined per language; Go's tags query lacks
   constants, so one pattern is added.
 
+**After M11 merged** (2026-10-18). Expand Selection
+(`Document::expand_step` in `editing.rs`) asks the tree first: when it
+is up to date, the candidates are the word, the smallest named node
+strictly containing the selection (and its inside when the node is
+bracketed or quoted), the line and the file, and the smallest wins; the
+bracket counting of M11 is kept for plain text, huge files and the
+frames between an edit and its reparse. The test walks a Rust call with
+a `)` inside a string, which counting cannot get past. Markdown Enter,
+Tab and Shift+Tab recognise bullets, numbers (counting up), task boxes
+and nested `>` quotes (`list_prefix`, in `editing.rs`). Per-language
+wrap went into `[editor.NAME]` as `wrap`, not the planned
+`[languages.NAME]`: M11 found that table already maps file patterns to
+languages, so a sub-table there would not parse; Markdown wraps by
+default. The design's per-language `auto_pairs`,
+`trim_trailing_whitespace` and `final_newline` had already landed in
+M11 under the same table.
+
 **Changes to DESIGN.md**: §4.2 gained the injection layer, capture
 tables, wide-tree splitting and the grammar sizes; the drop order is now
-TSX, Bash, TypeScript; three decision-log lines.
+TSX, Bash, TypeScript; four decision-log lines.

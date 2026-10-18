@@ -128,7 +128,8 @@ trim_trailing_whitespace = false  # on save
 final_newline = false             # on save
 
 [editor.markdown]
-auto_pairs = false                # a language table overrides any of the three
+auto_pairs = false                # a language table overrides any of the four
+wrap = false                      # Markdown soft-wraps unless told not to
 
 [indent]
 width = 4
@@ -151,6 +152,20 @@ pair right after a letter, so `don't` stays `don't`.
 
 Both save settings are off by default so that a file you did not edit
 round-trips byte for byte. Neither applies to memory-mapped huge files.
+
+`wrap` opens files of a language with soft wrap on; Markdown does unless
+its table says `wrap = false`, and the other languages follow the
+top-level `soft_wrap`. Toggle Wrap still changes one tab at a time.
+
+In Markdown, Enter continues a list item (`-`, `*`, `+`, a number, a
+`[ ]` task box) or a `>` quote on the next line, and Enter on an item
+with nothing on it ends the list; Tab and Shift+Tab indent and outdent
+the item under the cursor.
+
+Expand Selection (`select.expand`) grows through the syntax tree when
+the file has one: the word, then the string or bracket contents, the
+expression, the statement, the block, the function, the line, the file.
+Without a tree (plain text, huge files) it counts brackets instead.
 
 Indentation: with `detect = true` (the default) Nimbus looks at the first
 4,000 lines when a file opens and uses what it finds, tabs or the most

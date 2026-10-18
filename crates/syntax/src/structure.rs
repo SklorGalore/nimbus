@@ -15,6 +15,15 @@ use crate::registry;
 use crate::state::SyntaxState;
 use crate::text::NodeChunks;
 
+/// Whether there is a tree that describes the text as it is now, so
+/// that [`expand`] can be trusted over counting brackets. False while
+/// the first parse runs, after an edit until the reparse, and for files
+/// that get no tree.
+#[must_use]
+pub fn ready(state: &SyntaxState) -> bool {
+    state.tree().is_some() && state.phase_name() == "ready"
+}
+
 /// The range of the smallest named syntax node that contains `range`
 /// and is larger than it: the next step of a structural Expand
 /// Selection (an identifier, then the expression, the statement, the

@@ -194,6 +194,38 @@ pub struct Tab {
     pub merge: Option<Box<MergeView>>,
 }
 
+/// The tabs the app starts with: one per document given on the command
+/// line, each indented and wrapped as its language says, or one untitled
+/// tab when none was.
+fn first_tabs(docs: Vec<Document>, options: &Options, config: &Config) -> Vec<Tab> {
+    let mut tabs: Vec<Tab> = docs
+        .into_iter()
+        .map(|mut d| {
+            d.configure_indent(config.indent.for_language(d.language_key()));
+            let wrap = options.wrap || wrap_for(config, &d);
+            Tab::new(d, wrap)
+        })
+        .collect();
+    if tabs.is_empty() {
+        tabs.push(Tab::new(
+            Document::untitled(),
+            options.wrap || config.soft_wrap,
+        ));
+    }
+    tabs
+}
+
+/// Whether a tab for `doc` opens with soft wrap: the language's setting
+/// (`[editor.markdown] wrap`, on for Markdown by default) over the
+/// top-level `soft_wrap`.
+fn wrap_for(config: &Config, doc: &Document) -> bool {
+    config
+        .editor
+        .for_language(doc.language_key())
+        .wrap
+        .unwrap_or(config.soft_wrap)
+}
+
 impl Tab {
     /// A tab showing `doc`, wrapped if `wrap`.
     #[must_use]
@@ -479,17 +511,7 @@ impl App {
             sidebar.search.focus_query(Some(pattern.clone()));
             started
         });
-        let wrap = options.wrap || config.soft_wrap;
-        let mut tabs: Vec<Tab> = docs
-            .into_iter()
-            .map(|mut d| {
-                d.configure_indent(config.indent.for_language(d.language_key()));
-                Tab::new(d, wrap)
-            })
-            .collect();
-        if tabs.is_empty() {
-            tabs.push(Tab::new(Document::untitled(), wrap));
-        }
+        let tabs = first_tabs(docs, &options, &config);
         let all_warnings: Vec<String> = warnings
             .into_iter()
             .chain(key_warnings)
@@ -1729,7 +1751,8 @@ impl App {
                 let replace = self.tabs.len() == 1
                     && self.tabs[0].doc.path.is_none()
                     && !self.tabs[0].doc.is_dirty();
-                let tab = Tab::new(doc, self.config.soft_wrap);
+                let wrap = wrap_for(&self.config, &doc);
+                let tab = Tab::new(doc, wrap);
                 if replace {
                     self.tabs[0] = tab;
                     self.active = 0;
@@ -4147,7 +4170,7 @@ pub fn run_headless(
     );
     gpu.set_tab_width(config.tab_width);
     let mut view = View::default();
-    view.set_wrap(options.wrap || config.soft_wrap);
+    view.set_wrap(options.wrap || wrap_for(config, &doc));
     if options.wait_index {
         index_now(&mut doc);
     }
