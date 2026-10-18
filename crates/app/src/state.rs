@@ -15,6 +15,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use nimbus_core::{Normalize, Whitespace};
 use serde::{Deserialize, Serialize};
 
 use crate::sidebar::{DEFAULT_WIDTH, Mode};
@@ -33,6 +34,13 @@ pub struct State {
     pub sidebar_visible: bool,
     /// Sidebar width in logical pixels.
     pub sidebar_width: f32,
+    /// The compare view ignores whitespace: `"off"`, `"ends"` (leading and
+    /// trailing) or `"all"` (M18).
+    pub diff_ignore_whitespace: String,
+    /// The compare view ignores ASCII case.
+    pub diff_ignore_case: bool,
+    /// The compare view drops changes made only of blank lines.
+    pub diff_ignore_blank_lines: bool,
     /// The editor font size the zoom actions left, in points (M16); `None`
     /// when it is the config's `font_size`, so a later change to the config
     /// still takes effect. Read at startup unless `remember_zoom = false`.
@@ -53,11 +61,43 @@ impl Default for State {
         Self {
             sidebar_visible: true,
             sidebar_width: DEFAULT_WIDTH,
+            diff_ignore_whitespace: "off".to_owned(),
+            diff_ignore_case: false,
+            diff_ignore_blank_lines: false,
             font_size: None,
             window: None,
             recent: Vec::new(),
             sessions: Vec::new(),
         }
+    }
+}
+
+impl State {
+    /// The compare options as the diff takes them. An unknown whitespace
+    /// word (a hand edit) means off.
+    #[must_use]
+    pub fn diff_options(&self) -> Normalize {
+        Normalize {
+            whitespace: match self.diff_ignore_whitespace.as_str() {
+                "ends" => Whitespace::Ends,
+                "all" => Whitespace::All,
+                _ => Whitespace::Exact,
+            },
+            case: self.diff_ignore_case,
+            blank_lines: self.diff_ignore_blank_lines,
+        }
+    }
+
+    /// Remember `n` as the compare options.
+    pub fn set_diff_options(&mut self, n: Normalize) {
+        match n.whitespace {
+            Whitespace::Exact => "off",
+            Whitespace::Ends => "ends",
+            Whitespace::All => "all",
+        }
+        .clone_into(&mut self.diff_ignore_whitespace);
+        self.diff_ignore_case = n.case;
+        self.diff_ignore_blank_lines = n.blank_lines;
     }
 }
 
@@ -103,7 +143,9 @@ pub enum SidebarMode {
 impl From<Mode> for SidebarMode {
     fn from(m: Mode) -> Self {
         match m {
-            Mode::Files => Self::Files,
+            // A folder compare's results are not kept, so a session left
+            // on the Compare tab comes back on the tree.
+            Mode::Files | Mode::Compare => Self::Files,
             Mode::Search => Self::Search,
         }
     }
@@ -502,11 +544,20 @@ mod tests {
         };
         s.note_recent(Path::new("/p/a.rs"));
         s.put_session(session("/p"));
+        s.set_diff_options(Normalize {
+            whitespace: Whitespace::Ends,
+            case: true,
+            blank_lines: false,
+        });
         let text = toml::to_string(&s).unwrap();
         assert_eq!(State::parse(&text), s);
         let partial = State::parse("sidebar_width = 200.0\n");
         assert!(partial.sidebar_visible);
         assert_eq!(partial.sidebar_width, 200.0);
+        assert!(partial.diff_options().is_exact());
+        let back: State = toml::from_str(&text).unwrap();
+        assert_eq!(back.diff_options().whitespace, Whitespace::Ends);
+        assert!(back.diff_options().case);
         assert_eq!(partial.font_size, None);
         assert_eq!(partial.sessions, Vec::new());
         assert!(partial.window.is_none());

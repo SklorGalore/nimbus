@@ -18,8 +18,10 @@ use std::sync::Arc;
 
 use nimbus_core::compare::{Options, compare};
 use nimbus_core::live_diff::{EditSpan, LiveDiff, Side};
+use nimbus_core::split::Splits;
 use nimbus_core::{
-    Buffer, Hunk, Interner, Limits, MappedBuffer, RopeBuffer, Snapshot, Text, VecSource,
+    Buffer, Hunk, Interner, Limits, MappedBuffer, Normalize, RopeBuffer, Snapshot, Text, VecSource,
+    Whitespace,
 };
 use proptest::prelude::*;
 use proptest::test_runner::Config;
@@ -42,6 +44,8 @@ const PIECES: &[&str] = &[
     "fn f() {\n",
     "    x\n",
     "}\n",
+    "A\n",
+    " a \n",
 ];
 
 /// Mapped-buffer limits that split storage into tiny pieces, so the chunk
@@ -328,6 +332,12 @@ fn check_live(live: &LiveDiff, old: &str, new: &str, log: &str) {
 const TINY_OPTIONS: Options = Options {
     limit: 12,
     window: 8,
+    normalize: Normalize {
+        whitespace: Whitespace::Exact,
+        case: false,
+        blank_lines: false,
+    },
+    split: false,
 };
 
 proptest! {
@@ -430,4 +440,167 @@ proptest! {
         prop_assert_eq!(a.diff(&oa, &na), b.diff(&ob, &nb));
         prop_assert_eq!(a.num_tokens(), b.num_tokens());
     }
+
+    /// M18 options: the hunks are a valid diff of the normalised lines (they
+    /// turn the old normalised lines into the new ones) and as small as an
+    /// exact diff of the normalised texts, on both backends.
+    #[test]
+    fn options_diff_the_normalised_lines(
+        (old, new) in pair_strategy(),
+        ws in 0..3u8,
+        case in any::<bool>(),
+    ) {
+        let whitespace = [Whitespace::Exact, Whitespace::Ends, Whitespace::All][usize::from(ws)];
+        let n = Normalize { whitespace, case, blank_lines: false };
+        let (no, nn) = (normalised(&old, n), normalised(&new, n));
+        let expected = Interner::new();
+        let mut expected = expected;
+        let eo = expected.intern(&rope(&no.concat())).unwrap();
+        let en = expected.intern(&rope(&nn.concat())).unwrap();
+        let exact = expected.diff(&eo, &en);
+        for make in [rope, mapped] {
+            let mut i = Interner::with_options(n, false);
+            let a = i.intern(&make(&old)).unwrap();
+            let b = i.intern(&make(&new)).unwrap();
+            prop_assert_eq!(a.len(), no.len());
+            let hunks = i.diff(&a, &b);
+            prop_assert_eq!(apply_units(&no, &nn, &hunks), nn.concat());
+            prop_assert_eq!(changed(&hunks), changed(&exact), "{:?} vs {:?}", hunks, exact);
+        }
+    }
+
+    /// Ignore Blank Lines drops exactly the hunks made of blank lines.
+    #[test]
+    fn blank_line_changes_drop((old, new) in pair_strategy()) {
+        let n = Normalize { blank_lines: true, ..Normalize::default() };
+        let mut i = Interner::with_options(n, false);
+        let a = i.intern(&rope(&old)).unwrap();
+        let b = i.intern(&rope(&new)).unwrap();
+        let kept = i.diff(&a, &b);
+        let mut e = Interner::new();
+        let ea = e.intern(&rope(&old)).unwrap();
+        let eb = e.intern(&rope(&new)).unwrap();
+        let blank = |s: &str| s.bytes().all(|b| b.is_ascii_whitespace());
+        let (ol, nl): (Vec<&str>, Vec<&str>) =
+            (old.split_inclusive('\n').collect(), new.split_inclusive('\n').collect());
+        let expected: Vec<Hunk> = e
+            .diff(&ea, &eb)
+            .into_iter()
+            .filter(|h| !(ol[h.old.clone()].iter().all(|l| blank(l)) && nl[h.new.clone()].iter().all(|l| blank(l))))
+            .collect();
+        prop_assert_eq!(kept, expected);
+    }
+
+    /// Splitting (M18): with long lines cut into pieces, the hunks are in
+    /// units and turn the old units into the new ones; the unit counts
+    /// match the scans.
+    #[test]
+    fn split_compare_turns_old_units_into_new(
+        (old, new) in long_pair_strategy(),
+    ) {
+        for make in [rope, mapped] {
+            let (os, ns) = (make(&old), make(&new));
+            let options = Options { split: true, ..Options::default() };
+            let c = compare(&os, &ns, options).unwrap();
+            let (ou, nu) = (units(&*os, &c.old_splits), units(&*ns, &c.new_splits));
+            prop_assert_eq!(c.old_lines, ou.len());
+            prop_assert_eq!(c.new_lines, nu.len());
+            prop_assert_eq!(apply_units(&ou, &nu, &c.hunks), new.clone());
+        }
+    }
+}
+
+/// Each line of `text`, normalised the way the options describe, ending
+/// with `\n`: an independent model of what the interner compares.
+fn normalised(text: &str, n: Normalize) -> Vec<String> {
+    text.split_inclusive('\n')
+        .map(|l| {
+            let ws = |c: char| c.is_ascii_whitespace() || c == '\x0B';
+            let mut s: String = match n.whitespace {
+                Whitespace::Exact => l.to_owned(),
+                Whitespace::Ends => l.trim_matches(ws).to_owned(),
+                Whitespace::All => l.chars().filter(|&c| !ws(c)).collect(),
+            };
+            if n.case {
+                s.make_ascii_lowercase();
+            }
+            // Kept line endings become a mark, so each model line stays
+            // one line of the joined text; then a separator no normalised line contains, so the exact diff
+            // of the joined text sees the same lines.
+            let mut s = s.replace('\n', "\u{2}");
+            s.push('\u{1}');
+            s.push('\n');
+            s
+        })
+        .collect()
+}
+
+/// `old` units with the hunks applied, taking replacement units from `new`.
+fn apply_units(old: &[String], new: &[String], hunks: &[Hunk]) -> String {
+    let mut out = String::new();
+    let mut at = 0;
+    for h in hunks {
+        out.extend(old[at..h.old.start].iter().map(String::as_str));
+        out.extend(new[h.new.clone()].iter().map(String::as_str));
+        at = h.old.end;
+    }
+    out.extend(old[at..].iter().map(String::as_str));
+    out
+}
+
+fn changed(hunks: &[Hunk]) -> usize {
+    hunks.iter().map(|h| h.old.len() + h.new.len()).sum()
+}
+
+/// A text's units as strings: lines, with cut lines in their pieces (the
+/// last piece keeps the line ending).
+fn units(t: &dyn Text, splits: &Splits) -> Vec<String> {
+    let all = t.slice(0..t.len_bytes()).into_owned();
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (line, l) in all.split_inclusive('\n').enumerate() {
+        let span = t.line_span(start);
+        let mut piece = 0;
+        if splits.piece(line, 0, span).is_none() {
+            out.push(l.to_owned());
+        } else {
+            while let Some((r, _)) = splits.piece(line, piece, span) {
+                let last = r.end == span.end;
+                let end = if last { start + l.len() } else { r.end };
+                out.push(all[r.start..end].to_owned());
+                piece += 1;
+                if last {
+                    break;
+                }
+            }
+        }
+        start += l.len();
+    }
+    out
+}
+
+/// Pairs with long lines (over the split threshold), edited in a few places.
+fn long_pair_strategy() -> impl Strategy<Value = (String, String)> {
+    (
+        1u64..1000,
+        prop::collection::vec((any::<prop::sample::Index>(), "[a-z ]{0,30}"), 0..4),
+    )
+        .prop_map(|(seed, edits)| {
+            let mut x = seed;
+            let mut word = || {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                ["alpha", "beta", "gamma", "{\"k\":", "1,", "]", "é"][(x % 7) as usize]
+            };
+            let long: String = (0..2000).map(|_| word()).collect();
+            let old = format!("head\n{long}\nmiddle\n{long}");
+            let mut new = old.clone();
+            for (at, insert) in edits {
+                let bounds: Vec<usize> = new.char_indices().map(|(i, _)| i).collect();
+                let i = bounds[at.index(bounds.len())];
+                new.insert_str(i, &insert);
+            }
+            (old, new)
+        })
 }

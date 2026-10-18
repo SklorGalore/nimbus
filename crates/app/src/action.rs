@@ -398,6 +398,43 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::CompareTab,
         Keys::NONE,
     ),
+    // Compare, second pass (M18).
+    act(
+        "diff.compareHead",
+        "Compare with HEAD",
+        Command::CompareHead,
+        Keys::NONE,
+    ),
+    act(
+        "diff.compareRevision",
+        "Compare with Revision…",
+        Command::CompareRevision,
+        Keys::NONE,
+    ),
+    act(
+        "diff.compareFolders",
+        "Compare Folders…",
+        Command::CompareFolders,
+        Keys::NONE,
+    ),
+    act(
+        "diff.ignoreWhitespace",
+        "Ignore Whitespace (Off, Ends, All)",
+        Command::DiffWhitespace,
+        Keys::NONE,
+    ),
+    act(
+        "diff.ignoreCase",
+        "Ignore Case in Compare",
+        Command::DiffCase,
+        Keys::NONE,
+    ),
+    act(
+        "diff.ignoreBlankLines",
+        "Ignore Blank Lines in Compare",
+        Command::DiffBlankLines,
+        Keys::NONE,
+    ),
     act(
         "diff.next",
         "Next Change",

@@ -3,7 +3,7 @@
 Every command in Nimbus, with its **id** (what you write in the `[keys]`
 table of `config.toml`), its **title** (what the command palette and
 menus show) and its default keys. This list is made from the editor's
-own command table, so it matches the build it describes (version 0.8.0).
+own command table, so it matches the build it describes (version 0.9.0).
 
 - Commands without a key are run from the command palette
   (`Cmd+Shift+P` / `Ctrl+Shift+P`).
@@ -114,6 +114,12 @@ These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
 | Compare with Saved | `diff.compareSaved` | — | — |
 | Compare with File… | `diff.compareFile` | — | — |
 | Compare with Tab… | `diff.compareTab` | — | — |
+| Compare with HEAD | `diff.compareHead` | — | — |
+| Compare with Revision… | `diff.compareRevision` | — | — |
+| Compare Folders… | `diff.compareFolders` | — | — |
+| Ignore Whitespace (Off, Ends, All) | `diff.ignoreWhitespace` | — | — |
+| Ignore Case in Compare | `diff.ignoreCase` | — | — |
+| Ignore Blank Lines in Compare | `diff.ignoreBlankLines` | — | — |
 | Next Change | `diff.next` | `F7` | `F7` |
 | Previous Change | `diff.previous` | `Shift+F7` | `Shift+F7` |
 | Toggle Unified Compare | `diff.toggleUnified` | — | — |

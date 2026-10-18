@@ -9,12 +9,18 @@
 //!
 //! Nothing here is per line: rows come from a prefix sum over the hunks,
 //! and only the rows on screen are planned and drawn.
+//!
+//! Rows are made of *units* (M18). Usually a unit is a line, but a compare
+//! that cut long lines into pieces ([`Splits`]) has one unit per piece;
+//! the columns turn units back into lines wherever a line or a byte is
+//! needed, so the views outside see lines as before.
 
 use std::collections::HashSet;
 use std::ops::Range;
 
 use nimbus_core::Text;
 use nimbus_core::align::{Cell, MAX_COLUMNS, Row, Rows};
+use nimbus_core::split::Splits;
 use nimbus_render::Gpu;
 
 use crate::document::{Carets, Document};
@@ -31,6 +37,10 @@ pub enum Click {
     /// A fold row was clicked; it has been toggled.
     Toggled,
 }
+
+/// Per column, the bytes a row's cell shows: its line's content, or its
+/// piece of a cut line. `None` for fillers, folds, or a text not given.
+pub type Bytes = [Option<Range<usize>>; MAX_COLUMNS];
 
 /// What the live column draws besides its text.
 pub struct Live<'a> {
@@ -62,6 +72,8 @@ pub struct Columns<T> {
     plans: Vec<Vec<RowPlan>>,
     /// The change navigated to last.
     pub current: Option<usize>,
+    /// Per column, which lines are cut into pieces: units to lines.
+    units: [Splits; MAX_COLUMNS],
 }
 
 impl<T: Copy> std::fmt::Debug for Columns<T> {
@@ -86,7 +98,43 @@ impl<T: Copy> Columns<T> {
             unfolded: HashSet::new(),
             plans: vec![Vec::new(); MAX_COLUMNS],
             current: None,
+            units: Default::default(),
         }
+    }
+
+    /// Say which lines of each column the rows' units cut into pieces
+    /// (none: units are lines).
+    pub fn set_units(&mut self, units: [Splits; MAX_COLUMNS]) {
+        self.units = units;
+    }
+
+    /// The line holding unit `unit` of column `c`, and its piece.
+    #[must_use]
+    pub fn locate(&self, c: usize, unit: usize) -> (usize, usize) {
+        self.units.get(c).map_or((unit, 0), |u| u.locate(unit))
+    }
+
+    /// The bytes unit `unit` of column `c` shows in `t`: its piece of a cut
+    /// line, with whether it continues the piece before, or `None` for a
+    /// whole line.
+    #[must_use]
+    pub fn piece(&self, c: usize, unit: usize, t: &dyn Text) -> Option<(Range<usize>, bool)> {
+        let u = self.units.get(c)?;
+        if u.is_empty() {
+            return None;
+        }
+        let (line, piece) = u.locate(unit);
+        if line >= t.len_lines() {
+            return None;
+        }
+        u.piece(line, piece, t.line_span(t.line_to_byte(line)))
+    }
+
+    /// The live column's first unit of `line`.
+    fn live_unit(&self, line: usize) -> usize {
+        self.units
+            .get(self.live)
+            .map_or(line, |u| u.unit_of_line(line))
     }
 
     /// Draw this many columns side by side (1: all over the same area).
@@ -183,13 +231,14 @@ impl<T: Copy> Columns<T> {
         if self.rows.is_empty() {
             return;
         }
-        let mut row = self.rows.row_of(self.live, line);
+        let unit = self.live_unit(line);
+        let mut row = self.rows.row_of(self.live, unit);
         if let Some(r) = self.rows.at(row)
             && let Cell::Fold { first, .. } = r.cells[0]
         {
             self.unfolded.insert(first);
             self.rows.toggle_fold(row);
-            row = self.rows.row_of(self.live, line);
+            row = self.rows.row_of(self.live, unit);
         }
         self.show_row(row, layout);
     }
@@ -198,7 +247,7 @@ impl<T: Copy> Columns<T> {
     /// after the current one), or the previous. Returns the change's first
     /// row, scrolled on screen, and records it as current.
     pub fn step_change(&mut self, forward: bool, line: usize, layout: &Layout) -> Option<usize> {
-        let row = self.rows.row_of(self.live, line);
+        let row = self.rows.row_of(self.live, self.live_unit(line));
         let found = if forward {
             let from = match self.current {
                 Some(n) if self.rows.change_row(n).is_some_and(|r| r <= row) => {
@@ -220,11 +269,17 @@ impl<T: Copy> Columns<T> {
     /// change may have no line on the live side); `None` past the end.
     #[must_use]
     pub fn live_line_from(&self, row: usize) -> Option<usize> {
+        self.live_unit_from(row)
+            .map(|u| self.locate(self.live, u).0)
+    }
+
+    /// The live column's unit on `row`, or the nearest one below.
+    fn live_unit_from(&self, row: usize) -> Option<usize> {
         let mut at = row;
         loop {
             let r = self.rows.at(at)?;
-            if let Cell::Line(l) = r.cells[self.live] {
-                return Some(l);
+            if let Cell::Line(u) = r.cells[self.live] {
+                return Some(u);
             }
             at += 1;
         }
@@ -300,10 +355,13 @@ impl<T: Copy> Columns<T> {
             self.rows.toggle_fold(row);
             return Click::Toggled;
         }
-        let Some(line) = self.live_line_from(row) else {
+        let Some(unit) = self.live_unit_from(row) else {
             return Click::None;
         };
-        let start = doc.buffer.line_to_byte(line);
+        let line = self.locate(self.live, unit).0;
+        let start = self
+            .piece(self.live, unit, &doc.buffer)
+            .map_or_else(|| doc.buffer.line_to_byte(line), |(r, _)| r.start);
         let live_column = if self.count == 1 {
             0
         } else {
@@ -322,11 +380,14 @@ impl<T: Copy> Columns<T> {
     /// from its row and column; `marks` the byte ranges to draw stronger
     /// (changed words) per column of a row. Returns how far the first row
     /// is scrolled up, which [`draw`](Columns::draw) also knows.
+    /// `texts` are the columns' texts, for finding the pieces of cut
+    /// lines; only needed when [`set_units`](Columns::set_units) cut any.
     pub fn plan(
         &mut self,
         layout: &Layout,
+        texts: &[&dyn Text],
         background: impl Fn(&Row<T>, usize) -> Option<Color>,
-        mut marks: impl FnMut(&Row<T>) -> [Option<Range<usize>>; MAX_COLUMNS],
+        mut marks: impl FnMut(&Row<T>, &Bytes) -> [Option<Range<usize>>; MAX_COLUMNS],
     ) -> f32 {
         let visible = Self::visible_rows(layout) + 1;
         let columns = self.rows.columns();
@@ -337,10 +398,32 @@ impl<T: Copy> Columns<T> {
             let Some(r) = self.rows.at(self.scroll_row + i) else {
                 break;
             };
-            let marks = marks(&r);
+            // Each cell's line, piece and bytes, when its text was given.
+            let mut lines = [None; MAX_COLUMNS];
+            let mut pieces: [Option<(Range<usize>, bool)>; MAX_COLUMNS] = Default::default();
+            let mut bytes: Bytes = Default::default();
+            for (c, cell) in r.cells.iter().enumerate().take(columns) {
+                let Cell::Line(unit) = *cell else { continue };
+                let line = self.locate(c, unit).0;
+                lines[c] = Some(line);
+                let Some(t) = texts.get(c) else { continue };
+                pieces[c] = self.piece(c, unit, *t);
+                bytes[c] = Some(pieces[c].as_ref().map_or_else(
+                    || {
+                        let span = t.line_span(t.line_to_byte(line));
+                        span.start..span.end
+                    },
+                    |(r, _)| r.clone(),
+                ));
+            }
+            let marks = marks(&r, &bytes);
             for (c, (cell, mark)) in r.cells.iter().zip(marks).enumerate().take(columns) {
                 let mut plan = plan_of(*cell, background(&r, c));
                 plan.mark = mark;
+                if lines[c].is_some() {
+                    plan.line = lines[c];
+                    plan.piece = pieces[c].take();
+                }
                 if self.count == 1 {
                     // Every column over one area: a row is drawn by the
                     // column that has its line, and the fold once.
@@ -370,6 +453,7 @@ impl<T: Copy> Columns<T> {
                     fold: None,
                     background: None,
                     mark: None,
+                    piece: None,
                 });
             }
         }
@@ -535,18 +619,21 @@ fn plan_of(cell: Cell, background: Option<Color>) -> RowPlan {
             fold: None,
             background,
             mark: None,
+            piece: None,
         },
         Cell::Filler => RowPlan {
             line: None,
             fold: None,
             background,
             mark: None,
+            piece: None,
         },
         Cell::Fold { hidden, .. } => RowPlan {
             line: None,
             fold: Some(hidden),
             background: None,
             mark: None,
+            piece: None,
         },
     }
 }

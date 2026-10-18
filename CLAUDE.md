@@ -23,6 +23,9 @@ bench/gen.sh                                                # 10 MB / 100 MB tes
 bench/gen.sh diff && cargo run --release -- --diff bench/out/src-10mb.rs bench/out/src-10mb-edited.rs   # the compare view on the 10 MB bench pair
 NIMBUS_DIFF_FILES=$PWD/bench/out/src-10mb.rs:$PWD/bench/out/src-10mb-edited.rs cargo test --release -p nimbus-core -- --ignored --nocapture compare_bench   # time a comparison
 NIMBUS_DIFF_FILES=$PWD/bench/out/src-10mb.rs:$PWD/bench/out/src-10mb-edited.rs cargo test --release -p nimbus -- --ignored --nocapture typing_bench --test-threads 1   # keystroke cost in the compare and merge views (absolute paths: tests run in crates/app)
+cargo run -- --diff DIR_A DIR_B                               # folder compare in the sidebar's Compare mode (M18)
+cargo test --release -p nimbus-core -- --ignored --nocapture one_line_bench   # a 50 MB one-line file diffed in pieces
+cargo test --release -p nimbus -- --ignored --nocapture folder_compare        # walk and compare two trees of 100,000 files
 cargo run -- --merge BASE LOCAL REMOTE -o OUT --headless 1600x900 --screenshot /tmp/m.bmp   # render a three-way merge (exit code 0 only when OUT is saved with no conflicts)
 cargo run --release -- --merge examples/merge/{base,local,remote}.rs -o /tmp/merged.rs   # small sample inputs for the merge views by eye (examples/README.md)
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp   # render with no window (works with the screen locked)

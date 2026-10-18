@@ -37,10 +37,12 @@ tabs are remembered as the project's session (see
 
 ## The sidebar
 
-The sidebar (`Cmd+B` / `Ctrl+B` to show or hide it) has two tabs in its
-header, **Files** and **Search**, followed by the project folder's name.
-Search is the Find in Files panel, described in
-[Find and replace](find-and-replace.md#find-in-files). Files is the
+The sidebar (`Cmd+B` / `Ctrl+B` to show or hide it) has three tabs in
+its header, **Files**, **Search** and **Compare**, followed by the
+project folder's name. Search is the Find in Files panel, described in
+[Find and replace](find-and-replace.md#find-in-files). Compare holds the
+compare options and a folder compare's results, described in
+[Compare and merge](compare-and-merge.md#compare-options). Files is the
 project tree:
 
 - Folders come first, then files, both sorted without regard to case.
