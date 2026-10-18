@@ -20,7 +20,7 @@ use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::column;
-use crate::{LineSpan, Text};
+use crate::{Folds, LineSpan, Text};
 
 /// Where one visual row starts within its logical line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,12 +231,16 @@ impl WrapCache {
 }
 
 /// Row lookups for one view: the cache plus the current wrap width (or
-/// none, when wrap is off and every line is one row).
+/// none, when wrap is off and every line is one row), and the view's
+/// folds, which the row walkers ([`step_rows`], [`rows_between`]) skip
+/// over. Lines map to rows as a chain: logical line, then soft wrap, then
+/// folds, each step needing no per-line array (M13).
 #[derive(Debug)]
 pub struct WrapView<'a> {
     cache: &'a mut WrapCache,
     width: Option<usize>,
     tab_width: usize,
+    folds: Option<&'a Folds>,
 }
 
 impl<'a> WrapView<'a> {
@@ -246,6 +250,38 @@ impl<'a> WrapView<'a> {
             cache,
             width,
             tab_width,
+            folds: None,
+        }
+    }
+
+    /// The same, skipping the lines `folds` hide.
+    #[must_use]
+    pub fn with_folds(mut self, folds: &'a Folds) -> Self {
+        self.folds = (!folds.is_empty()).then_some(folds);
+        self
+    }
+
+    /// The folds rows skip, if any.
+    #[must_use]
+    pub fn folds(&self) -> Option<&'a Folds> {
+        self.folds
+    }
+
+    /// Where the visible line after `span` starts, past any fold.
+    #[must_use]
+    pub fn next_line(&self, t: &dyn Text, span: LineSpan) -> Option<usize> {
+        match self.folds {
+            Some(f) => f.next_line(t, span),
+            None => span.next,
+        }
+    }
+
+    /// Where the visible line before the one starting at `start` starts.
+    #[must_use]
+    pub fn prev_line(&self, t: &dyn Text, start: usize) -> Option<usize> {
+        match self.folds {
+            Some(f) => f.prev_line(t, start),
+            None => Some(t.line_span(start.checked_sub(1)?).start),
         }
     }
 
@@ -324,7 +360,11 @@ pub struct RowPos {
 /// and last rows of the text. Returns the new position and how many rows
 /// were actually moved. Costs one row count per line passed.
 pub fn step_rows(t: &dyn Text, w: &mut WrapView<'_>, at: RowPos, n: isize) -> (RowPos, usize) {
-    let mut span = t.line_span(at.start);
+    // A start inside a fold counts from the fold's first line.
+    let mut span = match w.folds {
+        Some(f) => f.visible_line(t, at.start),
+        None => t.line_span(at.start),
+    };
     let mut p = RowPos {
         start: span.start,
         row: at.row.min(w.row_count_at(t, span).saturating_sub(1)),
@@ -339,7 +379,7 @@ pub fn step_rows(t: &dyn Text, w: &mut WrapView<'_>, at: RowPos, n: isize) -> (R
                 left = 0;
                 break;
             }
-            let Some(next) = span.next else {
+            let Some(next) = w.next_line(t, span) else {
                 left -= room;
                 p.row = rows - 1;
                 break;
@@ -358,13 +398,13 @@ pub fn step_rows(t: &dyn Text, w: &mut WrapView<'_>, at: RowPos, n: isize) -> (R
                 left = 0;
                 break;
             }
-            if p.start == 0 {
+            let Some(prev) = w.prev_line(t, p.start) else {
                 left -= p.row;
                 p.row = 0;
                 break;
-            }
+            };
             left -= p.row + 1;
-            span = t.line_span(p.start - 1);
+            span = t.line_span(prev);
             p = RowPos {
                 start: span.start,
                 row: w.row_count_at(t, span) - 1,
@@ -374,8 +414,18 @@ pub fn step_rows(t: &dyn Text, w: &mut WrapView<'_>, at: RowPos, n: isize) -> (R
     (p, n.unsigned_abs() - left)
 }
 
-/// The visual row containing byte offset `pos`.
+/// The visual row containing byte offset `pos`. A position a fold hides
+/// is on the last row of the fold's first line, where its chip is.
 pub fn row_pos_of(t: &dyn Text, w: &mut WrapView<'_>, pos: usize) -> RowPos {
+    if let Some(f) = w.folds
+        && f.hiding(pos).is_some()
+    {
+        let span = f.visible_line(t, pos);
+        return RowPos {
+            start: span.start,
+            row: w.row_count_at(t, span) - 1,
+        };
+    }
     let span = t.line_span(pos);
     let off = pos.saturating_sub(span.start);
     RowPos {
@@ -598,5 +648,26 @@ mod tests {
             proptest::prop_assert_eq!(back, start, "{:?} wrapped at {:?}", text, width);
             proptest::prop_assert_eq!(isize::try_from(moved_back).unwrap(), moved);
         }
+    }
+
+    #[test]
+    fn row_walkers_step_over_folds_and_wrap_together() {
+        // Lines: "aaaa aaaa" (2 rows at width 5), "b", "c", "dddd dddd" (2 rows).
+        let t = RopeBuffer::from_text("aaaa aaaa\nb\nc\ndddd dddd");
+        let mut folds = Folds::new();
+        // Hide "b" and "c" behind the first line.
+        assert!(folds.fold(crate::fold::lines_range(&t, 0, 12).unwrap_or(0..0)));
+        let mut cache = WrapCache::default();
+        let mut w = WrapView::new(&mut cache, Some(5), 4).with_folds(&folds);
+        let top = RowPos { start: 0, row: 0 };
+        let (p, moved) = step_rows(&t, &mut w, top, 2);
+        assert_eq!((p, moved), (RowPos { start: 14, row: 0 }, 2));
+        let (p, moved) = step_rows(&t, &mut w, top, 10);
+        assert_eq!((p, moved), (RowPos { start: 14, row: 1 }, 3));
+        let (back, moved) = step_rows(&t, &mut w, p, -2);
+        assert_eq!((back, moved), (RowPos { start: 0, row: 1 }, 2));
+        assert_eq!(rows_between(&t, &mut w, top, p, 100), 3);
+        // A hidden position shows on the last row of the fold's first line.
+        assert_eq!(row_pos_of(&t, &mut w, 11), RowPos { start: 0, row: 1 });
     }
 }
