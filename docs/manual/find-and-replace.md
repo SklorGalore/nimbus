@@ -85,7 +85,7 @@ has one.
 | Give the keyboard back to the text | `Escape` |
 | Next or previous result, from anywhere | `F4`, `Shift+F4` |
 | Replace All | `Cmd+Option+Enter` / `Ctrl+Alt+Enter` |
-| Earlier or later patterns (or replacements, includes, excludes) | `Up`, `Down` in a field |
+| Earlier or later patterns, or replacements | `Up`, `Down` in the query or replacement field |
 | Forget the selected saved search | `Delete` |
 
 **History and saved searches.** Each search you run (by Enter, or by
