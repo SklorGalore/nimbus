@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 use winit::event_loop::EventLoopProxy;
 
 use super::{App, AppEvent, MESSAGE_TIME, Message, Tab, wrap_for};
+use crate::config::Config;
+use crate::docs::Docs;
 use crate::document::Document;
+use crate::groups::Groups;
 use crate::input::Command;
 use crate::picker::Kind;
 use crate::session::{self, Restore};
@@ -124,19 +127,33 @@ impl App {
     /// are left out; there is no autosave to bring their text back.
     pub(super) fn capture_session(&self) -> Option<Session> {
         let root = self.ws.session_root.clone()?;
+        // One entry per document, in the order first shown: a file split
+        // into two groups is one file to reopen until groups are saved too.
+        // The active tab speaks for its document.
+        let active_doc = self.tabs[self.active].doc;
         let tabs = self
             .tabs
             .iter()
             .enumerate()
-            .filter_map(|(i, t)| {
-                let path = if t.doc.is_placeholder() {
-                    t.doc.path.clone()?
+            .filter(|&(i, t)| {
+                if t.doc == active_doc {
+                    i == self.active
                 } else {
-                    t.doc.canonical.clone()?
+                    !self.tabs[..i].iter().any(|o| o.doc == t.doc)
+                }
+            })
+            .filter_map(|(i, t)| {
+                let doc = &self.docs[t.doc];
+                let path = if doc.is_placeholder() {
+                    doc.path.clone()?
+                } else {
+                    doc.canonical.clone()?
                 };
-                let (cursor, scroll) = t.pending.map_or((t.doc.cursor(), t.view.scroll_top), |p| {
-                    (p.cursor, p.scroll)
-                });
+                let (cursor, scroll) = t
+                    .pending
+                    .map_or((t.carets.cursor(&doc.buffer), t.view.scroll_top), |p| {
+                        (p.cursor, p.scroll)
+                    });
                 Some(SessionTab {
                     path,
                     cursor,
@@ -168,10 +185,11 @@ impl App {
         let Some(tab) = self.tabs.get(i) else {
             return false;
         };
-        if !tab.doc.is_placeholder() {
+        let doc = &self.docs[tab.doc];
+        if !doc.is_placeholder() {
             return true;
         }
-        let Some(path) = tab.doc.path.clone() else {
+        let Some(path) = doc.path.clone() else {
             return true;
         };
         match Document::open(&path) {
@@ -187,15 +205,19 @@ impl App {
         }
     }
 
-    /// Put `doc`, just read, in place of tab `i`'s placeholder.
+    /// Put `doc`, just read, in place of tab `i`'s placeholder, for every
+    /// tab showing it.
     pub(super) fn adopt_restored(&mut self, i: usize, mut doc: Document) {
         doc.detect_language(&self.languages);
         self.configure_indent(&mut doc);
         let wrap = self.options.wrap || wrap_for(&self.config, &doc);
-        let tab = &mut self.tabs[i];
-        tab.view.set_wrap(wrap);
-        tab.doc = doc;
-        tab.apply_pending();
+        let id = self.tabs[i].doc;
+        doc.journal_mut().keep = true;
+        self.docs[id] = doc;
+        for tab in self.tabs.iter_mut().filter(|t| t.doc == id) {
+            tab.view.set_wrap(wrap);
+            tab.apply_pending(&mut self.docs[id]);
+        }
         self.title_key = None;
         self.sync_watch();
     }
@@ -208,12 +230,11 @@ impl App {
             return;
         }
         if self.tabs.len() == 1 {
-            self.tabs[0] = Tab::new(Document::untitled(), self.config.soft_wrap);
+            let id = self.docs.insert(Document::untitled());
+            let old = std::mem::replace(&mut self.tabs[0], Tab::new(id, self.config.soft_wrap));
+            self.docs.remove(old.doc);
         } else {
-            self.tabs.remove(i);
-            if self.active > i || self.active == self.tabs.len() {
-                self.active = self.active.saturating_sub(1);
-            }
+            self.remove_tab(i);
         }
         self.title_key = None;
         self.session_changed();
@@ -281,12 +302,13 @@ impl App {
     /// Remember tab `i`, about to close, for Reopen Closed Tab.
     pub(super) fn remember_closed(&mut self, i: usize) {
         let tab = &self.tabs[i];
-        let Some(path) = tab.doc.path.clone() else {
+        let doc = &self.docs[tab.doc];
+        let Some(path) = doc.path.clone() else {
             return; // untitled: nothing to reopen
         };
         let (cursor, scroll) = tab
             .pending
-            .map_or((tab.doc.cursor(), tab.view.scroll_top), |p| {
+            .map_or((tab.carets.cursor(&doc.buffer), tab.view.scroll_top), |p| {
                 (p.cursor, p.scroll)
             });
         self.ws.closed.push((path, Pending { cursor, scroll }));
@@ -303,10 +325,10 @@ impl App {
         };
         let before = self.tabs.len();
         self.open_path(&path);
-        if self.tabs.len() > before || self.tabs[self.active].doc.path.as_deref() == Some(&path) {
+        if self.tabs.len() > before || self.doc().path.as_deref() == Some(&path) {
             let tab = &mut self.tabs[self.active];
             tab.pending = Some(at);
-            tab.apply_pending();
+            tab.apply_pending(&mut self.docs[tab.doc]);
             self.changed(true);
         }
     }
@@ -344,11 +366,20 @@ impl App {
                 })
                 .map_err(|e| e.to_string())
         });
-        // Keep only tabs with unsaved work (or saving).
-        let keep: Vec<Tab> = std::mem::take(&mut self.tabs)
-            .into_iter()
-            .filter(|t| t.doc.is_dirty() || t.doc.is_saving() || t.doc.deleted)
-            .collect();
+        // Keep only tabs with unsaved work (or saving), in one group; the
+        // other documents close.
+        let (keep, gone): (Vec<Tab>, Vec<Tab>) =
+            std::mem::take(&mut self.tabs).into_iter().partition(|t| {
+                let d = &self.docs[t.doc];
+                d.is_dirty() || d.is_saving() || d.deleted
+            });
+        for t in gone {
+            if !keep.iter().any(|k| k.doc == t.doc) {
+                self.docs.remove(t.doc);
+            }
+        }
+        self.find.open = false;
+        self.groups = Groups::default();
         self.root.clone_from(&session.root);
         let (visible, width) = (self.sidebar.visible, self.sidebar.width);
         self.sidebar = Sidebar::new(session.root.clone(), visible, width);
@@ -362,23 +393,30 @@ impl App {
             &mut state,
             &mut self.sidebar,
             self.config.soft_wrap,
+            &mut self.docs,
         );
         self.ws.state = state;
-        let opened = tabs.len();
         let mut tabs = tabs;
-        for tab in tabs.iter_mut().filter(|t| !t.doc.is_placeholder()) {
-            self.configure_indent(&mut tab.doc);
-            tab.view.set_wrap(wrap_for(&self.config, &tab.doc));
+        configure_tabs(&mut tabs, &mut self.docs, &self.config, false);
+        // An untitled tab stands in when the session had none.
+        let (tabs, untitled): (Vec<Tab>, Vec<Tab>) = tabs
+            .into_iter()
+            .partition(|t| self.docs[t.doc].path.is_some());
+        for t in untitled {
+            self.docs.remove(t.doc);
         }
+        let opened = tabs.len();
         self.tabs = keep;
+        for tab in &mut self.tabs {
+            tab.group = 0;
+        }
         let first_new = self.tabs.len();
-        self.tabs
-            .extend(tabs.into_iter().filter(|t| t.doc.path.is_some()));
+        self.tabs.extend(tabs);
         self.active = if self.tabs.len() > first_new {
             (first_new + active).min(self.tabs.len() - 1)
         } else if self.tabs.is_empty() {
-            self.tabs
-                .push(Tab::new(Document::untitled(), self.config.soft_wrap));
+            let id = self.docs.insert(Document::untitled());
+            self.tabs.push(Tab::new(id, self.config.soft_wrap));
             0
         } else {
             0
@@ -410,8 +448,9 @@ impl App {
         let paths: Vec<PathBuf> = self
             .tabs
             .iter()
-            .filter(|t| t.doc.is_placeholder())
-            .filter_map(|t| t.doc.path.clone())
+            .map(|t| &self.docs[t.doc])
+            .filter(|d| d.is_placeholder())
+            .filter_map(|d| d.path.clone())
             .collect();
         if !paths.is_empty() {
             spawn_restore(&self.proxy, paths);
@@ -421,11 +460,10 @@ impl App {
     /// A restored tab's file arrived from the worker. It is dropped if the
     /// tab was shown (and so read) meanwhile, or closed.
     pub(super) fn restored_arrived(&mut self, path: &Path, doc: Result<Box<Document>, String>) {
-        let Some(i) = self
-            .tabs
-            .iter()
-            .position(|t| t.doc.is_placeholder() && t.doc.path.as_deref() == Some(path))
-        else {
+        let Some(i) = self.tabs.iter().position(|t| {
+            let d = &self.docs[t.doc];
+            d.is_placeholder() && d.path.as_deref() == Some(path)
+        }) else {
             return;
         };
         match doc {
@@ -443,18 +481,22 @@ impl App {
 /// or else a restored session's (the front one read, the rest
 /// placeholders, with the sidebar's mode and expanded folders and a note
 /// for files that are gone), or else one untitled tab. Returns them and
-/// the front tab's index.
+/// the front tab's index. The documents go in `open`.
 pub(super) fn startup_tabs(
     docs: Vec<Document>,
     restore: Option<Restore>,
     state: &mut State,
     sidebar: &mut Sidebar,
     wrap: bool,
+    open: &mut Docs,
 ) -> (Vec<Tab>, usize, Option<String>) {
     for c in docs.iter().filter_map(|d| d.canonical.as_deref()) {
         state.note_recent(c);
     }
-    let mut tabs: Vec<Tab> = docs.into_iter().map(|d| Tab::new(d, wrap)).collect();
+    let mut tabs: Vec<Tab> = docs
+        .into_iter()
+        .map(|d| Tab::new(open.insert(d), wrap))
+        .collect();
     let mut active = 0;
     let mut note = None;
     if let Some(r) = restore.filter(|_| tabs.is_empty()) {
@@ -463,22 +505,49 @@ pub(super) fn startup_tabs(
         }
         sidebar.tree.expand_later(r.expanded);
         note = session::dropped_note(&r.dropped);
-        for t in r.tabs {
-            let mut tab = Tab::new(t.doc, wrap);
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for (k, t) in r.tabs.into_iter().enumerate() {
+            // A file listed twice (a split, saved by an earlier build) is
+            // one tab: two documents on one file would each save over the
+            // other.
+            if let Some(j) = seen.iter().position(|c| *c == t.canonical) {
+                if k == r.active {
+                    active = j;
+                }
+                continue;
+            }
+            if k == r.active {
+                active = tabs.len();
+            }
+            seen.push(t.canonical);
+            let id = open.insert(t.doc);
+            let mut tab = Tab::new(id, wrap);
             tab.pending = Some(Pending {
                 cursor: t.cursor,
                 scroll: t.scroll,
             });
-            tab.apply_pending();
+            tab.apply_pending(&mut open[id]);
             tabs.push(tab);
         }
-        active = r.active;
     }
     if tabs.is_empty() {
-        tabs.push(Tab::new(Document::untitled(), wrap));
+        tabs.push(Tab::new(open.insert(Document::untitled()), wrap));
     }
     let active = active.min(tabs.len() - 1);
     (tabs, active, note)
+}
+
+/// Set each read tab's indentation and wrap from the config and its
+/// language; `wrap` (`--wrap`) turns wrap on for all of them.
+pub(super) fn configure_tabs(tabs: &mut [Tab], docs: &mut Docs, config: &Config, wrap: bool) {
+    for tab in tabs {
+        let doc = &mut docs[tab.doc];
+        if doc.is_placeholder() {
+            continue;
+        }
+        doc.configure_indent(config.indent.for_language(doc.language_key()));
+        tab.view.set_wrap(wrap || wrap_for(config, doc));
+    }
 }
 
 /// The first message: startup warnings (as an error, shown for longer),
@@ -498,4 +567,51 @@ pub(super) fn startup_message(warnings: Vec<String>, note: Option<String>) -> Op
         is_error,
         until: Instant::now() + MESSAGE_TIME * if is_error { 2 } else { 1 },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::RestoredTab;
+
+    fn restored(name: &str, cursor: usize) -> RestoredTab {
+        let mut doc = Document::from_text("some text\n");
+        doc.path = Some(PathBuf::from(name));
+        RestoredTab {
+            doc,
+            canonical: PathBuf::from(name),
+            cursor,
+            scroll: 0,
+        }
+    }
+
+    #[test]
+    fn a_file_listed_twice_restores_as_one_tab() {
+        let restore = Restore {
+            tabs: vec![
+                restored("/p/a.rs", 1),
+                restored("/p/b.rs", 2),
+                restored("/p/b.rs", 3),
+            ],
+            active: 2,
+            mode: None,
+            expanded: Vec::new(),
+            dropped: Vec::new(),
+        };
+        let mut state = State::default();
+        let mut sidebar = Sidebar::new(PathBuf::from("/p"), false, 200.0);
+        let mut open = Docs::default();
+        let (tabs, active, _) = startup_tabs(
+            Vec::new(),
+            Some(restore),
+            &mut state,
+            &mut sidebar,
+            false,
+            &mut open,
+        );
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(active, 1, "the duplicate's front place goes to its file");
+        assert_eq!(open.iter().count(), 2);
+        assert_eq!(tabs[1].carets.cursor(&open[tabs[1].doc].buffer), 2);
+    }
 }

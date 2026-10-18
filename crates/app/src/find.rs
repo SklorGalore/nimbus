@@ -14,7 +14,7 @@ use nimbus_core::search::{self, Generation, Query};
 use nimbus_core::{Buffer, Snapshot, Text};
 use regex::bytes::Regex;
 
-use crate::document::Document;
+use crate::document::{Document, Solo};
 
 /// Documents at least this large are searched on a background thread.
 pub const BACKGROUND_SEARCH_BYTES: usize = 1024 * 1024;
@@ -57,9 +57,9 @@ pub struct FindBar {
     /// Whether the bar has keyboard focus (rather than the editor).
     pub focused: bool,
     /// The query field.
-    pub find: Document,
+    pub find: Solo,
     /// The replacement field.
-    pub replace: Document,
+    pub replace: Solo,
     /// Regex matching on.
     pub regex: bool,
     /// Case-sensitive matching on.
@@ -87,8 +87,8 @@ impl Default for FindBar {
             replace_mode: false,
             focus: Field::Find,
             focused: false,
-            find: Document::untitled(),
-            replace: Document::untitled(),
+            find: Solo::default(),
+            replace: Solo::default(),
             regex: false,
             case_sensitive: false,
             matches: Vec::new(),
@@ -103,12 +103,27 @@ impl Default for FindBar {
     }
 }
 
+impl FindBar {
+    /// A closed bar for another editor group, sharing `other`'s search
+    /// generation: only the focused group's bar searches, and a shared
+    /// counter means a batch still queued from one bar can never pass for
+    /// the other's (M13).
+    #[must_use]
+    pub fn sharing(other: &Self) -> Self {
+        Self {
+            generation: Arc::clone(&other.generation),
+            ..Self::default()
+        }
+    }
+}
+
 /// Matches kept for one search, about 4 MB of ranges; past this they are
 /// counted as "+" but not stored, and Replace All is refused.
 pub const MAX_KEPT: usize = 250_000;
 
 /// Text of a single-line field document.
-fn field_text(doc: &Document) -> String {
+fn field_text(field: &Solo) -> String {
+    let doc = &field.doc;
     doc.buffer.slice(0..doc.buffer.len_bytes()).into_owned()
 }
 
@@ -121,10 +136,10 @@ impl FindBar {
         self.focus = Field::Find;
         self.replace_mode = replace_mode;
         if let Some(text) = selection.filter(|t| !t.contains('\n') && t.len() <= 200) {
-            self.find = Document::untitled();
-            let _ = self.find.insert(&text);
+            self.find = Solo::default();
+            let _ = self.find.ed().insert(&text);
         }
-        self.find.select_all();
+        self.find.ed().select_all();
     }
 
     /// Hide the bar and clear highlights.
@@ -137,7 +152,7 @@ impl FindBar {
     }
 
     /// The focused field.
-    pub fn field_mut(&mut self) -> &mut Document {
+    pub fn field_mut(&mut self) -> &mut Solo {
         match self.focus {
             Field::Find => &mut self.find,
             Field::Replace => &mut self.replace,
@@ -357,7 +372,7 @@ impl FindBar {
         if let Some(e) = &self.error {
             return e.lines().last().unwrap_or("invalid pattern").to_owned();
         }
-        if self.find.buffer.len_bytes() == 0 {
+        if self.find.doc.buffer.len_bytes() == 0 {
             return String::new();
         }
         let more = if self.complete && !self.capped {
@@ -380,7 +395,7 @@ mod tests {
     fn bar_with(pattern: &str) -> FindBar {
         let mut bar = FindBar::default();
         bar.open(false, None);
-        let _ = bar.find.insert(pattern);
+        let _ = bar.find.ed().insert(pattern);
         bar
     }
 
@@ -412,7 +427,7 @@ mod tests {
         let doc = Document::from_text("key=value");
         let mut bar = bar_with(r"(\w+)=(\w+)");
         bar.regex = true;
-        let _ = bar.replace.insert("$2=$1");
+        let _ = bar.replace.ed().insert("$2=$1");
         bar.search(&doc, |_| true);
         assert_eq!(
             bar.replacement_for(&doc, 0..9).as_deref(),
@@ -431,7 +446,7 @@ mod tests {
         let doc = Document::from_text("foobaz");
         let mut bar = bar_with(r"foo\B");
         bar.regex = true;
-        let _ = bar.replace.insert("bar");
+        let _ = bar.replace.ed().insert("bar");
         bar.search(&doc, |_| true);
         assert_eq!(bar.matches, vec![0..3]);
         assert_eq!(bar.replacement_for(&doc, 0..3).as_deref(), Some("bar"));

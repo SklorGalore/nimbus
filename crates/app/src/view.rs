@@ -12,11 +12,11 @@ use std::fmt::Write as _;
 use std::ops::Range;
 
 use nimbus_core::wrap::{self, RowPos, RowStart, WrapCache, WrapView};
-use nimbus_core::{LineEnding, Selection, Selections, Text, column, long_line};
+use nimbus_core::{Folds, LineEnding, Selection, Selections, Text, column, long_line};
 use nimbus_render::{ColorRun, Gpu, Metrics, Style};
 use nimbus_syntax::highlight::{Highlighter, Span};
 
-use crate::document::{Document, Tail};
+use crate::document::{Carets, Document, Solo, Tail};
 use crate::find::{Field, FindBar};
 use crate::theme::{Color, Theme, Ui};
 
@@ -316,16 +316,9 @@ fn f32_of(n: usize) -> f32 {
     n as f32
 }
 
-/// Start a frame with the text area as its own layer, clipped so rows
-/// scrolled under a bar above or below do not show through it.
-fn begin_text(gpu: &mut Gpu, layout: &Layout, ui: &Ui) {
-    begin_frame(gpu, ui);
-    begin_column(gpu, layout);
-}
-
-/// Start a frame: everything queued before is dropped. The compare view
-/// calls this once, then [`begin_column`] per column through
-/// [`View::draw_rows`].
+/// Start a frame: everything queued before is dropped. Called once per
+/// frame; each group's view, or each column of a compare view, then
+/// begins its own clipped layer with [`begin_column`].
 pub fn begin_frame(gpu: &mut Gpu, ui: &Ui) {
     gpu.begin_frame();
     gpu.set_background(ui.background);
@@ -491,8 +484,21 @@ fn wrapper<'a>(
     wrap: bool,
     layout: &Layout,
     tab_width: usize,
+    folds: &'a Folds,
 ) -> WrapView<'a> {
-    WrapView::new(cache, wrap.then_some(layout.wrap_cols), tab_width)
+    let w = WrapView::new(cache, wrap.then_some(layout.wrap_cols), tab_width);
+    // Rows skip folded lines (M13); with no folds there is nothing to ask.
+    if folds.is_empty() {
+        w
+    } else {
+        w.with_folds(folds)
+    }
+}
+
+/// Where a fold marker goes in the gutter: right of the line numbers.
+fn fold_marker_x(layout: &Layout) -> f32 {
+    let cell = layout.metrics.cell_width;
+    (layout.left + layout.margin + f(layout.gutter_cols) * cell + 0.4 * cell).round()
 }
 
 /// The top visible row: the row containing `scroll_top`. Snapping to the
@@ -556,6 +562,17 @@ pub struct View {
     /// Characters in the selections, as last counted, with the version and
     /// selections they were counted for.
     selected_chars: Option<(u64, Selections, usize)>,
+    /// The folded regions in this view (M13). Each pane folds on its own;
+    /// folds follow every edit to the document through its journal.
+    pub folds: Folds,
+    /// The document's epoch and journal end the folds last followed.
+    folds_at: (u64, u64),
+    /// Where each fold chip was drawn last frame, `[x0, x1, top]`, and
+    /// the fold it opens, for clicks.
+    chips: Vec<Chip>,
+    /// The line under the pointer, by its start, when it can be folded:
+    /// its gutter shows the fold marker.
+    pub fold_hover: Option<usize>,
 }
 
 /// The scrollbar as drawn: a track down the right edge of the text and a
@@ -620,13 +637,51 @@ impl RowGeom<'_> {
 }
 
 impl View {
+    /// Bring the folds up to date with the edits made to `doc` since they
+    /// last looked, from this view or another (M13). An edit that touches
+    /// a fold opens it; one before it moves it. A text swapped wholesale
+    /// (a reload) drops them all.
+    pub fn follow(&mut self, doc: &Document) {
+        let end = doc.journal().end();
+        if self.folds_at.0 != doc.epoch {
+            self.folds.clear();
+        } else if self.folds_at.1 != end && !self.folds.is_empty() {
+            match doc.journal().since(self.folds_at.1) {
+                Some(shifts) => {
+                    for s in shifts {
+                        self.folds.apply_change(s.start, s.removed, s.inserted);
+                    }
+                }
+                None => self.folds.clear(),
+            }
+        }
+        self.folds_at = (doc.epoch, end);
+    }
+
+    /// The fold whose chip is at window position `(x, y)`, by its start.
+    #[must_use]
+    pub fn chip_at(&self, x: f32, y: f32, line_height: f32) -> Option<usize> {
+        self.chips
+            .iter()
+            .find(|([x0, x1, top], _)| x >= *x0 && x < *x1 && y >= *top && y < top + line_height)
+            .map(|&(_, start)| start)
+    }
+
+    /// Whether `x` is on the gutter's fold-marker column, right of the
+    /// line numbers.
+    #[must_use]
+    pub fn on_fold_marker(layout: &Layout, x: f32) -> bool {
+        let cell = layout.metrics.cell_width;
+        x >= fold_marker_x(layout) - 0.4 * cell && x < layout.text_left
+    }
+
     /// Pixel offset of the top row, rounded so text stays on whole pixels.
     fn px(&self) -> f32 {
         self.scroll_px.round()
     }
 
     fn set_anchor(&mut self, t: &dyn Text, layout: &Layout, tab_width: usize, at: RowPos) {
-        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
+        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width, &self.folds);
         let span = t.line_span(at.start);
         self.scroll_top = span.start + w.rows_at(t, span).get(at.row).map_or(0, |r| r.byte);
     }
@@ -653,7 +708,7 @@ impl View {
             reason = "k is a row count from one scroll gesture"
         )]
         let k = k_f as isize;
-        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
+        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width, &self.folds);
         let anchor = anchor(self.scroll_top, t, &mut w);
         let (to, moved) = wrap::step_rows(t, &mut w, anchor, k);
         let (end, _) = wrap::step_rows(t, &mut w, to, 1);
@@ -686,7 +741,7 @@ impl View {
             reason = "a byte offset from a clamped fraction of the length"
         )]
         let byte = (fraction.clamp(0.0, 1.0) * f64_of(t.len_bytes())) as usize;
-        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
+        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width, &self.folds);
         let at = anchor(byte, t, &mut w);
         self.scroll_px = 0.0;
         self.set_anchor(t, layout, tab_width, at);
@@ -697,8 +752,8 @@ impl View {
     /// [`BRACKET_LIMIT`] bytes. Only for a bare cursor. Remembered until
     /// the text, the cursor or the tree changes, so most frames only
     /// compare three numbers.
-    fn bracket_pair(&mut self, doc: &Document) -> Option<(usize, usize)> {
-        let sel = doc.selection();
+    fn bracket_pair(&mut self, doc: &Document, carets: &Carets) -> Option<(usize, usize)> {
+        let sel = carets.selection(&doc.buffer);
         if !sel.is_empty() {
             return None;
         }
@@ -723,20 +778,20 @@ impl View {
 
     /// How many characters the selections hold, counted again only when
     /// the text or the selections change.
-    fn selected_chars(&mut self, doc: &Document) -> usize {
+    fn selected_chars(&mut self, doc: &Document, carets: &Carets) -> usize {
         if let Some((v, sels, n)) = &self.selected_chars
             && *v == doc.version
-            && *sels == doc.selections
+            && *sels == carets.selections
         {
             return *n;
         }
         let t = &doc.buffer;
-        let n = doc
+        let n = carets
             .selections
             .iter()
             .map(|s| t.slice(s.range()).chars().count())
             .sum();
-        self.selected_chars = Some((doc.version, doc.selections.clone(), n));
+        self.selected_chars = Some((doc.version, carets.selections.clone(), n));
         n
     }
 
@@ -745,17 +800,17 @@ impl View {
     /// selected, the line ending, the encoding, the language and, while a
     /// huge file's lines are being counted, how far that has got. Built in
     /// a reused string, so drawing it each frame allocates nothing.
-    pub fn status_info(&mut self, doc: &Document, tab_width: usize) -> &str {
+    pub fn status_info(&mut self, doc: &Document, carets: &Carets, tab_width: usize) -> &str {
         // Counting characters reads the selections; past a size where that
         // costs, bytes say as much.
-        let selected = doc.selected_len();
-        let chars =
-            (selected > 0 && selected <= STATUS_COUNT_LIMIT).then(|| self.selected_chars(doc));
+        let selected = carets.selected_len();
+        let chars = (selected > 0 && selected <= STATUS_COUNT_LIMIT)
+            .then(|| self.selected_chars(doc, carets));
         let out = &mut self.status;
         out.clear();
         let t = &doc.buffer;
-        let sel = doc.selection();
-        let count = doc.selections.count();
+        let sel = carets.selection(t);
+        let count = carets.selections.count();
         if count > 1 {
             let _ = write!(out, "{count} cursors   ");
         }
@@ -845,11 +900,17 @@ impl View {
     }
 
     /// Scroll as little as possible to bring the cursor into view.
-    pub fn ensure_cursor_visible(&mut self, doc: &Document, layout: &Layout, tab_width: usize) {
+    pub fn ensure_cursor_visible(
+        &mut self,
+        doc: &Document,
+        carets: &Carets,
+        layout: &Layout,
+        tab_width: usize,
+    ) {
         let t = &doc.buffer;
-        let cursor = doc.cursor();
+        let cursor = carets.cursor(t);
         let full = layout.full_lines();
-        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
+        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width, &self.folds);
         let cursor_row = wrap::row_pos_of(t, &mut w, cursor);
         let top_row = anchor(self.scroll_top, t, &mut w);
         let new_anchor = if cursor_row < top_row || (cursor_row == top_row && self.scroll_px > 0.0)
@@ -884,7 +945,7 @@ impl View {
 
     /// Lookups for the current wrap setting, for cursor movement by row.
     pub fn wrap_view(&mut self, layout: &Layout, tab_width: usize) -> WrapView<'_> {
-        wrapper(&mut self.cache, self.wrap, layout, tab_width)
+        wrapper(&mut self.cache, self.wrap, layout, tab_width, &self.folds)
     }
 
     /// The byte offset under window position `(x, y)` in physical pixels.
@@ -905,7 +966,7 @@ impl View {
         )]
         let rows_down = rows_down as isize;
         let at = {
-            let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
+            let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width, &self.folds);
             let anchor = anchor(self.scroll_top, t, &mut w);
             wrap::step_rows(t, &mut w, anchor, rows_down).0
         };
@@ -924,7 +985,7 @@ impl View {
         tab_width: usize,
     ) -> usize {
         let t = &doc.buffer;
-        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
+        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width, &self.folds);
         let span = t.line_span(at.start);
         let long = long_line::is_long(span);
         // Wrapped rows do not scroll sideways; long lines and unwrapped
@@ -970,7 +1031,7 @@ impl View {
             reason = "a row count within the window"
         )]
         let rows_down = rows_down as isize;
-        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
+        let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width, &self.folds);
         let anchor = anchor(self.scroll_top, t, &mut w);
         let (at, _) = wrap::step_rows(t, &mut w, anchor, rows_down);
         let span = t.line_span(at.start);
@@ -1015,22 +1076,24 @@ impl View {
         &mut self,
         gpu: &mut Gpu,
         doc: &Document,
+        carets: &Carets,
         layout: &Layout,
         tab_width: usize,
         deco: &Decorations<'_>,
     ) {
         let t = &doc.buffer;
-        let cursor = doc.cursor();
-        let selections = doc.selections.as_slice();
-        let brackets = self.bracket_pair(doc);
+        let cursor = carets.cursor(t);
+        let selections = carets.selections.as_slice();
+        let brackets = self.bracket_pair(doc, carets);
         self.cache.next_frame();
         self.cursor_at = None;
+        self.chips.clear();
 
-        begin_text(gpu, layout, deco.ui);
+        begin_column(gpu, layout);
 
         let px = self.px();
         let (wrapping, scroll_x) = (self.wrap, self.scroll_x);
-        let mut w = wrapper(&mut self.cache, wrapping, layout, tab_width);
+        let mut w = wrapper(&mut self.cache, wrapping, layout, tab_width, &self.folds);
         let mut at = anchor(self.scroll_top, t, &mut w);
         let mut next_match = deco.matches.partition_point(|m| m.end <= at.start);
         // Selections and cursor heads are sorted, so each is found by
@@ -1062,6 +1125,7 @@ impl View {
             number: &mut self.number,
             spliced: &mut self.spliced,
             cursor_at: None,
+            line_end: [0.0, 0.0],
         };
         let geom = (
             scroll_col_of(layout, scroll_x),
@@ -1079,6 +1143,7 @@ impl View {
                 has_cursor,
                 mark: None,
             };
+            let line_top = (line.first_row == 0).then_some(top);
             next_match = draw_line(
                 &mut painter,
                 t,
@@ -1089,11 +1154,17 @@ impl View {
                 &mut top,
                 next_match,
             );
-            shown_end = span.next.unwrap_or(t.len_bytes());
-            let Some(next) = span.next else {
+            let marks = (&self.folds, &mut self.chips, self.fold_hover);
+            let (next, folded) = after_line(&mut painter, &w, t, span, line_top, marks);
+            shown_end = next.unwrap_or(t.len_bytes());
+            let Some(next) = next else {
                 break;
             };
-            number = number.and_then(|n| (next <= t.indexed_bytes()).then_some(n + 1));
+            number = if folded {
+                t.line_number(next)
+            } else {
+                number.and_then(|n| (next <= t.indexed_bytes()).then_some(n + 1))
+            };
             at = RowPos {
                 start: next,
                 row: 0,
@@ -1117,6 +1188,7 @@ impl View {
         &mut self,
         gpu: &mut Gpu,
         doc: &Document,
+        carets: &Carets,
         layout: &Layout,
         tab_width: usize,
         deco: &Decorations<'_>,
@@ -1126,9 +1198,9 @@ impl View {
     ) {
         let t = &doc.buffer;
         let lh = layout.metrics.line_height;
-        let cursor = doc.cursor();
-        let selections = doc.selections.as_slice();
-        let brackets = self.bracket_pair(doc);
+        let cursor = carets.cursor(t);
+        let selections = carets.selections.as_slice();
+        let brackets = self.bracket_pair(doc, carets);
         self.cache.next_frame();
         self.cursor_at = None;
         self.wrap = false;
@@ -1136,7 +1208,7 @@ impl View {
         begin_column(gpu, layout);
 
         let scroll_x = self.scroll_x;
-        let mut w = wrapper(&mut self.cache, false, layout, tab_width);
+        let mut w = wrapper(&mut self.cache, false, layout, tab_width, &self.folds);
         planned_ranges(t, plans, &mut self.hl_ranges);
         let spans: &[Span] = if deco.looks.is_none() {
             &[]
@@ -1165,6 +1237,7 @@ impl View {
             number: &mut self.number,
             spliced: &mut self.spliced,
             cursor_at: None,
+            line_end: [0.0, 0.0],
         };
         let geom = (
             scroll_col_of(layout, scroll_x),
@@ -1333,6 +1406,42 @@ struct LineDraw {
     mark: Option<(Range<usize>, Color)>,
 }
 
+/// A fold chip as drawn, `[x0, x1, top]`, and the start of its fold.
+type Chip = ([f32; 3], usize);
+
+/// What follows a line [`View::draw`] drew: when it is folded, the chip
+/// after it and the `▸` in its gutter, and the next line is the one after
+/// the fold; else `▾` if the pointer is on its gutter and it can fold.
+/// Returns the next line's start and whether this one was folded.
+fn after_line(
+    painter: &mut Painter<'_, '_>,
+    w: &WrapView<'_>,
+    t: &dyn Text,
+    span: nimbus_core::LineSpan,
+    line_top: Option<f32>,
+    (folds, chips, hover): (&Folds, &mut Vec<Chip>, Option<usize>),
+) -> (Option<usize>, bool) {
+    let fold = if folds.is_empty() {
+        None
+    } else {
+        folds.on_line(span)
+    };
+    let Some(f) = fold else {
+        if hover == Some(span.start) {
+            painter.fold_marker(line_top, false);
+        }
+        return (span.next, false);
+    };
+    let hidden = t
+        .line_number(f.end)
+        .zip(t.line_number(f.start))
+        .map(|(b, a)| b - a);
+    let rect = painter.chip(hidden);
+    chips.push((rect, f.start));
+    painter.fold_marker(line_top, true);
+    (w.next_line(t, span), true)
+}
+
 /// Draw one logical line from row `first_row` down, advancing `top` per
 /// row drawn. Shared by [`View::draw`] and [`View::draw_rows`]. Returns the
 /// index of the first find match not finished on the last row.
@@ -1364,6 +1473,10 @@ fn draw_line(
             painter.mark(&row, m, *color);
         }
         next_match = painter.row(&row, next_match, scroll_col);
+        painter.line_end = [
+            row.x_of(row.end(), layout.metrics.cell_width, tab_width),
+            row.top,
+        ];
         *top += lh;
     } else {
         let text = t.slice(span.start..span.end);
@@ -1396,6 +1509,10 @@ fn draw_line(
             }
             let first = if wrapping { start_col } else { scroll_col };
             next_match = painter.row(&row, next_match, first);
+            painter.line_end = [
+                row.x_of(row.end(), layout.metrics.cell_width, tab_width),
+                row.top,
+            ];
             *top += lh;
         }
     }
@@ -1424,6 +1541,9 @@ struct Painter<'a, 'g> {
     number: &'a mut String,
     spliced: &'a mut String,
     cursor_at: Option<[f32; 2]>,
+    /// Where the last row drawn ends, `[x, top]`: a fold chip goes after
+    /// it.
+    line_end: [f32; 2],
 }
 
 impl Painter<'_, '_> {
@@ -1449,6 +1569,44 @@ impl Painter<'_, '_> {
             self.number,
             color,
         );
+    }
+
+    /// The chip after a folded line's last row: `…` and how many lines
+    /// the fold hides (when they are counted). Returns where it is,
+    /// `[x0, x1, top]`, for clicks.
+    fn chip(&mut self, hidden: Option<usize>) -> [f32; 3] {
+        let cell = self.layout.metrics.cell_width;
+        let [end, top] = self.line_end;
+        self.number.clear();
+        match hidden {
+            Some(1) => self.number.push_str("… 1 line"),
+            Some(n) => {
+                let _ = write!(self.number, "… {n} lines");
+            }
+            None => self.number.push('…'),
+        }
+        let x0 = (end + cell).round().max(self.layout.text_left);
+        let x1 = x0 + f(self.number.chars().count() + 2) * cell;
+        self.gpu.push_rect(
+            [x0, top],
+            [x1 - x0, self.layout.metrics.line_height],
+            self.deco.ui.fold_chip,
+        );
+        self.gpu
+            .push_text_line([x0 + cell, top], self.number, self.deco.ui.gutter);
+        [x0, x1, top]
+    }
+
+    /// The fold marker in the gutter of the line whose first row is at
+    /// `top` (`None` when scrolled out of view): `▸` when folded, `▾`
+    /// when it can be.
+    fn fold_marker(&mut self, top: Option<f32>, folded: bool) {
+        let Some(top) = top else {
+            return;
+        };
+        let mark = if folded { "▸" } else { "▾" };
+        let x = fold_marker_x(self.layout);
+        self.gpu.push_text_line([x, top], mark, self.deco.ui.gutter);
     }
 
     /// Draw one row: selection, matches, text and cursor. `first` is the
@@ -1818,7 +1976,7 @@ pub fn find_bar_row(layout: &Layout, y: f32, rows: usize) -> Option<usize> {
 pub(crate) fn draw_field(
     gpu: &mut Gpu,
     ui: &Ui,
-    doc: &Document,
+    field: &Solo,
     origin: [f32; 2],
     width: f32,
     layout: &Layout,
@@ -1826,9 +1984,10 @@ pub(crate) fn draw_field(
 ) {
     let m = layout.metrics;
     let cell = m.cell_width;
+    let doc = &field.doc;
     let text = doc.buffer.line(0);
     let line_end = text.len();
-    let cursor_col = column::col_at(&text, doc.cursor().min(line_end), 4);
+    let cursor_col = column::col_at(&text, field.carets.cursor(&doc.buffer).min(line_end), 4);
     // Scroll the field so the cursor stays inside it.
     #[expect(
         clippy::cast_possible_truncation,
@@ -1839,7 +1998,7 @@ pub(crate) fn draw_field(
     let first = cursor_col.saturating_sub(visible);
     let x0 = origin[0] - f(first) * cell;
     gpu.begin_layer(Some([origin[0], origin[1], width, m.line_height]));
-    if let Some((a, b)) = field_selection(doc, &text) {
+    if let Some((a, b)) = field_selection(field, &text) {
         gpu.push_rect(
             [x0 + f(a) * cell, origin[1]],
             [f(b - a) * cell, m.line_height],
@@ -1911,8 +2070,17 @@ pub fn tab_at(layout: &Layout, tabs: &[TabLabel], active: usize, x: f32, y: f32)
         .position(|&(a, b)| x >= a && x < b)
 }
 
-/// Draw the tab bar across the top of the window.
-pub fn draw_tabs(gpu: &mut Gpu, ui: &Ui, layout: &Layout, tabs: &[TabLabel], active: usize) {
+/// Draw a tab bar across the top of `layout`'s column. Only the focused
+/// group's active tab carries the accent line, so it is clear which
+/// group the keyboard talks to.
+pub fn draw_tabs(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    tabs: &[TabLabel],
+    active: usize,
+    focused: bool,
+) {
     if layout.tabs_h <= 0.0 {
         return;
     }
@@ -1930,6 +2098,8 @@ pub fn draw_tabs(gpu: &mut Gpu, ui: &Ui, layout: &Layout, tabs: &[TabLabel], act
         let is_active = i == active;
         if is_active {
             gpu.push_rect([x0, 0.0], [x1 - x0, layout.tabs_h], ui.tab_active);
+        }
+        if is_active && focused {
             gpu.push_rect(
                 [x0, layout.tabs_h - accent],
                 [x1 - x0, accent],
@@ -1945,11 +2115,21 @@ pub fn draw_tabs(gpu: &mut Gpu, ui: &Ui, layout: &Layout, tabs: &[TabLabel], act
     }
 }
 
+/// Draw a line between neighbouring groups, from the top of the window
+/// to the status bar. `panes` are the groups' layouts, left to right.
+pub fn draw_dividers(gpu: &mut Gpu, ui: &Ui, window: &Layout, panes: &[Layout]) {
+    let line = window.scale.round().max(1.0);
+    gpu.begin_layer(None);
+    for pane in panes.iter().skip(1) {
+        gpu.push_rect([pane.left, 0.0], [line, window.bottom], ui.picker_border);
+    }
+}
+
 /// What the picker overlay shows.
 #[derive(Debug)]
 pub struct PickerView<'a> {
     /// The query field.
-    pub input: &'a Document,
+    pub input: &'a Solo,
     /// Hint shown while the query is empty.
     pub placeholder: &'a str,
     /// Visible rows: main text and detail.
@@ -2029,7 +2209,7 @@ pub fn draw_picker(
         [field_w + 2.0 * pad, lh + pad],
         ui.field,
     );
-    if view.input.buffer.len_bytes() == 0 {
+    if view.input.doc.buffer.len_bytes() == 0 {
         gpu.push_text_line([left + cell, field_y], view.placeholder, ui.gutter);
     }
     draw_field(
@@ -2104,8 +2284,8 @@ pub fn draw_status(
 }
 
 /// The selected columns of the first line of a one-line field.
-fn field_selection(doc: &Document, text: &str) -> Option<(usize, usize)> {
-    let sel = doc.selection().range();
+fn field_selection(field: &Solo, text: &str) -> Option<(usize, usize)> {
+    let sel = field.carets.selection(&field.doc.buffer).range();
     if sel.is_empty() || sel.start > text.len() {
         return None;
     }
@@ -2117,6 +2297,7 @@ fn field_selection(doc: &Document, text: &str) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::{Editor, Solo};
 
     fn layout(len_lines: usize) -> Layout {
         let metrics = Metrics {
@@ -2139,14 +2320,15 @@ mod tests {
         Layout::new(metrics, 168, 208, 1.0, len_lines)
     }
 
-    fn doc(text: &str) -> Document {
-        Document::from_text(text)
+    fn doc(text: &str) -> Solo {
+        Solo::from_text(text)
     }
 
     #[test]
     fn long_lines_highlight_only_their_visible_bytes() {
         use nimbus_core::RopeBuffer;
         let mut cache = WrapCache::default();
+        let none = Folds::new();
         let l = layout(3);
         let mut out = Vec::new();
         // 40 KB: under the long-line limit, so wrapped and counted exactly.
@@ -2155,11 +2337,11 @@ mod tests {
         let start = buf.line_to_byte(1);
         let at = RowPos { start, row: 0 };
         // No wrap, scrolled 1000 columns right, 50 columns wide.
-        let mut w = wrapper(&mut cache, false, &l, 4);
+        let mut w = wrapper(&mut cache, false, &l, 4, &none);
         visible_ranges(&buf, &mut w, at, 1, (1000, 50), &mut out);
         assert_eq!(out, vec![start + 1000..start + 1051]);
         // Wrapped: the rows on screen, from the top row on.
-        let mut w = wrapper(&mut cache, true, &l, 4);
+        let mut w = wrapper(&mut cache, true, &l, 4, &none);
         let at = RowPos { start, row: 5 };
         out.clear();
         visible_ranges(&buf, &mut w, at, 3, (0, 50), &mut out);
@@ -2174,7 +2356,7 @@ mod tests {
         let buf = RopeBuffer::from_text(&format!("short\n{long}\nend\n"));
         let at = RowPos { start, row: 0 };
         for wrap in [false, true] {
-            let mut w = wrapper(&mut cache, wrap, &l, 4);
+            let mut w = wrapper(&mut cache, wrap, &l, 4, &none);
             out.clear();
             visible_ranges(&buf, &mut w, at, 3, (100_000, 50), &mut out);
             let total: usize = out.iter().map(std::ops::Range::len).sum();
@@ -2218,7 +2400,7 @@ mod tests {
     }
 
     /// The top row as (line, byte within the line).
-    fn top(v: &View, d: &Document) -> (usize, usize) {
+    fn top(v: &View, d: &Solo) -> (usize, usize) {
         let line = d.buffer.byte_to_line(v.scroll_top);
         (line, v.scroll_top - d.buffer.line_to_byte(line))
     }
@@ -2229,14 +2411,17 @@ mod tests {
         d.line_ending = LineEnding::CrLf;
         let mut v = View::default();
         assert_eq!(
-            v.status_info(&d, 4),
+            v.status_info(&d, &d.carets, 4),
             "Ln 1, Col 1   Spaces: 4   CRLF   UTF-8"
         );
         d.indent = nimbus_core::indent::Indent {
             width: 4,
             tabs: true,
         };
-        assert_eq!(v.status_info(&d, 4), "Ln 1, Col 1   Tabs   CRLF   UTF-8");
+        assert_eq!(
+            v.status_info(&d, &d.carets, 4),
+            "Ln 1, Col 1   Tabs   CRLF   UTF-8"
+        );
         // "Tabs" sits at columns 14..18 of the right-aligned info.
         let l = layout(3);
         let cell = l.metrics.cell_width;
@@ -2246,18 +2431,21 @@ mod tests {
         assert!(!v.indent_item_hit(&l, info_x + 2.0 * cell));
         assert!(!v.indent_item_hit(&l, info_x + 18.5 * cell));
         // Line 2, after the tab (4 columns) and "let ": column 9.
-        d.click(12 + 1 + 4, false);
-        assert_eq!(v.status_info(&d, 4), "Ln 2, Col 9   Tabs   CRLF   UTF-8");
-        // Selecting "é = 1" counts characters, not bytes.
-        d.select(17..23);
+        d.ed().click(12 + 1 + 4, false);
         assert_eq!(
-            v.status_info(&d, 4),
+            v.status_info(&d, &d.carets, 4),
+            "Ln 2, Col 9   Tabs   CRLF   UTF-8"
+        );
+        // Selecting "é = 1" counts characters, not bytes.
+        d.ed().select(17..23);
+        assert_eq!(
+            v.status_info(&d, &d.carets, 4),
             "5 selected   Ln 2, Col 14   Tabs   CRLF   UTF-8"
         );
-        d.selections =
+        d.carets.selections =
             nimbus_core::Selections::from_vec(vec![Selection::cursor(0), Selection::cursor(12)], 0);
         assert_eq!(
-            v.status_info(&d, 4),
+            v.status_info(&d, &d.carets, 4),
             "2 cursors   Ln 1, Col 1   Tabs   CRLF   UTF-8"
         );
         let size = |n| {
@@ -2313,7 +2501,7 @@ mod tests {
         let mut index = LineIndex::new();
         index.merge(scanner.take_chunk()).unwrap();
         let buffer = MappedBuffer::with_index(source, index, Limits::default()).unwrap();
-        let mut d = Document::default();
+        let mut d = Solo::of(Document::default());
         d.buffer = buffer.into();
         assert!(!d.buffer.is_fully_indexed());
         let l = layout(10);
@@ -2321,8 +2509,8 @@ mod tests {
 
         // Primary+End: the cursor goes to the end and the view follows,
         // without waiting for line numbers.
-        d.click(text.len(), false);
-        v.ensure_cursor_visible(&d, &l, 4);
+        d.ed().click(text.len(), false);
+        v.ensure_cursor_visible(&d, &d.carets, &l, 4);
         let shown = l.full_lines() * 11;
         assert!(v.scroll_top + shown >= text.len(), "{}", v.scroll_top);
         assert_eq!(d.buffer.line_number(v.scroll_top), None, "shown as ~");
@@ -2373,6 +2561,130 @@ mod tests {
             ..View::default()
         };
         assert!(v.scrollbar_geometry(1000, &l).is_none());
+    }
+
+    #[test]
+    fn scrolling_and_clicks_step_over_folded_lines() {
+        // 100 lines "x"; fold lines 2 to 89 behind line 1.
+        let d = doc(&"x\n".repeat(99));
+        let l = layout(100);
+        let t = &d.buffer;
+        let mut v = View::default();
+        let fold = nimbus_core::fold::lines_range(t, t.line_to_byte(1), t.line_to_byte(89));
+        assert!(v.folds.fold(fold.unwrap()));
+        // Two rows down from the top is line 90, the next one shown.
+        v.scroll_by(40.0, &d, &l, 4);
+        assert_eq!(top(&v, &d).0, 90);
+        v.scroll_by(-20.0, &d, &l, 4);
+        assert_eq!(top(&v, &d).0, 1);
+        // A click on the third row lands on line 90.
+        v.scroll_by(-1e6, &d, &l, 4);
+        let pos = v.hit(l.text_left, l.top + 2.0 * 20.0 + 1.0, &d, &l, 4);
+        assert_eq!(t.byte_to_line(pos), 90);
+        // Following an edit before the fold moves it; one inside opens it.
+        let mut d = d;
+        d.journal_mut().keep = true;
+        v.follow(&d);
+        d.ed().insert("yy").unwrap();
+        v.follow(&d);
+        assert_eq!(v.folds.active()[0].start, 5);
+        let inside = d.buffer.line_to_byte(40);
+        let mut ed = d.ed();
+        ed.click(inside, false);
+        ed.insert("z").unwrap();
+        v.follow(&d);
+        assert!(v.folds.is_empty());
+    }
+
+    /// `NIMBUS_FOLD_FILE=$PWD/bench/out/log-4gb.log cargo test --release -p nimbus -- --ignored --nocapture fold_bench`
+    ///
+    /// M13 task 8: on a huge file, the CPU side of what the done-when
+    /// list times per frame (drawing itself needs a GPU, and costs what
+    /// one unfolded screen costs): folding and unfolding one region,
+    /// scrolling a screen at a time through a thousand folds, and a
+    /// keystroke in one pane with a second pane on the same document
+    /// following it.
+    #[test]
+    #[ignore = "benchmark: needs NIMBUS_FOLD_FILE and a release build"]
+    fn fold_bench() {
+        use std::time::{Duration, Instant};
+        let Ok(path) = std::env::var("NIMBUS_FOLD_FILE") else {
+            return;
+        };
+        let report = |what: &str, mut samples: Vec<Duration>| {
+            samples.sort();
+            let pick = |p: usize| samples[(samples.len() - 1) * p / 100];
+            println!(
+                "{what}: p50 {:?}, p99 {:?}, max {:?} ({} samples)",
+                pick(50),
+                pick(99),
+                samples[samples.len() - 1],
+                samples.len()
+            );
+        };
+        let mut doc = Document::open(std::path::Path::new(&path)).unwrap();
+        doc.journal_mut().keep = true;
+        let len = doc.buffer.len_bytes();
+        println!("{} MB, mapped: {}", len >> 20, doc.buffer.is_mapped());
+        let screen = layout(1_000_000);
+        let fold_at = |t: &dyn Text, p: usize| {
+            let first = t.line_span(p);
+            let mut last = first;
+            for _ in 0..20 {
+                last = t.line_span(last.next.unwrap_or(last.start));
+            }
+            nimbus_core::fold::lines_range(t, first.start, last.start)
+        };
+        // One region, folded and unfolded.
+        let mut view = View::default();
+        let mut samples = Vec::new();
+        for i in 1..200 {
+            let p = len / 200 * i;
+            let t0 = Instant::now();
+            let f = fold_at(&doc.buffer, p).unwrap();
+            view.folds.fold(f.clone());
+            view.folds.unfold_line(doc.buffer.line_span(f.start));
+            samples.push(t0.elapsed());
+        }
+        report("fold + unfold one region", samples);
+        // A thousand folds, then scrolling a screen at a time.
+        let t0 = Instant::now();
+        let regions: Vec<_> = (1..=1000)
+            .filter_map(|i| fold_at(&doc.buffer, len / 1001 * i))
+            .collect();
+        view.folds.fold_many(regions);
+        println!(
+            "1000 folds made in {:?}, {} bytes",
+            t0.elapsed(),
+            view.folds.len() * 16
+        );
+        let mut samples = Vec::new();
+        for i in 0..300 {
+            view.scroll_top = len / 300 * i;
+            let t0 = Instant::now();
+            view.scroll_by(screen.bottom - screen.top, &doc, &screen, 4);
+            let _ = view.hit(screen.text_left, screen.bottom - 1.0, &doc, &screen, 4);
+            samples.push(t0.elapsed());
+        }
+        report("scroll a screen with 1000 folds (walk + hit)", samples);
+        // Two panes on one document: type in one, the other follows.
+        let (mut typing, mut watching) = (Carets::default(), Carets::default());
+        let mut other = View::default();
+        let mut samples = Vec::new();
+        for i in 0..300 {
+            let at = doc.buffer.line_span(len / 301 * i).start;
+            Editor::new(&mut doc, &mut watching).click(at, false);
+            Editor::new(&mut doc, &mut typing).click(at, false);
+            let t0 = Instant::now();
+            Editor::new(&mut doc, &mut typing).insert("x").unwrap();
+            view.follow(&doc);
+            other.follow(&doc);
+            let _ = watching.fit(&doc);
+            doc.journal_mut().trim();
+            samples.push(t0.elapsed());
+        }
+        report("keystroke with a second pane following", samples);
+        println!("folds left after typing: {}", view.folds.len());
     }
 
     #[test]
@@ -2429,11 +2741,13 @@ mod tests {
         let mut d = doc(&text);
         let l = layout(51);
         let mut v = View::default();
-        d.click(d.buffer.line_to_byte(30), false);
-        v.ensure_cursor_visible(&d, &l, 4);
+        let at = d.buffer.line_to_byte(30);
+        d.ed().click(at, false);
+        v.ensure_cursor_visible(&d, &d.carets, &l, 4);
         assert_eq!(top(&v, &d).0, 21, "line 30 is the last full line");
-        d.click(d.buffer.line_to_byte(5), false);
-        v.ensure_cursor_visible(&d, &l, 4);
+        let at = d.buffer.line_to_byte(5);
+        d.ed().click(at, false);
+        v.ensure_cursor_visible(&d, &d.carets, &l, 4);
         assert_eq!(top(&v, &d).0, 5);
     }
 
@@ -2444,11 +2758,11 @@ mod tests {
         let l = narrow(13);
         let mut v = View::default();
         v.set_wrap(true);
-        d.click(6 * 18 + 9, false); // line 6, row 1
-        v.ensure_cursor_visible(&d, &l, 4);
+        d.ed().click(6 * 18 + 9, false); // line 6, row 1
+        v.ensure_cursor_visible(&d, &d.carets, &l, 4);
         assert_eq!(top(&v, &d), (2, 0));
-        d.click(18 + 9, false); // line 1, row 1
-        v.ensure_cursor_visible(&d, &l, 4);
+        d.ed().click(18 + 9, false); // line 1, row 1
+        v.ensure_cursor_visible(&d, &d.carets, &l, 4);
         assert_eq!(top(&v, &d), (1, 9));
     }
 
@@ -2556,9 +2870,9 @@ mod tests {
     #[test]
     fn field_selection_columns() {
         let mut d = doc("abc");
-        d.select(1..3);
+        d.ed().select(1..3);
         assert_eq!(field_selection(&d, "abc"), Some((1, 3)));
-        d.select(2..2);
+        d.ed().select(2..2);
         assert_eq!(field_selection(&d, "abc"), None);
     }
 }

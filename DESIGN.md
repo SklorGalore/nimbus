@@ -547,7 +547,7 @@ introduces and points at the code.
 | 10 | Find in files | **Done** | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
 | 11 | Everyday editing | **Done** | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
 | 12 | Workspace | **Done** | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
-| 13 | Split views and folding | Planned | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
+| 13 | Split views and folding | In progress | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
 | 14 | Languages, second pass | In progress | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
 | 15 | Distribution | Done | Installers and packages for every platform (unsigned), an update check, signed checksums | [m15](docs/milestones/m15-distribution.md) |
 | 16 | Rendering, second pass | Planned | Colour emoji, ligatures, zoom, whitespace and indent guides | [m16](docs/milestones/m16-rendering-second-pass.md) |

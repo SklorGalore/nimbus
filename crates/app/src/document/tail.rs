@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use nimbus_core::{Buffer, ExtendError, Source, Text};
 
-use super::{Document, Stamp};
+use super::{Carets, Document, Editor, Stamp};
 use crate::indexer;
 use crate::io;
 use crate::mapping::MappedFile;
@@ -245,24 +245,28 @@ impl Document {
         }
     }
 
-    /// After a command: following stops once the cursor leaves the end or
-    /// the text is edited, since either means the user is doing something
-    /// other than watching the end.
-    pub fn check_following(&mut self) {
+    /// After a command: following stops once `carets`, the active tab's,
+    /// leave the end or the text is edited, since either means the user is
+    /// doing something other than watching the end.
+    pub fn check_following(&mut self, carets: &Carets) {
         if self.tail == Tail::Following
             && (self.is_dirty()
-                || self.selections.count() > 1
-                || self.selection() != nimbus_core::Selection::cursor(self.buffer.len_bytes()))
+                || carets.selections.count() > 1
+                || carets.selection(&self.buffer)
+                    != nimbus_core::Selection::cursor(self.buffer.len_bytes()))
         {
             self.tail = Tail::Grew;
         }
     }
 
-    /// Put the cursor at the end of the text, for a view following it.
-    pub fn follow_end(&mut self) {
+    /// Put `carets`, a view's following this text, at its end. Every tab
+    /// showing a followed document follows it.
+    pub fn follow_end(&mut self, carets: &mut Carets) {
         let end = self.buffer.len_bytes();
-        if self.selections.count() > 1 || self.selection() != nimbus_core::Selection::cursor(end) {
-            self.click(end, false);
+        if carets.selections.count() > 1
+            || carets.selection(&self.buffer) != nimbus_core::Selection::cursor(end)
+        {
+            Editor::new(self, carets).click(end, false);
         }
     }
 }
@@ -297,9 +301,14 @@ fn same(t: &dyn Text, mut at: usize, mut bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::DiskChange;
+    use crate::document::{DiskChange, Solo};
     use crate::languages::Languages;
     use std::io::Write;
+
+    /// Look at the file, as the watcher would, for a document shown once.
+    fn look(s: &mut Solo, languages: &Languages) -> DiskChange {
+        s.doc.disk_changed(languages, &mut [&mut s.carets])
+    }
 
     fn append(path: &Path, text: &[u8]) {
         let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
@@ -314,30 +323,34 @@ mod tests {
         let path = dir.join("log.txt");
         std::fs::write(&path, "one\n").unwrap();
         let languages = Languages::default();
-        let mut doc = Document::open(&path).unwrap();
-        doc.click(2, false);
+        let mut doc = Solo::of(Document::open(&path).unwrap());
+        doc.ed().click(2, false);
         append(&path, "two\nthr\u{e9}".as_bytes());
         // Only the first byte of the last é: it waits.
         let cut = std::fs::read(&path).unwrap();
         std::fs::write(&path, &cut[..cut.len() - 1]).unwrap();
-        assert_eq!(doc.disk_changed(&languages), DiskChange::Appended);
+        assert_eq!(look(&mut doc, &languages), DiskChange::Appended);
         assert_eq!(doc.buffer.slice(0..doc.buffer.len_bytes()), "one\ntwo\nthr");
         assert!(!doc.is_dirty());
         assert_eq!(doc.tail, Tail::Grew);
-        assert_eq!(doc.cursor(), 2, "the cursor stays where it was");
+        assert_eq!(
+            doc.carets.cursor(&doc.doc.buffer),
+            2,
+            "the cursor stays where it was"
+        );
         std::fs::write(&path, &cut).unwrap();
-        assert_eq!(doc.disk_changed(&languages), DiskChange::Appended);
+        assert_eq!(look(&mut doc, &languages), DiskChange::Appended);
         assert_eq!(
             doc.buffer.slice(0..doc.buffer.len_bytes()),
             "one\ntwo\nthr\u{e9}"
         );
         assert!(!doc.history.can_undo(), "nothing to undo");
-        doc.follow_end();
-        assert_eq!(doc.cursor(), doc.buffer.len_bytes());
+        doc.doc.follow_end(&mut doc.carets);
+        assert_eq!(doc.carets.cursor(&doc.doc.buffer), doc.buffer.len_bytes());
 
         // A rewrite that is longer is not an append: it reloads.
         std::fs::write(&path, "ONE\ntwo\nthr\u{e9} and more").unwrap();
-        assert_eq!(doc.disk_changed(&languages), DiskChange::Reloaded);
+        assert_eq!(look(&mut doc, &languages), DiskChange::Reloaded);
         assert_eq!(doc.buffer.slice(0..3), "ONE");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -350,19 +363,19 @@ mod tests {
         let path = dir.join("big.log");
         std::fs::write(&path, "\u{feff}one\ntwo\n").unwrap();
         let languages = Languages::default();
-        let mut doc = Document::open_mapped(&path).unwrap();
+        let mut doc = Solo::of(Document::open_mapped(&path).unwrap());
         assert!(doc.buffer.is_mapped() && doc.bom);
 
         // Not following: the file stays as it was loaded.
         append(&path, b"three\n");
-        assert_eq!(doc.disk_changed(&languages), DiskChange::NotReloaded);
+        assert_eq!(look(&mut doc, &languages), DiskChange::NotReloaded);
         assert_eq!(doc.tail, Tail::Grew);
         assert_eq!(doc.buffer.len_bytes(), 8);
 
         doc.tail = Tail::Following;
-        assert_eq!(doc.disk_changed(&languages), DiskChange::Appended);
+        assert_eq!(look(&mut doc, &languages), DiskChange::Appended);
         let all = |d: &Document| d.buffer.slice(0..d.buffer.len_bytes()).into_owned();
-        assert_eq!(all(&doc), "one\ntwo\nthree\n");
+        assert_eq!(all(&doc.doc), "one\ntwo\nthree\n");
         assert!(!doc.is_dirty() && !doc.conflict);
         assert!(
             doc.buffer.is_fully_indexed(),
@@ -373,10 +386,10 @@ mod tests {
 
         // Soon after, it waits; later it maps again.
         append(&path, b"four\n");
-        assert!(matches!(doc.disk_changed(&languages), DiskChange::Later(_)));
+        assert!(matches!(look(&mut doc, &languages), DiskChange::Later(_)));
         doc.extended_at = None;
-        assert_eq!(doc.disk_changed(&languages), DiskChange::Appended);
-        assert_eq!(all(&doc), "one\ntwo\nthree\nfour\n");
+        assert_eq!(look(&mut doc, &languages), DiskChange::Appended);
+        assert_eq!(all(&doc.doc), "one\ntwo\nthree\nfour\n");
 
         // Rewritten, not appended to: not taken as an append. (Windows
         // refuses to truncate a mapped file, so this cannot happen there.)
@@ -385,8 +398,8 @@ mod tests {
             doc.extended_at = None;
             std::fs::write(&path, "\u{feff}ONE\ntwo\nthree\nfour\nfive\n").unwrap();
             // While following, a rewritten file is read again.
-            assert_eq!(doc.disk_changed(&languages), DiskChange::Reloaded);
-            assert_eq!(all(&doc), "ONE\ntwo\nthree\nfour\nfive\n");
+            assert_eq!(look(&mut doc, &languages), DiskChange::Reloaded);
+            assert_eq!(all(&doc.doc), "ONE\ntwo\nthree\nfour\nfive\n");
         }
         drop(doc);
         let _ = std::fs::remove_dir_all(&dir);

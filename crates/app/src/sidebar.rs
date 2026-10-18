@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use nimbus_render::Gpu;
 
-use crate::document::Document;
+use crate::document::{Document, Solo};
 use crate::input::Motion;
 use crate::search_panel::{self, Panel};
 use crate::theme::Ui;
@@ -71,7 +71,7 @@ pub struct TreeEdit {
     /// follows, `None` for the top of the tree.
     pub node: Option<NodeId>,
     /// The name being typed.
-    pub field: Document,
+    pub field: Solo,
 }
 
 /// What a click or key in the sidebar asks the app to do.
@@ -109,14 +109,18 @@ impl Sidebar {
     /// is nothing to rename.
     pub fn begin_edit(&mut self, kind: EditKind) -> Option<Vec<ListRequest>> {
         let selected = self.tree.selected.filter(|&s| self.tree.node(s).is_some());
-        let mut field = Document::untitled();
+        let mut field = Solo {
+            doc: Document::untitled(),
+            carets: crate::document::Carets::default(),
+        };
         let mut requests = Vec::new();
         let (dir, node) = if kind == EditKind::Rename {
             let id = selected?;
             let n = self.tree.node(id)?;
             let dir = n.path.parent()?.to_path_buf();
-            let _ = field.insert(&n.name);
-            field.select(tree_ops::stem_range(&n.name, n.is_dir));
+            let mut ed = field.ed();
+            let _ = ed.insert(&n.name);
+            ed.select(tree_ops::stem_range(&n.name, n.is_dir));
             (dir, Some(id))
         } else {
             match selected.and_then(|s| self.tree.node(s).map(|n| (s, n))) {
@@ -643,7 +647,10 @@ mod tests {
         assert_eq!(s.edit.take().unwrap().dir, PathBuf::from("/p/src"));
         s.begin_edit(EditKind::Rename).unwrap();
         let e = s.edit.as_ref().unwrap();
-        assert_eq!(e.field.selected_text().as_deref(), Some("main"));
+        assert_eq!(
+            e.field.carets.selected_text(&e.field.doc.buffer).as_deref(),
+            Some("main")
+        );
         assert_eq!(e.dir, PathBuf::from("/p/src"));
         assert!(s.focused);
     }

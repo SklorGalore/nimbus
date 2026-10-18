@@ -17,7 +17,7 @@ use nimbus_core::Text;
 use nimbus_core::align::{Cell, MAX_COLUMNS, Row, Rows};
 use nimbus_render::Gpu;
 
-use crate::document::Document;
+use crate::document::{Carets, Document};
 use crate::theme::{Color, Theme, Ui};
 use crate::view::{Decorations, Layout, Preedit, RowPlan, ScrollbarHit, View};
 
@@ -384,7 +384,7 @@ impl<T: Copy> Columns<T> {
         &mut self,
         gpu: &mut Gpu,
         layout: &Layout,
-        docs: &[&Document],
+        docs: &[(&Document, &Carets)],
         views: &mut [&mut View],
         live: &Live<'_>,
         theme: &mut Theme,
@@ -393,7 +393,7 @@ impl<T: Copy> Columns<T> {
         let ui = theme.ui;
         let layouts = self.layouts(layout);
         let scroll_x = views.get(self.live).map_or(0.0, |v| v.scroll_x.max(0.0));
-        for (c, (doc, view)) in docs.iter().zip(views.iter_mut()).enumerate() {
+        for (c, (&(doc, carets), view)) in docs.iter().zip(views.iter_mut()).enumerate() {
             let col_layout = &layouts[c.min(layouts.len() - 1)];
             view.scroll_x = scroll_x;
             let looks = if doc.syntax.capture_names().is_some() {
@@ -418,6 +418,7 @@ impl<T: Copy> Columns<T> {
             view.draw_rows(
                 gpu,
                 doc,
+                carets,
                 col_layout,
                 tab_width,
                 &deco,

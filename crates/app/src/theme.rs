@@ -124,6 +124,8 @@ ui_colors! {
     diff_filler,
     /// Merge view: a conflict.
     merge_conflict,
+    /// Behind the chip after a folded line (M13).
+    fold_chip,
 }
 
 /// A loaded theme.

@@ -111,7 +111,7 @@ impl App {
         let Some(edit) = self.sidebar.edit.take() else {
             return;
         };
-        let name = edit.field.buffer.line(0).into_owned();
+        let name = edit.field.doc.buffer.line(0).into_owned();
         let to = match tree_ops::target(&edit.dir, &name) {
             Ok(to) => to,
             Err(e) => {
@@ -234,7 +234,7 @@ impl App {
     fn tabs_under(&self, path: &Path) -> Vec<usize> {
         (0..self.tabs.len())
             .filter(|&i| {
-                let d = &self.tabs[i].doc;
+                let d = &self.docs[self.tabs[i].doc];
                 let p = if d.is_placeholder() {
                     d.path.as_deref()
                 } else {
@@ -256,9 +256,11 @@ impl App {
         let dirty: Vec<String> = self
             .tabs_under(&path)
             .into_iter()
-            .map(|i| &self.tabs[i].doc)
+            .map(|i| &self.docs[self.tabs[i].doc])
             .filter(|d| d.is_dirty() || d.is_saving())
             .map(crate::document::Document::display_name)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
             .collect();
         if !dirty.is_empty() && !self.confirm_trash_unsaved(&dirty) {
             return;
@@ -306,7 +308,7 @@ impl App {
         let target = self
             .tree_target()
             .filter(|_| self.sidebar.visible)
-            .or_else(|| self.tabs[self.active].doc.canonical.clone());
+            .or_else(|| self.doc().canonical.clone());
         let Some(path) = target else {
             self.say("Nothing to reveal: the file is not saved yet", false);
             return;
@@ -334,14 +336,14 @@ impl App {
     /// `from` was renamed to `to`: tabs, recent files and closed tabs
     /// showing it, or anything inside it, follow.
     fn follow_move(&mut self, from: &Path, to: &Path) {
-        for tab in &mut self.tabs {
-            let current = if tab.doc.is_placeholder() {
-                tab.doc.path.clone()
+        for (_, doc) in self.docs.iter_mut() {
+            let current = if doc.is_placeholder() {
+                doc.path.clone()
             } else {
-                tab.doc.canonical.clone()
+                doc.canonical.clone()
             };
             if let Some(new) = current.and_then(|p| tree_ops::moved(&p, from, to)) {
-                tab.doc.moved_to(new);
+                doc.moved_to(new);
             }
         }
         for r in &mut self.ws.state.recent {

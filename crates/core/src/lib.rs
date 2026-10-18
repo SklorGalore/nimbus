@@ -13,6 +13,7 @@ pub mod comment;
 pub mod compare;
 pub mod diff;
 pub mod expand;
+pub mod fold;
 pub mod indent;
 pub mod line_ending;
 pub mod line_index;
@@ -40,6 +41,7 @@ pub use buffer::{
 };
 pub use compare::{Comparison, compare};
 pub use diff::{DIFF_LIMIT, DiffError, Hunk, Interner, Lines};
+pub use fold::Folds;
 pub use line_ending::LineEnding;
 pub use live_diff::{EditSpan, LiveDiff, Region, Side};
 pub use mapped::{ExtendError, Limits, MappedBuffer, MappedSnapshot, PieceRun};

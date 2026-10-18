@@ -26,7 +26,7 @@ use nimbus_core::{Buffer, Snapshot, Text};
 use nimbus_render::Gpu;
 
 use crate::columns::{Click, Columns, Live};
-use crate::document::Document;
+use crate::document::{Carets, Document, Editor};
 use crate::theme::Theme;
 use crate::view::{Layout, Preedit, View};
 
@@ -96,6 +96,8 @@ pub struct MergeView {
     /// Names for the status line.
     names: (String, String),
     views: [View; 2],
+    /// The read-only sides' cursors, which stay at the start.
+    still: [Carets; 2],
     regions: Regions,
     /// The regions behind the rows' changes, by change number.
     change_regions: Vec<usize>,
@@ -226,6 +228,7 @@ impl MergeView {
             theirs: inputs.theirs,
             names: inputs.names,
             views,
+            still: [Carets::default(), Carets::default()],
             regions: Regions::default(),
             change_regions: Vec::new(),
             columns: Columns::new(Rows::from_segments(3, Folding::default(), []), 3, 1),
@@ -408,18 +411,20 @@ impl MergeView {
     }
 
     /// The region under the result's cursor.
-    fn region_at_cursor(&self, doc: &Document) -> Option<usize> {
-        let line = doc.buffer.byte_to_line(doc.cursor());
+    fn region_at_cursor(&self, doc: &Document, cursor: usize) -> Option<usize> {
+        let line = doc.buffer.byte_to_line(cursor);
         self.regions.change_at_result_line(line)
     }
 
     /// Take a side for the change under the cursor: one undoable edit of
     /// the result. Returns what happened, for the message line.
-    pub fn take(&mut self, doc: &mut Document, take: Take) -> Result<(), String> {
+    pub fn take(&mut self, ed: &mut Editor<'_>, take: Take) -> Result<(), String> {
+        let cursor = ed.cursor();
+        let doc = &mut *ed.doc;
         if self.pending.is_some() {
             return Err("still merging".to_owned());
         }
-        let Some(i) = self.region_at_cursor(doc) else {
+        let Some(i) = self.region_at_cursor(doc, cursor) else {
             return Err("no change at the cursor".to_owned());
         };
         if self.regions.all()[i].tag().is_none() {
@@ -445,18 +450,18 @@ impl MergeView {
             doc.buffer.line_to_byte(lines.start),
             doc.buffer.line_to_byte(lines.end),
         );
-        let outcome = doc
+        let outcome = ed
             .replace(start..end, &text)
             .map(|_| ())
             .map_err(|e| e.to_string());
         // The replace was noted like any edit, but the regions learn of it
         // from the take itself, which knows its region where a span at a
         // line start would not (an empty region there, or the holder).
-        let _ = doc.take_edits();
+        let _ = ed.doc.take_edits();
         if outcome.is_ok() {
             self.regions
                 .took(i, pick, nimbus_core::merge::lines_in(&text));
-            doc.click(start, false);
+            ed.click(start, false);
         }
         self.scratch = text;
         self.rebuild_rows();
@@ -469,14 +474,20 @@ impl MergeView {
     }
 
     /// Keep the result's cursor on screen.
-    pub fn ensure_cursor_visible(&mut self, doc: &Document, layout: &Layout) {
-        let line = doc.buffer.byte_to_line(doc.cursor());
+    pub fn ensure_cursor_visible(&mut self, doc: &Document, cursor: usize, layout: &Layout) {
+        let line = doc.buffer.byte_to_line(cursor);
         self.columns.ensure_line_visible(line, layout);
     }
 
     /// Go to the next or previous change; returns the byte for the cursor.
-    pub fn step_change(&mut self, forward: bool, doc: &Document, layout: &Layout) -> Option<usize> {
-        let line = doc.buffer.byte_to_line(doc.cursor());
+    pub fn step_change(
+        &mut self,
+        forward: bool,
+        doc: &Document,
+        cursor: usize,
+        layout: &Layout,
+    ) -> Option<usize> {
+        let line = doc.buffer.byte_to_line(cursor);
         let start = self.columns.step_change(forward, line, layout)?;
         let line = self
             .columns
@@ -491,9 +502,10 @@ impl MergeView {
         &mut self,
         forward: bool,
         doc: &Document,
+        cursor: usize,
         layout: &Layout,
     ) -> Option<usize> {
-        let line = doc.buffer.byte_to_line(doc.cursor());
+        let line = doc.buffer.byte_to_line(cursor);
         let at = self.regions.at_result_line(line).unwrap_or(0);
         let regions = self.regions.all();
         let found = if forward {
@@ -522,7 +534,7 @@ impl MergeView {
     }
 
     /// The summary for the status bar, followed by the editor's own `info`.
-    pub fn status(&mut self, doc: &Document, info: &str) -> &str {
+    pub fn status(&mut self, doc: &Document, cursor: usize, info: &str) -> &str {
         use std::fmt::Write as _;
         self.status.clear();
         let (l, r) = &self.names;
@@ -542,7 +554,7 @@ impl MergeView {
         }
         let changes = self.columns.rows.changes();
         let conflicts = self.open_conflicts();
-        match self.region_at_cursor(doc).and_then(|i| {
+        match self.region_at_cursor(doc, cursor).and_then(|i| {
             self.change_regions
                 .iter()
                 .position(|&r| r == i)
@@ -621,6 +633,7 @@ impl MergeView {
         gpu: &mut Gpu,
         layout: &Layout,
         doc: &Document,
+        carets: &Carets,
         view: &mut View,
         theme: &mut Theme,
         tab_width: usize,
@@ -639,7 +652,11 @@ impl MergeView {
         self.columns.draw(
             gpu,
             layout,
-            &[&self.ours, doc, &self.theirs],
+            &[
+                (&self.ours, &self.still[0]),
+                (doc, carets),
+                (&self.theirs, &self.still[1]),
+            ],
             &mut [ours_view, view, theirs_view],
             &live,
             theme,
@@ -650,6 +667,7 @@ impl MergeView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::Solo;
 
     /// A merge started on a worker shows the inputs unaligned and refuses
     /// edits until its result arrives, then aligns like a synchronous one.
@@ -657,17 +675,18 @@ mod tests {
     fn worker_merge_waits_then_aligns() {
         let (tx, rx) = std::sync::mpsc::channel();
         let send: Send = Arc::new(move |m| tx.send(m).is_ok());
-        let (mut m, mut result) = MergeView::start(
+        let (mut m, result) = MergeView::start(
             Shape::ThreeWay,
             inputs(Some("a\nb\nc\n"), "x\nb\nc\n", "a\nb\ny\n"),
             None,
             &send,
         );
+        let mut result = Solo::of(result);
         assert!(m.is_pending());
         assert!(m.columns.rows.is_empty());
         assert_eq!(result.buffer.len_bytes(), 0);
         assert_eq!(
-            m.take(&mut result, Take::Left),
+            m.take(&mut result.ed(), Take::Left),
             Err("still merging".to_owned())
         );
         let merged = rx.recv().unwrap();
@@ -702,7 +721,7 @@ mod tests {
         }
     }
 
-    fn text(d: &Document) -> String {
+    fn text(d: &Solo) -> String {
         d.buffer.slice(0..d.buffer.len_bytes()).into_owned()
     }
 
@@ -712,29 +731,36 @@ mod tests {
 
     #[test]
     fn two_way_merge_starts_as_the_left_and_takes_sides() {
-        let (mut m, mut result) =
+        let (mut m, result) =
             MergeView::two_way(inputs(None, "a\nb\nc\n", "a\nB\nc\nd\n"), None).unwrap();
+        let mut result = Solo::of(result);
         assert_eq!(text(&result), "a\nb\nc\n");
         assert_eq!(m.columns.rows.changes(), 2);
-        assert!(m.status(&result, "").starts_with("Merge left ⇄ right"));
+        assert!(
+            m.status(&result, result.carets.cursor(&result.buffer), "")
+                .starts_with("Merge left ⇄ right")
+        );
         // Take the right side for the change on line 1.
-        result.click(2, false);
-        m.take(&mut result, Take::Right).unwrap();
+        result.ed().click(2, false);
+        m.take(&mut result.ed(), Take::Right).unwrap();
         assert_eq!(text(&result), "a\nB\nc\n");
         assert!(
-            m.status(&result, "").contains("(right taken)"),
+            m.status(&result, result.carets.cursor(&result.buffer), "")
+                .contains("(right taken)"),
             "{}",
-            m.status(&result, "")
+            m.status(&result, result.carets.cursor(&result.buffer), "")
         );
         // The second change is a pure addition on the right: taking both
         // appends their line (ours has nothing there).
         let layout = layout();
-        let pos = m.step_change(true, &result, &layout).unwrap();
-        result.click(pos, false);
-        m.take(&mut result, Take::Both).unwrap();
+        let pos = m
+            .step_change(true, &result, result.carets.cursor(&result.buffer), &layout)
+            .unwrap();
+        result.ed().click(pos, false);
+        m.take(&mut result.ed(), Take::Both).unwrap();
         assert_eq!(text(&result), "a\nB\nc\nd\n");
         // Undo is an ordinary edit the regions follow.
-        result.undo().unwrap();
+        result.ed().undo().unwrap();
         assert!(m.sync(&mut result));
         assert_eq!(text(&result), "a\nB\nc\n");
         assert_eq!(m.columns.rows.changes(), 2);
@@ -745,21 +771,28 @@ mod tests {
     /// there inserts them.
     #[test]
     fn right_only_lines_in_the_middle_can_be_taken() {
-        let (mut m, mut result) =
+        let (mut m, result) =
             MergeView::two_way(inputs(None, "a\nb\nc\n", "a\nX\nb\nc\n"), None).unwrap();
+        let mut result = Solo::of(result);
         assert_eq!(m.columns.rows.changes(), 1);
         let layout = layout();
-        result.click(0, false);
-        let pos = m.step_change(true, &result, &layout).unwrap();
-        result.click(pos, false);
+        result.ed().click(0, false);
+        let pos = m
+            .step_change(true, &result, result.carets.cursor(&result.buffer), &layout)
+            .unwrap();
+        result.ed().click(pos, false);
         assert_eq!(result.buffer.byte_to_line(pos), 1);
-        m.take(&mut result, Take::Right).unwrap();
+        m.take(&mut result.ed(), Take::Right).unwrap();
         assert_eq!(text(&result), "a\nX\nb\nc\n");
-        assert!(m.status(&result, "").contains("(right taken)"));
+        assert!(
+            m.status(&result, result.carets.cursor(&result.buffer), "")
+                .contains("(right taken)")
+        );
         // The equal run after it followed: typing on its last line is an
         // edit of that run, not of the take.
-        result.click(result.buffer.line_to_byte(3), false);
-        result.insert("!").unwrap();
+        let at = result.buffer.line_to_byte(3);
+        result.ed().click(at, false);
+        result.ed().insert("!").unwrap();
         assert!(m.sync(&mut result));
         assert_eq!(text(&result), "a\nX\nb\n!c\n");
         assert!(matches!(
@@ -772,42 +805,58 @@ mod tests {
 
     #[test]
     fn three_way_merge_marks_conflicts_and_counts_them_down() {
-        let (mut m, mut result) = MergeView::three_way(
+        let (mut m, result) = MergeView::three_way(
             inputs(Some("a\nb\nc\nd\n"), "a\nX\nc\nd\n", "a\nY\nc\nD\n"),
             None,
         )
         .unwrap();
+        let mut result = Solo::of(result);
         assert_eq!(
             text(&result),
             "a\n<<<<<<< ours\nX\n=======\nY\n>>>>>>> theirs\nc\nD\n",
             "their change to d is taken; the clash on b is a conflict"
         );
         assert_eq!(m.open_conflicts(), 1);
-        assert!(m.status(&result, "").contains("1 conflict left"));
+        assert!(
+            m.status(&result, result.carets.cursor(&result.buffer), "")
+                .contains("1 conflict left")
+        );
         let layout = layout();
-        result.click(0, false);
-        let pos = m.step_conflict(true, &result, &layout).unwrap();
+        result.ed().click(0, false);
+        let pos = m
+            .step_conflict(true, &result, result.carets.cursor(&result.buffer), &layout)
+            .unwrap();
         assert_eq!(pos, 2, "the conflict block starts on line 1");
-        result.click(pos, false);
-        m.take(&mut result, Take::Left).unwrap();
+        result.ed().click(pos, false);
+        m.take(&mut result.ed(), Take::Left).unwrap();
         assert_eq!(text(&result), "a\nX\nc\nD\n");
         assert_eq!(m.open_conflicts(), 0);
-        assert!(m.status(&result, "").contains("no conflicts left"));
-        assert!(m.step_conflict(true, &result, &layout).is_none());
+        assert!(
+            m.status(&result, result.carets.cursor(&result.buffer), "")
+                .contains("no conflicts left")
+        );
+        assert!(
+            m.step_conflict(true, &result, result.carets.cursor(&result.buffer), &layout)
+                .is_none()
+        );
     }
 
     #[test]
     fn a_file_with_markers_reopens_as_a_merge() {
         let source = "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> other\nc\n";
-        let (mut m, mut result) = MergeView::from_markers(source, None).unwrap().unwrap();
+        let (mut m, result) = MergeView::from_markers(source, None).unwrap().unwrap();
+        let mut result = Solo::of(result);
         assert_eq!(
             text(&result),
             "a\n<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\nc\n"
         );
         assert_eq!(m.open_conflicts(), 1);
-        assert!(m.status(&result, "").starts_with("Merge HEAD + other"));
-        result.click(4, false);
-        m.take(&mut result, Take::Right).unwrap();
+        assert!(
+            m.status(&result, result.carets.cursor(&result.buffer), "")
+                .starts_with("Merge HEAD + other")
+        );
+        result.ed().click(4, false);
+        m.take(&mut result.ed(), Take::Right).unwrap();
         assert_eq!(text(&result), "a\ny\nc\n");
         assert!(MergeView::from_markers("plain\n", None).unwrap().is_none());
     }
@@ -844,7 +893,7 @@ mod tests {
         }
         let theirs = Document::with_text(None, &theirs_text);
         let t = std::time::Instant::now();
-        let (mut m, mut result) = MergeView::three_way(
+        let (mut m, result) = MergeView::three_way(
             Inputs {
                 base: Some(base),
                 ours,
@@ -854,6 +903,7 @@ mod tests {
             None,
         )
         .unwrap();
+        let mut result = Solo::of(result);
         println!(
             "three-way merge built in {:?}: {} rows, {} changes, {} conflicts",
             t.elapsed(),
@@ -867,9 +917,9 @@ mod tests {
         let mut samples = Vec::new();
         for (i, at) in type_at(len).enumerate() {
             let ch = if i % 7 == 6 { "\n" } else { "x" };
-            result.click(at, false);
+            result.ed().click(at, false);
             let t = std::time::Instant::now();
-            result.insert(ch).unwrap();
+            result.ed().insert(ch).unwrap();
             m.sync(&mut result);
             m.plan(&result, &layout, &theme);
             samples.push(t.elapsed());
@@ -882,9 +932,10 @@ mod tests {
                 break;
             };
             let line = m.regions.all()[r].result.start;
-            result.click(result.buffer.line_to_byte(line), false);
+            let at = result.buffer.line_to_byte(line);
+            result.ed().click(at, false);
             let t = std::time::Instant::now();
-            if m.take(&mut result, Take::Right).is_ok() {
+            if m.take(&mut result.ed(), Take::Right).is_ok() {
                 m.sync(&mut result);
                 m.plan(&result, &layout, &theme);
                 samples.push(t.elapsed());
@@ -895,16 +946,17 @@ mod tests {
 
     #[test]
     fn typing_in_the_result_is_followed() {
-        let (mut m, mut result) =
-            MergeView::two_way(inputs(None, "a\nb\n", "a\nB\n"), None).unwrap();
-        result.click(2, false);
-        result.insert("x\n").unwrap();
+        let (mut m, result) = MergeView::two_way(inputs(None, "a\nb\n", "a\nB\n"), None).unwrap();
+        let mut result = Solo::of(result);
+        result.ed().click(2, false);
+        result.ed().insert("x\n").unwrap();
         assert!(m.sync(&mut result));
         assert_eq!(text(&result), "a\nx\nb\n");
         assert!(
-            m.status(&result, "").contains("(edited)"),
+            m.status(&result, result.carets.cursor(&result.buffer), "")
+                .contains("(edited)"),
             "{}",
-            m.status(&result, "")
+            m.status(&result, result.carets.cursor(&result.buffer), "")
         );
     }
 }

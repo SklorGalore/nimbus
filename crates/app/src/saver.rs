@@ -451,6 +451,7 @@ pub fn not_replaced(temp: &Path, target: &Path, why: &dyn std::fmt::Display) -> 
 mod tests {
     use super::*;
     use crate::document::Document;
+    use crate::document::Solo;
     use nimbus_core::mapped::Limits;
     use nimbus_core::{AnyBuffer, Buffer, MappedBuffer, movement};
     use std::cell::Cell;
@@ -496,7 +497,7 @@ mod tests {
     };
 
     /// All the document's raw bytes.
-    fn raw(d: &Document) -> Vec<u8> {
+    fn raw(d: &Solo) -> Vec<u8> {
         let mut out = Vec::new();
         d.buffer
             .read_into(0..d.buffer.len_bytes(), &mut out)
@@ -506,8 +507,8 @@ mod tests {
 
     /// Open `path`, which must open mapped, with `limits` instead of the
     /// default ones and only the first `indexed` bytes' lines counted.
-    fn open_mapped(path: &Path, limits: Limits, indexed: usize) -> Document {
-        let mut d = Document::open_mapped(path).unwrap();
+    fn open_mapped(path: &Path, limits: Limits, indexed: usize) -> Solo {
+        let mut d = Solo::of(Document::open_mapped(path).unwrap());
         assert!(d.buffer.is_mapped(), "{} must open mapped", path.display());
         let source = d.backing_file().unwrap().clone() as Arc<dyn Source>;
         let mut scanner = Scanner::new(nimbus_core::line_index::Spacing::new(2, 5));
@@ -524,7 +525,7 @@ mod tests {
 
     /// Save `d` the way the app does, but on this thread: write, switch,
     /// then poll every millisecond while it waits.
-    fn save_with(d: &mut Document, policy: ReplacePolicy, chunk: usize) -> SaveStep {
+    fn save_with(d: &mut Solo, policy: ReplacePolicy, chunk: usize) -> SaveStep {
         let job = d.begin_save(policy).unwrap().with_chunk(chunk);
         let token = job.token;
         let result = job.run(|_, _| {});
@@ -536,7 +537,7 @@ mod tests {
         step
     }
 
-    fn save(d: &mut Document) -> SaveStep {
+    fn save(d: &mut Solo) -> SaveStep {
         save_with(d, ReplacePolicy::default(), 7)
     }
 
@@ -551,7 +552,7 @@ mod tests {
 
     /// The document reads the file at `path` (not a temp file), is clean,
     /// has every line counted, and its line numbers match `expected`.
-    fn check_saved(d: &Document, path: &Path, expected: &[u8], bom: bool) {
+    fn check_saved(d: &Solo, path: &Path, expected: &[u8], bom: bool) {
         let mut on_disk = Vec::new();
         if bom {
             on_disk.extend_from_slice(io::BOM.as_bytes());
@@ -598,7 +599,7 @@ mod tests {
     /// Random edits: insertions (text with line breaks and non-ASCII
     /// characters), deletions short and long (past the copy limit, so undo
     /// holds pieces), and undo and redo, mirrored on a `Vec<u8>` oracle.
-    fn edit_randomly(d: &mut Document, oracle: &mut Vec<u8>, rng: &mut Rng, steps: usize) {
+    fn edit_randomly(d: &mut Solo, oracle: &mut Vec<u8>, rng: &mut Rng, steps: usize) {
         const TEXTS: [&str; 6] = ["x", "hello\n", "é", "\r\n", "日本語 ", "\tline\nline\n"];
         // The oracle after each undo step, to follow undo and redo.
         let mut undone: Vec<Vec<u8>> = Vec::new();
@@ -609,29 +610,29 @@ mod tests {
             match rng.below(10) {
                 0..=3 => {
                     let text = TEXTS[rng.below(TEXTS.len())];
-                    d.replace(a..a, text).unwrap();
+                    d.ed().replace(a..a, text).unwrap();
                     oracle.splice(a..a, text.bytes());
                 }
                 4..=6 => {
                     // Up to 60 bytes: often past the 16-byte copy limit.
                     let b = movement::clamp(&d.buffer, (a + rng.below(60)).min(len));
-                    d.replace(a..b, "").unwrap();
+                    d.ed().replace(a..b, "").unwrap();
                     oracle.drain(a..b);
                 }
                 7 => {
                     let b = movement::clamp(&d.buffer, (a + rng.below(30)).min(len));
-                    d.replace(a..b, "+").unwrap();
+                    d.ed().replace(a..b, "+").unwrap();
                     oracle.splice(a..b, *b"+");
                 }
                 8 if done.len() > 1 => {
-                    assert!(d.undo().unwrap());
+                    assert!(d.ed().undo().unwrap());
                     undone.push(done.pop().unwrap());
                     oracle.clone_from(done.last().unwrap());
                     assert_eq!(&raw(d), oracle, "after undo");
                     continue;
                 }
                 9 if !undone.is_empty() => {
-                    assert!(d.redo().unwrap());
+                    assert!(d.ed().redo().unwrap());
                     done.push(undone.pop().unwrap());
                     oracle.clone_from(done.last().unwrap());
                     assert_eq!(&raw(d), oracle, "after redo");
@@ -692,22 +693,22 @@ mod tests {
         let dir = TempDir::new("cursor");
         let path = dir.0.join("crlf.txt");
         std::fs::write(&path, b"one\r\ntwo \xff\r\nthree\r\n").unwrap();
-        let mut d = Document::open_mapped(&path).unwrap();
-        d.click(6, false);
-        d.insert("X").unwrap();
-        d.select(2..9);
+        let mut d = Solo::of(Document::open_mapped(&path).unwrap());
+        d.ed().click(6, false);
+        d.ed().insert("X").unwrap();
+        d.ed().select(2..9);
         assert!(matches!(save(&mut d), SaveStep::Saved));
-        assert_eq!(d.selection().range(), 2..9);
+        assert_eq!(d.ed().selection().range(), 2..9);
         assert_eq!(d.line_ending, nimbus_core::LineEnding::CrLf);
         assert_eq!(
             std::fs::read(&path).unwrap(),
             b"one\r\ntXwo \xff\r\nthree\r\n"
         );
         // Typing after a save starts a new, undoable step.
-        d.click(0, false);
-        d.insert("Y").unwrap();
+        d.ed().click(0, false);
+        d.ed().insert("Y").unwrap();
         assert!(d.is_dirty());
-        d.undo().unwrap();
+        d.ed().undo().unwrap();
         assert!(!d.is_dirty());
     }
 
@@ -716,14 +717,14 @@ mod tests {
         let dir = TempDir::new("empty");
         let path = dir.0.join("bin");
         std::fs::write(&path, b"\xff").unwrap();
-        let mut d = Document::open_mapped(&path).unwrap();
-        d.select_all();
-        d.delete_back().unwrap();
+        let mut d = Solo::of(Document::open_mapped(&path).unwrap());
+        d.ed().select_all();
+        d.ed().delete_back().unwrap();
         assert!(matches!(save(&mut d), SaveStep::Saved));
         check_saved(&d, &path, b"", false);
 
         // Save As: the same steps, to a new name.
-        d.insert("new \u{1F600}").unwrap();
+        d.ed().insert("new \u{1F600}").unwrap();
         let other = dir.0.join("other.txt");
         d.path = Some(other.clone());
         assert!(matches!(save(&mut d), SaveStep::Saved));
@@ -741,7 +742,7 @@ mod tests {
         let dir = TempDir::new("busy");
         let path = dir.0.join("f");
         std::fs::write(&path, b"abc\xff").unwrap();
-        let mut d = Document::open_mapped(&path).unwrap();
+        let mut d = Solo::of(Document::open_mapped(&path).unwrap());
         let job = d.begin_save(ReplacePolicy::default()).unwrap();
         assert!(d.is_saving());
         assert!(
@@ -765,8 +766,8 @@ mod tests {
         let dir = TempDir::new("failed");
         let path = dir.0.join("f");
         std::fs::write(&path, b"abc\xff").unwrap();
-        let mut d = Document::open_mapped(&path).unwrap();
-        d.insert("x").unwrap();
+        let mut d = Solo::of(Document::open_mapped(&path).unwrap());
+        d.ed().insert("x").unwrap();
         let job = d.begin_save(ReplacePolicy::default()).unwrap();
         let token = job.token;
         job.cancel_flag().store(true, Ordering::Relaxed);
@@ -785,11 +786,11 @@ mod tests {
         let dir = TempDir::new("raced");
         let path = dir.0.join("f");
         std::fs::write(&path, b"abc\xff").unwrap();
-        let mut d = Document::open_mapped(&path).unwrap();
+        let mut d = Solo::of(Document::open_mapped(&path).unwrap());
         let job = d.begin_save(ReplacePolicy::default()).unwrap();
         let token = job.token;
         let written = job.run(|_, _| {});
-        d.replace(0..1, "A").unwrap();
+        d.ed().replace(0..1, "A").unwrap();
         let step = d.save_written(token, written, Instant::now());
         assert!(matches!(step, SaveStep::Failed(_)), "{step:?}");
         assert_eq!(raw(&d), b"Abc\xff");
@@ -807,8 +808,8 @@ mod tests {
         let dir = TempDir::new("rename");
         let path = dir.0.join("app.log");
         std::fs::write(&path, b"old \xff\n").unwrap();
-        let mut d = Document::open_mapped(&path).unwrap();
-        d.insert("new ").unwrap();
+        let mut d = Solo::of(Document::open_mapped(&path).unwrap());
+        d.ed().insert("new ").unwrap();
         for unmap_first in [false, true] {
             let policy = ReplacePolicy {
                 unmap_first,
@@ -833,8 +834,8 @@ mod tests {
 
         // The next successful save replaces the target and deletes the
         // temp file it was reading.
-        d.click(0, false);
-        d.insert("!").unwrap();
+        d.ed().click(0, false);
+        d.ed().insert("!").unwrap();
         assert!(matches!(save(&mut d), SaveStep::Saved));
         check_saved(&d, &path, b"!new old \xff\n", false);
         assert_eq!(dir.others("app.log"), Vec::<String>::new());
@@ -877,7 +878,7 @@ mod tests {
         let path = dir.0.join("a.log");
         std::fs::write(&path, b"one \xff\ntwo\n").unwrap();
         let mut d = open_mapped(&path, SMALL, 4);
-        d.insert("x").unwrap();
+        d.ed().insert("x").unwrap();
         let expected = raw(&d);
         let search = d.buffer.snapshot();
         let other = dir.0.join("b.log");
@@ -906,8 +907,8 @@ mod tests {
         let original = b"one\ntwo \xff\nthree\nfour five six seven eight\n";
         std::fs::write(&path, original).unwrap();
         let mut d = open_mapped(&path, SMALL, 4);
-        d.replace(4..7, "TWO").unwrap();
-        d.replace(0..20, "").unwrap(); // past the copy limit: undo holds pieces
+        d.ed().replace(4..7, "TWO").unwrap();
+        d.ed().replace(0..20, "").unwrap(); // past the copy limit: undo holds pieces
         let expected = raw(&d);
         assert_eq!(expected, b" five six seven eight\n");
         let policy = ReplacePolicy {
@@ -942,7 +943,7 @@ mod tests {
         assert_eq!(dir.others("w.log"), Vec::<String>::new());
 
         // A reader that never lets go: give up after the wait, on the temp.
-        d.insert("more").unwrap();
+        d.ed().insert("more").unwrap();
         let expected = raw(&d);
         let search = d.buffer.snapshot();
         let step = save_with(
@@ -979,8 +980,8 @@ mod tests {
             original.extend_from_slice(b"\xb5s request\n");
         }
         std::fs::write(&path, &original).unwrap();
-        let mut d = Document::open_mapped(&path).unwrap();
-        d.replace(0..9, "").unwrap();
+        let mut d = Solo::of(Document::open_mapped(&path).unwrap());
+        d.ed().replace(0..9, "").unwrap();
         let before = raw(&d);
         let search = d.buffer.snapshot();
         assert!(matches!(save(&mut d), SaveStep::Saved));
@@ -1035,12 +1036,12 @@ mod tests {
 
         let copy = dir.0.join("nimbus.log");
         std::fs::copy(&input, &copy).unwrap();
-        let mut d = Document::open_mapped(&copy).unwrap();
+        let mut d = Solo::of(Document::open_mapped(&copy).unwrap());
         assert!(d.buffer.is_mapped() && !d.buffer.is_fully_indexed());
         let mut bar = crate::find::FindBar::default();
         bar.open(true, None);
-        bar.find.insert("ERROR").unwrap();
-        bar.replace.insert("E!").unwrap();
+        bar.find.ed().insert("ERROR").unwrap();
+        bar.replace.ed().insert("E!").unwrap();
         bar.search_now(&d);
         assert_eq!(bar.matches.len(), 10_000);
         let items: Vec<_> = bar
@@ -1048,7 +1049,7 @@ mod tests {
             .iter()
             .map(|r| (r.clone(), bar.replacement_for(&d, r.clone()).unwrap()))
             .collect();
-        assert_eq!(d.replace_many(&items).unwrap(), 10_000);
+        assert_eq!(d.ed().replace_many(&items).unwrap(), 10_000);
         let step = save_with(&mut d, ReplacePolicy::default(), io::SAVE_CHUNK);
         assert!(matches!(step, SaveStep::Saved), "{step:?}");
         let (ours, sed) = (
@@ -1076,7 +1077,7 @@ mod tests {
             return;
         };
         let started = Instant::now();
-        let mut d = Document::open_mapped(&path).unwrap();
+        let mut d = Solo::of(Document::open_mapped(&path).unwrap());
         println!(
             "opened {} bytes in {:?}",
             d.buffer.len_bytes(),
@@ -1084,7 +1085,7 @@ mod tests {
         );
         let mid = movement::clamp(&d.buffer, d.buffer.len_bytes() / 2);
         let line = d.buffer.line_span(mid).start;
-        d.replace(line..line, "edited by nimbus\n").unwrap();
+        d.ed().replace(line..line, "edited by nimbus\n").unwrap();
         let job = d.begin_save(ReplacePolicy::default()).unwrap();
         let token = job.token;
         let started = Instant::now();

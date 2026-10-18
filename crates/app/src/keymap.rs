@@ -777,7 +777,10 @@ mod tests {
         );
         o.insert("file.save".to_owned(), vec!["Ctrl+K".to_owned()]);
         let (_, warnings) = Keymap::new(&o);
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        // Ctrl+K also starts the fold chords on Windows and Linux (M13),
+        // so binding it alone is reported once more there.
+        let expected = if cfg!(target_os = "macos") { 1 } else { 2 };
+        assert_eq!(warnings.len(), expected, "{warnings:?}");
     }
 
     #[test]
