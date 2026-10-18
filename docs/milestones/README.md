@@ -39,12 +39,12 @@ repeated in each file:
 | 9 | [Compare and merge](m9-diff.md) | Done |
 | 10 | [Find in files](m10-find-in-files.md) | Done |
 | 11 | [Everyday editing](m11-everyday-editing.md) | Done |
-| 12 | [Workspace](m12-workspace.md) | Next |
-| 13 | [Split views and folding](m13-splits-and-folding.md) | In progress |
+| 12 | [Workspace](m12-workspace.md) | Done |
+| 13 | [Split views and folding](m13-splits-and-folding.md) | Done |
 | 14 | [Languages, second pass](m14-languages.md) | In progress |
 | 15 | [Distribution](m15-distribution.md) | Done |
 | 16 | [Rendering, second pass](m16-rendering-second-pass.md) | Planned |
-| 17 | [Encodings and line endings](m17-encodings.md) | Planned |
+| 17 | [Encodings and line endings](m17-encodings.md) | Done |
 | 18 | [Compare, second pass](m18-compare-second-pass.md) | Planned |
 | 19 | [Workspace and search, second pass](m19-workspace-and-search-second-pass.md) | Planned |
 | 20 | [Reading aids](m20-reading-aids.md) | Planned |

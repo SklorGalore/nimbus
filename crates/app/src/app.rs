@@ -23,7 +23,7 @@ use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
 
 use nimbus_core::line_index::IndexChunk;
-use nimbus_core::{Buffer, Text};
+use nimbus_core::{Buffer, LineEnding, Text};
 use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
@@ -34,6 +34,7 @@ use crate::debug::Debug;
 use crate::docs::{DocId, Docs};
 use crate::document::{Carets, DiskChange, Document, Editor, MAX_COPY_BYTES, Occurrence, Solo};
 use crate::editing::Outcome;
+use crate::encoding::{Choice, Encoding};
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::find_files::{self, Batch as FilesBatch};
 use crate::folding;
@@ -44,18 +45,27 @@ use crate::keymap::{Chord, Keymap, chord_label};
 use crate::languages::Languages;
 use crate::menu::{self, MenuBar};
 use crate::merge_view::{Inputs, MergeView, Merged, Shape, Take};
-use crate::picker::{self, Item, Kind, Picker};
+use crate::picker::{self, EncodingFor, Item, Kind, Picker};
 use crate::replace_files::{self, Replacement};
 use crate::saver::{self, ReplacePolicy, SaveEvent, SaveStep};
 use crate::search_panel::{Focus, Reply};
+use crate::session;
 use crate::sidebar::{self, Mode, Sidebar};
 use crate::state::State;
 use crate::theme::{Theme, Ui};
 use crate::tree::{self, Entry, ListRequest};
 use crate::update::{self, UpdateError};
-use crate::view::{self, Decorations, Layout, PickerView, Preedit, TabLabel, View};
+use crate::view::{self, Decorations, Layout, PickerView, Preedit, StatusItem, TabLabel, View};
 use crate::watch::{Change, Watch};
 use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
+
+mod geometry;
+mod tail;
+mod tree_ops;
+mod workspace;
+
+pub use workspace::Startup;
+use workspace::{Pending, Workspace, configure_tabs, startup_message, startup_tabs};
 
 /// Events sent to the event loop from other threads.
 #[derive(Debug)]
@@ -91,6 +101,13 @@ pub enum AppEvent {
     Diff(DiffResult),
     /// A merge's chunks (and result text) finished on a worker (M9).
     Merged(Merged),
+    /// A restored tab's file was read on a worker: the document for the
+    /// placeholder with this path, or why it could not be read.
+    Restored(PathBuf, Result<Box<Document>, String>),
+    /// Recent files found missing on a worker.
+    RecentMissing(Vec<PathBuf>),
+    /// A file operation from the tree finished on its worker.
+    FileOp(crate::tree_ops::Op, Result<(), String>),
     /// A check for updates finished; `true` when it was the startup
     /// check, which stays quiet unless a newer release exists.
     Update(Result<update::Outcome, UpdateError>, bool),
@@ -221,26 +238,8 @@ pub struct Tab {
     /// A merge view on this tab (M9): the inputs and the regions of the
     /// result, which is this tab's document.
     pub merge: Option<Box<MergeView>>,
-}
-
-/// The tabs the app starts with: one per document given on the command
-/// line, each indented and wrapped as its language says, or one untitled
-/// tab when none was.
-fn first_tabs(docs: Vec<Document>, options: &Options, config: &Config) -> (Docs, Vec<Tab>) {
-    let mut open = Docs::default();
-    let mut tabs: Vec<Tab> = docs
-        .into_iter()
-        .map(|mut d| {
-            d.configure_indent(config.indent.for_language(d.language_key()));
-            let wrap = options.wrap || wrap_for(config, &d);
-            Tab::new(open.insert(d), wrap)
-        })
-        .collect();
-    if tabs.is_empty() {
-        let wrap = options.wrap || config.soft_wrap;
-        tabs.push(Tab::new(open.insert(Document::untitled()), wrap));
-    }
-    (open, tabs)
+    /// Where a restored tab's cursor and view go once its file is read.
+    pending: Option<Pending>,
 }
 
 /// The cursors of every tab showing `doc`.
@@ -279,6 +278,40 @@ impl Tab {
             discard_at: None,
             compare: None,
             merge: None,
+            pending: None,
+        }
+    }
+
+    /// Put the cursor and the view where a restored session left them,
+    /// once `doc`, this tab's document, is read.
+    fn apply_pending(&mut self, doc: &mut Document) {
+        if doc.is_placeholder() {
+            return;
+        }
+        let Some(p) = self.pending.take() else { return };
+        let t = &doc.buffer;
+        let (cursor, scroll) = (
+            session::clamp_offset(t, p.cursor),
+            session::clamp_offset(t, p.scroll),
+        );
+        // Saved folds are byte ranges into the file as it was: kept only
+        // when its size and time say it is the same file, and then only
+        // the ones that still run from a line's end to a later line's end.
+        let folds: Vec<std::ops::Range<usize>> = if p.disk.is_some() && doc.disk_stamp() == p.disk {
+            p.folds
+                .into_iter()
+                .filter(|f| f.end <= t.len_bytes())
+                .filter(|f| nimbus_core::fold::lines_range(t, f.start, f.end) == Some(f.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Editor::new(doc, &mut self.carets).click(cursor, false);
+        self.view.scroll_top = scroll;
+        if !folds.is_empty() {
+            self.view.follow(doc);
+            self.view.folds.fold_many(folds);
+            self.view.folds.reveal(cursor);
         }
     }
 }
@@ -466,8 +499,8 @@ pub struct App {
     sidebar: Sidebar,
     /// Changes on disk to the sidebar's folders and open files.
     watch: Watch,
-    /// Remembered between runs (sidebar visibility and width).
-    ui_state: State,
+    /// What is remembered between runs, and the session's bookkeeping.
+    ws: Workspace,
     /// The pointer shows the resize cursor.
     resize_cursor: bool,
     /// Watching has started (after the first frame).
@@ -535,20 +568,31 @@ impl App {
         started: Instant,
         gpu_init: JoinHandle<Result<GpuContext, GpuError>>,
         (config, languages, docs, root): (Config, Languages, Vec<Document>, PathBuf),
+        startup: Startup,
         proxy: EventLoopProxy<AppEvent>,
         warnings: Vec<String>,
     ) -> Self {
+        let Startup {
+            mut state,
+            restore,
+            session_root,
+        } = startup;
+        let session_root = session_root.filter(|_| !options.unattended());
         let debug_overlay = options.debug_overlay;
         let (keymap, key_warnings) = Keymap::new(&config.keys);
         let (theme, theme_warnings) = Theme::load(&config.theme);
-        let ui_state = State::load();
         let disk_proxy = proxy.clone();
         let warn_proxy = proxy.clone();
         let mut sidebar = Sidebar::new(
             io::canonical(&root),
-            ui_state.sidebar_visible,
-            ui_state.sidebar_width,
+            state.sidebar_visible,
+            state.sidebar_width,
         );
+        let wrap = options.wrap || config.soft_wrap;
+        let mut open = Docs::default();
+        let (mut tabs, groups, active, note) =
+            startup_tabs(docs, restore, &mut state, &mut sidebar, wrap, &mut open);
+        configure_tabs(&mut tabs, &mut open, &config, options.wrap);
         // `--search`: the Search panel open, searching once the window is
         // up (the first frame schedules it like a typed query).
         let search_files_at = options.search.as_ref().map(|pattern| {
@@ -557,22 +601,12 @@ impl App {
             sidebar.search.focus_query(Some(pattern.clone()));
             started
         });
-        let (open, tabs) = first_tabs(docs, &options, &config);
         let all_warnings: Vec<String> = warnings
             .into_iter()
             .chain(key_warnings)
             .chain(theme_warnings)
             .collect();
-        let message = (!all_warnings.is_empty()).then(|| {
-            for w in &all_warnings {
-                log::warn!("{w}");
-            }
-            Message {
-                text: all_warnings.join("; "),
-                is_error: true,
-                until: Instant::now() + MESSAGE_TIME * 2,
-            }
-        });
+        let message = startup_message(all_warnings, note);
         Self {
             options,
             started,
@@ -590,10 +624,10 @@ impl App {
             merge_saved_clean: None,
             frames: 0,
             docs: open,
-            groups: Groups::default(),
+            groups,
             fold_hover_key: None,
             tabs,
-            active: 0,
+            active,
             blink: Blink::new(started),
             preedit: None,
             debug: Debug::new(debug_overlay),
@@ -622,7 +656,14 @@ impl App {
                     let _ = warn_proxy.send_event(AppEvent::WatchWarning(warning));
                 },
             ),
-            ui_state,
+            ws: Workspace {
+                state,
+                session_root,
+                save_at: None,
+                restore_started: false,
+                closed: Vec::new(),
+                moving: Vec::new(),
+            },
             resize_cursor: false,
             watching: false,
             pending_line: None,
@@ -857,6 +898,10 @@ impl App {
 
     /// Something changed what is on screen.
     fn changed(&mut self, keep_cursor_visible: bool) {
+        // The tree's name field goes away with the keyboard.
+        if self.sidebar.edit.is_some() && !self.sidebar.focused {
+            self.sidebar.edit = None;
+        }
         self.sync_panes();
         if keep_cursor_visible {
             // A cursor put inside a fold (a search match, Go to Line, an
@@ -865,6 +910,8 @@ impl App {
             let cursor = tab.carets.cursor(&self.docs[tab.doc].buffer);
             tab.view.folds.reveal(cursor);
         }
+        let tab = &self.tabs[self.active];
+        self.docs[tab.doc].check_following(&tab.carets);
         if keep_cursor_visible && let Some(layout) = self.layout() {
             let tab_width = self.tab_width();
             let tab = &mut self.tabs[self.active];
@@ -916,6 +963,14 @@ impl App {
             && self.picker.is_none()
             && self.sidebar.mode == Mode::Search
             && self.run_search_panel(cmd)
+        {
+            self.changed(false);
+            return;
+        }
+        if self.sidebar.focused
+            && self.picker.is_none()
+            && self.sidebar.edit.is_some()
+            && self.run_tree_edit(cmd)
         {
             self.changed(false);
             return;
@@ -1017,6 +1072,8 @@ impl App {
             }
             Command::ReloadFromDisk if self.waits_for_save() => {}
             Command::ReloadFromDisk => self.reload_active(),
+            Command::ReopenWithEncoding => self.open_picker(Kind::Encoding(EncodingFor::Reopen)),
+            Command::SaveWithEncoding => self.open_picker(Kind::Encoding(EncodingFor::Save)),
             Command::KeepMine => {
                 self.doc_mut().keep_mine();
                 self.say(
@@ -1029,7 +1086,7 @@ impl App {
                 self.quit(event_loop);
                 return true;
             }
-            _ => return self.run_compare_command(cmd),
+            _ => return self.run_workspace_command(cmd),
         }
         self.changed(false);
         true
@@ -1473,8 +1530,18 @@ impl App {
         if i == self.active || i >= self.tabs.len() {
             return;
         }
+        // A restored tab not read yet: compare with its file.
         let src = &self.docs[self.tabs[i].doc];
         let name = src.display_name();
+        if src.is_placeholder()
+            && let Some(path) = src.path.clone()
+        {
+            match Document::open(&path) {
+                Ok(other) => self.start_compare(other, Other::File(path)),
+                Err(e) => self.say(format!("Cannot read {}: {e}", path.display()), true),
+            }
+            return;
+        }
         match (src.copy_of(), src.path.clone()) {
             (Some(copy), _) => self.start_compare(copy, Other::Tab(name)),
             (None, Some(path)) => match Document::open(&path) {
@@ -1510,7 +1577,7 @@ impl App {
 
     /// Editing, movement and find commands on the active tab.
     fn run_edit(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
-        if cmd.edits_text() && (self.waits_for_save() || self.waits_for_merge()) {
+        if cmd.edits_text() && (self.refuses_edits() || self.waits_for_merge()) {
             return Ok(());
         }
         let page = self.layout().map_or(1, |l| l.full_lines());
@@ -1625,6 +1692,19 @@ impl App {
             Command::ChangeCase(case) => self.edit_op(|d| d.change_case(case)),
             Command::RewriteLines(op) => self.edit_op(|d| d.rewrite_lines(op)),
             Command::TrimWhitespace => self.edit_op(|e| e.trim_whitespace()),
+            Command::ChangeLineEndings(to) => {
+                let outcome = self.ed().change_line_endings(to)?;
+                if outcome == Outcome::TooLarge {
+                    self.say("Too large to change every line ending at once", true);
+                } else {
+                    let name = match to {
+                        LineEnding::Lf => "LF",
+                        LineEnding::CrLf => "CRLF",
+                    };
+                    self.say(format!("Line endings: {name}"), false);
+                }
+                Ok(())
+            }
             Command::IndentUsingSpaces | Command::IndentUsingTabs => {
                 let settings = self.config.indent.for_language(self.doc().language_key());
                 let indent = nimbus_core::indent::Indent {
@@ -1722,6 +1802,9 @@ impl App {
         if i == self.active && g == self.groups.focused {
             return;
         }
+        if !self.ensure_loaded(i) {
+            return;
+        }
         if g != self.groups.focused {
             self.doc_mut().history.seal();
             self.park_focus();
@@ -1731,6 +1814,7 @@ impl App {
         self.active = i;
         self.sidebar.focused = false;
         self.after_focus_moved();
+        self.session_changed();
     }
 
     /// The next (`step` 1) or previous (-1) tab in the focused group's
@@ -1811,6 +1895,8 @@ impl App {
             return; // closed or reloaded meanwhile
         };
         let merged = self.docs[self.tabs[i].doc].merge_index(token, chunk);
+        // A grown file's count may go on in another run.
+        self.start_indexing();
         if error.is_some() {
             // Nothing more comes: stop waiting for it.
             self.docs[self.tabs[i].doc].stop_indexing();
@@ -1867,13 +1953,11 @@ impl App {
 
     /// Remember the sidebar's visibility and width for the next run.
     fn remember(&mut self) {
-        let state = State {
-            sidebar_visible: self.sidebar.visible,
-            sidebar_width: self.sidebar.width,
-        };
-        if state != self.ui_state {
-            state.save();
-            self.ui_state = state;
+        let (visible, width) = (self.sidebar.visible, self.sidebar.width);
+        if (visible, width) != (self.ws.state.sidebar_visible, self.ws.state.sidebar_width) {
+            self.ws.state.sidebar_visible = visible;
+            self.ws.state.sidebar_width = width;
+            self.save_state_soon();
         }
     }
 
@@ -1914,13 +1998,15 @@ impl App {
         let now = Instant::now();
         let mut notes = Vec::new();
         let mut is_error = false;
+        let mut later = Vec::new();
         let on_disk: Vec<DocId> = self
             .docs
             .iter()
             .filter(|(_, d)| {
-                d.canonical
-                    .as_deref()
-                    .is_some_and(|p| changes.iter().any(|c| c.path == p))
+                d.canonical.as_deref().is_some_and(|p| {
+                    changes.iter().any(|c| c.path == p)
+                        && !self.ws.moving.iter().any(|m| p.starts_with(m))
+                })
             })
             .map(|(id, _)| id)
             .collect();
@@ -1933,7 +2019,7 @@ impl App {
             // mapped one: it never reloads by itself unless cut short, and
             // that must be handled at once.
             if let Some(at) = self.docs[id].reloaded_at
-                && !self.docs[id].buffer.is_mapped()
+                && !self.docs[id].is_file_mapped()
                 && now.duration_since(at) < RELOAD_GAP
             {
                 let due = at + RELOAD_GAP;
@@ -1947,7 +2033,11 @@ impl App {
             // Every tab showing it keeps its place in the new text.
             let mut carets = carets_of(&mut self.tabs, id);
             let note = match self.docs[id].disk_changed(&self.languages, &mut carets) {
-                DiskChange::None => continue,
+                DiskChange::None | DiskChange::Appended => continue,
+                DiskChange::Later(due) => {
+                    later.extend(self.docs[id].canonical.clone().map(|p| (due, p)));
+                    continue;
+                }
                 DiskChange::Reloaded => format!("{name} changed on disk; reloaded"),
                 DiskChange::Conflict => {
                     is_error = true;
@@ -1958,7 +2048,8 @@ impl App {
                 }
                 DiskChange::NotReloaded => format!(
                     "{name} changed on disk; huge files do not reload by themselves. \
-                     Run Reload from Disk from the command palette to see the changes"
+                     Run Reload from Disk from the command palette to see the changes, \
+                     or Follow Tail for a file being added to"
                 ),
                 DiskChange::Truncated { reloaded: true } => {
                     is_error = true;
@@ -1985,7 +2076,11 @@ impl App {
         if !notes.is_empty() {
             self.say(notes.join("; "), is_error);
         }
-        self.changed(false);
+        for (due, path) in later {
+            self.recheck_later(due, path);
+        }
+        let follow = self.follow_tails();
+        self.changed(follow);
     }
 
     /// A command while the sidebar has focus. Movement and Enter work in
@@ -1995,18 +2090,27 @@ impl App {
         let Some(layout) = self.window_layout() else {
             return false;
         };
+        let mac = cfg!(target_os = "macos");
         let (motion, enter) = match cmd {
+            // Finder's keys on macOS: Return renames, Command+Down (and
+            // Space) opens. Enter opens elsewhere, F2 renames everywhere.
+            Command::Newline if mac => return self.run_tree_command(Command::TreeRename),
+            Command::Move(Motion::DocEnd, false) | Command::Insert(" ") if mac => (None, true),
             Command::Move(m, _) => (Some(m), false),
             Command::Newline => (None, true),
             Command::Escape => {
                 self.sidebar.focused = false;
                 return true;
             }
+            // Delete, or Command+Backspace on macOS, trashes.
+            Command::DeleteForward => return self.run_tree_command(Command::TreeDelete),
+            Command::DeleteToLineStart if mac => {
+                return self.run_tree_command(Command::TreeDelete);
+            }
             Command::Insert(_)
             | Command::Tab
             | Command::Outdent
             | Command::DeleteBack
-            | Command::DeleteForward
             | Command::DeleteWordBack
             | Command::DeleteWordForward
             | Command::DeleteToLineStart
@@ -2062,6 +2166,9 @@ impl App {
                 let replace = self.tabs.len() == 1
                     && self.docs[self.tabs[0].doc].path.is_none()
                     && !self.docs[self.tabs[0].doc].is_dirty();
+                if let Some(c) = &doc.canonical {
+                    self.ws.state.note_recent(c);
+                }
                 let wrap = wrap_for(&self.config, &doc);
                 let tab = Tab::new(self.docs.insert(doc), wrap);
                 if replace {
@@ -2074,9 +2181,13 @@ impl App {
                     let i = self.add_tab(tab);
                     self.switch_to(i);
                 }
+                self.save_state_soon();
+                self.session_changed();
                 self.sync_watch();
                 self.changed(false);
-                self.note_conflict_markers();
+                if !self.note_encoding() {
+                    self.note_conflict_markers();
+                }
             }
             Err(e) => self.say(format!("Cannot open {}: {e}", path.display()), true),
         }
@@ -2110,6 +2221,13 @@ impl App {
             self.say("Already saving; edits wait until it is done", false);
             return Saved::Started;
         }
+        if let Some(why) = self.docs[self.tabs[i].doc].read_only.clone() {
+            self.dialog(MessageLevel::Error, "Could not save", &why);
+            return Saved::No;
+        }
+        if !self.confirm_lossy(i) {
+            return Saved::No;
+        }
         if self.docs[self.tabs[i].doc].saves_on_worker() {
             return self.start_save(i);
         }
@@ -2136,10 +2254,201 @@ impl App {
             }
             Err(e) => {
                 log::error!("{e}");
+                if let Some(u) = e.unencodable().copied() {
+                    return self.offer_utf8(i, u);
+                }
                 self.dialog(MessageLevel::Error, "Could not save", &e.to_string());
                 Saved::No
             }
         }
+    }
+
+    /// Saving a file whose encoding has no bytes for one of its characters
+    /// stopped there: show it, and offer to save as UTF-8, which holds
+    /// every character.
+    fn offer_utf8(&mut self, i: usize, u: io::Unencodable) -> Saved {
+        let doc = &self.docs[self.tabs[i].doc];
+        let line = doc
+            .buffer
+            .byte_to_line(u.offset.min(doc.buffer.len_bytes()))
+            + 1;
+        let name = doc.display_name();
+        if i == self.active {
+            self.go_to_byte(u.offset);
+        }
+        let text = format!(
+            "Line {line} of {name} has {:?} (U+{:04X}), which {} cannot hold. \
+             Nothing was saved.\n\nSave as UTF-8 instead?",
+            u.ch,
+            u32::from(u.ch),
+            u.encoding
+        );
+        self.say(
+            format!("{} cannot hold {:?} on line {line}", u.encoding, u.ch),
+            true,
+        );
+        if self.options.smoke || self.options.screenshot.is_some() {
+            return Saved::No;
+        }
+        let mut dialog = MessageDialog::new()
+            .set_level(MessageLevel::Warning)
+            .set_title("Character not in the encoding")
+            .set_description(text)
+            .set_buttons(MessageButtons::OkCancelCustom(
+                "Save as UTF-8".into(),
+                "Cancel".into(),
+            ));
+        if let Some(window) = &self.window {
+            dialog = dialog.set_parent(window.as_ref());
+        }
+        let utf8 = match dialog.show() {
+            MessageDialogResult::Ok => true,
+            MessageDialogResult::Custom(label) => label == "Save as UTF-8",
+            _ => false,
+        };
+        if !utf8 {
+            return Saved::No;
+        }
+        let doc = &mut self.docs[self.tabs[i].doc];
+        doc.encoding = Encoding::Utf8;
+        doc.bom = false;
+        doc.chosen_encoding = Some(Encoding::Utf8);
+        self.save(i)
+    }
+
+    /// A file opened with bytes its encoding could not read (shown as
+    /// U+FFFD) asks before its first save, which writes U+FFFD in their
+    /// place. `true` to go on.
+    fn confirm_lossy(&mut self, i: usize) -> bool {
+        let doc = &self.docs[self.tabs[i].doc];
+        if !doc.lossy || self.options.smoke || self.options.screenshot.is_some() {
+            return true;
+        }
+        let text = format!(
+            "{} had bytes that are not valid {}; they show as �. \
+             Saving writes that character in their place. Save anyway?",
+            doc.display_name(),
+            doc.encoding.name()
+        );
+        let mut dialog = MessageDialog::new()
+            .set_level(MessageLevel::Warning)
+            .set_title("Replace unreadable bytes?")
+            .set_description(text)
+            .set_buttons(MessageButtons::YesNo);
+        if let Some(window) = &self.window {
+            dialog = dialog.set_parent(window.as_ref());
+        }
+        matches!(dialog.show(), MessageDialogResult::Yes)
+    }
+
+    /// An encoding was picked for the active document: read the file again
+    /// in it, or save it in it.
+    fn encoding_chosen(&mut self, purpose: EncodingFor, choice: Choice) {
+        match purpose {
+            EncodingFor::Reopen => self.reopen_with(choice.encoding),
+            EncodingFor::Save => self.save_with(choice),
+        }
+    }
+
+    /// Read the active file again in `encoding`, asking first if that loses
+    /// unsaved changes. The choice sticks: reloading after a change on
+    /// disk keeps it.
+    fn reopen_with(&mut self, encoding: Encoding) {
+        if self.doc().path.is_none() {
+            self.say("Not saved yet: nothing to reopen", false);
+            return;
+        }
+        if self.waits_for_save() {
+            return;
+        }
+        if self.doc().is_dirty() && !self.options.smoke && self.options.screenshot.is_none() {
+            let text = format!(
+                "Reopening {} as {} discards its unsaved changes. Reopen?",
+                self.doc().display_name(),
+                encoding.name()
+            );
+            let mut dialog = MessageDialog::new()
+                .set_level(MessageLevel::Warning)
+                .set_title("Unsaved changes")
+                .set_description(text)
+                .set_buttons(MessageButtons::YesNo);
+            if let Some(window) = &self.window {
+                dialog = dialog.set_parent(window.as_ref());
+            }
+            if !matches!(dialog.show(), MessageDialogResult::Yes) {
+                return;
+            }
+        }
+        let id = self.tabs[self.active].doc;
+        let before = self.docs[id].chosen_encoding.replace(encoding);
+        let mut carets = carets_of(&mut self.tabs, id);
+        match self.docs[id].reload(&self.languages, &mut carets) {
+            Ok(()) => {
+                if !self.note_encoding() {
+                    self.say(format!("Reopened as {}", encoding.name()), false);
+                }
+            }
+            Err(e) => {
+                self.docs[id].chosen_encoding = before;
+                self.say(format!("Cannot reopen: {e}"), true);
+            }
+        }
+        self.changed(false);
+    }
+
+    /// Save the active file in `choice`'s encoding from now on. If the save
+    /// fails, the file keeps its old encoding.
+    fn save_with(&mut self, choice: Choice) {
+        let i = self.active;
+        let doc = self.doc();
+        if doc.saves_on_worker() && !choice.encoding.is_utf8() {
+            self.say(
+                format!(
+                    "Files over {} MB save only as UTF-8",
+                    io::MAX_ROPE_BYTES / (1024 * 1024)
+                ),
+                true,
+            );
+            return;
+        }
+        if doc.buffer.is_mapped() && !doc.saves_on_worker() && !choice.encoding.is_utf8() {
+            // Its bytes are not text in any known encoding.
+            self.say("This file is not text; it saves only as it is", true);
+            return;
+        }
+        let before = (doc.encoding, doc.bom, doc.chosen_encoding);
+        let doc = self.doc_mut();
+        doc.encoding = choice.encoding;
+        doc.bom = choice.bom && choice.encoding.bom().is_some();
+        let saved = self.save(i);
+        let doc = &mut self.docs[self.tabs[i].doc];
+        match saved {
+            Saved::No if (doc.encoding, doc.bom) == (choice.encoding, choice.bom) => {
+                (doc.encoding, doc.bom, doc.chosen_encoding) = before;
+            }
+            Saved::No => {}
+            Saved::Yes | Saved::Started => doc.chosen_encoding = Some(doc.encoding),
+        }
+    }
+
+    /// Say what the active document's encoding means for it, when it means
+    /// something: read-only, or unreadable bytes shown as U+FFFD. Returns
+    /// whether it said anything.
+    fn note_encoding(&mut self) -> bool {
+        let doc = self.doc();
+        if let Some(why) = doc.read_only.clone() {
+            self.say(why, true);
+            return true;
+        }
+        if doc.lossy {
+            let text = format!(
+                "Some bytes are not valid {}; they show as �",
+                doc.encoding.name()
+            );
+            self.say(text, true);
+            return true;
+        }
+        false
     }
 
     /// Saving a merge with conflicts left asks first. `true` to go on.
@@ -2332,6 +2641,16 @@ impl App {
         }
     }
 
+    /// Say why the active document cannot be edited now, if it cannot: it
+    /// is read-only, or a save is under way. Returns whether it cannot.
+    fn refuses_edits(&mut self) -> bool {
+        if let Some(why) = self.doc().read_only.clone() {
+            self.say(why, true);
+            return true;
+        }
+        self.waits_for_save()
+    }
+
     /// Say that edits to the active document wait for its save, if one is
     /// under way. Returns whether it is.
     fn waits_for_save(&mut self) -> bool {
@@ -2475,10 +2794,14 @@ impl App {
             }
         }
         if self.tabs.len() == 1 {
+            self.save_state();
             event_loop.exit();
             return;
         }
+        self.remember_closed(i);
         self.remove_tab(i);
+        while !self.ensure_loaded(self.active) {}
+        self.session_changed();
         self.title_key = None;
         self.preedit = None;
         if self.find.open {
@@ -2766,6 +3089,7 @@ impl App {
             // `--merge`: git's mergetool reads the exit code.
             self.exit_code = i32::from(!clean);
         }
+        self.save_state();
         event_loop.exit();
     }
 
@@ -2783,8 +3107,9 @@ impl App {
         // whose language did not change keep their state.
         let (languages, language_warnings) = Languages::load(&config.languages);
         warnings.extend(language_warnings);
+        warnings.extend(io::set_encoding_rules(&config.encodings));
         self.languages = languages;
-        for (_, doc) in self.docs.iter_mut() {
+        for (_, doc) in self.docs.iter_mut().filter(|(_, d)| !d.is_placeholder()) {
             doc.detect_language(&self.languages);
             doc.configure_indent(config.indent.for_language(doc.language_key()));
         }
@@ -2896,7 +3221,18 @@ impl App {
         });
         self.picker = Some(match kind {
             Kind::Palette => Picker::palette(notify),
-            Kind::Files => Picker::files(&self.root, notify),
+            Kind::Files => Picker::files(&self.root, self.recent_under_root(), notify),
+            Kind::Recent => {
+                let paths: Vec<PathBuf> = self
+                    .ws
+                    .state
+                    .recent
+                    .iter()
+                    .map(|r| r.path.clone())
+                    .collect();
+                self.check_recent(paths.clone());
+                Picker::recent(paths, &self.root, notify)
+            }
             Kind::Line => {
                 let t = &self.doc().buffer;
                 Picker::go_to_line(notify, t.is_fully_indexed().then(|| t.len_lines()))
@@ -2923,6 +3259,14 @@ impl App {
                     .map(|(i, t)| (i, self.docs[t.doc].display_name()))
                     .collect();
                 Picker::tabs(names, notify)
+            }
+            Kind::Encoding(purpose) => {
+                let doc = self.doc();
+                let current = Choice {
+                    encoding: doc.encoding,
+                    bom: doc.bom,
+                };
+                Picker::encodings(purpose, current, notify)
             }
         });
         self.find.focused = false;
@@ -2961,9 +3305,13 @@ impl App {
                 match chosen {
                     Some(Item::Action(a)) => self.run(a.command, event_loop),
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
+                    Some(Item::Recent(path)) => self.open_path(&path),
                     Some(Item::Line(n)) => self.go_to_line(n),
                     Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
+                    Some(Item::Encoding(purpose, choice, _)) => {
+                        self.encoding_chosen(purpose, choice);
+                    }
                     None => {}
                 }
             }
@@ -3088,6 +3436,9 @@ impl App {
             | Command::ToggleIgnored
             | Command::ToggleDebugOverlay
             | Command::ReloadFromDisk
+            | Command::ReopenWithEncoding
+            | Command::SaveWithEncoding
+            | Command::ChangeLineEndings(_)
             | Command::KeepMine
             | Command::OpenFile
             | Command::NewFile
@@ -3141,7 +3492,7 @@ impl App {
     /// Replace the current match (if the editor's selection is one) and go
     /// to the next.
     fn replace_one(&mut self) {
-        if self.waits_for_save() {
+        if self.refuses_edits() {
             return;
         }
         let sel = self.selection().range();
@@ -3165,7 +3516,7 @@ impl App {
 
     /// Replace every match as one undo step.
     fn replace_all(&mut self) {
-        if self.waits_for_save() {
+        if self.refuses_edits() {
             return;
         }
         if !self.find.complete && !self.find.capped {
@@ -3523,6 +3874,7 @@ impl App {
             }
         };
         self.clicks.scrollbar_grab = Some(grab);
+        self.docs[tab.doc].stop_following();
         self.changed(false);
     }
 
@@ -3653,15 +4005,23 @@ impl App {
         }
     }
 
-    /// A click on the status bar: the indentation item ("Spaces: 4")
-    /// offers the choices for this file, through the palette.
+    /// A click on the status bar: the indentation item ("Spaces: 4") and
+    /// the line ending ("LF") offer the choices for this file through the
+    /// palette; the encoding item offers Reopen and Save with Encoding.
     fn status_bar_click(&mut self, layout: &Layout, x: f32) {
-        if !self.tabs[self.active].view.indent_item_hit(layout, x) {
-            return;
-        }
+        let query = match self.tabs[self.active].view.status_item_at(layout, x) {
+            Some(StatusItem::Indent) => "indent",
+            Some(StatusItem::LineEnding) => "line endings",
+            Some(StatusItem::Encoding) => "with encoding",
+            Some(StatusItem::Follow) => {
+                self.toggle_follow();
+                return;
+            }
+            None => return,
+        };
         self.open_picker(Kind::Palette);
         if let Some(p) = self.picker.as_mut()
-            && let Err(e) = p.input.ed().insert("indent")
+            && let Err(e) = p.input.ed().insert(query)
         {
             log::debug!("picker query: {e}");
         }
@@ -3702,6 +4062,9 @@ impl App {
                 (None, None) => tab
                     .view
                     .scroll_by(-dy, &self.docs[tab.doc], &layout, tab_width),
+            }
+            if dy > 0.0 {
+                self.docs[tab.doc].stop_following();
             }
             tab.view.scroll_x_by(-dx);
         }
@@ -3862,10 +4225,14 @@ impl App {
                 self.picker = None;
                 match chosen {
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
+                    Some(Item::Recent(path)) => self.open_path(&path),
                     Some(Item::Action(a)) => self.pending_action = Some(a.command),
                     Some(Item::Line(n)) => self.go_to_line(n),
                     Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
+                    Some(Item::Encoding(purpose, choice, _)) => {
+                        self.encoding_chosen(purpose, choice);
+                    }
                     None => {}
                 }
             }
@@ -4044,6 +4411,9 @@ impl App {
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let frame_started = Instant::now();
+        // The front tab is always read: a closed tab can bring a
+        // placeholder to the front.
+        while !self.ensure_loaded(self.active) {}
         // The first parse runs on a worker while this frame shows the
         // text plain; colours follow when it finishes. Before the layout,
         // which leaves room for any message this adds.
@@ -4203,6 +4573,9 @@ struct ReplaceSummary {
     changed: usize,
     /// Tabs busy saving, left alone.
     busy: usize,
+    /// Tabs in another encoding than UTF-8 or read-only, left alone: the
+    /// search read the file's bytes, whose offsets are not the tab's.
+    encoded: usize,
 }
 
 impl App {
@@ -4297,6 +4670,9 @@ impl App {
             | Command::ToggleIgnored
             | Command::ToggleDebugOverlay
             | Command::ReloadFromDisk
+            | Command::ReopenWithEncoding
+            | Command::SaveWithEncoding
+            | Command::ChangeLineEndings(_)
             | Command::KeepMine
             | Command::OpenFile
             | Command::NewFile
@@ -4538,6 +4914,10 @@ impl App {
                 summary.busy += 1;
                 continue;
             }
+            if !self.docs[tab.doc].encoding.is_utf8() || self.docs[tab.doc].read_only.is_some() {
+                summary.encoded += 1;
+                continue;
+            }
             let mut ed = Editor::new(&mut self.docs[tab.doc], &mut tab.carets);
             match replace_in_tab(&mut ed, &replacement, &ranges) {
                 Some(0) => summary.changed += 1,
@@ -4619,6 +4999,13 @@ impl App {
                 text,
                 "; {} still saving, left alone",
                 plural(summary.busy, "tab", "tabs")
+            );
+        }
+        if summary.encoded > 0 {
+            let _ = write!(
+                text,
+                "; {} not in UTF-8, left alone",
+                plural(summary.encoded, "tab", "tabs")
             );
         }
         let failed: Vec<PathBuf> = report
@@ -4794,7 +5181,11 @@ fn draw_headless_picker(
     let (kind, query) = spec.split_once(':').unwrap_or((spec, ""));
     let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
     let mut p = match kind {
-        "files" => Picker::files(root, notify),
+        "files" => Picker::files(root, Vec::new(), notify),
+        "recent" => {
+            let paths = State::load().recent.into_iter().map(|r| r.path).collect();
+            Picker::recent(paths, root, notify)
+        }
         "line" => Picker::go_to_line(notify, Some(doc.buffer.len_lines())),
         "symbols" => Picker::symbols(notify, symbol_items(doc)),
         _ => Picker::palette(notify),
@@ -5320,6 +5711,10 @@ fn draw_picker_overlay(
         (Kind::Line, _) => "",
         (Kind::Tabs, true) => "tab",
         (Kind::Tabs, false) => "tabs",
+        (Kind::Encoding(_), true) => "encoding",
+        (Kind::Encoding(_), false) => "encodings",
+        (Kind::Recent, true) => "recent file",
+        (Kind::Recent, false) => "recent files",
     };
     let more = if p.loading() { "…" } else { "" };
     let status = if p.kind == Kind::Line {
@@ -5333,6 +5728,9 @@ fn draw_picker_overlay(
         Kind::Line => "Type a line number",
         Kind::Symbols => "Type a function, type or heading name",
         Kind::Tabs => "Type a tab name",
+        Kind::Encoding(EncodingFor::Reopen) => "Reopen with encoding",
+        Kind::Encoding(EncodingFor::Save) => "Save with encoding",
+        Kind::Recent => "Type a file name or folder",
     };
     let pv = PickerView {
         input: &p.input,
@@ -5470,6 +5868,9 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             AppEvent::Replaced(report) => self.replaced(report),
+            AppEvent::Restored(path, doc) => self.restored_arrived(&path, doc),
+            AppEvent::RecentMissing(gone) => self.recent_missing(&gone),
+            AppEvent::FileOp(op, result) => self.file_op_done(&op, result),
             AppEvent::WatchWarning(warning) => {
                 self.say(warning, true);
                 self.changed(false);
@@ -5502,7 +5903,7 @@ impl ApplicationHandler<AppEvent> for App {
         let attrs = Window::default_attributes()
             .with_title(format!("{} — Nimbus", self.doc().display_name()))
             .with_inner_size(LogicalSize::new(960.0, 640.0));
-        let attrs = with_app_icon(attrs);
+        let attrs = self.restore_geometry(event_loop, with_app_icon(attrs));
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -5575,7 +5976,7 @@ impl ApplicationHandler<AppEvent> for App {
             let _ = self.find.find.ed().insert(&pattern);
             self.search(true);
         }
-        if self.options.find.is_none() && self.options.diff.is_none() {
+        if self.options.find.is_none() && self.options.diff.is_none() && !self.note_encoding() {
             self.note_conflict_markers();
         }
         if let Some(args) = self.options.merge.clone() {
@@ -5634,6 +6035,9 @@ impl ApplicationHandler<AppEvent> for App {
         if self.sidebar.search.tick(now) {
             self.changed(false);
         }
+        if self.ws.save_at.is_some_and(|t| now >= t) {
+            self.save_state();
+        }
         if self.recheck_at.is_some_and(|t| now >= t) {
             self.recheck_at = None;
             let changes: Vec<Change> = std::mem::take(&mut self.recheck)
@@ -5670,6 +6074,9 @@ impl ApplicationHandler<AppEvent> for App {
             // Huge files count their lines in the background, started
             // after the first frame so the disk is not shared with it.
             self.start_indexing();
+        }
+        if self.frames > 0 {
+            self.start_restoring();
         }
         if self.frames > 0 && !self.watching {
             // Starting watches can take milliseconds (macOS restarts its
@@ -5715,6 +6122,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.search_files_at,
             self.sidebar.search.wake_at(),
             self.recheck_at,
+            self.ws.save_at,
             self.saves.poll_at,
             self.tabs[self.active]
                 .compare
@@ -5791,6 +6199,12 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
             }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => self.tree_context_menu(),
 
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
 

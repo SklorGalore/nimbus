@@ -13,6 +13,7 @@ mod debug;
 mod docs;
 mod document;
 mod editing;
+mod encoding;
 mod find;
 mod find_files;
 mod folding;
@@ -29,10 +30,12 @@ mod picker;
 mod replace_files;
 mod saver;
 mod search_panel;
+mod session;
 mod sidebar;
 mod state;
 mod theme;
 mod tree;
+mod tree_ops;
 mod update;
 mod view;
 mod watch;
@@ -49,6 +52,7 @@ use crate::app::{App, AppEvent};
 use crate::config::Config;
 use crate::document::Document;
 use crate::languages::Languages;
+use crate::state::State;
 
 /// Command-line options.
 #[expect(
@@ -88,6 +92,9 @@ pub struct Options {
     /// Open every file in this backend, whatever its size (`--backend
     /// rope|mapped`), for measuring one against the other.
     pub backend: Option<io::Backend>,
+    /// `--encoding NAME`: read the files named on the command line in this
+    /// encoding, skipping detection (M17).
+    pub encoding: Option<encoding::Encoding>,
     /// With `--headless`: count all of a huge file's lines before drawing,
     /// instead of drawing with only the first part counted.
     pub wait_index: bool,
@@ -102,6 +109,18 @@ pub struct Options {
     /// result saves to `RESULT`; the exit code says whether it was saved
     /// with no conflicts left.
     pub merge: Option<MergeArgs>,
+    /// `--no-session`: neither restore the last session nor save this one.
+    pub no_session: bool,
+}
+
+impl Options {
+    /// A run nobody is sitting at (`--smoke`, `--screenshot`,
+    /// `--bench-typing`, `--headless`): it must not change what Nimbus
+    /// remembers, or measuring would overwrite the owner's session.
+    #[must_use]
+    pub fn unattended(&self) -> bool {
+        self.smoke || self.screenshot.is_some() || self.bench_typing > 0 || self.headless.is_some()
+    }
 }
 
 /// The files of `--merge`.
@@ -158,7 +177,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--headless WxH [--wait-index]] [--debug-overlay] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index]] [--debug-overlay] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -246,6 +265,7 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
                 });
         }
         "--wrap" => o.wrap = true,
+        "--no-session" => o.no_session = true,
         "--wait-index" => o.wait_index = true,
         "--debug-overlay" => o.debug_overlay = true,
         "--cursors" => o.cursors = numbers(args.next()),
@@ -260,6 +280,19 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
                 std::process::exit(2);
             };
             o.backend = Some(b);
+        }
+        "--encoding" => {
+            let Some(e) = args
+                .next()
+                .and_then(|e| e.to_str().and_then(encoding::Encoding::from_label))
+            else {
+                print_err(
+                    "nimbus: --encoding needs an encoding name, such as utf-8, utf-16le, \
+                     windows-1252 or latin1",
+                );
+                std::process::exit(2);
+            };
+            o.encoding = Some(e);
         }
         "--headless" => o.headless = Some(parse_size(args.next())),
         _ => return false,
@@ -360,7 +393,11 @@ fn open_files(options: &Options, languages: &Languages) -> (Vec<Document>, PathB
             root.get_or_insert_with(|| path.clone());
             continue;
         }
-        match Document::open(path) {
+        let opened = match options.encoding {
+            Some(e) => Document::open_as(path, e),
+            None => Document::open(path),
+        };
+        match opened {
             Ok(mut doc) => {
                 doc.detect_language(languages);
                 if root.is_none() {
@@ -391,6 +428,65 @@ fn open_files(options: &Options, languages: &Languages) -> (Vec<Document>, PathB
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     (docs, root)
+}
+
+/// The project folder whose session this run restores and saves, if any
+/// ([`session::launch`]). Never for a headless run, nor once `open_files`
+/// opened files.
+fn plan_session(
+    options: &Options,
+    state: &State,
+    docs: &[Document],
+    root: &Path,
+) -> Option<PathBuf> {
+    if options.headless.is_some() {
+        return None;
+    }
+    let folder = options.files.iter().any(|p| p.is_dir()).then_some(root);
+    let files = !docs.is_empty() || options.diff.is_some() || options.merge.is_some();
+    match session::launch(state, folder, files, options.no_session) {
+        session::Launch::Folder(f) => Some(f),
+        session::Launch::Files => None,
+    }
+}
+
+/// Load what earlier runs remembered and, when this run is a session's,
+/// plan restoring it: the front tab read now, the rest later. Returns the
+/// project root, which is the session's folder for one.
+fn start_session(
+    options: &Options,
+    languages: &Languages,
+    docs: &[Document],
+    root: PathBuf,
+    warnings: &mut Vec<String>,
+) -> (PathBuf, app::Startup) {
+    let state = State::load();
+    let Some(folder) = plan_session(options, &state, docs, &root) else {
+        let startup = app::Startup {
+            state,
+            restore: None,
+            session_root: None,
+        };
+        return (root, startup);
+    };
+    let restore = state.session(&folder).map(|s| {
+        let (r, w) = session::restore(s, |p| {
+            Document::open(p)
+                .map(|mut d| {
+                    d.detect_language(languages);
+                    d
+                })
+                .map_err(|e| e.to_string())
+        });
+        warnings.extend(w);
+        r
+    });
+    let startup = app::Startup {
+        state,
+        restore,
+        session_root: Some(folder.clone()),
+    };
+    (folder, startup)
 }
 
 fn main() {
@@ -424,7 +520,9 @@ fn main() {
     }
     let (languages, language_warnings) = Languages::load(&config.languages);
     warnings.extend(language_warnings);
+    warnings.extend(io::set_encoding_rules(&config.encodings));
     let (docs, root) = open_files(&options, &languages);
+    let (root, startup) = start_session(&options, &languages, &docs, root, &mut warnings);
     log::debug!(
         "startup: config and {} file(s) loaded at {:?}",
         docs.len(),
@@ -475,6 +573,7 @@ fn main() {
         started,
         gpu_init,
         (config, languages, docs, root),
+        startup,
         proxy,
         warnings,
     );

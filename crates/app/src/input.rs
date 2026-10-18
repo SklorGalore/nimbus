@@ -103,6 +103,12 @@ pub enum Command<'a> {
     IndentUsingTabs,
     /// Work the indentation out from the file again.
     DetectIndent,
+    /// Pick an encoding and read the file again in it (M17).
+    ReopenWithEncoding,
+    /// Pick an encoding and save the file in it.
+    SaveWithEncoding,
+    /// Change every line ending in the file, as one undoable edit.
+    ChangeLineEndings(nimbus_core::LineEnding),
     /// Undo the last change.
     Undo,
     /// Redo the last undone change.
@@ -218,6 +224,26 @@ pub enum Command<'a> {
     FoldLevel(usize),
     /// Open the fuzzy file opener.
     QuickOpen,
+    /// Tree: name a new file in the selected folder.
+    TreeNewFile,
+    /// Tree: name a new folder in the selected folder.
+    TreeNewFolder,
+    /// Tree: rename the selected file or folder.
+    TreeRename,
+    /// Tree: move the selected file or folder to the trash.
+    TreeDelete,
+    /// Tree: show the selected file in Finder, Explorer or the file manager.
+    TreeReveal,
+    /// Open the list of recently opened files.
+    OpenRecent,
+    /// Open the last closed tab again, with its cursor.
+    ReopenClosedTab,
+    /// Forget the recently opened files.
+    ClearRecent,
+    /// Switch to the most recent other project's session.
+    ReopenLastSession,
+    /// Keep the view at the end of a growing file, or stop.
+    FollowTail,
     /// Open the command palette.
     Palette,
     /// Read the config file again.
@@ -349,6 +375,7 @@ impl Command<'_> {
                 | Command::ChangeCase(_)
                 | Command::RewriteLines(_)
                 | Command::TrimWhitespace
+                | Command::ChangeLineEndings(_)
         )
     }
 }
