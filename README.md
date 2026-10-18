@@ -20,7 +20,7 @@
 [Roadmap](#roadmap) ·
 [Contributing](#contributing)
 
-<img src="assets/screenshot.png" alt="Nimbus editing a Rust file with syntax highlighting and the status bar" width="640">
+<img src="assets/screenshots/hero.png" alt="Nimbus editing a Rust file, with the file tree in the sidebar, several tabs and the status bar" width="860">
 
 </div>
 
@@ -105,6 +105,23 @@ from opening your first file to themes, languages and key bindings.
   italic, and color emoji. A Nerd Font is bundled.
 - Zoom that is remembered between sessions, visible whitespace and
   indent guides.
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%"><img src="assets/screenshots/light.png" alt="The built-in light theme"><br><sub>The built-in light theme</sub></td>
+<td width="50%"><img src="assets/screenshots/palette.png" alt="The command palette"><br><sub>Every command in the palette, with its keys</sub></td>
+</tr>
+<tr>
+<td><img src="assets/screenshots/diff.png" alt="Comparing two files side by side"><br><sub>Compare two files; unchanged runs fold away</sub></td>
+<td><img src="assets/screenshots/merge.png" alt="A three-way merge with one conflict"><br><sub>Three-way merge, with the result in the middle</sub></td>
+</tr>
+<tr>
+<td><img src="assets/screenshots/multicursor.png" alt="Five cursors editing at once"><br><sub>Several cursors, one undo step</sub></td>
+<td><img src="assets/screenshots/find.png" alt="The find bar with highlighted matches"><br><sub>Find in the current file</sub></td>
+</tr>
+</table>
 
 ## Installation
 
@@ -307,6 +324,7 @@ cargo fmt --all --check                                         # formatting
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets  # lints, as CI runs them
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp  # render without a window
 bench/gen.sh                                                    # generate large test files
+scripts/screenshots.sh                                          # remake the README and manual screenshots
 ```
 
 The lints are strict: no `unwrap`, `expect` or `panic!` outside tests,
