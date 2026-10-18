@@ -49,8 +49,11 @@ pub struct EditorSettings {
     pub trim_trailing_whitespace: Option<bool>,
     /// End the file with a line break when saving.
     pub final_newline: Option<bool>,
+    /// Open files of this language with soft wrap on. Unset means: on for
+    /// Markdown, else the top-level `soft_wrap`.
+    pub wrap: Option<bool>,
     /// Overrides by language key (`rust`, `markdown`, a user language's
-    /// name), each with the same three settings.
+    /// name), each with the same settings.
     #[serde(flatten)]
     pub languages: HashMap<String, EditorSettings>,
 }
@@ -81,6 +84,10 @@ pub struct Editing {
     pub trim_trailing_whitespace: bool,
     /// Add a final line break on save.
     pub final_newline: bool,
+    /// Start with soft wrap on: what the language's table, the `[editor]`
+    /// table or the prose default says, or `None` for the top-level
+    /// `soft_wrap` setting.
+    pub wrap: Option<bool>,
 }
 
 /// Indentation resolved for one document's language.
@@ -106,11 +113,16 @@ impl EditorSettings {
         let pick = |f: fn(&Self) -> Option<bool>, default: bool| {
             lang.and_then(f).or_else(|| f(self)).unwrap_or(default)
         };
-        let code = language.is_some_and(|l| !PROSE.contains(&l));
+        let prose = language.is_some_and(|l| PROSE.contains(&l));
+        let code = language.is_some() && !prose;
         Editing {
             auto_pairs: pick(|s| s.auto_pairs, code),
             trim_trailing_whitespace: pick(|s| s.trim_trailing_whitespace, false),
             final_newline: pick(|s| s.final_newline, false),
+            wrap: lang
+                .and_then(|s| s.wrap)
+                .or(self.wrap)
+                .or_else(|| prose.then_some(true)),
         }
     }
 }
@@ -206,12 +218,15 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 
 # Editing. auto_pairs: typing ( [ { " ' or ` inserts the closer; on for
 # code and off for Markdown and plain text unless set. The two save
-# settings are off so files round-trip byte for byte. A language table
-# ([editor.markdown], [editor.lua]) overrides any of the three.
+# settings are off so files round-trip byte for byte. wrap: soft wrap for
+# files of a language; Markdown wraps unless told not to. A language table
+# ([editor.markdown], [editor.lua]) overrides any of the four.
 # [editor]
 # auto_pairs = true
 # trim_trailing_whitespace = false
 # final_newline = false
+# [editor.markdown]
+# wrap = false
 
 # Indentation. With detect = true (the default) the file's own
 # indentation wins over width and tabs. [indent.python] and the like
@@ -362,6 +377,7 @@ mod tests {
     fn editor_and_indent_tables_resolve_per_language() {
         let (c, w) = Config::parse(
             "[editor]\nauto_pairs = false\nfinal_newline = true\n[editor.rust]\nauto_pairs = true\n\
+             wrap = true\n[editor.markdown]\nwrap = false\n\
              [indent]\nwidth = 2\n[indent.python]\nwidth = 4\ntabs = false\ndetect = false\n\
              [indent.makefile]\ntabs = true\n",
         );
@@ -370,6 +386,15 @@ mod tests {
         assert!(rust.auto_pairs && rust.final_newline && !rust.trim_trailing_whitespace);
         assert!(!c.editor.for_language(Some("python")).auto_pairs);
         assert!(!c.editor.for_language(None).auto_pairs);
+        // Wrap: a language table says, else Markdown wraps and the rest
+        // leave it to the top-level `soft_wrap` (`None`).
+        assert_eq!(rust.wrap, Some(true));
+        assert_eq!(c.editor.for_language(Some("markdown")).wrap, Some(false));
+        assert_eq!(c.editor.for_language(Some("python")).wrap, None);
+        assert_eq!(
+            Config::default().editor.for_language(Some("markdown")).wrap,
+            Some(true)
+        );
         let py = c.indent.for_language(Some("python"));
         assert_eq!(
             (py.indent.width, py.indent.tabs, py.detect),

@@ -11,6 +11,7 @@
 //! This crate starts no threads: it hands out jobs, and the app runs them
 //! and passes the results back.
 
+use std::cell::RefCell;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,6 +22,7 @@ use tree_sitter::{InputEdit, ParseOptions, ParseState, Parser, Tree};
 
 use crate::LanguageId;
 use crate::edit::{input_edit, point_at};
+use crate::inject::Injected;
 use crate::lexical::{self, Lexical, Rules};
 use crate::registry::{self, Grammar};
 use crate::text::bytes_from;
@@ -166,6 +168,11 @@ pub struct SyntaxState {
     /// Increases whenever highlighting may have changed; highlight caches
     /// key on it.
     rev: u64,
+    /// Trees for languages nested in this one (M14), made and dropped as
+    /// the view moves. Behind a `RefCell` because the highlighter, which
+    /// borrows the state to read the tree, is what knows the visible
+    /// range and so what to parse.
+    injected: RefCell<Injected>,
 }
 
 impl std::fmt::Debug for SyntaxState {
@@ -206,7 +213,22 @@ impl SyntaxState {
             lexical_only: false,
             cancel: Arc::new(AtomicBool::new(false)),
             rev: 0,
+            injected: RefCell::new(Injected::default()),
         }
+    }
+
+    /// The injected trees: the highlighter refreshes them for the visible
+    /// range and reads their spans.
+    #[must_use]
+    pub fn injected(&self) -> &RefCell<Injected> {
+        &self.injected
+    }
+
+    /// Whether the last frame left a nested region unparsed for lack of
+    /// time, so the view should be drawn again to finish colouring it.
+    #[must_use]
+    pub fn injections_pending(&self) -> bool {
+        self.injected.try_borrow().is_ok_and(|i| i.pending())
     }
 
     /// Start over, for a new language or a reloaded file. A running job is
@@ -403,6 +425,7 @@ impl SyntaxState {
             }
             Phase::Off(_) | Phase::Lexical(_) | Phase::Waiting => {}
         }
+        self.injected.get_mut().edit(&ie);
         self.rev += 1;
     }
 

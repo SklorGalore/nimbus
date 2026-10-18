@@ -23,16 +23,26 @@ pub enum LanguageId {
     Python,
     /// JavaScript, including JSX.
     JavaScript,
-    /// TypeScript. (`.tsx` is not highlighted: the TSX grammar alone adds
-    /// about 1.4 MB, which the binary budget cannot spare; DESIGN.md §10.)
+    /// TypeScript.
     TypeScript,
     /// Bash and other POSIX shell scripts.
     Bash,
+    /// C.
+    C,
+    /// Go.
+    Go,
+    /// HTML.
+    Html,
+    /// CSS.
+    Css,
+    /// TypeScript with JSX (`.tsx`): a second parser in the TypeScript
+    /// grammar, added in M14 once the binary budget had room for it.
+    Tsx,
 }
 
 impl LanguageId {
     /// Every language, for tests and listings.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 14] = [
         Self::Rust,
         Self::Markdown,
         Self::Json,
@@ -42,6 +52,11 @@ impl LanguageId {
         Self::JavaScript,
         Self::TypeScript,
         Self::Bash,
+        Self::C,
+        Self::Go,
+        Self::Html,
+        Self::Css,
+        Self::Tsx,
     ];
 
     /// Lower-case key used in file names and the config:
@@ -58,7 +73,37 @@ impl LanguageId {
             Self::JavaScript => "javascript",
             Self::TypeScript => "typescript",
             Self::Bash => "bash",
+            Self::C => "c",
+            Self::Go => "go",
+            Self::Html => "html",
+            Self::Css => "css",
+            Self::Tsx => "tsx",
         }
+    }
+
+    /// The language a fenced code block or an injection query names, by
+    /// key, display name or a common alias (`py`, `sh`, `js`, `md`, ...).
+    /// `None` for a language Nimbus has no grammar for.
+    #[must_use]
+    pub fn from_alias(name: &str) -> Option<Self> {
+        let name = name.trim();
+        if let Some(l) = Self::from_name(name) {
+            return Some(l);
+        }
+        Some(match name.to_ascii_lowercase().as_str() {
+            "rs" => Self::Rust,
+            "md" => Self::Markdown,
+            "jsonc" | "json5" => Self::Json,
+            "yml" => Self::Yaml,
+            "py" | "python3" => Self::Python,
+            "js" | "jsx" | "mjs" | "cjs" | "node" => Self::JavaScript,
+            "ts" | "mts" | "cts" => Self::TypeScript,
+            "sh" | "zsh" | "shell" | "console" => Self::Bash,
+            "h" => Self::C,
+            "golang" => Self::Go,
+            "htm" | "xhtml" => Self::Html,
+            _ => return None,
+        })
     }
 
     /// The language with this key or display name, ignoring case
@@ -89,6 +134,11 @@ impl LanguageId {
             Self::JavaScript => "JavaScript",
             Self::TypeScript => "TypeScript",
             Self::Bash => "Shell",
+            Self::C => "C",
+            Self::Go => "Go",
+            Self::Html => "HTML",
+            Self::Css => "CSS",
+            Self::Tsx => "TSX",
         }
     }
 
@@ -124,6 +174,11 @@ impl LanguageId {
             "js" | "mjs" | "cjs" | "jsx" => Self::JavaScript,
             "ts" | "mts" | "cts" => Self::TypeScript,
             "sh" | "bash" | "zsh" | "ksh" => Self::Bash,
+            "c" | "h" => Self::C,
+            "go" => Self::Go,
+            "html" | "htm" | "xhtml" => Self::Html,
+            "css" => Self::Css,
+            "tsx" => Self::Tsx,
             _ => return None,
         })
     }
@@ -163,6 +218,16 @@ mod tests {
         assert_eq!(LanguageId::from_name("lua"), None);
     }
 
+    #[test]
+    fn aliases_name_fenced_block_languages() {
+        assert_eq!(LanguageId::from_alias("py"), Some(LanguageId::Python));
+        assert_eq!(LanguageId::from_alias(" sh "), Some(LanguageId::Bash));
+        assert_eq!(LanguageId::from_alias("Rust"), Some(LanguageId::Rust));
+        assert_eq!(LanguageId::from_alias("tsx"), Some(LanguageId::Tsx));
+        assert_eq!(LanguageId::from_alias("latex"), None);
+        assert_eq!(LanguageId::from_alias(""), None);
+    }
+
     fn path(p: &str) -> Option<LanguageId> {
         LanguageId::from_path(Path::new(p))
     }
@@ -172,7 +237,11 @@ mod tests {
         assert_eq!(path("src/main.rs"), Some(LanguageId::Rust));
         assert_eq!(path("README.MD"), Some(LanguageId::Markdown));
         assert_eq!(path("Cargo.lock"), Some(LanguageId::Toml));
-        assert_eq!(path("app.tsx"), None, "TSX grammar left out for size");
+        assert_eq!(path("app.tsx"), Some(LanguageId::Tsx));
+        assert_eq!(path("lib.h"), Some(LanguageId::C));
+        assert_eq!(path("main.go"), Some(LanguageId::Go));
+        assert_eq!(path("index.HTM"), Some(LanguageId::Html));
+        assert_eq!(path("site.css"), Some(LanguageId::Css));
         assert_eq!(path("x.mjs"), Some(LanguageId::JavaScript));
         assert_eq!(path("/home/u/.zshrc"), Some(LanguageId::Bash));
         assert_eq!(path("notes.txt"), None);

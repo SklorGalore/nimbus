@@ -4,7 +4,7 @@
 
 A fast, lightweight, modeless text editor, with its own GPU text renderer.
 It opens a 4 GB log in a fraction of a second, edits with several cursors,
-and highlights nine languages. See `DESIGN.md` for how it works and
+and highlights fourteen languages. See `DESIGN.md` for how it works and
 `docs/customizing.md` for settings, themes and languages.
 
 ## Getting a build

@@ -716,6 +716,12 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::all(&["Primary+G"]),
     ),
     act(
+        "edit.goToSymbol",
+        "Go to Symbol…",
+        Command::GoToSymbol,
+        Keys::all(&["Primary+Shift+R"]),
+    ),
+    act(
         "view.toggleSidebar",
         "Toggle Sidebar",
         Command::ToggleSidebar,

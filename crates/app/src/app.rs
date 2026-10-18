@@ -212,6 +212,38 @@ pub struct Tab {
     pub merge: Option<Box<MergeView>>,
 }
 
+/// The tabs the app starts with: one per document given on the command
+/// line, each indented and wrapped as its language says, or one untitled
+/// tab when none was.
+fn first_tabs(docs: Vec<Document>, options: &Options, config: &Config) -> Vec<Tab> {
+    let mut tabs: Vec<Tab> = docs
+        .into_iter()
+        .map(|mut d| {
+            d.configure_indent(config.indent.for_language(d.language_key()));
+            let wrap = options.wrap || wrap_for(config, &d);
+            Tab::new(d, wrap)
+        })
+        .collect();
+    if tabs.is_empty() {
+        tabs.push(Tab::new(
+            Document::untitled(),
+            options.wrap || config.soft_wrap,
+        ));
+    }
+    tabs
+}
+
+/// Whether a tab for `doc` opens with soft wrap: the language's setting
+/// (`[editor.markdown] wrap`, on for Markdown by default) over the
+/// top-level `soft_wrap`.
+fn wrap_for(config: &Config, doc: &Document) -> bool {
+    config
+        .editor
+        .for_language(doc.language_key())
+        .wrap
+        .unwrap_or(config.soft_wrap)
+}
+
 impl Tab {
     /// A tab showing `doc`, wrapped if `wrap`.
     #[must_use]
@@ -497,17 +529,7 @@ impl App {
             sidebar.search.focus_query(Some(pattern.clone()));
             started
         });
-        let wrap = options.wrap || config.soft_wrap;
-        let mut tabs: Vec<Tab> = docs
-            .into_iter()
-            .map(|mut d| {
-                d.configure_indent(config.indent.for_language(d.language_key()));
-                Tab::new(d, wrap)
-            })
-            .collect();
-        if tabs.is_empty() {
-            tabs.push(Tab::new(Document::untitled(), wrap));
-        }
+        let tabs = first_tabs(docs, &options, &config);
         let all_warnings: Vec<String> = warnings
             .into_iter()
             .chain(key_warnings)
@@ -745,6 +767,7 @@ impl App {
             Command::GoToTab(i) => self.switch_to(i.min(self.tabs.len() - 1)),
             Command::QuickOpen => self.open_picker(Kind::Files),
             Command::GoToLine => self.open_picker(Kind::Line),
+            Command::GoToSymbol => self.open_picker(Kind::Symbols),
             Command::Palette => self.open_picker(Kind::Palette),
             Command::ReloadConfig => self.reload_config(),
             Command::ToggleTheme => {
@@ -756,23 +779,8 @@ impl App {
                 self.theme = Theme::built_in(next).unwrap_or_default();
                 self.say(format!("Theme: {next}"), false);
             }
-            Command::ToggleSidebar => {
-                self.sidebar.visible = !self.sidebar.visible;
-                if self.sidebar.visible {
-                    self.show_sidebar();
-                } else {
-                    self.sidebar.focused = false;
-                }
-                self.remember();
-            }
-            Command::FocusSidebar => {
-                self.sidebar.visible = true;
-                self.sidebar.focused = true;
-                self.sidebar.mode = Mode::Files;
-                self.find.focused = false;
-                self.show_sidebar();
-                self.remember();
-            }
+            Command::ToggleSidebar => self.toggle_sidebar(),
+            Command::FocusSidebar => self.focus_sidebar(),
             Command::FindInFiles
             | Command::ReplaceInFiles
             | Command::NextResult
@@ -824,6 +832,27 @@ impl App {
         }
         self.changed(false);
         true
+    }
+
+    /// Show or hide the sidebar, keeping focus out of a hidden one.
+    fn toggle_sidebar(&mut self) {
+        self.sidebar.visible = !self.sidebar.visible;
+        if self.sidebar.visible {
+            self.show_sidebar();
+        } else {
+            self.sidebar.focused = false;
+        }
+        self.remember();
+    }
+
+    /// Show the file tree and move keyboard focus into it.
+    fn focus_sidebar(&mut self) {
+        self.sidebar.visible = true;
+        self.sidebar.focused = true;
+        self.sidebar.mode = Mode::Files;
+        self.find.focused = false;
+        self.show_sidebar();
+        self.remember();
     }
 
     /// The compare view's commands (M9). Returns `false` for any other.
@@ -1481,6 +1510,16 @@ impl App {
         self.changed(true);
     }
 
+    /// Put the cursor at byte `pos` of the active document (a symbol
+    /// chosen in the picker) and scroll it into view.
+    fn go_to_byte(&mut self, pos: usize) {
+        let doc = self.doc_mut();
+        let pos = pos.min(doc.buffer.len_bytes());
+        doc.click(pos, false);
+        doc.preferred_column = None;
+        self.changed(true);
+    }
+
     /// Start line counting for any mapped document that has not started.
     fn start_indexing(&mut self) {
         for tab in &mut self.tabs {
@@ -1730,7 +1769,8 @@ impl App {
                 let replace = self.tabs.len() == 1
                     && self.tabs[0].doc.path.is_none()
                     && !self.tabs[0].doc.is_dirty();
-                let tab = Tab::new(doc, self.config.soft_wrap);
+                let wrap = wrap_for(&self.config, &doc);
+                let tab = Tab::new(doc, wrap);
                 if replace {
                     self.tabs[0] = tab;
                     self.active = 0;
@@ -2312,6 +2352,19 @@ impl App {
                 let t = &self.doc().buffer;
                 Picker::go_to_line(notify, t.is_fully_indexed().then(|| t.len_lines()))
             }
+            Kind::Symbols => {
+                let doc = self.doc();
+                let symbols = symbol_items(doc);
+                if symbols.is_empty() {
+                    let why = match doc.syntax.phase_name() {
+                        "off" | "simple" => "No symbols: this file has no syntax tree",
+                        "waiting" | "parsing" => "No symbols yet: the file is still being parsed",
+                        _ => "No symbols found in this file",
+                    };
+                    self.say(why, false);
+                }
+                Picker::symbols(notify, symbols)
+            }
             Kind::Tabs => {
                 let names = self
                     .tabs
@@ -2360,6 +2413,7 @@ impl App {
                     Some(Item::Action(a)) => self.run(a.command, event_loop),
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
                     Some(Item::Line(n)) => self.go_to_line(n),
+                    Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
                     None => {}
                 }
@@ -2475,6 +2529,7 @@ impl App {
             | Command::ToggleTheme
             | Command::ToggleSidebar
             | Command::GoToLine
+            | Command::GoToSymbol
             | Command::FocusSidebar
             | Command::ToggleIgnored
             | Command::ToggleDebugOverlay
@@ -3114,6 +3169,7 @@ impl App {
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
                     Some(Item::Action(a)) => self.pending_action = Some(a.command),
                     Some(Item::Line(n)) => self.go_to_line(n),
+                    Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
                     None => {}
                 }
@@ -3200,6 +3256,13 @@ impl App {
                 tab_width,
             },
         );
+        // Nested languages the budget left unparsed colour on the next
+        // frame.
+        if tab.doc.syntax.injections_pending()
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
         view::draw_tabs(gpu, &self.theme.ui, layout, &labels, self.active);
         let active = self.tabs[self.active].doc.canonical.as_deref();
         sidebar::draw(
@@ -3935,8 +3998,34 @@ fn line_estimate(t: &dyn Text) -> usize {
     usize::try_from(estimate).unwrap_or(usize::MAX).max(lines)
 }
 
-/// `--picker KIND[:QUERY]` with `--headless`: open the palette, file opener
-/// or go-to-line picker with `QUERY` typed, let it settle, and draw it.
+/// The tab labels for headless rendering: the given ones, or the one
+/// document's own.
+fn labels_or_own(labels: Vec<TabLabel>, doc: &Document) -> Vec<TabLabel> {
+    if labels.is_empty() {
+        vec![TabLabel {
+            name: doc.display_name(),
+            dirty: false,
+        }]
+    } else {
+        labels
+    }
+}
+
+/// The document's definitions with their line numbers, for Go to Symbol.
+fn symbol_items(doc: &Document) -> Vec<(nimbus_syntax::symbols::Symbol, Option<usize>)> {
+    let t = &doc.buffer;
+    nimbus_syntax::symbols::symbols(&doc.syntax, t)
+        .into_iter()
+        .map(|s| {
+            let line = t.line_number(s.start).map(|l| l + 1);
+            (s, line)
+        })
+        .collect()
+}
+
+/// `--picker KIND[:QUERY]` with `--headless`: open the palette, file
+/// opener, go-to-line or symbol picker with `QUERY` typed, let it settle,
+/// and draw it.
 fn draw_headless_picker(
     gpu: &mut Gpu,
     ui: &Ui,
@@ -3951,6 +4040,7 @@ fn draw_headless_picker(
     let mut p = match kind {
         "files" => Picker::files(root, notify),
         "line" => Picker::go_to_line(notify, Some(doc.buffer.len_lines())),
+        "symbols" => Picker::symbols(notify, symbol_items(doc)),
         _ => Picker::palette(notify),
     };
     let _ = p.input.insert(query);
@@ -4085,9 +4175,11 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
             (matches, current),
         );
     } else {
-        let captures = match syntax.capture_names() {
-            Some((key, names)) => scene.theme.capture_looks(key, names),
-            None => &[],
+        let looks = if syntax.capture_names().is_some() {
+            scene.theme.resolve_tables();
+            Some(&*scene.theme)
+        } else {
+            None
         };
         scene.view.draw(
             gpu,
@@ -4100,9 +4192,13 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
                 matches,
                 current,
                 ui: &ui,
-                captures,
+                looks,
             },
         );
+        // A nested language that came into view loads its grammar or was
+        // parsed this frame: its table may be new to the theme, and its
+        // spans may be waiting on the next frame's budget.
+        scene.theme.resolve_tables();
         scene.view.draw_scrollbar(gpu, scene.doc, layout, &ui);
     }
     if find.open {
@@ -4154,7 +4250,7 @@ pub fn run_headless(
     );
     gpu.set_tab_width(config.tab_width);
     let mut view = View::default();
-    view.set_wrap(options.wrap || config.soft_wrap);
+    view.set_wrap(options.wrap || wrap_for(config, &doc));
     if options.wait_index {
         index_now(&mut doc);
     }
@@ -4172,10 +4268,12 @@ pub fn run_headless(
     print_warnings(nimbus_syntax::registry::take_warnings());
     let (mut theme, warnings) = Theme::load(&config.theme);
     print_warnings(warnings);
+    let labels = labels_or_own(labels, &doc);
     // Characters the bundled font lacks are looked for in system fonts on
     // a worker; with no later frame to show them in, wait for them once
     // everything has been painted, and paint again if any arrived.
-    for pass in 0..2 {
+    let mut fonts_waited = false;
+    for _ in 0..8 {
         paint_scene(
             &mut gpu,
             &layout,
@@ -4208,9 +4306,15 @@ pub fn run_headless(
         if let Some(spec) = &options.picker {
             draw_headless_picker(&mut gpu, ui, &layout, (spec, &root), &doc, config);
         }
-        if pass == 1 || !gpu.wait_for_fonts(Duration::from_secs(5)) {
+        // Nested languages are parsed a few per frame; keep painting
+        // until none is left over, as the window would on redraws.
+        if doc.syntax.injections_pending() {
+            continue;
+        }
+        if fonts_waited || !gpu.wait_for_fonts(Duration::from_secs(5)) {
             break;
         }
+        fonts_waited = true;
     }
     gpu.request_capture();
     if let Err(e) = gpu.render() {
@@ -4430,6 +4534,8 @@ fn draw_picker_overlay(
         (Kind::Palette, false) => "commands",
         (Kind::Files, true) => "file",
         (Kind::Files, false) => "files",
+        (Kind::Symbols, true) => "symbol",
+        (Kind::Symbols, false) => "symbols",
         (Kind::Line, _) => "",
         (Kind::Tabs, true) => "tab",
         (Kind::Tabs, false) => "tabs",
@@ -4444,6 +4550,7 @@ fn draw_picker_overlay(
         Kind::Palette => "Type a command",
         Kind::Files => "Type a file name",
         Kind::Line => "Type a line number",
+        Kind::Symbols => "Type a function, type or heading name",
         Kind::Tabs => "Type a tab name",
     };
     let pv = PickerView {
