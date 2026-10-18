@@ -344,8 +344,11 @@ Our own pipeline on `wgpu` 30. Four pieces:
 2. **Shaping**: `swash`, per line. Results are cached keyed on
    `(line content hash, font id, size)`. The editor area is monospace, which
    makes column math trivial.
-3. **Glyph atlas**: one `R8Unorm` texture (2048², a second page is added when
-   full). Our own shelf packer, about a hundred lines, written by hand
+3. **Glyph atlas**: one `R8Unorm` texture (2048²) of coverage masks, and
+   since M16 a second `Rgba8Unorm` page for colour glyphs (emoji), created
+   only when the first one is drawn (16 MB of GPU memory). The glyph
+   instance carries a flag saying which page to sample; one bind group
+   holds both, with a 1×1 stand-in until the colour page exists. Our own shelf packer, about a hundred lines, written by hand
    because learning how atlases work was a goal. `etagere` is the drop-in
    fallback if the packer becomes a time sink. Glyphs are rasterized by
    `swash::scale` with grayscale antialiasing at the exact pixel size and
@@ -361,8 +364,24 @@ Our own pipeline on `wgpu` 30. Four pieces:
 **Colour and blending.** The surface uses a non-sRGB format, so blending
 happens in gamma space, which is how most platforms' native text looks.
 Coverage gets a small adjustable contrast curve, because light text on dark
-backgrounds otherwise looks thin. Linear blending is a possible later
-experiment, not a v1 goal.
+backgrounds otherwise looks thin. M16 tried linear blending behind
+`--linear-blend` (an sRGB surface, theme colours turned into linear light
+in the shaders, no contrast curve). Compared by eye on the same file in
+both themes: linear light makes light-on-dark text a touch heavier and
+dark-on-light text visibly thinner, so the light theme would need its own
+tuning. **Decision: stay in gamma space**; the flag stays for checking
+again on other displays, and is not a setting.
+
+**Fonts after M16.** `font` in the config names an installed family or a
+font file; the family is found with `fontdb` on a worker after the first
+frame, which draws with Hack, then the atlas is refilled. `ligatures =
+true` lets the font's `liga`, `calt` and `clig` features join characters
+(they are switched off otherwise); a ligature keeps the cells of the
+characters it replaces, and a line with a cursor or selection edge inside
+one is shaped again with ligatures off. Colour emoji come through the M8
+fallback, which now prefers colour fonts for emoji and reads a colour font
+up to 512 MB, such as the 200 MB Apple Color Emoji, into memory (copied,
+not mapped, so no `unsafe`; it costs its full size on the first emoji).
 
 **Startup path (M1).** M0 creates the GPU instance, adapter and device on the
 main thread after the window exists. M1 moves that work to a thread spawned
@@ -558,7 +577,7 @@ introduces and points at the code.
 | 13 | Split views and folding | Done | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
 | 14 | Languages, second pass | In progress | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
 | 15 | Distribution | Done | Installers and packages for every platform (unsigned), an update check, signed checksums | [m15](docs/milestones/m15-distribution.md) |
-| 16 | Rendering, second pass | Planned | Colour emoji, ligatures, zoom, whitespace and indent guides | [m16](docs/milestones/m16-rendering-second-pass.md) |
+| 16 | Rendering, second pass | Done | Colour emoji, ligatures, zoom, whitespace and indent guides | [m16](docs/milestones/m16-rendering-second-pass.md) |
 | 17 | Encodings and line endings | Done | Open and save UTF-16 and Windows-1252; change encoding and line endings | [m17](docs/milestones/m17-encodings.md) |
 | 18 | Compare, second pass | Done | Ignore whitespace, compare folders, diff one-line files, compare with HEAD | [m18](docs/milestones/m18-compare-second-pass.md) |
 | 19 | Workspace and search, second pass | Planned | Several roots, named workspaces, drag and drop, search history and multi-line patterns | [m19](docs/milestones/m19-workspace-and-search-second-pass.md) |
@@ -728,4 +747,5 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | M17: a huge file whose start only *looks* like Windows-1252 keeps M7's editable byte path; read-only is for huge files whose encoding is known (UTF-16 byte order mark, explicit choice), since a guess should not take editing away | §4.1, m17 |
 | 2026-10-18 | M17: ISO-8859-1 is true Latin-1 (byte = code point), separate from Windows-1252, which `encoding_rs` substitutes for it per the web standard | §4.1, m17 |
 | 2026-10-18 | M19: several roots are extra parentless nodes in the one arena tree, not a list of trees; the workspace's session stays in `state.toml` keyed by its first root, and workspace files are written only by Save Workspace As or Here; Undo Move cannot restore a trashed item on macOS (the `trash` crate has no restore there); a multi-line match longer than the 1 MB window is cut, or missed when it spans more than one window plus one block | §4.4, m19 |
+| 2026-10-18 | M16: a colour font over 64 MB (Apple Color Emoji, about 200 MB) is copied into memory, up to 512 MB, rather than mapped with new `unsafe` (owner's choice); `font` names an installed family or a file, looked up on a worker; indent guides default off; linear blending tried and declined (gamma space stays) | §4.3, m16 |
 | 2026-10-18 | M18 landed: diff options normalise lines before hashing; lines over 4 KB are cut by a 64-byte gear hash and diffed in pieces (layered path only, within 256 MB); git read with `cat-file --filters` on its own thread; folder compare merges two sorted walks by `Path` order | §4.4, m18 |

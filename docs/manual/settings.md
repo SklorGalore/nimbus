@@ -55,6 +55,11 @@ then `[tables]`.
 | `soft_wrap` | `true` or `false` | `false` | Whether new tabs start with soft wrap on. Languages can override it with `wrap` in `[editor.LANGUAGE]`; Markdown wraps unless told not to. |
 | `theme` | text | `"dark"` | `"dark"`, `"light"`, or the name of your own theme in `themes/NAME.toml`. An unknown name falls back to dark with a warning. |
 | `check_updates` | `true` or `false` | `false` | Ask GitHub once at each start whether a newer release exists. Off by default, so Nimbus never contacts the network unless you ask. See [Updates](troubleshooting.md#checking-for-updates). |
+| `font` | text | `""` (empty) | The editor font: an installed font's name (`"JetBrains Mono"`) or a font file's path (`.ttf`, `.otf`, `.ttc`). Empty is the bundled Hack Nerd Font Mono. It loads just after the window appears; a name that is not found keeps Hack and says so. |
+| `ligatures` | `true` or `false` | `false` | Join `->`, `!=`, `=>` and friends into one glyph, in a font that has ligatures (Hack has none). Columns stay the same, and a ligature splits apart where the cursor or a selection edge falls inside it. |
+| `remember_zoom` | `true` or `false` | `true` | Keep the size Zoom In and Zoom Out left (in `state.toml`) for the next start. `false` starts every session at `font_size`. Changing `font_size` in the file always wins. |
+| `render_whitespace` | `"selection"`, `"all"` or `"none"` | `"selection"` | Draw spaces as `·` and tabs as `→`: only inside a selection, everywhere, or never. Toggle Render Whitespace in the palette cycles it for the session. |
+| `indent_guides` | `true` or `false` | `false` | Draw a thin line at each indentation level, the one around the cursor brighter. Toggle Indent Guides in the palette switches it for the session. |
 
 ### `[keys]`
 
@@ -85,14 +90,16 @@ own. See [Languages](languages.md#how-a-files-language-is-chosen).
 
 Maps a file name or pattern to the encoding such files are read and
 saved in, skipping Nimbus's guess. A pattern without a `/` is matched
-against the file name. One with a `/` is matched against the file's
-whole path, usually a full path, so start it with `**/`. Encoding names
+against the file name. One with a `/` is matched against the end of
+the file's path, so `legacy/*.txt` is a `.txt` file directly inside any
+folder called `legacy`; `**` goes through folders and a leading `/`
+matches from the root. Encoding names
 are listed in [Encodings](encodings.md#encoding-names).
 
 ```toml
 [encodings]
 "*.csv" = "windows-1252"
-"**/legacy/*.txt" = "latin1"
+"legacy/*.txt" = "latin1"
 "export.dat" = "utf-16le"
 ```
 
@@ -170,6 +177,18 @@ This is the file "Open Config File" writes:
 # soft_wrap = false
 # theme = "dark"            # or "light", or NAME for themes/NAME.toml here
 # check_updates = false     # true: ask GitHub for a newer release at startup
+
+# The editor font: an installed font's name or a font file's path. Empty is
+# the bundled Hack Nerd Font Mono. ligatures joins -> != => and friends in
+# fonts that have them (Fira Code, JetBrains Mono, Cascadia Code).
+# font = "JetBrains Mono"
+# ligatures = false
+# Zoom (View > Zoom In/Out, Primary+= and Primary+-) is remembered between
+# sessions; false starts every session at font_size.
+# remember_zoom = true
+# Show spaces as · and tabs as →: "selection", "all" or "none".
+# render_whitespace = "selection"
+# indent_guides = false     # true: a hairline at each indentation level
 
 # Key bindings: action id = list of chords. "Primary" is Cmd on macOS and
 # Ctrl elsewhere. An empty list unbinds the action. The command palette

@@ -128,7 +128,7 @@ picker takes any ref and shows git's error text in the message line.
 
 ## Results
 
-Landed on 2026-10-18 (nimbus 0.6.0, nimbus-core 0.5.0). Measured in the
+Landed on 2026-10-18 (nimbus 0.9.0, nimbus-core 0.7.0). Measured in the
 cloud container (4 cores, release build); the owner's Mac numbers are to
 be added.
 

@@ -19,6 +19,7 @@
 //! "Reopen with Encoding"), else its byte order mark, else a guess from its
 //! first 64 KB.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -94,9 +95,9 @@ static ENCODING_RULES: RwLock<Vec<(globset::GlobMatcher, bool, Encoding)>> =
 
 /// Use the config's `[encodings]` table, pattern to encoding name
 /// (`"*.csv" = "windows-1252"`), for files opened from now on: a file whose
-/// name matches is read in that encoding, skipping detection. A pattern
-/// with a `/` is matched against the whole path, others against the file
-/// name. Returns a warning for each entry that is not understood.
+/// name matches is read in that encoding, skipping detection. Returns a
+/// warning for each entry that is not understood; see [`encoding_glob`]
+/// for how a pattern is matched.
 pub fn set_encoding_rules(table: &HashMap<String, String>) -> Vec<String> {
     let mut rules = Vec::new();
     let mut warnings = Vec::new();
@@ -108,8 +109,8 @@ pub fn set_encoding_rules(table: &HashMap<String, String>) -> Vec<String> {
             warnings.push(format!("config: encodings: unknown encoding {name:?}"));
             continue;
         };
-        match globset::Glob::new(pattern) {
-            Ok(glob) => rules.push((glob.compile_matcher(), pattern.contains('/'), encoding)),
+        match encoding_glob(pattern) {
+            Ok((glob, whole)) => rules.push((glob, whole, encoding)),
             Err(e) => warnings.push(format!("config: encodings: pattern {pattern:?}: {e}")),
         }
     }
@@ -119,21 +120,49 @@ pub fn set_encoding_rules(table: &HashMap<String, String>) -> Vec<String> {
     warnings
 }
 
+/// Compile one `[encodings]` pattern, and say whether it is matched against
+/// the whole path (`true`) or the file name alone.
+///
+/// A pattern without a `/` (`*.csv`) names files anywhere. One with a `/`
+/// is matched against the whole path, but paths are absolute, so a
+/// relative pattern such as `legacy/*.txt` would never match as written.
+/// It is read the way people mean it, as the end of a path: a folder
+/// `legacy` anywhere, holding `*.txt`. Only patterns that start with `/`,
+/// `**` or a Windows drive are taken as they are. `*` stops at `/`, so
+/// `legacy/*.txt` does not reach into `legacy/old/`; `**` crosses folders.
+fn encoding_glob(pattern: &str) -> Result<(globset::GlobMatcher, bool), globset::Error> {
+    let whole = pattern.contains('/');
+    let anchored = pattern.starts_with('/')
+        || pattern.starts_with("**")
+        || pattern.as_bytes().get(1) == Some(&b':');
+    let full = if whole && !anchored {
+        Cow::Owned(format!("**/{pattern}"))
+    } else {
+        Cow::Borrowed(pattern)
+    };
+    let glob = globset::GlobBuilder::new(&full)
+        .literal_separator(true)
+        .build()?;
+    Ok((glob.compile_matcher(), whole))
+}
+
+/// Whether a compiled `[encodings]` pattern matches `path`.
+fn glob_matches(glob: &globset::GlobMatcher, whole: bool, path: &Path) -> bool {
+    if whole {
+        glob.is_match(path)
+    } else {
+        path.file_name().is_some_and(|name| glob.is_match(name))
+    }
+}
+
 /// The encoding the config's `[encodings]` table gives `path`, if any.
 fn configured_encoding(path: &Path) -> Option<Encoding> {
     let rules = ENCODING_RULES
         .read()
         .unwrap_or_else(PoisonError::into_inner);
-    let name = path.file_name()?;
     rules
         .iter()
-        .find(|(glob, whole, _)| {
-            if *whole {
-                glob.is_match(path)
-            } else {
-                glob.is_match(name)
-            }
-        })
+        .find(|(glob, whole, _)| glob_matches(glob, *whole, path))
         .map(|(_, _, e)| *e)
 }
 
@@ -1278,6 +1307,24 @@ mod tests {
         assert_eq!(configured_encoding(&dir.0.join("a.txt")), None);
         set_encoding_rules(&HashMap::new());
         assert_eq!(configured_encoding(&path), None);
+    }
+
+    #[test]
+    fn encoding_patterns_with_a_folder_match_the_end_of_the_path() {
+        let hit = |pattern: &str, path: &str| {
+            let (glob, whole) = encoding_glob(pattern).unwrap();
+            glob_matches(&glob, whole, Path::new(path))
+        };
+        assert!(hit("legacy/*.txt", "/home/a/proj/legacy/notes.txt"));
+        assert!(!hit("legacy/*.txt", "/home/a/proj/legacy/old/notes.txt"));
+        assert!(!hit("legacy/*.txt", "/home/a/proj/notlegacy/notes.txt"));
+        assert!(!hit("legacy/*.txt", "/home/a/proj/notes.txt"));
+        assert!(hit("**/legacy/*.txt", "/home/a/proj/legacy/notes.txt"));
+        assert!(hit("legacy/**/*.txt", "/p/legacy/old/notes.txt"));
+        assert!(hit("/home/a/*.txt", "/home/a/notes.txt"));
+        assert!(!hit("/home/a/*.txt", "/srv/home/a/notes.txt"));
+        assert!(hit("*.csv", "/x/y/data.csv"));
+        assert!(!hit("*.csv", "/x/y.csv/data"));
     }
 
     #[test]

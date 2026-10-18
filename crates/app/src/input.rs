@@ -142,6 +142,16 @@ pub enum Command<'a> {
     ToggleIgnored,
     /// Show or hide the debug overlay: frame time, latency, atlas use.
     ToggleDebugOverlay,
+    /// Make the editor font one point larger (M16).
+    ZoomIn,
+    /// Make the editor font one point smaller.
+    ZoomOut,
+    /// Go back to the config's `font_size`.
+    ResetZoom,
+    /// Cycle where whitespace shows: none, selection, all.
+    ToggleWhitespace,
+    /// Show or hide indent guides.
+    ToggleIndentGuides,
     /// Select the word under the cursor, or add the next occurrence of the
     /// selection as another cursor.
     AddNextOccurrence,
@@ -334,7 +344,8 @@ impl Command<'_> {
     }
 
     /// Whether this arranges the editor rather than editing: the groups
-    /// and folds of M13. These run whatever field has the keyboard.
+    /// and folds of M13, the zoom and view toggles of M16. These run
+    /// whatever field has the keyboard.
     #[must_use]
     pub fn is_layout(self) -> bool {
         matches!(
@@ -350,6 +361,11 @@ impl Command<'_> {
                 | Self::FoldAll
                 | Self::UnfoldAll
                 | Self::FoldLevel(_)
+                | Self::ZoomIn
+                | Self::ZoomOut
+                | Self::ResetZoom
+                | Self::ToggleWhitespace
+                | Self::ToggleIndentGuides
         )
     }
 
@@ -721,6 +737,48 @@ mod tests {
         if cfg!(target_os = "macos") {
             assert_eq!(resolve(&km, k, false), Some(Command::Insert("ç")));
         }
+    }
+
+    #[test]
+    fn zoom_keys_resolve_to_zoom_commands() {
+        let km = km();
+        let eq = ch("=");
+        assert_eq!(
+            resolve(&km, press(&eq, KeyCode::Equal, Some("="), primary()), false),
+            Some(Command::ZoomIn)
+        );
+        let plus = ch("+");
+        assert_eq!(
+            resolve(
+                &km,
+                press(
+                    &plus,
+                    KeyCode::Equal,
+                    Some("+"),
+                    primary() | ModifiersState::SHIFT
+                ),
+                false
+            ),
+            Some(Command::ZoomIn)
+        );
+        let minus = ch("-");
+        assert_eq!(
+            resolve(
+                &km,
+                press(&minus, KeyCode::Minus, Some("-"), primary()),
+                false
+            ),
+            Some(Command::ZoomOut)
+        );
+        let zero = ch("0");
+        assert_eq!(
+            resolve(
+                &km,
+                press(&zero, KeyCode::Digit0, Some("0"), primary()),
+                false
+            ),
+            Some(Command::ResetZoom)
+        );
     }
 
     #[test]

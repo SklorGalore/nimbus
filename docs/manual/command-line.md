@@ -37,7 +37,7 @@ does not overwrite your session.
 | `--diff OLD NEW` | Open `NEW` in a tab, compared with `OLD` (see [Compare and merge](compare-and-merge.md#comparing)). With two folders, compare the folders instead (see [Comparing folders](compare-and-merge.md#comparing-folders)). |
 | `--merge BASE LOCAL REMOTE` | Open a three-way merge of the three files. The result saves to `LOCAL` unless `-o` says otherwise. The exit code is 0 only if the result was saved with no conflicts left, 1 otherwise. |
 | `-o FILE`, `--output FILE` | With `--merge`: where the result saves. |
-| `--version`, `-V` | Print the version (`nimbus 0.8.0`) and exit. |
+| `--version`, `-V` | Print the version (`nimbus 0.9.0`) and exit. |
 | `--help`, `-h` | Print a one-line usage summary and exit. |
 
 An unknown option, or an option missing its value, prints an error and

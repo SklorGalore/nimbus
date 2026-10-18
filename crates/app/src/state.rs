@@ -3,9 +3,10 @@
 //! The config file is the user's, edited by hand and full of their comments,
 //! so Nimbus never writes to it. What the app remembers by itself goes in
 //! this separate file instead: whether the sidebar is shown and how wide,
-//! the window's size and place, the files opened lately, and one *session*
-//! per project folder (its tabs, cursors and expanded folders), so closing
-//! Nimbus and opening it again brings you back where you were.
+//! the zoom (M16), the window's size and place, the files opened lately,
+//! and one *session* per project folder (its tabs, cursors and expanded
+//! folders), so closing Nimbus and opening it again brings you back where
+//! you were.
 //!
 //! The file never holds any text from your files, only paths and byte
 //! offsets, so it stays a few kilobytes. A missing or broken file just
@@ -40,6 +41,10 @@ pub struct State {
     pub diff_ignore_case: bool,
     /// The compare view drops changes made only of blank lines.
     pub diff_ignore_blank_lines: bool,
+    /// The editor font size the zoom actions left, in points (M16); `None`
+    /// when it is the config's `font_size`, so a later change to the config
+    /// still takes effect. Read at startup unless `remember_zoom = false`.
+    pub font_size: Option<f64>,
     /// The window's size and place when it last closed.
     pub window: Option<WindowGeometry>,
     /// Files opened in any session, most recent first, at most
@@ -59,6 +64,7 @@ impl Default for State {
             diff_ignore_whitespace: "off".to_owned(),
             diff_ignore_case: false,
             diff_ignore_blank_lines: false,
+            font_size: None,
             window: None,
             recent: Vec::new(),
             sessions: Vec::new(),
@@ -525,6 +531,7 @@ mod tests {
         let mut s = State {
             sidebar_visible: false,
             sidebar_width: 300.0,
+            font_size: Some(18.0),
             window: Some(WindowGeometry {
                 width: 1000.0,
                 height: 700.0,
@@ -551,6 +558,7 @@ mod tests {
         let back: State = toml::from_str(&text).unwrap();
         assert_eq!(back.diff_options().whitespace, Whitespace::Ends);
         assert!(back.diff_options().case);
+        assert_eq!(partial.font_size, None);
         assert_eq!(partial.sessions, Vec::new());
         assert!(partial.window.is_none());
         // A session missing everything but its root still loads.

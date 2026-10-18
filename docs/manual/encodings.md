@@ -136,13 +136,16 @@ To skip the guess for some files, give them an encoding in the
 ```toml
 [encodings]
 "*.csv" = "windows-1252"
-"**/legacy/*.txt" = "latin1"
+"legacy/*.txt" = "latin1"
 ```
 
-A pattern without a `/` is matched against the file's name. One with a
-`/` is matched against the file's whole path, which is usually a full
-path such as `/home/you/project/legacy/notes.txt`, so start it with
-`**/` as above. The table applies to files opened after the
+A pattern without a `/` is matched against the file's name, wherever
+the file is. One with a `/` is matched against the end of the file's
+path, so `legacy/*.txt` is any `.txt` file directly inside a folder
+called `legacy`, such as `/home/you/project/legacy/notes.txt`. A `*`
+stays within one folder; use `**` to go through folders
+(`legacy/**/*.txt`), and start a pattern with `/` to match from the
+root. The table applies to files opened after the
 config is loaded or reloaded. A pattern or encoding name Nimbus does not
 understand is reported in the message line and skipped.
 

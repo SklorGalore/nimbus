@@ -38,6 +38,8 @@ cargo test --release -p nimbus-core -- --ignored --nocapture # opt-in benchmarks
 bench/gen.sh logs && ./target/release/nimbus bench/out/log-4gb.log --headless 1400x700 --screenshot /tmp/l.bmp --wait-index   # huge-file check (mapped buffer, all lines counted first)
 ./target/release/nimbus FILE --backend rope|mapped ...      # force a buffer backend (measurement)
 cargo run -- FILE --debug-overlay --headless 1400x500 --screenshot /tmp/d.bmp   # the F12 overlay, shown from the start
+cargo run -- FILE --linear-blend --headless 1400x500 --screenshot /tmp/lin.bmp  # M16 experiment: blend text in linear light (sRGB target)
+NIMBUS_BENCH_FILE=$PWD/bench/out/src-10mb.rs cargo test --release -p nimbus -- --ignored --nocapture m16_typing_bench   # keystroke cost with whitespace, guides and ligatures on vs off (needs a GPU)
 cargo run -- FILE --cursors 4,19,33 --headless 900x300 --screenshot /tmp/m.bmp  # several cursors (byte offsets; the last is primary)
 bench/gen.sh sizes && bench/threshold.sh                    # rope vs mapped open time and memory at 64-512 MB
 cargo test --release -p nimbus-syntax -- --ignored --nocapture --test-threads 1   # keystroke and first-parse cost, tree memory (needs bench/gen.sh)

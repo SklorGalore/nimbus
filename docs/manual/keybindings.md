@@ -3,7 +3,7 @@
 Every command in Nimbus, with its **id** (what you write in the `[keys]`
 table of `config.toml`), its **title** (what the command palette and
 menus show) and its default keys. This list is made from the editor's
-own command table, so it matches the build it describes (version 0.8.0).
+own command table, so it matches the build it describes (version 0.9.0).
 
 - Commands without a key are run from the command palette
   (`Cmd+Shift+P` / `Ctrl+Shift+P`).
@@ -239,6 +239,11 @@ These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
 | Fold Level 3 | `fold.level3` | `Cmd+K Cmd+3` | `Ctrl+K Ctrl+3` |
 | Focus Sidebar | `view.focusSidebar` | `Cmd+Shift+E` | `Ctrl+Shift+E` |
 | Toggle Debug Overlay | `view.toggleDebugOverlay` | `F12` | `F12` |
+| Zoom In | `view.zoomIn` | `Cmd+=` | `Ctrl+=` |
+| Zoom Out | `view.zoomOut` | `Cmd+-` | `Ctrl+-` |
+| Reset Zoom | `view.resetZoom` | `Cmd+0` | `Ctrl+0` |
+| Toggle Render Whitespace (selection, all, none) | `view.toggleWhitespace` | — | — |
+| Toggle Indent Guides | `view.toggleIndentGuides` | — | — |
 | Show/Hide Ignored Files in Sidebar | `view.toggleIgnored` | — | — |
 | Reload from Disk | `file.reloadFromDisk` | — | — |
 | Keep My Version (ignore the change on disk) | `file.keepMine` | — | — |
