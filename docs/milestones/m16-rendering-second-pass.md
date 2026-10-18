@@ -1,6 +1,6 @@
 # M16 — Rendering, second pass
 
-**Status: in progress (draft PR on `claude/m16-rendering-193lg4`).** Written on 2026-10-18 from the rendering items the
+**Status: done** (2026-10-18). Written on 2026-10-18 from the rendering items the
 backlog kept unscheduled since M8 (colour emoji, ligatures, scrollbar
 fade, the linear-blending experiment) plus the two things a user of a
 GPU editor asks for first: changing the font size without editing the
