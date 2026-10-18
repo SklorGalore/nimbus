@@ -38,6 +38,18 @@ pub enum Op {
     /// Move a file or folder to the system's trash (the Recycle Bin on
     /// Windows), where it can be put back from.
     Trash(PathBuf),
+    /// Copy a file or folder (and everything in it) to `to`, which must not
+    /// exist yet (M19: a drag with `Alt` held).
+    Copy {
+        /// What is copied.
+        from: PathBuf,
+        /// The copy.
+        to: PathBuf,
+    },
+    /// Put the most recently trashed item that was at this path back
+    /// (Undo Move after a Move to Trash). Windows and Linux only: macOS
+    /// gives no way to find a trashed item again.
+    Restore(PathBuf),
 }
 
 impl Op {
@@ -45,9 +57,12 @@ impl Op {
     #[must_use]
     pub fn result_path(&self) -> &Path {
         match self {
-            Self::NewFile(p) | Self::NewFolder(p) | Self::Rename { to: p, .. } | Self::Trash(p) => {
-                p
-            }
+            Self::NewFile(p)
+            | Self::NewFolder(p)
+            | Self::Rename { to: p, .. }
+            | Self::Copy { to: p, .. }
+            | Self::Trash(p)
+            | Self::Restore(p) => p,
         }
     }
 }
@@ -115,6 +130,119 @@ pub fn run(op: &Op) -> Result<(), String> {
         Op::Trash(p) => trash_context()
             .delete(p)
             .map_err(|e| format!("{}: {e}", p.display())),
+        Op::Copy { from, to } => {
+            if to.exists() {
+                return Err(format!("{} already exists", to.display()));
+            }
+            if to.starts_with(from) {
+                return Err(format!("cannot copy {} into itself", from.display()));
+            }
+            copy_all(from, to).map_err(|e| at(from, e))
+        }
+        Op::Restore(p) => restore(p),
+    }
+}
+
+/// Copy `from` to `to`: a file, or a folder and everything in it. A link
+/// is copied as what it points to, as Finder and Explorer do.
+fn copy_all(from: &Path, to: &Path) -> std::io::Result<()> {
+    if !from.is_dir() {
+        if let Some(dir) = to.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        return std::fs::copy(from, to).map(drop);
+    }
+    // A stack, not recursion, so a deep tree cannot overflow the thread.
+    let mut stack = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((src, dst)) = stack.pop() {
+        std::fs::create_dir(&dst)?;
+        for entry in std::fs::read_dir(&src)? {
+            let entry = entry?;
+            let (s, d) = (entry.path(), dst.join(entry.file_name()));
+            if s.is_dir() {
+                stack.push((s, d));
+            } else {
+                std::fs::copy(&s, &d)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Put back the item most recently trashed from `path`.
+#[cfg(any(
+    target_os = "windows",
+    all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    )
+))]
+fn restore(path: &Path) -> Result<(), String> {
+    let at = |e: trash::Error| format!("{}: {e}", path.display());
+    if path.exists() {
+        return Err(format!("{} exists again; nothing put back", path.display()));
+    }
+    let item = trash::os_limited::list()
+        .map_err(at)?
+        .into_iter()
+        .filter(|i| i.original_path() == path)
+        .max_by_key(|i| i.time_deleted)
+        .ok_or_else(|| format!("{} is no longer in the trash", path.display()))?;
+    trash::os_limited::restore_all([item]).map_err(at)
+}
+
+/// macOS: the trash crate cannot find an item in the Trash again, so it
+/// cannot be put back from here.
+#[cfg(not(any(
+    target_os = "windows",
+    all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    )
+)))]
+fn restore(path: &Path) -> Result<(), String> {
+    Err(format!(
+        "{} is in the Trash; use Put Back in Finder to restore it",
+        path.display()
+    ))
+}
+
+/// Whether trashed items can be put back from Nimbus on this system.
+#[must_use]
+pub const fn can_restore() -> bool {
+    cfg!(any(
+        target_os = "windows",
+        all(
+            unix,
+            not(target_os = "macos"),
+            not(target_os = "ios"),
+            not(target_os = "android")
+        )
+    ))
+}
+
+/// A free name for a copy of `name` in `dir`: `a copy.rs`, then
+/// `a copy 2.rs` and so on, as Finder names them.
+#[must_use]
+pub fn copy_name(dir: &Path, name: &str, is_dir: bool) -> PathBuf {
+    let stem = stem_range(name, is_dir);
+    let (base, ext) = (&name[stem.clone()], &name[stem.end..]);
+    let mut n = 1;
+    loop {
+        let candidate = if n == 1 {
+            format!("{base} copy{ext}")
+        } else {
+            format!("{base} copy {n}{ext}")
+        };
+        let path = dir.join(candidate);
+        if !path.exists() {
+            return path;
+        }
+        n += 1;
     }
 }
 
@@ -273,6 +401,38 @@ mod tests {
         })
         .unwrap();
         assert!(to.is_file() && !f.exists());
+        // Copying a folder copies what is inside; never over something.
+        let copy = dir.join("copied");
+        run(&Op::Copy {
+            from: d.clone(),
+            to: copy.clone(),
+        })
+        .unwrap();
+        assert!(copy.join("inner/renamed.txt").is_file() && to.is_file());
+        assert!(
+            run(&Op::Copy {
+                from: d.clone(),
+                to: copy.clone(),
+            })
+            .is_err()
+        );
+        assert!(
+            run(&Op::Copy {
+                from: d.clone(),
+                to: d.join("inside"),
+            })
+            .is_err()
+        );
+        assert_eq!(
+            copy_name(&d.join("inner"), "renamed.txt", false),
+            d.join("inner/renamed copy.txt")
+        );
+        std::fs::write(d.join("inner/renamed copy.txt"), "").unwrap();
+        assert_eq!(
+            copy_name(&d.join("inner"), "renamed.txt", false),
+            d.join("inner/renamed copy 2.txt")
+        );
+        assert_eq!(copy_name(&dir, "folder", true), dir.join("folder copy"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

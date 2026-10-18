@@ -40,6 +40,10 @@ pub struct Restore {
     pub expanded: Vec<PathBuf>,
     /// Files of the session that are gone, for a message-line note.
     pub dropped: Vec<PathBuf>,
+    /// Further root folders of the workspace (M19) that are still there.
+    pub roots: Vec<PathBuf>,
+    /// The Search panel's history and saved searches.
+    pub search: crate::state::SearchHistory,
     /// Each editor group's share of the width, left to right; the groups
     /// are numbered with no gaps, and there is at least one.
     pub shares: Vec<f32>,
@@ -96,6 +100,11 @@ pub fn launch(state: &State, folder: Option<&Path>, files: bool, no_session: boo
     }
 }
 
+/// The folders of `paths` that are still there.
+fn existing_dirs(paths: &[PathBuf]) -> Vec<PathBuf> {
+    paths.iter().filter(|p| p.is_dir()).cloned().collect()
+}
+
 /// Plan the restore of `session`: drop files that are gone, read the
 /// front tab of each editor group, and make placeholders of the rest.
 /// `open` reads a file (the real [`Document::open`], or a stand-in in
@@ -113,6 +122,8 @@ pub fn restore(
             .iter()
             .map(|p| session.root.join(p))
             .collect(),
+        roots: existing_dirs(&session.roots),
+        search: session.search.clone(),
         ..Restore::default()
     };
     let mut warnings = Vec::new();
@@ -313,7 +324,7 @@ mod tests {
                 tab(&b, true),
                 tab(&a, false),
             ],
-            groups: Vec::new(),
+            ..Session::default()
         };
         let mut opened = Vec::new();
         let (r, warnings) = restore(&session, |p| {
@@ -357,6 +368,7 @@ mod tests {
                 in_group(&c, 2, true, true),
             ],
             groups: vec![0.5, 0.2, 0.3],
+            ..Session::default()
         };
         let mut opened = Vec::new();
         let (r, warnings) = restore(&session, |p| {
@@ -384,7 +396,7 @@ mod tests {
             mode: SidebarMode::Files,
             expanded: Vec::new(),
             tabs: vec![tab(&a, true), tab(&b, false)],
-            groups: Vec::new(),
+            ..Session::default()
         };
         let (r, warnings) = restore(&session, |p| {
             if p.ends_with("a.txt") {
@@ -414,7 +426,7 @@ mod tests {
             mode: SidebarMode::Files,
             expanded: Vec::new(),
             tabs: Vec::new(),
-            groups: Vec::new(),
+            ..Session::default()
         });
         assert_eq!(
             launch(&state, None, false, false),
