@@ -484,9 +484,12 @@ fn open_files(options: &Options, languages: &Languages) -> (Vec<Document>, PathB
 
 /// The project folder whose session this run restores and saves, if any
 /// ([`session::launch`]). Never for a headless run, nor once `open_files`
-/// opened files.
+/// opened files. `remember` is the config's `remember_workspace`: `false`
+/// treats every run as `--no-session` does for sessions, while recent
+/// files and the window position are still saved ([`Options::remembers`]).
 fn plan_session(
     options: &Options,
+    remember: bool,
     state: &State,
     docs: &[Document],
     root: &Path,
@@ -496,7 +499,7 @@ fn plan_session(
     }
     let folder = options.files.iter().any(|p| p.is_dir()).then_some(root);
     let files = !docs.is_empty() || options.diff.is_some() || options.merge.is_some();
-    match session::launch(state, folder, files, options.no_session) {
+    match session::launch(state, folder, files, options.no_session || !remember) {
         session::Launch::Folder(f) => Some(f),
         session::Launch::Files => None,
     }
@@ -543,10 +546,13 @@ fn load_workspace(name: &str) -> state::Session {
 
 /// Plan a run of the named workspace `session`: its first root is the
 /// session's folder, its tabs are restored, its other roots come back. It
-/// saves its session in the state file like any folder's; the workspace
-/// file itself changes only with Save Workspace As.
+/// saves its session in the state file like any folder's, unless
+/// `remember` (the config's `remember_workspace`) is off; the workspace
+/// file itself changes only with Save Workspace As. Naming a workspace
+/// always opens it, whatever `remember` says.
 fn start_workspace(
     options: &Options,
+    remember: bool,
     languages: &Languages,
     name: &str,
     session: &state::Session,
@@ -564,7 +570,7 @@ fn start_workspace(
     app::Startup {
         state: State::load(),
         restore: Some(restore),
-        session_root: (options.headless.is_none() && !options.no_session)
+        session_root: (options.headless.is_none() && !options.no_session && remember)
             .then(|| session.root.clone()),
         more_roots: Vec::new(),
         workspace: Some(name.to_owned()),
@@ -576,13 +582,14 @@ fn start_workspace(
 /// project root, which is the session's folder for one.
 fn start_session(
     options: &Options,
+    remember: bool,
     languages: &Languages,
     docs: &[Document],
     root: PathBuf,
     warnings: &mut Vec<String>,
 ) -> (PathBuf, app::Startup) {
     let state = State::load();
-    let Some(folder) = plan_session(options, &state, docs, &root) else {
+    let Some(folder) = plan_session(options, remember, &state, docs, &root) else {
         let startup = app::Startup {
             state,
             restore: None,
@@ -612,6 +619,28 @@ fn start_session(
         workspace: None,
     };
     (folder, startup)
+}
+
+/// What this run restores and saves: the named workspace with
+/// `--workspace`, else the session [`start_session`] picks. `remember` is
+/// the config's `remember_workspace`. Returns the project root.
+fn plan_startup(
+    options: &Options,
+    remember: bool,
+    languages: &Languages,
+    docs: &[Document],
+    (root, more_roots): (PathBuf, Vec<PathBuf>),
+    warnings: &mut Vec<String>,
+) -> (PathBuf, app::Startup) {
+    if let Some(name) = &options.workspace {
+        let session = load_workspace(name);
+        let startup = start_workspace(options, remember, languages, name, &session, warnings);
+        (session.root, startup)
+    } else {
+        let (root, mut startup) = start_session(options, remember, languages, docs, root, warnings);
+        startup.more_roots = more_roots;
+        (root, startup)
+    }
 }
 
 fn main() {
@@ -649,15 +678,14 @@ fn main() {
     warnings.extend(language_warnings);
     warnings.extend(io::set_encoding_rules(&config.encodings));
     let (docs, root, more_roots) = open_files(&options, &languages);
-    let (root, startup) = if let Some(name) = &options.workspace {
-        let session = load_workspace(name);
-        let startup = start_workspace(&options, &languages, name, &session, &mut warnings);
-        (session.root, startup)
-    } else {
-        let (root, mut startup) = start_session(&options, &languages, &docs, root, &mut warnings);
-        startup.more_roots = more_roots;
-        (root, startup)
-    };
+    let (root, startup) = plan_startup(
+        &options,
+        config.remember_workspace,
+        &languages,
+        &docs,
+        (root, more_roots),
+        &mut warnings,
+    );
     log::debug!(
         "startup: config and {} file(s) loaded at {:?}",
         docs.len(),

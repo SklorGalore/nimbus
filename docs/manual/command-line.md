@@ -19,6 +19,11 @@ What you name also decides whether Nimbus uses a
 | `nimbus FILE...` (with or without a folder), `--diff`, `--merge` | Just those files. | Left alone. |
 | `nimbus --no-session` | An empty untitled tab, with the current folder (or the folder you name) as the project. | Neither restored nor saved; recent files and the window position are not saved either. |
 
+With `remember_workspace = false` in the
+[config](settings.md#top-level), `nimbus` and `nimbus FOLDER` start
+like `--no-session` (one empty tab, no session restored or saved), while
+recent files and the window position are still remembered.
+
 The testing options below (`--headless`, `--screenshot`, `--smoke`,
 `--bench-typing`) never save anything Nimbus remembers, so measuring
 does not overwrite your session.

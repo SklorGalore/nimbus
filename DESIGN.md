@@ -463,7 +463,8 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
   expanded folders, the sidebar's mode) are remembered in `state.toml`
   beside the config. Nimbus never writes the user's `config.toml`.
   `nimbus FOLDER` and `nimbus` alone restore a session; `nimbus FILE` and
-  `--no-session` neither restore nor save one.
+  `--no-session` neither restore nor save one, and neither does any run
+  with `remember_workspace = false` (recents and window state still kept).
 - **Find / replace** (`Primary+F`, `Primary+H` on Windows and Linux,
   `Primary+Alt+F` on macOS where `Cmd+H` hides the app): an inline bar at the
   top of the view, incremental, with match count and regex and case toggles.
