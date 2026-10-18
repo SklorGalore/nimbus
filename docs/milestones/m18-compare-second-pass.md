@@ -140,8 +140,12 @@ be added.
 | 50 MB one-line file against a copy with 5 edits (`one_line_bench`) | under 2 s | 381 ms, 5 hunks over 50,764 pieces |
 | Folder compare of 100,000 files, 300 differing (`folder_compare` bench) | under 2 s | 0.96 s and 1.13 s; first row after 17–30 ms |
 
-Startup and binary size: no new dependency and no startup work (the
-folder walk and git run only when asked); not re-measured here.
+Startup: `--smoke` on the owner's M5 Pro gave 143–144 ms warm (three
+runs), under the 500 ms budget and in line with M1's 116–132 ms. The first
+run after the build took 632 ms, all of it before our code drew anything
+(window and GPU ready in 301 ms against 83–88 ms warm): macOS warming its
+caches for a new binary, not M18 work. No new dependency and no startup
+work (the folder walk and git run only when asked).
 
 What landed, and where:
 
