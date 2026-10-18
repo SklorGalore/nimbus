@@ -1330,7 +1330,7 @@ impl App {
                 let tab = &mut self.tabs[self.active];
                 let on = !tab.view.wrap;
                 tab.view.set_wrap(on);
-                tab.doc.preferred_column = None;
+                tab.doc.carets.preferred_column = None;
                 self.say(if on { "Soft wrap on" } else { "Soft wrap off" }, false);
                 Ok(())
             }
@@ -1477,7 +1477,7 @@ impl App {
         let pos = t.line_to_byte(line.min(t.len_lines().saturating_sub(1)));
         let doc = self.doc_mut();
         doc.click(pos, false);
-        doc.preferred_column = None;
+        doc.carets.preferred_column = None;
         self.changed(true);
     }
 
@@ -4249,7 +4249,7 @@ fn headless_cursors(options: &Options, doc: &mut Document) {
         .iter()
         .map(|&p| nimbus_core::Selection::cursor(nimbus_core::movement::clamp(t, p)))
         .collect();
-    doc.selections = nimbus_core::Selections::from_vec(sels, options.cursors.len() - 1);
+    doc.carets.selections = nimbus_core::Selections::from_vec(sels, options.cursors.len() - 1);
 }
 
 /// `--diff A B` headless: the compare, diffed on this thread.

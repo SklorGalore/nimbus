@@ -723,17 +723,18 @@ impl View {
     fn selected_chars(&mut self, doc: &Document) -> usize {
         if let Some((v, sels, n)) = &self.selected_chars
             && *v == doc.version
-            && *sels == doc.selections
+            && *sels == doc.carets.selections
         {
             return *n;
         }
         let t = &doc.buffer;
         let n = doc
+            .carets
             .selections
             .iter()
             .map(|s| t.slice(s.range()).chars().count())
             .sum();
-        self.selected_chars = Some((doc.version, doc.selections.clone(), n));
+        self.selected_chars = Some((doc.version, doc.carets.selections.clone(), n));
         n
     }
 
@@ -752,7 +753,7 @@ impl View {
         out.clear();
         let t = &doc.buffer;
         let sel = doc.selection();
-        let count = doc.selections.count();
+        let count = doc.carets.selections.count();
         if count > 1 {
             let _ = write!(out, "{count} cursors   ");
         }
@@ -994,7 +995,7 @@ impl View {
     ) {
         let t = &doc.buffer;
         let cursor = doc.cursor();
-        let selections = doc.selections.as_slice();
+        let selections = doc.carets.selections.as_slice();
         let brackets = self.bracket_pair(doc);
         self.cache.next_frame();
         self.cursor_at = None;
@@ -1100,7 +1101,7 @@ impl View {
         let t = &doc.buffer;
         let lh = layout.metrics.line_height;
         let cursor = doc.cursor();
-        let selections = doc.selections.as_slice();
+        let selections = doc.carets.selections.as_slice();
         let brackets = self.bracket_pair(doc);
         self.cache.next_frame();
         self.cursor_at = None;
@@ -2229,7 +2230,7 @@ mod tests {
             v.status_info(&d, 4),
             "5 selected   Ln 2, Col 14   Tabs   CRLF   UTF-8"
         );
-        d.selections =
+        d.carets.selections =
             nimbus_core::Selections::from_vec(vec![Selection::cursor(0), Selection::cursor(12)], 0);
         assert_eq!(
             v.status_info(&d, 4),

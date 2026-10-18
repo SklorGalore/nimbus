@@ -78,7 +78,7 @@ impl Document {
         let Batch { items, after } = batch;
         if items.is_empty() {
             return Ok(match after {
-                Some(after) if after != self.selections => {
+                Some(after) if after != self.carets.selections => {
                     self.set_selections(after);
                     Outcome::Done
                 }
@@ -107,15 +107,16 @@ impl Document {
             anchor: movement::clamp(t, s.anchor),
             head: movement::clamp(t, s.head),
         });
-        self.selections = after;
-        self.goals.clear();
-        self.preferred_column = None;
-        self.pairs = None;
+        self.carets.selections = after;
+        self.carets.goals.clear();
+        self.carets.preferred_column = None;
+        self.carets.pairs = None;
     }
 
     /// Whether the selected lines are small enough for a line operation.
     fn within_limit(&self) -> Result<(), Outcome> {
-        Batch::check_size(&self.buffer, &self.selections, LINE_OP_LIMIT).map_err(Outcome::from)
+        Batch::check_size(&self.buffer, &self.carets.selections, LINE_OP_LIMIT)
+            .map_err(Outcome::from)
     }
 
     /// Duplicate the selection, or the cursor's line.
@@ -127,8 +128,12 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let batch = lines::duplicate(&self.buffer, &self.selections, self.line_ending.as_str())
-            .into_owned();
+        let batch = lines::duplicate(
+            &self.buffer,
+            &self.carets.selections,
+            self.line_ending.as_str(),
+        )
+        .into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -141,7 +146,7 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let batch = lines::move_lines(&self.buffer, &self.selections, down).into_owned();
+        let batch = lines::move_lines(&self.buffer, &self.carets.selections, down).into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -154,7 +159,7 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let batch = lines::delete_lines(&self.buffer, &self.selections).into_owned();
+        let batch = lines::delete_lines(&self.buffer, &self.carets.selections).into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -167,7 +172,7 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let batch = lines::join_lines(&self.buffer, &self.selections).into_owned();
+        let batch = lines::join_lines(&self.buffer, &self.carets.selections).into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -179,7 +184,7 @@ impl Document {
     pub fn insert_line(&mut self, above: bool) -> Result<Outcome, EditError> {
         let batch = lines::insert_line(
             &self.buffer,
-            &self.selections,
+            &self.carets.selections,
             self.line_ending.as_str(),
             above,
         )
@@ -189,7 +194,7 @@ impl Document {
 
     /// Select the cursor's line; pressed again, the next line too.
     pub fn select_line(&mut self) {
-        let after = lines::select_lines(&self.buffer, &self.selections);
+        let after = lines::select_lines(&self.buffer, &self.carets.selections);
         self.set_selections(after);
         self.history.seal();
     }
@@ -207,7 +212,7 @@ impl Document {
         let Some(token) = self.comment_tokens.line else {
             return self.toggle_block_comment();
         };
-        let batch = comment::toggle_line(&self.buffer, &self.selections, token).into_owned();
+        let batch = comment::toggle_line(&self.buffer, &self.carets.selections, token).into_owned();
         self.apply_batch(batch, (Bias::Before, Bias::After))
     }
 
@@ -223,20 +228,21 @@ impl Document {
         let Some(tokens) = self.comment_tokens.block else {
             return Ok(Outcome::NoComment);
         };
-        let batch = comment::toggle_block(&self.buffer, &self.selections, tokens).into_owned();
+        let batch =
+            comment::toggle_block(&self.buffer, &self.carets.selections, tokens).into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
     /// Grow every selection one step: word, pair, line, everything.
     pub fn expand_selection(&mut self) -> Outcome {
         let t = &self.buffer;
-        let before = self.selections.clone();
+        let before = self.carets.selections.clone();
         let mut after = before.clone();
         after.transform(|_, s| expand(t, s, BRACKET_LIMIT).unwrap_or(s));
         if after == before {
             return Outcome::Nothing;
         }
-        self.expand_stack.push((before, after.clone()));
+        self.carets.expand_stack.push((before, after.clone()));
         self.set_selections(after);
         self.history.seal();
         Outcome::Done
@@ -244,14 +250,14 @@ impl Document {
 
     /// Undo the last Expand Selection, if nothing else moved since.
     pub fn shrink_selection(&mut self) -> Outcome {
-        match self.expand_stack.pop() {
-            Some((before, after)) if after == self.selections => {
+        match self.carets.expand_stack.pop() {
+            Some((before, after)) if after == self.carets.selections => {
                 self.set_selections(before);
                 self.history.seal();
                 Outcome::Done
             }
             _ => {
-                self.expand_stack.clear();
+                self.carets.expand_stack.clear();
                 Outcome::Nothing
             }
         }
@@ -269,7 +275,7 @@ impl Document {
     /// Move each cursor to the bracket pairing with the one next to it,
     /// or with `select`, select from one bracket to the other.
     pub fn matching_bracket(&mut self, select: bool) -> Outcome {
-        let before = self.selections.clone();
+        let before = self.carets.selections.clone();
         let mut after = before.clone();
         let mut moved = false;
         for i in 0..after.count() {
@@ -311,7 +317,8 @@ impl Document {
         if self.selected_len() > LINE_OP_LIMIT {
             return Ok(Outcome::TooLarge);
         }
-        let batch = transform::change_case(&self.buffer, &self.selections, case).into_owned();
+        let batch =
+            transform::change_case(&self.buffer, &self.carets.selections, case).into_owned();
         self.apply_batch(batch, (Bias::Before, Bias::After))
     }
 
@@ -327,7 +334,7 @@ impl Document {
         }
         let batch = transform::rewrite_lines(
             &self.buffer,
-            &self.selections,
+            &self.carets.selections,
             op,
             self.line_ending.as_str(),
         )
@@ -345,14 +352,15 @@ impl Document {
         if let Err(o) = self.whole_or_selected_within_limit() {
             return Ok(o);
         }
-        let batch = transform::trim_trailing(&self.buffer, &self.selections).into_owned();
+        let batch = transform::trim_trailing(&self.buffer, &self.carets.selections).into_owned();
         self.apply_batch(batch, (Bias::Before, Bias::Before))
     }
 
     /// The limit check for operations that take the whole text when
     /// nothing is selected.
     fn whole_or_selected_within_limit(&self) -> Result<(), Outcome> {
-        let whole = self.selections.count() == 1 && self.selections.primary().is_empty();
+        let whole =
+            self.carets.selections.count() == 1 && self.carets.selections.primary().is_empty();
         if whole {
             if self.buffer.len_bytes() > LINE_OP_LIMIT {
                 return Err(Outcome::TooLarge);
@@ -391,7 +399,7 @@ impl Document {
             let col = movement::column_of(t, r.start, indent.width);
             Some((r, Cow::Owned(indent.to_next_stop(col).into_owned())))
         });
-        self.pairs = None;
+        self.carets.pairs = None;
         self.apply_each(items, (Bias::After, Bias::After)).map(drop)
     }
 
@@ -409,7 +417,7 @@ impl Document {
         let mut after = Vec::new();
         let mut grown = 0usize;
         let mut items: Vec<(Range<usize>, Cow<'_, str>)> = Vec::new();
-        for s in self.selections.iter() {
+        for s in self.carets.selections.iter() {
             let t: &dyn Text = &self.buffer;
             let r = s.range();
             let line_start = movement::line_start(t, r.start);
@@ -440,8 +448,8 @@ impl Document {
             after.push(Selection::cursor(cursor));
             items.push((r, Cow::Owned(text)));
         }
-        let after = Selections::from_vec(after, self.selections.primary_index());
-        self.pairs = None;
+        let after = Selections::from_vec(after, self.carets.selections.primary_index());
+        self.carets.pairs = None;
         self.apply_each(items, (Bias::After, Bias::After))?;
         self.set_selections(after);
         Ok(())
@@ -461,7 +469,7 @@ impl Document {
     pub fn type_text(&mut self, text: &str, auto_pairs: bool) -> Result<(), EditError> {
         let mut bytes = text.bytes();
         let (Some(c), None) = (bytes.next(), bytes.next()) else {
-            self.pairs = None;
+            self.carets.pairs = None;
             return self.insert(text);
         };
         let pair = PAIRS.iter().find(|&&(open, _)| open == c);
@@ -477,12 +485,12 @@ impl Document {
             let inside = self.pairs_valid();
             self.insert(text)?;
             if let Some(depth) = inside {
-                self.pairs = Some((self.selections.clone(), depth));
+                self.carets.pairs = Some((self.carets.selections.clone(), depth));
             }
             return Ok(());
         };
         let t: &dyn Text = &self.buffer;
-        let all_selected = self.selections.iter().all(|s| !s.is_empty());
+        let all_selected = self.carets.selections.iter().all(|s| !s.is_empty());
         if all_selected {
             return self.wrap_selections(open, close);
         }
@@ -499,8 +507,8 @@ impl Document {
             let prev_ok = !quote || prev.is_none_or(|p| !(p.is_ascii_alphanumeric() || p == close));
             s.is_empty() && next_ok && prev_ok
         };
-        if !self.selections.iter().all(fits) {
-            self.pairs = None;
+        if !self.carets.selections.iter().all(fits) {
+            self.carets.pairs = None;
             return self.insert(text);
         }
         let depth = self.pairs_valid().unwrap_or(0) + 1;
@@ -508,13 +516,13 @@ impl Document {
         let both = std::str::from_utf8(&both).unwrap_or(text);
         let items = self.each(|_, s| Some((s.range(), Cow::Borrowed(both))));
         let mut after = Vec::new();
-        for (i, s) in self.selections.iter().enumerate() {
+        for (i, s) in self.carets.selections.iter().enumerate() {
             after.push(Selection::cursor(s.head + 1 + 2 * i));
         }
-        let after = Selections::from_vec(after, self.selections.primary_index());
+        let after = Selections::from_vec(after, self.carets.selections.primary_index());
         self.apply_each(items, (Bias::After, Bias::After))?;
         self.set_selections(after);
-        self.pairs = Some((self.selections.clone(), depth));
+        self.carets.pairs = Some((self.carets.selections.clone(), depth));
         Ok(())
     }
 
@@ -522,12 +530,12 @@ impl Document {
     /// still the ones the last typing step left and each closer is still
     /// there.
     fn pairs_valid(&self) -> Option<usize> {
-        let (recorded, depth) = self.pairs.as_ref()?;
-        if *depth == 0 || *recorded != self.selections {
+        let (recorded, depth) = self.carets.pairs.as_ref()?;
+        if *depth == 0 || *recorded != self.carets.selections {
             return None;
         }
         let t = &self.buffer;
-        let closers = self.selections.iter().all(|s| {
+        let closers = self.carets.selections.iter().all(|s| {
             s.is_empty()
                 && t.byte_at(s.head)
                     .is_some_and(|b| PAIRS.iter().any(|&(_, close)| close == b))
@@ -542,13 +550,18 @@ impl Document {
             return false;
         };
         let t = &self.buffer;
-        if !self.selections.iter().all(|s| t.byte_at(s.head) == Some(c)) {
+        if !self
+            .carets
+            .selections
+            .iter()
+            .all(|s| t.byte_at(s.head) == Some(c))
+        {
             return false;
         }
-        let mut after = self.selections.clone();
+        let mut after = self.carets.selections.clone();
         after.transform(|_, s| Selection::cursor(s.head + 1));
-        self.selections = after;
-        self.pairs = (depth > 1).then(|| (self.selections.clone(), depth - 1));
+        self.carets.selections = after;
+        self.carets.pairs = (depth > 1).then(|| (self.carets.selections.clone(), depth - 1));
         self.history.seal();
         true
     }
@@ -561,7 +574,7 @@ impl Document {
         );
         let mut items: Vec<(Range<usize>, Cow<'_, str>)> = Vec::new();
         let mut after = Vec::new();
-        for (i, s) in self.selections.iter().enumerate() {
+        for (i, s) in self.carets.selections.iter().enumerate() {
             let r = s.range();
             items.push((r.start..r.start, Cow::Borrowed(open)));
             items.push((r.end..r.end, Cow::Borrowed(close)));
@@ -579,7 +592,7 @@ impl Document {
                 }
             });
         }
-        let after = Selections::from_vec(after, self.selections.primary_index());
+        let after = Selections::from_vec(after, self.carets.selections.primary_index());
         self.history.seal();
         self.apply_each(items, (Bias::After, Bias::After))?;
         self.set_selections(after);
@@ -594,7 +607,7 @@ impl Document {
         let t: &dyn Text = &self.buffer;
         let closer = std::str::from_utf8(std::slice::from_ref(&c)).unwrap_or("");
         let mut items: Vec<(Range<usize>, Cow<'_, str>)> = Vec::new();
-        for s in self.selections.iter() {
+        for s in self.carets.selections.iter() {
             if !s.is_empty() {
                 return Ok(false);
             }
@@ -620,7 +633,7 @@ impl Document {
             }
             items.push((line_start..s.head, Cow::Owned(format!("{want}{closer}"))));
         }
-        self.pairs = None;
+        self.carets.pairs = None;
         self.apply_each(items, (Bias::After, Bias::After))?;
         Ok(true)
     }
@@ -634,7 +647,7 @@ impl Document {
     pub fn backspace(&mut self) -> Result<bool, EditError> {
         if let Some(depth) = self.pairs_valid() {
             let t = &self.buffer;
-            let empty_pair = self.selections.iter().all(|s| {
+            let empty_pair = self.carets.selections.iter().all(|s| {
                 let prev = s.head.checked_sub(1).and_then(|p| t.byte_at(p));
                 let next = t.byte_at(s.head);
                 PAIRS
@@ -644,11 +657,12 @@ impl Document {
             if empty_pair {
                 let items = self.each(|_, s| Some((s.head - 1..s.head + 1, Cow::Borrowed(""))));
                 let changed = self.apply_each(items, (Bias::After, Bias::After))?;
-                self.pairs = (depth > 1).then(|| (self.selections.clone(), depth - 1));
+                self.carets.pairs =
+                    (depth > 1).then(|| (self.carets.selections.clone(), depth - 1));
                 return Ok(changed);
             }
         }
-        self.pairs = None;
+        self.carets.pairs = None;
         self.delete_back()
     }
 
@@ -694,14 +708,14 @@ mod tests {
     }
 
     fn cursors(d: &mut Document, at: &[usize]) {
-        d.selections = Selections::from_vec(
+        d.carets.selections = Selections::from_vec(
             at.iter().map(|&p| Selection::cursor(p)).collect(),
             at.len() - 1,
         );
     }
 
     fn heads(d: &Document) -> Vec<usize> {
-        d.selections.iter().map(|s| s.head).collect()
+        d.carets.selections.iter().map(|s| s.head).collect()
     }
 
     fn rust(d: &mut Document) {
