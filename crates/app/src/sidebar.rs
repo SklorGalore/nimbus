@@ -8,11 +8,13 @@ use std::path::{Path, PathBuf};
 
 use nimbus_render::Gpu;
 
+use crate::document::Document;
 use crate::input::Motion;
 use crate::search_panel::{self, Panel};
 use crate::theme::Ui;
 use crate::tree::{ListRequest, NodeId, Tree};
-use crate::view::Layout;
+use crate::tree_ops::{self, EditKind};
+use crate::view::{self, Layout};
 
 /// Default width in logical pixels (multiplied by the scale factor).
 pub const DEFAULT_WIDTH: f32 = 240.0;
@@ -53,6 +55,23 @@ pub struct Sidebar {
     pub tree: Tree,
     /// Scroll left over from trackpad deltas smaller than a row.
     wheel: f32,
+    /// The inline field naming a new file or folder, or renaming one.
+    pub edit: Option<TreeEdit>,
+}
+
+/// The tree's inline text field: New File, New Folder or Rename. The field
+/// is a [`Document`], like the find bar's, so every editing key works in it.
+#[derive(Debug)]
+pub struct TreeEdit {
+    /// What the name is for.
+    pub kind: EditKind,
+    /// The folder the name goes in.
+    pub dir: PathBuf,
+    /// Rename: the node renamed. New: the folder whose row the new row
+    /// follows, `None` for the top of the tree.
+    pub node: Option<NodeId>,
+    /// The name being typed.
+    pub field: Document,
 }
 
 /// What a click or key in the sidebar asks the app to do.
@@ -80,7 +99,52 @@ impl Sidebar {
             scroll: 0,
             tree: Tree::new(root),
             wheel: 0.0,
+            edit: None,
         }
+    }
+
+    /// Start naming a new file or folder in the selected folder (the
+    /// selected file's folder, or the root), or renaming the selected node.
+    /// Returns listings to start (the folder opens), or `None` when there
+    /// is nothing to rename.
+    pub fn begin_edit(&mut self, kind: EditKind) -> Option<Vec<ListRequest>> {
+        let selected = self.tree.selected.filter(|&s| self.tree.node(s).is_some());
+        let mut field = Document::untitled();
+        let mut requests = Vec::new();
+        let (dir, node) = if kind == EditKind::Rename {
+            let id = selected?;
+            let n = self.tree.node(id)?;
+            let dir = n.path.parent()?.to_path_buf();
+            let _ = field.insert(&n.name);
+            field.select(tree_ops::stem_range(&n.name, n.is_dir));
+            (dir, Some(id))
+        } else {
+            match selected.and_then(|s| self.tree.node(s).map(|n| (s, n))) {
+                Some((id, n)) if n.is_dir => {
+                    let dir = n.path.clone();
+                    requests = self.tree.set_expanded(id, true);
+                    (dir, Some(id))
+                }
+                Some((id, n)) => {
+                    let parent = self.tree.parent(id);
+                    let dir = n
+                        .path
+                        .parent()
+                        .map_or_else(|| self.tree.root().to_path_buf(), Path::to_path_buf);
+                    (dir, parent)
+                }
+                None => (self.tree.root().to_path_buf(), None),
+            }
+        };
+        self.edit = Some(TreeEdit {
+            kind,
+            dir,
+            node,
+            field,
+        });
+        self.focused = true;
+        self.mode = Mode::Files;
+        Some(requests)
     }
 
     /// Width in physical pixels at `scale`, or 0 when hidden.
@@ -210,6 +274,8 @@ impl Sidebar {
     /// tab); in the Search panel, whatever the panel says.
     pub fn click(&mut self, layout: &Layout, x: f32, y: f32) -> Outcome {
         self.focused = true;
+        // A click anywhere drops an unfinished name.
+        self.edit = None;
         if let Some(mode) = Self::header_tab_at(layout, x, y) {
             self.mode = mode;
             return Outcome::default();
@@ -386,15 +452,55 @@ pub fn draw(
         return;
     }
 
-    let rows = sidebar.tree.rows();
-    let mut y = header;
-    for row in rows.iter().skip(sidebar.scroll) {
+    draw_tree(gpu, ui, layout, sidebar, active, blink);
+    // The divider.
+    let line = layout.scale.round().max(1.0);
+    gpu.push_rect([w - line, 0.0], [line, bottom], ui.picker_border);
+    gpu.begin_layer(None);
+}
+
+/// The tree's rows below the header, with the name field when one is open:
+/// in place of the renamed row, or as a new row at the top of its folder.
+fn draw_tree(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    sidebar: &Sidebar,
+    active: Option<&Path>,
+    blink: bool,
+) {
+    let (cell, lh) = (layout.metrics.cell_width, layout.metrics.line_height);
+    let (w, pad, bottom) = (layout.left, layout.margin, layout.bottom);
+    let accent = (2.0 * layout.scale).round().max(1.0);
+    let cursor = sidebar.focused && blink;
+    let edit = sidebar.edit.as_ref();
+    let new_after = edit.filter(|e| e.kind != EditKind::Rename).map(|e| e.node);
+    let new_mark = match edit.map(|e| e.kind) {
+        Some(EditKind::NewFolder) => "▸",
+        _ => "",
+    };
+    let mut y = Sidebar::header_h(layout);
+    if let Some(e) = edit.filter(|_| new_after == Some(None) && sidebar.scroll == 0) {
+        draw_edit_row(gpu, ui, layout, e, (y, 0), new_mark, cursor);
+        y += lh;
+    }
+    for row in sidebar.tree.rows().iter().skip(sidebar.scroll) {
         if y >= bottom {
             break;
         }
         let Some(node) = sidebar.tree.node(row.node) else {
             continue;
         };
+        let mark = match (node.is_dir, node.expanded) {
+            (true, true) => "▾",
+            (true, false) => "▸",
+            (false, _) => "",
+        };
+        if let Some(e) = edit.filter(|e| e.kind == EditKind::Rename && e.node == Some(row.node)) {
+            draw_edit_row(gpu, ui, layout, e, (y, row.depth), mark, cursor);
+            y += lh;
+            continue;
+        }
         if sidebar.tree.selected == Some(row.node) {
             let color = if sidebar.focused {
                 ui.picker_selected
@@ -407,17 +513,34 @@ pub fn draw(
             gpu.push_rect([0.0, y], [accent, lh], ui.tab_accent);
         }
         let x = pad + cols(row.depth * 2) * cell;
-        if node.is_dir {
-            let mark = if node.expanded { "▾" } else { "▸" };
-            gpu.push_text_line([x, y], mark, ui.gutter);
-        }
+        gpu.push_text_line([x, y], mark, ui.gutter);
         gpu.push_text_span([x + 2.0 * cell, y], &node.name, 0, ui.text, 0.0);
         y += lh;
+        if let Some(e) = edit.filter(|_| new_after == Some(Some(row.node))) {
+            draw_edit_row(gpu, ui, layout, e, (y, row.depth + 1), new_mark, cursor);
+            y += lh;
+        }
     }
-    // The divider.
-    let line = layout.scale.round().max(1.0);
-    gpu.push_rect([w - line, 0.0], [line, bottom], ui.picker_border);
-    gpu.begin_layer(None);
+}
+
+/// One tree row holding the name field, at `(y, depth)`, after a folder
+/// `mark` (or none).
+fn draw_edit_row(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    edit: &TreeEdit,
+    (y, depth): (f32, usize),
+    mark: &str,
+    cursor: bool,
+) {
+    let cell = layout.metrics.cell_width;
+    let x = layout.margin + cols(depth * 2) * cell;
+    gpu.push_text_line([x, y], mark, ui.gutter);
+    let at = [x + 2.0 * cell, y];
+    let width = (layout.left - at[0] - layout.margin).max(4.0 * cell);
+    gpu.push_rect(at, [width, layout.metrics.line_height], ui.field);
+    view::draw_field(gpu, ui, &edit.field, at, width, layout, cursor);
 }
 
 #[cfg(test)]
@@ -482,6 +605,34 @@ mod tests {
         assert_eq!(s.tree.rows().len(), 2);
         s.key(Some(Motion::DocEnd), false, &l).unwrap();
         assert_eq!(selected(&s), "README");
+    }
+
+    #[test]
+    fn name_fields_go_in_the_selected_folder() {
+        let l = layout();
+        let mut s = sidebar();
+        assert!(s.begin_edit(EditKind::Rename).is_none(), "nothing selected");
+        // Nothing selected: a new file goes at the top of the root.
+        s.begin_edit(EditKind::NewFile).unwrap();
+        let e = s.edit.take().unwrap();
+        assert_eq!((e.dir, e.node), (PathBuf::from("/p"), None));
+        // A folder selected: inside it, which opens.
+        s.key(Some(Motion::Down), false, &l).unwrap();
+        let req = s.begin_edit(EditKind::NewFolder).unwrap();
+        assert_eq!(req.len(), 1, "src is listed");
+        let e = s.edit.take().unwrap();
+        assert_eq!(e.dir, PathBuf::from("/p/src"));
+        // A file selected: beside it; Rename starts with its name, the
+        // part before the extension selected.
+        s.tree.loaded(&req[0], vec![entry("main.rs", false)]);
+        s.key(Some(Motion::Down), false, &l).unwrap();
+        s.begin_edit(EditKind::NewFile).unwrap();
+        assert_eq!(s.edit.take().unwrap().dir, PathBuf::from("/p/src"));
+        s.begin_edit(EditKind::Rename).unwrap();
+        let e = s.edit.as_ref().unwrap();
+        assert_eq!(e.field.selected_text().as_deref(), Some("main"));
+        assert_eq!(e.dir, PathBuf::from("/p/src"));
+        assert!(s.focused);
     }
 
     #[test]

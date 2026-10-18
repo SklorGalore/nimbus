@@ -144,6 +144,9 @@ pub struct Tree {
     /// Folders to open as soon as they are listed: a restored session's
     /// expanded folders, which load one level at a time.
     expand_later: HashSet<PathBuf>,
+    /// Select this path when a listing shows it: a file just created or
+    /// renamed, which the tree learns about from the disk.
+    select_later: Option<PathBuf>,
 }
 
 /// The root node's index.
@@ -179,6 +182,7 @@ impl Tree {
             reveal: None,
             selected: None,
             expand_later: HashSet::new(),
+            select_later: None,
         }
     }
 
@@ -333,6 +337,12 @@ impl Tree {
             self.expand_later
                 .retain(|p| p.parent() != Some(req.path.as_path()));
         }
+        if let Some(want) = &self.select_later
+            && let Some(&id) = children.iter().find(|&&c| &self.nodes[c].path == want)
+        {
+            self.selected = Some(id);
+            self.select_later = None;
+        }
         let node = &mut self.nodes[req.node];
         node.children = Some(children);
         node.loading = false;
@@ -437,6 +447,13 @@ impl Tree {
     pub fn expand_later(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
         self.expand_later
             .extend(paths.into_iter().filter(|p| p.starts_with(&self.root)));
+    }
+
+    /// Select `path` once a listing shows it, and list its folder again now
+    /// (after our own change to it, so it need not wait for the watcher).
+    pub fn select_when_listed(&mut self, path: &Path) -> Vec<ListRequest> {
+        self.select_later = Some(path.to_path_buf());
+        self.affected_by(path)
     }
 
     /// The folders shown open (not the root), and any still waiting to

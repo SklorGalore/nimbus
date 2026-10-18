@@ -70,6 +70,9 @@ pub(super) struct Workspace {
     pub(super) restore_started: bool,
     /// Tabs closed in this run, most recent last, for Reopen Closed Tab.
     pub(super) closed: Vec<(PathBuf, Pending)>,
+    /// Paths being renamed from the tree: their disappearance on disk is
+    /// the rename, not a deletion, until it reports back.
+    pub(super) moving: Vec<PathBuf>,
 }
 
 /// Most closed tabs remembered for Reopen Closed Tab.
@@ -210,8 +213,8 @@ impl App {
         self.session_changed();
     }
 
-    /// Commands about recent files, closed tabs and sessions. Returns
-    /// `false` for any other.
+    /// Commands about recent files, closed tabs and sessions, then the
+    /// tree's and the compare view's. Returns `false` for any other.
     pub(super) fn run_workspace_command(&mut self, cmd: Command<'_>) -> bool {
         match cmd {
             Command::OpenRecent => self.open_picker(Kind::Recent),
@@ -222,7 +225,7 @@ impl App {
                 self.say("Recent files cleared", false);
             }
             Command::ReopenLastSession => self.reopen_last_session(),
-            _ => return false,
+            _ => return self.run_tree_command(cmd) || self.run_compare_command(cmd),
         }
         self.changed(false);
         true

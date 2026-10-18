@@ -152,6 +152,16 @@ pub enum Command<'a> {
     GoToTab(usize),
     /// Open the fuzzy file opener.
     QuickOpen,
+    /// Tree: name a new file in the selected folder.
+    TreeNewFile,
+    /// Tree: name a new folder in the selected folder.
+    TreeNewFolder,
+    /// Tree: rename the selected file or folder.
+    TreeRename,
+    /// Tree: move the selected file or folder to the trash.
+    TreeDelete,
+    /// Tree: show the selected file in Finder, Explorer or the file manager.
+    TreeReveal,
     /// Open the list of recently opened files.
     OpenRecent,
     /// Open the last closed tab again, with its cursor.

@@ -53,6 +53,7 @@ use crate::view::{self, Decorations, Layout, PickerView, Preedit, TabLabel, View
 use crate::watch::{Change, Watch};
 use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
 
+mod tree_ops;
 mod workspace;
 
 pub use workspace::Startup;
@@ -97,6 +98,8 @@ pub enum AppEvent {
     Restored(PathBuf, Result<Box<Document>, String>),
     /// Recent files found missing on a worker.
     RecentMissing(Vec<PathBuf>),
+    /// A file operation from the tree finished on its worker.
+    FileOp(crate::tree_ops::Op, Result<(), String>),
 }
 
 /// List a folder for the sidebar on its own thread.
@@ -567,6 +570,7 @@ impl App {
                 save_at: None,
                 restore_started: false,
                 closed: Vec::new(),
+                moving: Vec::new(),
             },
             resize_cursor: false,
             watching: false,
@@ -642,6 +646,10 @@ impl App {
 
     /// Something changed what is on screen.
     fn changed(&mut self, keep_cursor_visible: bool) {
+        // The tree's name field goes away with the keyboard.
+        if self.sidebar.edit.is_some() && !self.sidebar.focused {
+            self.sidebar.edit = None;
+        }
         if keep_cursor_visible && let Some(layout) = self.layout() {
             let tab_width = self.tab_width();
             let tab = &mut self.tabs[self.active];
@@ -671,6 +679,14 @@ impl App {
             && self.picker.is_none()
             && self.sidebar.mode == Mode::Search
             && self.run_search_panel(cmd)
+        {
+            self.changed(false);
+            return;
+        }
+        if self.sidebar.focused
+            && self.picker.is_none()
+            && self.sidebar.edit.is_some()
+            && self.run_tree_edit(cmd)
         {
             self.changed(false);
             return;
@@ -797,7 +813,7 @@ impl App {
                 self.quit(event_loop);
                 return true;
             }
-            _ => return self.run_workspace_command(cmd) || self.run_compare_command(cmd),
+            _ => return self.run_workspace_command(cmd),
         }
         self.changed(false);
         true
@@ -1513,7 +1529,9 @@ impl App {
             let Some(path) = tab.doc.canonical.as_deref() else {
                 continue;
             };
-            if !changes.iter().any(|c| c.path == path) {
+            if !changes.iter().any(|c| c.path == path)
+                || self.ws.moving.iter().any(|m| path.starts_with(m))
+            {
                 continue;
             }
             // A file written to over and over (a growing log) reloads at
@@ -1581,18 +1599,27 @@ impl App {
         let Some(layout) = self.layout() else {
             return false;
         };
+        let mac = cfg!(target_os = "macos");
         let (motion, enter) = match cmd {
+            // Finder's keys on macOS: Return renames, Command+Down (and
+            // Space) opens. Enter opens elsewhere, F2 renames everywhere.
+            Command::Newline if mac => return self.run_tree_command(Command::TreeRename),
+            Command::Move(Motion::DocEnd, false) | Command::Insert(" ") if mac => (None, true),
             Command::Move(m, _) => (Some(m), false),
             Command::Newline => (None, true),
             Command::Escape => {
                 self.sidebar.focused = false;
                 return true;
             }
+            // Delete, or Command+Backspace on macOS, trashes.
+            Command::DeleteForward => return self.run_tree_command(Command::TreeDelete),
+            Command::DeleteToLineStart if mac => {
+                return self.run_tree_command(Command::TreeDelete);
+            }
             Command::Insert(_)
             | Command::Tab
             | Command::Outdent
             | Command::DeleteBack
-            | Command::DeleteForward
             | Command::DeleteWordBack
             | Command::DeleteWordForward
             | Command::DeleteToLineStart
@@ -4372,6 +4399,7 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::Replaced(report) => self.replaced(report),
             AppEvent::Restored(path, doc) => self.restored_arrived(&path, doc),
             AppEvent::RecentMissing(gone) => self.recent_missing(&gone),
+            AppEvent::FileOp(op, result) => self.file_op_done(&op, result),
             AppEvent::WatchWarning(warning) => {
                 self.say(warning, true);
                 self.changed(false);

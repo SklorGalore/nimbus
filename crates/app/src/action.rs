@@ -165,6 +165,42 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::NONE,
     ),
     act(
+        "tree.newFile",
+        "New File in Tree…",
+        Command::TreeNewFile,
+        Keys::NONE,
+    ),
+    act(
+        "tree.newFolder",
+        "New Folder in Tree…",
+        Command::TreeNewFolder,
+        Keys::NONE,
+    ),
+    act(
+        "tree.rename",
+        "Rename in Tree…",
+        Command::TreeRename,
+        Keys::all(&["F2"]),
+    ),
+    act(
+        "tree.delete",
+        "Move to Trash",
+        Command::TreeDelete,
+        Keys::NONE,
+    ),
+    act(
+        "tree.reveal",
+        if cfg!(target_os = "macos") {
+            "Reveal in Finder"
+        } else if cfg!(target_os = "windows") {
+            "Reveal in Explorer"
+        } else {
+            "Reveal in File Manager"
+        },
+        Command::TreeReveal,
+        Keys::NONE,
+    ),
+    act(
         "session.reopenLast",
         "Reopen Last Session",
         Command::ReopenLastSession,

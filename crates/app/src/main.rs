@@ -30,6 +30,7 @@ mod sidebar;
 mod state;
 mod theme;
 mod tree;
+mod tree_ops;
 mod view;
 mod watch;
 

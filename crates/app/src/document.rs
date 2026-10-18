@@ -404,6 +404,17 @@ impl Document {
         }
     }
 
+    /// The file was moved to `path` (renamed in the tree): save there from
+    /// now on. Its contents did not change, so nothing is read again and
+    /// the edits and history stay.
+    pub fn moved_to(&mut self, path: PathBuf) {
+        if !self.placeholder {
+            self.canonical = Some(io::canonical(&path));
+            self.deleted = false;
+        }
+        self.path = Some(path);
+    }
+
     /// Whether this is a [`Document::placeholder`].
     #[must_use]
     pub fn is_placeholder(&self) -> bool {
