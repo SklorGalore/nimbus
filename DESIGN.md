@@ -467,6 +467,7 @@ it.
 | `memmap2`, `memchr` | 0.9, 2 | mapped buffer, newline scanning | M7 |
 | `fontdb` | 0.24 | system font discovery and fallback | M8 |
 | `imara-diff` | 0.2 | line diff (Myers) over our own tokens | M9 |
+| `ureq` | 3 | HTTPS for the update check; rustls with the system's certificate store | M15 |
 
 ## 8. Milestones
 
@@ -648,6 +649,7 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-17 | Up to three editor columns, no nesting; one file may be open in two columns, so documents and panes are split | §9, m13 |
 | 2026-10-17 | Grammars to add: C, Go, HTML, CSS, TSX, each measured against the 35 MB budget; Go to Symbol is `Primary+Shift+R` | §9, m14 |
 | 2026-10-17 | No signing accounts: builds stay unsigned and the README keeps its `xattr` step; update check off unless `check_updates = true`; checksums signed with `minisign` | §9, m15 |
+| 2026-10-17 | Update check over `ureq` with rustls and the platform verifier (+1.7 MB), the one JSON field scanned by hand; packages built by shell scripts and Inno Setup in the workflow, manifests generated from the tag | §7, m15 |
 | 2026-10-18 | M16–M21 drafted from what M9–M15 deferred and approved in order: rendering, encodings, compare, workspace and search, reading aids, foundations and 1.0 | §8, §9, backlog |
 | 2026-10-18 | Zoom remembered across sessions unless `remember_zoom = false`; Western encodings only, East Asian behind an off feature | §9, m16, m17 |
 | 2026-10-18 | "Compare with HEAD" through a git subprocess is the one exception to the git non-goal; workspace files may also live in a root as `.nimbus/workspace.toml` | §2, §9, m18, m19 |
