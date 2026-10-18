@@ -43,7 +43,7 @@ workspace = true
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 muda = { version = "0.21", default-features = false }
 
-# The app delegate that receives Finder's Open With (open_with.rs). The
+# The open-files method added to winit's app delegate (open_with.rs). The
 # same versions winit 0.30 already links, so they add almost nothing.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5.2"

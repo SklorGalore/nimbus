@@ -708,9 +708,9 @@ fn main() {
     log::debug!("startup: event loop ready at {:?}", started.elapsed());
 
     let proxy = event_loop.create_proxy();
-    // Kept alive until run_app returns: AppKit holds its delegate weakly.
+    // Finder's Open With and Dock drops (open_with.rs).
     #[cfg(target_os = "macos")]
-    let _open_with = open_with::install(proxy.clone());
+    open_with::install(proxy.clone());
     let mut app = App::new(
         options,
         started,
