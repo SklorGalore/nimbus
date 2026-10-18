@@ -23,8 +23,8 @@
 //! - Only the rows on screen are planned and drawn ([`Columns`]), and the
 //!   changed-word marks are worked out for those rows alone.
 //!
-//! M18 adds three things. A header row above the columns toggles the diff
-//! options (ignore whitespace, case, blank lines), which re-diff on the
+//! M18 adds three things. The diff options (ignore whitespace, case,
+//! blank lines), toggled in the sidebar's Compare tab, re-diff on the
 //! worker like a fresh compare. A text with lines over 4 KB is diffed in
 //! pieces ([`nimbus_core::split`]): such a pair always takes the layered
 //! [`compare`] path, recomputed after a pause, because the live diff
@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use nimbus_core::align::{Change, Folding, MAX_COLUMNS, Row, Rows};
 use nimbus_core::compare::{Comparison, Options, compare};
-use nimbus_core::diff::{DIFF_LIMIT, Hunk, Normalize, Whitespace};
+use nimbus_core::diff::{DIFF_LIMIT, Hunk, Normalize};
 use nimbus_core::live_diff::{LiveDiff, Side};
 use nimbus_core::split::{Splits, has_long_lines};
 use nimbus_core::{Buffer, Snapshot, Text};
@@ -65,7 +65,7 @@ pub enum Other {
     Missing,
 }
 
-/// A toggle in the compare view's header row.
+/// A compare option, toggled from the sidebar's Compare tab or the palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Toggle {
     /// Ignore whitespace: off, at the ends, everywhere.
@@ -403,21 +403,13 @@ impl Compare {
 
     /// Scroll by `dy` pixels (positive is down).
     pub fn scroll_by(&mut self, dy: f32, layout: &Layout) {
-        self.columns.scroll_by(dy, &Self::body(layout));
-    }
-
-    /// The columns' area: `layout` below the header row.
-    #[must_use]
-    pub fn body(layout: &Layout) -> Layout {
-        let mut body = *layout;
-        body.top = (body.top + layout.metrics.line_height).min(body.bottom);
-        body
+        self.columns.scroll_by(dy, layout);
     }
 
     /// Keep the right side's cursor on screen, opening a fold it is in.
     pub fn ensure_cursor_visible(&mut self, doc: &Document, cursor: usize, layout: &Layout) {
         let line = doc.buffer.byte_to_line(cursor);
-        self.columns.ensure_line_visible(line, &Self::body(layout));
+        self.columns.ensure_line_visible(line, layout);
     }
 
     /// Go to the next change after the cursor (or the current one).
@@ -439,9 +431,7 @@ impl Compare {
         layout: &Layout,
     ) -> Option<usize> {
         let line = doc.buffer.byte_to_line(cursor);
-        let start = self
-            .columns
-            .step_change(forward, line, &Self::body(layout))?;
+        let start = self.columns.step_change(forward, line, layout)?;
         // The cursor goes to the change's first line on the right, or to
         // the line after a pure removal; at the very end, the last line.
         let line = self
@@ -449,92 +439,6 @@ impl Compare {
             .live_line_from(start)
             .unwrap_or_else(|| doc.buffer.len_lines().saturating_sub(1));
         Some(doc.buffer.line_to_byte(line))
-    }
-
-    /// The header toggle at `(x, y)`, if the press is on one.
-    #[must_use]
-    pub fn header_hit(&self, layout: &Layout, x: f32, y: f32) -> Option<Toggle> {
-        let lh = layout.metrics.line_height;
-        if y < layout.top || y >= layout.top + lh {
-            return None;
-        }
-        self.header_items(layout)
-            .into_iter()
-            .find(|(_, range, _, _)| range.contains(&x))
-            .map(|(t, ..)| t)
-    }
-
-    /// The header's toggles: each with its button's x range, label and
-    /// whether on. A button is the label with one cell of padding each
-    /// side, so the whole box is clickable.
-    fn header_items(&self, layout: &Layout) -> Vec<(Toggle, Range<f32>, &'static str, bool)> {
-        let cell = layout.metrics.cell_width;
-        let n = self.normalize;
-        let items = [
-            (
-                Toggle::Whitespace,
-                match n.whitespace {
-                    Whitespace::Exact => "Ignore whitespace",
-                    Whitespace::Ends => "Ignore whitespace: ends",
-                    Whitespace::All => "Ignore whitespace: all",
-                },
-                n.whitespace != Whitespace::Exact,
-            ),
-            (Toggle::Case, "Ignore case", n.case),
-            (Toggle::BlankLines, "Ignore blank lines", n.blank_lines),
-            (Toggle::Unified, "Unified", self.unified),
-        ];
-        let mut x = layout.left + layout.margin;
-        items
-            .into_iter()
-            .map(|(t, label, on)| {
-                #[expect(clippy::cast_precision_loss, reason = "a short label's length")]
-                let w = (label.chars().count() + 2) as f32 * cell;
-                let item = (t, x..x + w, label, on);
-                x += w + cell;
-                item
-            })
-            .collect()
-    }
-
-    /// Draw the header row: each toggle a bordered button, filled with the
-    /// theme's "on" colour and underlined when on, so it reads as
-    /// something to click rather than a label.
-    fn draw_header(&self, gpu: &mut Gpu, layout: &Layout, theme: &Theme) {
-        let ui = theme.ui;
-        let lh = layout.metrics.line_height;
-        gpu.begin_layer(Some([
-            layout.left,
-            layout.top,
-            layout.width,
-            layout.top + lh,
-        ]));
-        gpu.push_rect(
-            [layout.left, layout.top],
-            [layout.width - layout.left, lh],
-            ui.tab_bar,
-        );
-        let accent = (2.0 * layout.scale).round().max(1.0);
-        let line = layout.scale.round().max(1.0);
-        let inset = (0.1 * lh).round();
-        let (top, h) = (layout.top + inset, lh - 2.0 * inset);
-        for (_, range, label, on) in self.header_items(layout) {
-            let (x, w) = (range.start, range.end - range.start);
-            gpu.push_rect([x, top], [w, h], ui.picker_border);
-            let fill = if on { ui.toggle_on } else { ui.field };
-            gpu.push_rect(
-                [x + line, top + line],
-                [w - 2.0 * line, h - 2.0 * line],
-                fill,
-            );
-            if on {
-                gpu.push_rect([x, top + h - accent], [w, accent], ui.tab_accent);
-            }
-            let color = if on { ui.text } else { ui.gutter };
-            let cell = layout.metrics.cell_width;
-            gpu.push_text_line([x + cell, layout.top], label, color);
-        }
-        gpu.begin_layer(None);
     }
 
     /// A click at `(x, y)`. `view` is the right side's view, which maps
@@ -548,8 +452,7 @@ impl Compare {
         x: f32,
         y: f32,
     ) -> Click {
-        self.columns
-            .click(doc, view, &Self::body(layout), tab_width, x, y)
+        self.columns.click(doc, view, layout, tab_width, x, y)
     }
 
     /// The summary for the status bar, followed by the editor's own
@@ -660,8 +563,6 @@ impl Compare {
         preedit: Option<&Preedit>,
         matches: (&[Range<usize>], Option<Range<usize>>),
     ) {
-        self.draw_header(gpu, layout, theme);
-        let layout = &Self::body(layout);
         self.plan(doc, layout, theme);
         let live = Live {
             cursor_visible,
@@ -945,13 +846,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn options_re_diff_and_the_header_toggles_them() {
+    fn options_re_diff() {
         let mut doc = Solo::from_text("fn a() {\n    x\n}\nY\n");
         let other = Document::from_text("fn a() {\n  x  \n}\ny\n");
         let mut c = Compare::start_sync(&mut doc, other, Other::Saved, Normalize::default());
         assert_eq!(c.columns.rows.changes(), 2);
         let n = Normalize {
-            whitespace: Whitespace::Ends,
+            whitespace: nimbus_core::Whitespace::Ends,
             case: true,
             blank_lines: false,
         };
@@ -966,20 +867,6 @@ pub(crate) mod tests {
         };
         assert!(c.receive(&doc, result));
         assert_eq!(c.columns.rows.changes(), 0, "{:?}", c.hunks());
-        // The header row sits above the columns; its first toggle is
-        // whitespace, its last unified.
-        let layout = layout();
-        let y = layout.top + 1.0;
-        let x0 = layout.left + layout.margin + 1.0;
-        assert_eq!(c.header_hit(&layout, x0, y), Some(Toggle::Whitespace));
-        assert_eq!(
-            c.header_hit(&layout, x0, y + layout.metrics.line_height),
-            None
-        );
-        assert_eq!(
-            Compare::body(&layout).top,
-            layout.top + layout.metrics.line_height
-        );
     }
 
     #[test]
@@ -1015,7 +902,7 @@ pub(crate) mod tests {
         assert!(c.status("").contains("long lines compared in pieces"));
         let layout = layout();
         let theme = Theme::default();
-        c.plan(&doc, &Compare::body(&layout), &theme);
+        c.plan(&doc, &layout, &theme);
         let right = &c.columns.plans()[1];
         assert_eq!(right[0].line, Some(0));
         assert!(right[0].piece.is_none(), "short lines draw whole");

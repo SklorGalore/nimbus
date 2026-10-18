@@ -29,6 +29,7 @@ use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
 use crate::columns::Click;
 use crate::compare::{Compare, DiffResult, Other, Toggle};
+use crate::compare_panel;
 use crate::config::{self, Config};
 use crate::debug::Debug;
 use crate::docs::{DocId, Docs};
@@ -1440,6 +1441,8 @@ impl App {
     /// Put the active tab side by side with `other`.
     fn start_compare(&mut self, mut other: Document, what: Other) {
         let send = self.diff_sender();
+        // The options live in the sidebar's Compare tab: bring it forward.
+        self.sidebar.mode = sidebar::Mode::Compare;
         other.detect_language(&self.languages);
         if let Some(job) = other.syntax.take_job(&other.buffer) {
             spawn_syntax(&self.proxy, job);
@@ -1459,7 +1462,7 @@ impl App {
         self.changed(true);
     }
 
-    /// Flip one of the compare header's toggles. The diff options apply to
+    /// Flip one of the compare options (the sidebar's Compare tab). The diff options apply to
     /// every compare and are remembered in `state.toml`; Unified is the
     /// active compare's alone.
     fn toggle_diff_option(&mut self, toggle: Toggle) {
@@ -3733,6 +3736,9 @@ impl App {
         if let Some(row) = outcome.pair {
             self.open_folder_pair(row);
         }
+        if let Some(toggle) = outcome.toggle {
+            self.toggle_diff_option(toggle);
+        }
         self.changed(false);
     }
 
@@ -3759,7 +3765,7 @@ impl App {
     fn columns_scrollbar_hit(&self, layout: &Layout, x: f32, y: f32) -> Option<view::ScrollbarHit> {
         let tab = &self.tabs[self.active];
         match (tab.compare.as_ref(), tab.merge.as_ref()) {
-            (Some(c), _) => c.columns.scrollbar_hit(&Compare::body(layout), x, y),
+            (Some(c), _) => c.columns.scrollbar_hit(layout, x, y),
             (None, Some(m)) => m.columns.scrollbar_hit(layout, x, y),
             (None, None) => None,
         }
@@ -3783,7 +3789,7 @@ impl App {
     fn columns_thumb_height(&self, layout: &Layout) -> f32 {
         let tab = &self.tabs[self.active];
         match (tab.compare.as_ref(), tab.merge.as_ref()) {
-            (Some(c), _) => c.columns.thumb_height(&Compare::body(layout)),
+            (Some(c), _) => c.columns.thumb_height(layout),
             (None, Some(m)) => m.columns.thumb_height(layout),
             (None, None) => 0.0,
         }
@@ -3808,7 +3814,7 @@ impl App {
     fn drag_columns_scrollbar(&mut self, y: f32, layout: &Layout) {
         let tab = &mut self.tabs[self.active];
         match (tab.compare.as_mut(), tab.merge.as_mut()) {
-            (Some(c), _) => c.columns.drag_scrollbar(y, &Compare::body(layout)),
+            (Some(c), _) => c.columns.drag_scrollbar(y, layout),
             (None, Some(m)) => m.columns.drag_scrollbar(y, layout),
             (None, None) => {}
         }
@@ -3818,14 +3824,6 @@ impl App {
     fn columns_click(&mut self, layout: &Layout, (x, y): (f32, f32), now: Instant) {
         let tab_width = self.tab_width();
         let shift = self.modifiers.shift_key();
-        if let Some(toggle) = self.tabs[self.active]
-            .compare
-            .as_ref()
-            .and_then(|c| c.header_hit(layout, x, y))
-        {
-            self.toggle_diff_option(toggle);
-            return;
-        }
         let tab = &mut self.tabs[self.active];
         let click = match (tab.compare.as_mut(), tab.merge.as_mut()) {
             (Some(c), _) => c.click(&self.docs[tab.doc], &mut tab.view, layout, tab_width, x, y),
@@ -4238,6 +4236,10 @@ impl App {
         if many {
             view::draw_dividers(gpu, &self.theme.ui, layout, panes);
         }
+        self.sidebar.compare.options = compare_panel::Options {
+            normalize: self.ui_state.diff_options(),
+            unified: self.tabs[self.active].compare.as_ref().map(|c| c.unified),
+        };
         let active = self.docs[self.tabs[self.active].doc].canonical.as_deref();
         sidebar::draw(
             gpu,

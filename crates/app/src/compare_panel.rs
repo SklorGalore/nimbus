@@ -1,5 +1,11 @@
-//! The sidebar's Compare mode (M18): the files that differ between two
-//! folders, as a folder compare ([`crate::folder_compare`]) finds them.
+//! The sidebar's Compare mode (M18): the compare options as buttons, then
+//! the files that differ between two folders, as a folder compare
+//! ([`crate::folder_compare`]) finds them.
+//!
+//! The options (ignore whitespace, case, blank lines, unified) apply to
+//! every compare view; each is also a palette command. The app copies
+//! their current state into [`Panel::options`] before each draw, so the
+//! buttons never disagree with what the compare shows.
 //!
 //! One row per file, sorted by path, with a mark for how it differs:
 //! `−` only in the left folder, `+` only in the right, `≠` in both but
@@ -11,8 +17,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use nimbus_core::search::Generation;
+use nimbus_core::{Normalize, Whitespace};
 use nimbus_render::Gpu;
 
+use crate::compare::Toggle;
 use crate::folder_compare::{Batch, Results, Status};
 use crate::input::Motion;
 use crate::theme::Ui;
@@ -29,6 +37,27 @@ pub enum Key {
     Open(usize),
 }
 
+/// What a click in the panel asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Click {
+    /// Nothing under the press.
+    None,
+    /// Flip this compare option.
+    Toggle(Toggle),
+    /// Open this row of the folder compare.
+    Open(usize),
+}
+
+/// The compare options as the buttons show them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Options {
+    /// The diff options every compare uses.
+    pub normalize: Normalize,
+    /// Whether the active tab's compare is unified; `None` when the
+    /// active tab is not comparing.
+    pub unified: Option<bool>,
+}
+
 /// The Compare panel's state.
 #[derive(Debug, Default)]
 pub struct Panel {
@@ -40,14 +69,46 @@ pub struct Panel {
     pub selected: Option<usize>,
     /// The row opened in the compare view last, for stepping on.
     pub opened: Option<usize>,
+    /// The option buttons' state, refreshed by the app before drawing.
+    pub options: Options,
     /// The first visible row.
     scroll: usize,
     /// Scroll left over from trackpad deltas smaller than a row.
     wheel: f32,
 }
 
-/// Rows above the list: the two roots and the counts.
+/// The option buttons, in order, at the top of the panel.
+const TOGGLES: [Toggle; 4] = [
+    Toggle::Whitespace,
+    Toggle::Case,
+    Toggle::BlankLines,
+    Toggle::Unified,
+];
+
+/// Rows above the list: a label, the option buttons, a gap, then the two
+/// roots and the counts.
+const OPTION_ROWS: usize = 1 + TOGGLES.len() + 1;
 const SUMMARY_ROWS: usize = 2;
+
+impl Options {
+    /// A button's label and whether it is on.
+    fn button(self, toggle: Toggle) -> (&'static str, bool) {
+        let n = self.normalize;
+        match toggle {
+            Toggle::Whitespace => (
+                match n.whitespace {
+                    Whitespace::Exact => "Ignore whitespace",
+                    Whitespace::Ends => "Ignore whitespace: ends",
+                    Whitespace::All => "Ignore whitespace: all",
+                },
+                n.whitespace != Whitespace::Exact,
+            ),
+            Toggle::Case => ("Ignore case", n.case),
+            Toggle::BlankLines => ("Ignore blank lines", n.blank_lines),
+            Toggle::Unified => ("Unified", self.unified == Some(true)),
+        }
+    }
+}
 
 impl Panel {
     /// Begin showing comparison `generation` of `left` with `right`.
@@ -71,11 +132,18 @@ impl Panel {
         self.results.as_ref().map_or(0, |r| r.rows().len())
     }
 
-    /// Where the list starts, below the sidebar's header and the summary.
+    /// Where the folder summary starts, below the option buttons.
+    fn summary_top(layout: &Layout, header: f32) -> f32 {
+        #[expect(clippy::cast_precision_loss, reason = "a few rows")]
+        let options = OPTION_ROWS as f32 * layout.metrics.line_height;
+        header + options
+    }
+
+    /// Where the list starts, below the options and the summary.
     fn list_top(layout: &Layout, header: f32) -> f32 {
         #[expect(clippy::cast_precision_loss, reason = "two rows")]
         let summary = SUMMARY_ROWS as f32 * layout.metrics.line_height;
-        header + summary
+        Self::summary_top(layout, header) + summary
     }
 
     fn visible_rows(layout: &Layout, header: f32) -> usize {
@@ -115,11 +183,25 @@ impl Panel {
         self.scroll_by(whole as isize, layout, header);
     }
 
-    /// A click at physical `y`: select the row and return it to open.
-    pub fn click(&mut self, layout: &Layout, header: f32, y: f32) -> Option<usize> {
+    /// A click at physical `y`: an option button flips, a row of the
+    /// folder compare is selected and opened.
+    pub fn click(&mut self, layout: &Layout, header: f32, y: f32) -> Click {
+        let lh = layout.metrics.line_height;
+        let first = header + lh;
+        if y >= first {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a small non-negative row index"
+            )]
+            let i = ((y - first) / lh).floor() as usize;
+            if let Some(&t) = TOGGLES.get(i) {
+                return Click::Toggle(t);
+            }
+        }
         let top = Self::list_top(layout, header);
         if y < top {
-            return None;
+            return Click::None;
         }
         #[expect(
             clippy::cast_possible_truncation,
@@ -127,10 +209,12 @@ impl Panel {
             reason = "a small non-negative row index"
         )]
         let row = ((y - top) / layout.metrics.line_height).floor() as usize + self.scroll;
-        (row < self.len()).then(|| {
+        if row < self.len() {
             self.selected = Some(row);
-            row
-        })
+            Click::Open(row)
+        } else {
+            Click::None
+        }
     }
 
     /// A key while the panel has focus: arrows move, Enter opens a row.
@@ -216,6 +300,51 @@ fn folder_name(p: &Path) -> String {
     )
 }
 
+/// The option buttons: a label row, then one full-width button per
+/// option. On is a bordered box in the theme's "on" colour with an
+/// underline; off is a quieter solid fill (the border colour at half
+/// strength), so both read as buttons on the dark and the light theme.
+fn draw_options(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    options: Options,
+    (header, width): (f32, f32),
+) {
+    let (cell, lh) = (layout.metrics.cell_width, layout.metrics.line_height);
+    let pad = layout.margin;
+    gpu.push_text_line([pad, header], "Compare options", ui.gutter);
+    let line = layout.scale.round().max(1.0);
+    let accent = (2.0 * layout.scale).round().max(1.0);
+    let inset = (0.1 * lh).round();
+    let bw = (width - 2.0 * pad).max(0.0);
+    let mut row_y = header + lh;
+    for toggle in TOGGLES {
+        let (label, on) = options.button(toggle);
+        let (top, bh) = (row_y + inset, lh - 2.0 * inset);
+        if on {
+            gpu.push_rect([pad, top], [bw, bh], ui.picker_border);
+            gpu.push_rect(
+                [pad + line, top + line],
+                [bw - 2.0 * line, bh - 2.0 * line],
+                ui.toggle_on,
+            );
+            gpu.push_rect([pad, top + bh - accent], [bw, accent], ui.tab_accent);
+        } else {
+            let [r, g, b, a] = ui.picker_border;
+            gpu.push_rect([pad, top], [bw, bh], [r, g, b, a * 0.5]);
+        }
+        // Unified only means something while the active tab compares.
+        let color = if toggle == Toggle::Unified && options.unified.is_none() {
+            ui.gutter
+        } else {
+            ui.text
+        };
+        gpu.push_text_line([pad + cell, row_y], label, color);
+        row_y += lh;
+    }
+}
+
 /// Draw the panel below the sidebar's header, `w` pixels wide.
 pub fn draw(
     gpu: &mut Gpu,
@@ -229,7 +358,8 @@ pub fn draw(
     let (cell, lh) = (m.cell_width, m.line_height);
     let pad = layout.margin;
     let bottom = layout.bottom;
-    let mut y = header;
+    draw_options(gpu, ui, layout, panel.options, (header, w));
+    let mut y = Panel::summary_top(layout, header);
     let Some(results) = &panel.results else {
         gpu.push_text_line([pad, y], &panel.summary(), ui.gutter);
         return;
@@ -326,8 +456,12 @@ mod tests {
         let l = layout();
         let mut p = panel();
         let top = Panel::list_top(&l, 20.0);
-        assert_eq!(p.click(&l, 20.0, top + 21.0), Some(1));
-        assert_eq!(p.click(&l, 20.0, 25.0), None, "the summary");
+        assert_eq!(p.click(&l, 20.0, top + 21.0), Click::Open(1));
+        let summary = Panel::summary_top(&l, 20.0);
+        assert_eq!(p.click(&l, 20.0, summary + 5.0), Click::None, "the summary");
+        assert_eq!(p.click(&l, 20.0, 25.0), Click::None, "the options label");
+        assert_eq!(p.click(&l, 20.0, 45.0), Click::Toggle(Toggle::Whitespace));
+        assert_eq!(p.click(&l, 20.0, 105.0), Click::Toggle(Toggle::Unified));
         p.opened = Some(1);
         assert_eq!(p.step(true, &l, 20.0), Some(2));
         assert_eq!(p.step(false, &l, 20.0), Some(0));

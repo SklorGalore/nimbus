@@ -18,7 +18,7 @@ file that is one long line, and what changed since the last commit.
 
 - [x] **Diff options**: "Ignore Whitespace" (leading and trailing, then
       all), "Ignore Case" and "Ignore Blank Lines" toggle from the palette
-      and the compare view's header, and re-diff in the background; the
+      and the sidebar's Compare tab, and re-diff in the background; the
       merge views keep exact matching (a merge must not drop a whitespace
       change). The choice is remembered in `state.toml`.
 - [x] **Folder compare**: "Compare Folders…" walks two roots with M10's
@@ -156,8 +156,12 @@ What landed, and where:
   Ignore Blank Lines drops hunks whose lines are all blank on both sides,
   as `git diff --ignore-blank-lines` does. The live diff takes the same
   options (`LiveDiff::with_normalize`); merges never do.
-- **Header row** (`compare.rs`): "Ignore whitespace" (cycles off, ends,
-  all), "Ignore case", "Ignore blank lines" and "Unified", bright when on.
+- **Option buttons** (`compare_panel.rs`): "Ignore whitespace" (cycles
+  off, ends, all), "Ignore case", "Ignore blank lines" and "Unified", at
+  the top of the sidebar's Compare tab, which comes forward when a compare
+  starts. They began as a header row above the columns; the owner found
+  them hard to read as buttons there and chose the sidebar instead, which
+  also gives the diff its row back.
   The palette has the same actions (`diff.ignoreWhitespace`,
   `diff.ignoreCase`, `diff.ignoreBlankLines`). The options apply to every
   open compare and live in `state.toml`.
@@ -199,6 +203,6 @@ Surprises and deviations from the plan:
   the two folders with two folder dialogs. A file only in the left folder
   opens on its own; one only in the right opens against an empty side.
 - Not checked here: rendering. The container has no GPU, so there is no
-  headless screenshot of the header, the `⤶` rows or the Compare mode yet.
+  headless screenshot of the option buttons, the `⤶` rows or the Compare mode yet.
   Strict clippy passes for Linux and Windows (`scripts/clippy-cross.sh`);
   macOS is checked by CI.

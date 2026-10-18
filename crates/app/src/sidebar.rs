@@ -71,6 +71,8 @@ pub struct Outcome {
     pub search: Option<search_panel::Reply>,
     /// A row of the Compare panel to open in the compare view.
     pub pair: Option<usize>,
+    /// A compare option the Compare panel's button flips.
+    pub toggle: Option<crate::compare::Toggle>,
 }
 
 impl Sidebar {
@@ -240,10 +242,13 @@ impl Sidebar {
             };
         }
         if self.mode == Mode::Compare {
-            return Outcome {
-                pair: self.compare.click(layout, Self::header_h(layout), y),
-                ..Outcome::default()
-            };
+            let mut outcome = Outcome::default();
+            match self.compare.click(layout, Self::header_h(layout), y) {
+                compare_panel::Click::None => {}
+                compare_panel::Click::Toggle(t) => outcome.toggle = Some(t),
+                compare_panel::Click::Open(row) => outcome.pair = Some(row),
+            }
+            return outcome;
         }
         let Some(row) = self.row_at(layout, y) else {
             return Outcome::default();
