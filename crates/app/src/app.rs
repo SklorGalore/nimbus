@@ -1594,6 +1594,8 @@ impl App {
             return; // closed or reloaded meanwhile
         };
         let merged = self.tabs[i].doc.merge_index(token, chunk);
+        // A grown file's count may go on in another run.
+        self.start_indexing();
         if error.is_some() {
             // Nothing more comes: stop waiting for it.
             self.tabs[i].doc.stop_indexing();
@@ -1691,6 +1693,7 @@ impl App {
         let now = Instant::now();
         let mut notes = Vec::new();
         let mut is_error = false;
+        let mut later = Vec::new();
         for tab in &mut self.tabs {
             let Some(path) = tab.doc.canonical.as_deref() else {
                 continue;
@@ -1705,7 +1708,7 @@ impl App {
             // mapped one: it never reloads by itself unless cut short, and
             // that must be handled at once.
             if let Some(at) = tab.doc.reloaded_at
-                && !tab.doc.buffer.is_mapped()
+                && !tab.doc.is_file_mapped()
                 && now.duration_since(at) < RELOAD_GAP
             {
                 let due = at + RELOAD_GAP;
@@ -1719,12 +1722,7 @@ impl App {
             let note = match tab.doc.disk_changed(&self.languages) {
                 DiskChange::None | DiskChange::Appended => continue,
                 DiskChange::Later(due) => {
-                    self.recheck_at = Some(self.recheck_at.map_or(due, |t| t.min(due)));
-                    if let Some(p) = &tab.doc.canonical
-                        && !self.recheck.contains(p)
-                    {
-                        self.recheck.push(p.clone());
-                    }
+                    later.extend(tab.doc.canonical.clone().map(|p| (due, p)));
                     continue;
                 }
                 DiskChange::Reloaded => format!("{name} changed on disk; reloaded"),
@@ -1764,6 +1762,9 @@ impl App {
         }
         if !notes.is_empty() {
             self.say(notes.join("; "), is_error);
+        }
+        for (due, path) in later {
+            self.recheck_later(due, path);
         }
         let follow = self.follow_tails();
         self.changed(follow);

@@ -39,6 +39,17 @@ pub enum Tail {
     Following,
 }
 
+/// What [`Document::extend_mapping`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Extended {
+    /// The new bytes are in the document.
+    Appended,
+    /// The file was not just appended to (rewritten or replaced).
+    NotAppended,
+    /// The file is shorter than the document's mapping.
+    Shrunk,
+}
+
 /// How many bytes before the old end are compared with the file, and how
 /// many at the start, to tell an append from a rewrite. A log only ever
 /// grows at the end; a program that rewrote the file almost always changed
@@ -120,15 +131,16 @@ impl Document {
 
     /// The file of this mapped document, which has no unsaved edits, grew
     /// to `now`: map it again at its new length and append the new bytes
-    /// (M12, `DESIGN.md` §9). Returns `false`, changing nothing, when the
-    /// file was rewritten rather than appended to, or for a document not
-    /// backed by a mapping.
+    /// (M12, `DESIGN.md` §9). Changes nothing unless it returns
+    /// [`Extended::Appended`].
     ///
     /// A mapping has a fixed length, so growth means a second mapping of
-    /// the same file. Its first bytes are the very bytes the first one
-    /// maps, so every piece of the document reads the same through it; the
-    /// piece table checks a few of them, takes the new mapping as its
-    /// source and appends one piece for the new bytes
+    /// the same file. While the file has only been appended to, its first
+    /// bytes are the very bytes the first mapping shows, so every piece of
+    /// the document reads the same through it. That is checked as far as
+    /// is cheap: the first and last 64 bytes the old mapping had must still
+    /// be there ([`MappedFile::continues`]). Then the piece table takes the
+    /// new mapping as its source and appends one piece for the new bytes
     /// ([`nimbus_core::MappedBuffer::extend_source`]). The old mapping is
     /// unmapped when the last snapshot or undo step holding it goes. Memory
     /// does not grow with the file: mapped pages are the system's file
@@ -138,9 +150,9 @@ impl Document {
     /// # Errors
     ///
     /// Returns why the file could not be mapped or read.
-    pub(super) fn extend_mapping(&mut self, path: &Path, now: Stamp) -> Result<bool, String> {
-        let Some(old) = self.mapping.as_ref() else {
-            return Ok(false);
+    pub(super) fn extend_mapping(&mut self, path: &Path, now: Stamp) -> Result<Extended, String> {
+        let Some(old) = self.mapping.clone() else {
+            return Ok(Extended::NotAppended);
         };
         // A byte order mark stays left out, as when the file was opened.
         let skip = usize::try_from(old.file_len() - old.len() as u64).unwrap_or(0);
@@ -150,46 +162,79 @@ impl Document {
                 .map_err(|e| e.to_string())?
                 .skip_prefix(skip),
         );
-        if !mapped.continues(old).map_err(|e| e.to_string())? {
-            return Ok(false);
+        if mapped.file_len() < old.file_len() {
+            // Cut short since the size was read: part of the old mapping
+            // may be gone.
+            return Ok(Extended::Shrunk);
+        }
+        if !mapped.continues(&old).map_err(|e| e.to_string())? {
+            return Ok(Extended::NotAppended);
         }
         let counting = self.counting_lines();
         let Some(buffer) = self.buffer.as_mapped_mut() else {
-            return Ok(false);
+            return Ok(Extended::NotAppended);
+        };
+        // Count the new lines: here, for the little a log adds at a time,
+        // before anything changes, so a failed read changes nothing; or on
+        // a worker for more. A worker still counting carries on: when it
+        // reaches the old end, the document starts another for the rest
+        // (`Document::merge_index`).
+        let gap = mapped.len() as u64 - buffer.line_index().indexed();
+        let inline = !counting && gap <= indexer::FIRST_BLOCK as u64;
+        let chunks = if inline {
+            indexer::catch_up(&mapped, buffer.line_index())?
+        } else {
+            Vec::new()
         };
         let source: Arc<dyn Source> = mapped.clone();
         let edit = match buffer.extend_source(source) {
             Ok(edit) => edit,
-            Err(ExtendError::Shorter { .. } | ExtendError::Differs) => return Ok(false),
+            Err(ExtendError::Shorter { .. }) => return Ok(Extended::Shrunk),
+            Err(ExtendError::Differs) => return Ok(Extended::NotAppended),
             Err(e) => return Err(e.to_string()),
         };
-        // Count the new lines: here, for the little a log adds at a time,
-        // or on a worker for more, or when one is still counting (it
-        // stops, and the new one carries on from what it merged).
-        let gap = mapped.len() as u64 - buffer.line_index().indexed();
-        if counting || gap > indexer::FIRST_BLOCK as u64 {
+        for chunk in chunks {
+            if let Err(e) = buffer.merge_index(chunk) {
+                log::warn!("line index chunk refused: {e}");
+                break;
+            }
+        }
+        if !inline && !counting {
             let job = indexer::resume(&mapped, buffer.line_index());
             self.adopt_indexing(Some(job));
-        } else {
-            let chunks = indexer::catch_up(&mapped, buffer.line_index())?;
-            for chunk in chunks {
-                if let Err(e) = buffer.merge_index(chunk) {
-                    log::warn!("line index chunk refused: {e}");
-                    break;
-                }
-            }
         }
         self.edits.note(&self.buffer, &edit);
         self.syntax.edit(&self.buffer, &edit);
         self.syntax.touch();
         self.version += 1;
-        self.disk = Some(Stamp {
-            len: mapped.file_len(),
-            modified: now.modified,
-        });
+        // The size read before mapping: if more arrived since, the next
+        // change counts as growth and maps again.
+        self.disk = Some(now);
+        self.superseded.retain(|w| w.strong_count() > 0);
+        self.superseded.push(Arc::downgrade(&old));
         self.mapping = Some(mapped);
         self.conflict = false;
-        Ok(true)
+        Ok(Extended::Appended)
+    }
+
+    /// The line count of a following document reached the length its file
+    /// had when the count started, and the file has grown since: count the
+    /// rest, on a worker the app starts.
+    pub(super) fn count_the_rest(&mut self) {
+        let (Some(mapping), Some(buffer)) = (self.mapping.clone(), self.buffer.as_mapped()) else {
+            return;
+        };
+        if buffer.line_index().indexed() < mapping.len() as u64 && !buffer.line_index().is_done() {
+            let job = indexer::resume(&mapping, buffer.line_index());
+            self.adopt_indexing(Some(job));
+        }
+    }
+
+    /// Whether the text is read through a memory mapping of the file (a
+    /// huge file), not held in memory.
+    #[must_use]
+    pub fn is_file_mapped(&self) -> bool {
+        self.mapping.is_some()
     }
 
     /// An upward scroll: stop following, so reading an older part of the
@@ -339,10 +384,9 @@ mod tests {
         {
             doc.extended_at = None;
             std::fs::write(&path, "\u{feff}ONE\ntwo\nthree\nfour\nfive\n").unwrap();
-            assert_eq!(doc.disk_changed(&languages), DiskChange::NotReloaded);
-            // (Rewritten in place, so the mapped bytes changed too: M7's
-            // documented hazard. The document is just not extended.)
-            assert_eq!(doc.buffer.len_bytes(), 19);
+            // While following, a rewritten file is read again.
+            assert_eq!(doc.disk_changed(&languages), DiskChange::Reloaded);
+            assert_eq!(all(&doc), "ONE\ntwo\nthree\nfour\nfive\n");
         }
         drop(doc);
         let _ = std::fs::remove_dir_all(&dir);

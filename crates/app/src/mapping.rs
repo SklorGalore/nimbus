@@ -160,11 +160,14 @@ impl MappedFile {
             // again through this same call: a second, longer mapping
             // beside the first, with the same hazards and nothing more.
             // The document swaps it in for the first only after
-            // `continues` has checked that the file still holds the first
-            // mapping's bytes where they were, which is what keeps every
-            // piece of the document reading the same text through it. The
+            // `continues` has found the first mapping's first and last 64
+            // bytes still in place. That is a cheap check that the file
+            // was appended to, not proof (a file rewritten in place shows
+            // its new bytes through both mappings); memory safety never
+            // rests on it, since `core` checks every byte it reads. The
             // first mapping stays valid, and mapped, until the last
-            // snapshot or undo step holding it is dropped.
+            // snapshot or undo step holding it is dropped; on Windows a
+            // save waits for those too (`Document::poll_replace`).
             Some(unsafe { Mmap::map(&file)? })
         };
         // Sampled beside the mapping, from the length that was mapped.

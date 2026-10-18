@@ -206,7 +206,7 @@ impl Scanner {
             spacing,
             pos: index.upto,
             lines: index.lines,
-            last: index.checkpoints().last().map_or(0, |c| c.offset),
+            last: index.last_checkpoint().map_or(0, |c| c.offset),
             pending: Vec::new(),
             chunk_from: index.upto,
             done: false,
@@ -431,6 +431,13 @@ impl LineIndex {
     /// Every stored checkpoint, in increasing offset order.
     pub fn checkpoints(&self) -> impl Iterator<Item = Checkpoint> + '_ {
         self.chunks.iter().flat_map(|c| c.iter().copied())
+    }
+
+    /// The last stored checkpoint, found without walking the others
+    /// (only chunks with checkpoints are kept).
+    #[must_use]
+    pub fn last_checkpoint(&self) -> Option<Checkpoint> {
+        self.chunks.last().and_then(|c| c.last()).copied()
     }
 
     /// Number of stored checkpoints; times 16 bytes is the index's size.

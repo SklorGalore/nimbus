@@ -1620,6 +1620,8 @@ impl MappedBuffer {
     /// Returns the [`LineIndex::merge`] errors for a chunk that does not
     /// continue where the index ends, and [`MergeError::PastEnd`] for one
     /// reaching past the end of the source. Nothing changes on error.
+    /// A last chunk that ends short of the source (the file grew while it
+    /// was being scanned) leaves the index open for more.
     pub fn merge_index(&mut self, chunk: IndexChunk) -> Result<(), MergeError> {
         let len = to_u64(self.state.source.len());
         if chunk.upto() > len {
@@ -1630,7 +1632,13 @@ impl MappedBuffer {
         }
         // Copies the index's list of chunk pointers first if a snapshot
         // shares it. A refused chunk leaves the index unchanged.
-        Arc::make_mut(&mut self.state.index).merge(chunk)?;
+        let index = Arc::make_mut(&mut self.state.index);
+        index.merge(chunk)?;
+        // A scan of the file at an earlier, shorter length ends "done"; the
+        // source has grown since (`extend_source`), so it is not.
+        if index.is_done() && index.indexed() < len {
+            index.reopen();
+        }
         self.state.fill_counts();
         Ok(())
     }
@@ -2379,6 +2387,30 @@ mod tests {
             Err(ExtendError::Differs)
         ));
         assert_eq!(b.len_bytes(), grown.len(), "nothing changed");
+    }
+
+    #[test]
+    fn a_count_that_ends_at_the_old_length_leaves_the_index_open() {
+        let first: &[u8] = b"a\nb\nc\n";
+        let (mut b, mut scanner) = partly_indexed(first, 2, TINY);
+        let mut grown = first.to_vec();
+        grown.extend_from_slice(b"d\ne\n");
+        b.extend_source(Arc::new(VecSource::new(grown.clone())))
+            .unwrap();
+        // The count that was running reaches the old end and says done.
+        scanner.feed(&first[2..]);
+        scanner.finish();
+        b.merge_index(scanner.take_chunk()).unwrap();
+        assert!(!b.line_index().is_done(), "the file is longer now");
+        assert!(!b.is_fully_indexed());
+        check_invariants(&b);
+        let mut rest = Scanner::resume(b.line_index(), Spacing::new(2, 5));
+        rest.feed(&grown[first.len()..]);
+        rest.finish();
+        b.merge_index(rest.take_chunk()).unwrap();
+        assert!(b.is_fully_indexed() && b.line_index().is_done());
+        assert_eq!(b.line_number(b.len_bytes()), Some(5));
+        check_invariants(&b);
     }
 
     #[test]

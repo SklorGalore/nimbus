@@ -28,11 +28,20 @@ impl App {
         // Catch up with what arrived; a mapped document extends only while
         // following, so that goes first.
         doc.tail = Tail::Following;
-        if let DiskChange::Failed(e) = doc.disk_changed(&self.languages) {
-            doc.tail = Tail::Grew;
-            self.say(format!("Cannot read the file: {e}"), true);
-            return;
+        match doc.disk_changed(&self.languages) {
+            DiskChange::Failed(e) => {
+                doc.tail = Tail::Grew;
+                self.say(format!("Cannot read the file: {e}"), true);
+                return;
+            }
+            DiskChange::Later(due) => {
+                if let Some(path) = doc.canonical.clone() {
+                    self.recheck_later(due, path);
+                }
+            }
+            _ => {}
         }
+        let doc = &mut self.tabs[self.active].doc;
         doc.follow_end();
         self.start_indexing();
         self.changed(true);
@@ -50,5 +59,14 @@ impl App {
             }
         }
         self.tabs[self.active].doc.tail == Tail::Following
+    }
+
+    /// Look at `path` on disk again at `due`, as if the watcher had said
+    /// it changed.
+    pub(super) fn recheck_later(&mut self, due: std::time::Instant, path: std::path::PathBuf) {
+        self.recheck_at = Some(self.recheck_at.map_or(due, |t| t.min(due)));
+        if !self.recheck.contains(&path) {
+            self.recheck.push(path);
+        }
     }
 }

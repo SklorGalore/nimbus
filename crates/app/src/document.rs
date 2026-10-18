@@ -239,6 +239,10 @@ pub struct Document {
     /// log written in many small pieces is mapped again a few times a
     /// second, not on every write.
     extended_at: Option<Instant>,
+    /// Earlier, shorter mappings of the file that Follow Tail replaced,
+    /// which snapshots or undo steps may still hold. On Windows a save
+    /// waits for these too before replacing the file.
+    superseded: Vec<std::sync::Weak<MappedFile>>,
 }
 
 /// A snapshot of the text as the file held it, or none; a wrapper only
@@ -395,10 +399,15 @@ impl Document {
         let Some(mapped) = self.buffer.as_mapped_mut() else {
             return false;
         };
+        let last = chunk.is_done();
         match mapped.merge_index(chunk) {
             Ok(()) => {
                 // Line numbers changed under the highlighter's checkpoints.
                 self.syntax.touch();
+                if last {
+                    // The file may have grown while it was counted.
+                    self.count_the_rest();
+                }
                 true
             }
             Err(e) => {
@@ -623,12 +632,20 @@ impl Document {
                 {
                     return DiskChange::Later(at + tail::EXTEND_GAP);
                 }
+                // Every attempt counts, so a file that keeps failing is not
+                // mapped again on every write.
+                self.extended_at = Some(now);
                 match self.extend_mapping(&path, stamp) {
-                    Ok(true) => {
-                        self.extended_at = Some(now);
-                        return DiskChange::Appended;
+                    Ok(tail::Extended::Appended) => return DiskChange::Appended,
+                    Ok(tail::Extended::Shrunk) => return self.mapped_disk_changed(true, languages),
+                    // Rewritten or replaced (a rotated log) while followed:
+                    // read it again, as a rope document would be.
+                    Ok(tail::Extended::NotAppended) => {
+                        return match self.reload(languages) {
+                            Ok(()) => DiskChange::Reloaded,
+                            Err(e) => DiskChange::Failed(e.to_string()),
+                        };
                     }
-                    Ok(false) => {} // rewritten, not appended to
                     Err(e) => return DiskChange::Failed(e),
                 }
             }
@@ -1109,10 +1126,9 @@ impl Document {
         };
         // One reference is `replace.old` itself. More means a search (or a
         // line counter on its way out) still maps the old file.
-        let held = replace
-            .old
-            .as_ref()
-            .is_some_and(|o| Arc::strong_count(o) > 1);
+        let held = replace.old.as_ref().is_some_and(|o| {
+            Arc::strong_count(o) > 1 || self.superseded.iter().any(|w| w.strong_count() > 0)
+        });
         if !held {
             return self.replace_now();
         }
