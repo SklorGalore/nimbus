@@ -19,6 +19,7 @@ use nucleo::{Config, Nucleo};
 
 use crate::action::{self, ActionInfo};
 use crate::document::Solo;
+use crate::encoding::{Choice, Encoding};
 use crate::keymap::Keymap;
 
 /// Walking stops after this many files, so a huge folder (a home directory
@@ -43,6 +44,9 @@ pub enum Item {
     Symbol(Symbol, Option<usize>),
     /// An open tab to compare with (M9): its index and name.
     Tab(usize, String),
+    /// An encoding to reopen or save the file in (M17), and whether it is
+    /// the one the file has now.
+    Encoding(EncodingFor, Choice, bool),
     /// A recently opened file, by its full path.
     Recent(PathBuf),
     /// A name typed for something being saved (M19).
@@ -60,6 +64,15 @@ pub enum Naming {
     Search,
 }
 
+/// What an encoding picker is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodingFor {
+    /// Read the file again in the chosen encoding.
+    Reopen,
+    /// Write the file in the chosen encoding.
+    Save,
+}
+
 /// Which picker is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -73,6 +86,8 @@ pub enum Kind {
     Symbols,
     /// Choosing another tab to compare with.
     Tabs,
+    /// Choosing an encoding (M17).
+    Encoding(EncodingFor),
     /// Files opened lately, in any project.
     Recent,
     /// Typing a name: the query is the name.
@@ -348,6 +363,54 @@ impl Picker {
         picker
     }
 
+    /// Open the list of encodings, `for` reopening or saving the file whose
+    /// encoding is `current`. Saving offers UTF-8 with and without a byte
+    /// order mark, and UTF-16 with one (as Windows writes it).
+    pub fn encodings(
+        purpose: EncodingFor,
+        current: Choice,
+        notify: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        let picker = Self::new(
+            Kind::Encoding(purpose),
+            Config::DEFAULT,
+            notify,
+            PathBuf::new(),
+        );
+        let injector = picker.matcher.injector();
+        let mut choices: Vec<Choice> = Encoding::all()
+            .into_iter()
+            .map(|encoding| Choice {
+                encoding,
+                bom: purpose == EncodingFor::Save
+                    && matches!(encoding, Encoding::Utf16Le | Encoding::Utf16Be),
+            })
+            .collect();
+        if purpose == EncodingFor::Save {
+            choices.insert(
+                1,
+                Choice {
+                    encoding: Encoding::Utf8,
+                    bom: true,
+                },
+            );
+        }
+        for choice in choices {
+            let is_current = if purpose == EncodingFor::Save {
+                choice == current
+            } else {
+                choice.encoding == current.encoding
+            };
+            injector.push(Item::Encoding(purpose, choice, is_current), |item, cols| {
+                if let Item::Encoding(_, c, _) = item {
+                    cols[0] = c.label().into();
+                }
+            });
+        }
+        picker.walk_done.store(true, Ordering::Relaxed);
+        picker
+    }
+
     /// The name typed in a [`Kind::Name`] picker, trimmed.
     fn typed_name(&self) -> Option<String> {
         let text = self.input.doc.buffer.line(0);
@@ -506,6 +569,10 @@ impl Picker {
                     text: name.clone(),
                     detail: String::new(),
                 },
+                Item::Encoding(_, choice, current) => Row {
+                    text: choice.label().to_owned(),
+                    detail: if *current { "current" } else { "" }.to_owned(),
+                },
                 Item::Recent(p) => Row {
                     text: p
                         .file_name()
@@ -573,6 +640,29 @@ mod tests {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn encoding_picker_lists_choices_and_marks_the_current_one() {
+        let current = Choice {
+            encoding: crate::encoding::WINDOWS_1252,
+            bom: false,
+        };
+        let mut p = Picker::encodings(EncodingFor::Save, current, no_notify());
+        settle(&mut p);
+        let keymap = Keymap::new(&std::collections::HashMap::new()).0;
+        let (rows, _) = p.rows(&keymap);
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            &texts[..4],
+            ["UTF-8", "UTF-8 BOM", "UTF-16 LE", "UTF-16 BE"]
+        );
+        let _ = p.input.ed().insert("1252");
+        settle(&mut p);
+        match p.chosen() {
+            Some(Item::Encoding(EncodingFor::Save, c, true)) => assert_eq!(c, current),
+            other => panic!("{other:?}"),
         }
     }
 

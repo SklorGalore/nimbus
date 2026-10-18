@@ -240,14 +240,17 @@ pub(super) fn startup_tabs_and_roots(
         &mut Vec<String>,
     ),
     wrap: bool,
-) -> (Sidebar, (Vec<super::Tab>, usize, Option<String>)) {
+) -> (
+    Sidebar,
+    (Vec<super::Tab>, super::Groups, usize, Option<String>),
+) {
     let mut sidebar = Sidebar::new(
         io::canonical(root),
         state.sidebar_visible,
         state.sidebar_width,
     );
     let remembered = restore.is_some();
-    let (tabs, active, note) =
+    let (tabs, groups, active, note) =
         super::workspace::startup_tabs(docs, restore, state, &mut sidebar, wrap, open);
     super::workspace::set_more_roots(&mut sidebar, more, warnings);
     sidebar.workspace = workspace;
@@ -256,5 +259,5 @@ pub(super) fn startup_tabs_and_roots(
         (Some(n), Some(o)) => Some(format!("{n}; {o}")),
         (n, o) => n.or(o),
     };
-    (sidebar, (tabs, active, note))
+    (sidebar, (tabs, groups, active, note))
 }

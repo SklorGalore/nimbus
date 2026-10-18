@@ -23,7 +23,7 @@ use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
 
 use nimbus_core::line_index::IndexChunk;
-use nimbus_core::{Buffer, Text};
+use nimbus_core::{Buffer, LineEnding, Text};
 use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
@@ -34,6 +34,7 @@ use crate::debug::Debug;
 use crate::docs::{DocId, Docs};
 use crate::document::{Carets, DiskChange, Document, Editor, MAX_COPY_BYTES, Occurrence, Solo};
 use crate::editing::Outcome;
+use crate::encoding::{Choice, Encoding};
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::find_files::{self, Batch as FilesBatch};
 use crate::folding;
@@ -44,7 +45,7 @@ use crate::keymap::{Chord, Keymap, chord_label};
 use crate::languages::Languages;
 use crate::menu::{self, MenuBar};
 use crate::merge_view::{Inputs, MergeView, Merged, Shape, Take};
-use crate::picker::{self, Item, Kind, Picker};
+use crate::picker::{self, EncodingFor, Item, Kind, Picker};
 use crate::replace_files::{self, Replacement};
 use crate::saver::{self, ReplacePolicy, SaveEvent, SaveStep};
 use crate::search_panel::{Focus, Reply};
@@ -54,7 +55,7 @@ use crate::state::State;
 use crate::theme::{Theme, Ui};
 use crate::tree::{self, Entry, ListRequest};
 use crate::update::{self, UpdateError};
-use crate::view::{self, Decorations, Layout, PickerView, Preedit, TabLabel, View};
+use crate::view::{self, Decorations, Layout, PickerView, Preedit, StatusItem, TabLabel, View};
 use crate::watch::{Change, Watch};
 use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
 
@@ -294,8 +295,25 @@ impl Tab {
             session::clamp_offset(t, p.cursor),
             session::clamp_offset(t, p.scroll),
         );
+        // Saved folds are byte ranges into the file as it was: kept only
+        // when its size and time say it is the same file, and then only
+        // the ones that still run from a line's end to a later line's end.
+        let folds: Vec<std::ops::Range<usize>> = if p.disk.is_some() && doc.disk_stamp() == p.disk {
+            p.folds
+                .into_iter()
+                .filter(|f| f.end <= t.len_bytes())
+                .filter(|f| nimbus_core::fold::lines_range(t, f.start, f.end) == Some(f.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Editor::new(doc, &mut self.carets).click(cursor, false);
         self.view.scroll_top = scroll;
+        if !folds.is_empty() {
+            self.view.follow(doc);
+            self.view.folds.fold_many(folds);
+            self.view.folds.reveal(cursor);
+        }
     }
 }
 
@@ -569,7 +587,7 @@ impl App {
         let disk_proxy = proxy.clone();
         let warn_proxy = proxy.clone();
         let mut open = Docs::default();
-        let (mut sidebar, (mut tabs, active, note)) = workspaces::startup_tabs_and_roots(
+        let (mut sidebar, (mut tabs, groups, active, note)) = workspaces::startup_tabs_and_roots(
             (&root, docs, restore),
             (more_roots, workspace, session_root.as_deref()),
             (&mut state, &mut open, &mut warnings),
@@ -607,7 +625,7 @@ impl App {
             merge_saved_clean: None,
             frames: 0,
             docs: open,
-            groups: Groups::default(),
+            groups,
             fold_hover_key: None,
             tabs,
             active,
@@ -639,16 +657,7 @@ impl App {
                     let _ = warn_proxy.send_event(AppEvent::WatchWarning(warning));
                 },
             ),
-            ws: Workspace {
-                state,
-                session_root,
-                save_at: None,
-                restore_started: false,
-                closed: Vec::new(),
-                moving: Vec::new(),
-                undo_moves: Vec::new(),
-                undo_ops: Vec::new(),
-            },
+            ws: Workspace::new(state, session_root),
             resize_cursor: false,
             watching: false,
             pending_line: None,
@@ -1057,6 +1066,8 @@ impl App {
             }
             Command::ReloadFromDisk if self.waits_for_save() => {}
             Command::ReloadFromDisk => self.reload_active(),
+            Command::ReopenWithEncoding => self.open_picker(Kind::Encoding(EncodingFor::Reopen)),
+            Command::SaveWithEncoding => self.open_picker(Kind::Encoding(EncodingFor::Save)),
             Command::KeepMine => {
                 self.doc_mut().keep_mine();
                 self.say(
@@ -1560,7 +1571,7 @@ impl App {
 
     /// Editing, movement and find commands on the active tab.
     fn run_edit(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
-        if cmd.edits_text() && (self.waits_for_save() || self.waits_for_merge()) {
+        if cmd.edits_text() && (self.refuses_edits() || self.waits_for_merge()) {
             return Ok(());
         }
         let page = self.layout().map_or(1, |l| l.full_lines());
@@ -1675,6 +1686,19 @@ impl App {
             Command::ChangeCase(case) => self.edit_op(|d| d.change_case(case)),
             Command::RewriteLines(op) => self.edit_op(|d| d.rewrite_lines(op)),
             Command::TrimWhitespace => self.edit_op(|e| e.trim_whitespace()),
+            Command::ChangeLineEndings(to) => {
+                let outcome = self.ed().change_line_endings(to)?;
+                if outcome == Outcome::TooLarge {
+                    self.say("Too large to change every line ending at once", true);
+                } else {
+                    let name = match to {
+                        LineEnding::Lf => "LF",
+                        LineEnding::CrLf => "CRLF",
+                    };
+                    self.say(format!("Line endings: {name}"), false);
+                }
+                Ok(())
+            }
             Command::IndentUsingSpaces | Command::IndentUsingTabs => {
                 let settings = self.config.indent.for_language(self.doc().language_key());
                 let indent = nimbus_core::indent::Indent {
@@ -2155,7 +2179,9 @@ impl App {
                 self.session_changed();
                 self.sync_watch();
                 self.changed(false);
-                self.note_conflict_markers();
+                if !self.note_encoding() {
+                    self.note_conflict_markers();
+                }
             }
             Err(e) => self.say(format!("Cannot open {}: {e}", path.display()), true),
         }
@@ -2189,6 +2215,13 @@ impl App {
             self.say("Already saving; edits wait until it is done", false);
             return Saved::Started;
         }
+        if let Some(why) = self.docs[self.tabs[i].doc].read_only.clone() {
+            self.dialog(MessageLevel::Error, "Could not save", &why);
+            return Saved::No;
+        }
+        if !self.confirm_lossy(i) {
+            return Saved::No;
+        }
         if self.docs[self.tabs[i].doc].saves_on_worker() {
             return self.start_save(i);
         }
@@ -2215,10 +2248,201 @@ impl App {
             }
             Err(e) => {
                 log::error!("{e}");
+                if let Some(u) = e.unencodable().copied() {
+                    return self.offer_utf8(i, u);
+                }
                 self.dialog(MessageLevel::Error, "Could not save", &e.to_string());
                 Saved::No
             }
         }
+    }
+
+    /// Saving a file whose encoding has no bytes for one of its characters
+    /// stopped there: show it, and offer to save as UTF-8, which holds
+    /// every character.
+    fn offer_utf8(&mut self, i: usize, u: io::Unencodable) -> Saved {
+        let doc = &self.docs[self.tabs[i].doc];
+        let line = doc
+            .buffer
+            .byte_to_line(u.offset.min(doc.buffer.len_bytes()))
+            + 1;
+        let name = doc.display_name();
+        if i == self.active {
+            self.go_to_byte(u.offset);
+        }
+        let text = format!(
+            "Line {line} of {name} has {:?} (U+{:04X}), which {} cannot hold. \
+             Nothing was saved.\n\nSave as UTF-8 instead?",
+            u.ch,
+            u32::from(u.ch),
+            u.encoding
+        );
+        self.say(
+            format!("{} cannot hold {:?} on line {line}", u.encoding, u.ch),
+            true,
+        );
+        if self.options.smoke || self.options.screenshot.is_some() {
+            return Saved::No;
+        }
+        let mut dialog = MessageDialog::new()
+            .set_level(MessageLevel::Warning)
+            .set_title("Character not in the encoding")
+            .set_description(text)
+            .set_buttons(MessageButtons::OkCancelCustom(
+                "Save as UTF-8".into(),
+                "Cancel".into(),
+            ));
+        if let Some(window) = &self.window {
+            dialog = dialog.set_parent(window.as_ref());
+        }
+        let utf8 = match dialog.show() {
+            MessageDialogResult::Ok => true,
+            MessageDialogResult::Custom(label) => label == "Save as UTF-8",
+            _ => false,
+        };
+        if !utf8 {
+            return Saved::No;
+        }
+        let doc = &mut self.docs[self.tabs[i].doc];
+        doc.encoding = Encoding::Utf8;
+        doc.bom = false;
+        doc.chosen_encoding = Some(Encoding::Utf8);
+        self.save(i)
+    }
+
+    /// A file opened with bytes its encoding could not read (shown as
+    /// U+FFFD) asks before its first save, which writes U+FFFD in their
+    /// place. `true` to go on.
+    fn confirm_lossy(&mut self, i: usize) -> bool {
+        let doc = &self.docs[self.tabs[i].doc];
+        if !doc.lossy || self.options.smoke || self.options.screenshot.is_some() {
+            return true;
+        }
+        let text = format!(
+            "{} had bytes that are not valid {}; they show as �. \
+             Saving writes that character in their place. Save anyway?",
+            doc.display_name(),
+            doc.encoding.name()
+        );
+        let mut dialog = MessageDialog::new()
+            .set_level(MessageLevel::Warning)
+            .set_title("Replace unreadable bytes?")
+            .set_description(text)
+            .set_buttons(MessageButtons::YesNo);
+        if let Some(window) = &self.window {
+            dialog = dialog.set_parent(window.as_ref());
+        }
+        matches!(dialog.show(), MessageDialogResult::Yes)
+    }
+
+    /// An encoding was picked for the active document: read the file again
+    /// in it, or save it in it.
+    fn encoding_chosen(&mut self, purpose: EncodingFor, choice: Choice) {
+        match purpose {
+            EncodingFor::Reopen => self.reopen_with(choice.encoding),
+            EncodingFor::Save => self.save_with(choice),
+        }
+    }
+
+    /// Read the active file again in `encoding`, asking first if that loses
+    /// unsaved changes. The choice sticks: reloading after a change on
+    /// disk keeps it.
+    fn reopen_with(&mut self, encoding: Encoding) {
+        if self.doc().path.is_none() {
+            self.say("Not saved yet: nothing to reopen", false);
+            return;
+        }
+        if self.waits_for_save() {
+            return;
+        }
+        if self.doc().is_dirty() && !self.options.smoke && self.options.screenshot.is_none() {
+            let text = format!(
+                "Reopening {} as {} discards its unsaved changes. Reopen?",
+                self.doc().display_name(),
+                encoding.name()
+            );
+            let mut dialog = MessageDialog::new()
+                .set_level(MessageLevel::Warning)
+                .set_title("Unsaved changes")
+                .set_description(text)
+                .set_buttons(MessageButtons::YesNo);
+            if let Some(window) = &self.window {
+                dialog = dialog.set_parent(window.as_ref());
+            }
+            if !matches!(dialog.show(), MessageDialogResult::Yes) {
+                return;
+            }
+        }
+        let id = self.tabs[self.active].doc;
+        let before = self.docs[id].chosen_encoding.replace(encoding);
+        let mut carets = carets_of(&mut self.tabs, id);
+        match self.docs[id].reload(&self.languages, &mut carets) {
+            Ok(()) => {
+                if !self.note_encoding() {
+                    self.say(format!("Reopened as {}", encoding.name()), false);
+                }
+            }
+            Err(e) => {
+                self.docs[id].chosen_encoding = before;
+                self.say(format!("Cannot reopen: {e}"), true);
+            }
+        }
+        self.changed(false);
+    }
+
+    /// Save the active file in `choice`'s encoding from now on. If the save
+    /// fails, the file keeps its old encoding.
+    fn save_with(&mut self, choice: Choice) {
+        let i = self.active;
+        let doc = self.doc();
+        if doc.saves_on_worker() && !choice.encoding.is_utf8() {
+            self.say(
+                format!(
+                    "Files over {} MB save only as UTF-8",
+                    io::MAX_ROPE_BYTES / (1024 * 1024)
+                ),
+                true,
+            );
+            return;
+        }
+        if doc.buffer.is_mapped() && !doc.saves_on_worker() && !choice.encoding.is_utf8() {
+            // Its bytes are not text in any known encoding.
+            self.say("This file is not text; it saves only as it is", true);
+            return;
+        }
+        let before = (doc.encoding, doc.bom, doc.chosen_encoding);
+        let doc = self.doc_mut();
+        doc.encoding = choice.encoding;
+        doc.bom = choice.bom && choice.encoding.bom().is_some();
+        let saved = self.save(i);
+        let doc = &mut self.docs[self.tabs[i].doc];
+        match saved {
+            Saved::No if (doc.encoding, doc.bom) == (choice.encoding, choice.bom) => {
+                (doc.encoding, doc.bom, doc.chosen_encoding) = before;
+            }
+            Saved::No => {}
+            Saved::Yes | Saved::Started => doc.chosen_encoding = Some(doc.encoding),
+        }
+    }
+
+    /// Say what the active document's encoding means for it, when it means
+    /// something: read-only, or unreadable bytes shown as U+FFFD. Returns
+    /// whether it said anything.
+    fn note_encoding(&mut self) -> bool {
+        let doc = self.doc();
+        if let Some(why) = doc.read_only.clone() {
+            self.say(why, true);
+            return true;
+        }
+        if doc.lossy {
+            let text = format!(
+                "Some bytes are not valid {}; they show as �",
+                doc.encoding.name()
+            );
+            self.say(text, true);
+            return true;
+        }
+        false
     }
 
     /// Saving a merge with conflicts left asks first. `true` to go on.
@@ -2409,6 +2633,16 @@ impl App {
         } else if saved && self.saves.quit_after {
             self.quit(event_loop);
         }
+    }
+
+    /// Say why the active document cannot be edited now, if it cannot: it
+    /// is read-only, or a save is under way. Returns whether it cannot.
+    fn refuses_edits(&mut self) -> bool {
+        if let Some(why) = self.doc().read_only.clone() {
+            self.say(why, true);
+            return true;
+        }
+        self.waits_for_save()
     }
 
     /// Say that edits to the active document wait for its save, if one is
@@ -2867,6 +3101,7 @@ impl App {
         // whose language did not change keep their state.
         let (languages, language_warnings) = Languages::load(&config.languages);
         warnings.extend(language_warnings);
+        warnings.extend(io::set_encoding_rules(&config.encodings));
         self.languages = languages;
         for (_, doc) in self.docs.iter_mut().filter(|(_, d)| !d.is_placeholder()) {
             doc.detect_language(&self.languages);
@@ -3025,6 +3260,14 @@ impl App {
                     .collect();
                 Picker::tabs(names, notify)
             }
+            Kind::Encoding(purpose) => {
+                let doc = self.doc();
+                let current = Choice {
+                    encoding: doc.encoding,
+                    bom: doc.bom,
+                };
+                Picker::encodings(purpose, current, notify)
+            }
         });
         self.find.focused = false;
         self.tick_picker();
@@ -3067,6 +3310,9 @@ impl App {
                     Some(Item::Line(n)) => self.go_to_line(n),
                     Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
+                    Some(Item::Encoding(purpose, choice, _)) => {
+                        self.encoding_chosen(purpose, choice);
+                    }
                     None => {}
                 }
             }
@@ -3191,6 +3437,9 @@ impl App {
             | Command::ToggleIgnored
             | Command::ToggleDebugOverlay
             | Command::ReloadFromDisk
+            | Command::ReopenWithEncoding
+            | Command::SaveWithEncoding
+            | Command::ChangeLineEndings(_)
             | Command::KeepMine
             | Command::OpenFile
             | Command::NewFile
@@ -3244,7 +3493,7 @@ impl App {
     /// Replace the current match (if the editor's selection is one) and go
     /// to the next.
     fn replace_one(&mut self) {
-        if self.waits_for_save() {
+        if self.refuses_edits() {
             return;
         }
         let sel = self.selection().range();
@@ -3268,7 +3517,7 @@ impl App {
 
     /// Replace every match as one undo step.
     fn replace_all(&mut self) {
-        if self.waits_for_save() {
+        if self.refuses_edits() {
             return;
         }
         if !self.find.complete && !self.find.capped {
@@ -3757,19 +4006,23 @@ impl App {
         }
     }
 
-    /// A click on the status bar: the indentation item ("Spaces: 4")
-    /// offers the choices for this file, through the palette.
+    /// A click on the status bar: the indentation item ("Spaces: 4") and
+    /// the line ending ("LF") offer the choices for this file through the
+    /// palette; the encoding item offers Reopen and Save with Encoding.
     fn status_bar_click(&mut self, layout: &Layout, x: f32) {
-        if self.tabs[self.active].view.follow_item_hit(layout, x) {
-            self.toggle_follow();
-            return;
-        }
-        if !self.tabs[self.active].view.indent_item_hit(layout, x) {
-            return;
-        }
+        let query = match self.tabs[self.active].view.status_item_at(layout, x) {
+            Some(StatusItem::Indent) => "indent",
+            Some(StatusItem::LineEnding) => "line endings",
+            Some(StatusItem::Encoding) => "with encoding",
+            Some(StatusItem::Follow) => {
+                self.toggle_follow();
+                return;
+            }
+            None => return,
+        };
         self.open_picker(Kind::Palette);
         if let Some(p) = self.picker.as_mut()
-            && let Err(e) = p.input.ed().insert("indent")
+            && let Err(e) = p.input.ed().insert(query)
         {
             log::debug!("picker query: {e}");
         }
@@ -3979,6 +4232,9 @@ impl App {
                     Some(Item::Line(n)) => self.go_to_line(n),
                     Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
+                    Some(Item::Encoding(purpose, choice, _)) => {
+                        self.encoding_chosen(purpose, choice);
+                    }
                     None => {}
                 }
             }
@@ -4319,6 +4575,9 @@ struct ReplaceSummary {
     changed: usize,
     /// Tabs busy saving, left alone.
     busy: usize,
+    /// Tabs in another encoding than UTF-8 or read-only, left alone: the
+    /// search read the file's bytes, whose offsets are not the tab's.
+    encoded: usize,
 }
 
 impl App {
@@ -4442,6 +4701,9 @@ impl App {
             | Command::ToggleIgnored
             | Command::ToggleDebugOverlay
             | Command::ReloadFromDisk
+            | Command::ReopenWithEncoding
+            | Command::SaveWithEncoding
+            | Command::ChangeLineEndings(_)
             | Command::KeepMine
             | Command::OpenFile
             | Command::NewFile
@@ -4678,21 +4940,8 @@ impl App {
             return;
         }
 
-        let Some(re) = panel
-            .params
-            .as_ref()
-            .and_then(|p| p.query.compile().ok().flatten())
-        else {
+        let Some(replacement) = replacement_of(panel) else {
             return;
-        };
-        let replacement = Replacement {
-            re,
-            expand: panel.regex,
-            template: panel.replacement(),
-            multi_line: panel
-                .params
-                .as_ref()
-                .is_some_and(|p| nimbus_core::search::spans_lines(&p.query)),
         };
         let mut summary = ReplaceSummary::default();
         let mut undo = ReplaceUndo::default();
@@ -4716,6 +4965,10 @@ impl App {
             let tab = &mut self.tabs[ti];
             if self.docs[tab.doc].is_saving() {
                 summary.busy += 1;
+                continue;
+            }
+            if !self.docs[tab.doc].encoding.is_utf8() || self.docs[tab.doc].read_only.is_some() {
+                summary.encoded += 1;
                 continue;
             }
             let mut ed = Editor::new(&mut self.docs[tab.doc], &mut tab.carets);
@@ -4800,6 +5053,13 @@ impl App {
                 text,
                 "; {} still saving, left alone",
                 plural(summary.busy, "tab", "tabs")
+            );
+        }
+        if summary.encoded > 0 {
+            let _ = write!(
+                text,
+                "; {} not in UTF-8, left alone",
+                plural(summary.encoded, "tab", "tabs")
             );
         }
         let failed: Vec<PathBuf> = report
@@ -5515,6 +5775,8 @@ fn draw_picker_overlay(
         (Kind::Workspaces, false) => "workspaces",
         (Kind::Tabs, true) => "tab",
         (Kind::Tabs, false) => "tabs",
+        (Kind::Encoding(_), true) => "encoding",
+        (Kind::Encoding(_), false) => "encodings",
         (Kind::Recent, true) => "recent file",
         (Kind::Recent, false) => "recent files",
     };
@@ -5530,6 +5792,8 @@ fn draw_picker_overlay(
         Kind::Line => "Type a line number",
         Kind::Symbols => "Type a function, type or heading name",
         Kind::Tabs => "Type a tab name",
+        Kind::Encoding(EncodingFor::Reopen) => "Reopen with encoding",
+        Kind::Encoding(EncodingFor::Save) => "Save with encoding",
         Kind::Recent => "Type a file name or folder",
         Kind::Name(crate::picker::Naming::Workspace) => "Name the workspace",
         Kind::Name(crate::picker::Naming::Search) => "Name the search",
@@ -5589,6 +5853,69 @@ fn edit_field(
         log::error!("field edit refused: {e}");
     }
     None
+}
+
+impl App {
+    /// The pointer moved: carry on whatever drag is under way, then
+    /// update what hovering shows.
+    fn cursor_moved(&mut self, position: PhysicalPosition<f64>) {
+        self.mouse = position;
+        if self.sidebar.resizing {
+            if let Some(layout) = self.window_layout() {
+                self.sidebar.drag_to(&layout, to_f32(position.x));
+                self.changed(false);
+            }
+        } else if let Some(d) = self.groups.dragging {
+            self.drag_group_divider(d, to_f32(position.x));
+        } else if let Some(grab) = self.clicks.scrollbar_grab {
+            self.drag_scrollbar_to(to_f32(position.y) - grab);
+        } else if self.sidebar.drag.is_some() {
+            let at = (to_f32(position.x), to_f32(position.y));
+            let copy = self.modifiers.alt_key();
+            if let Some(layout) = self.window_layout()
+                && self.sidebar.drag_over(&layout, at, copy)
+            {
+                self.changed(false);
+            }
+        } else if self.clicks.dragging {
+            self.mouse_drag();
+        }
+        self.update_scrollbar_hover();
+        self.update_fold_hover();
+        self.update_cursor_icon();
+        self.update_search_hover();
+    }
+
+    /// The left button came up: every drag ends, and a row dragged in the
+    /// tree is dropped (Alt copies).
+    fn left_released(&mut self) {
+        self.clicks.dragging = false;
+        self.clicks.scrollbar_grab = None;
+        self.groups.dragging = None;
+        let dragged = self.sidebar.drag.is_some_and(|d| d.moving);
+        if let Some((from, dir)) = self.sidebar.end_drag() {
+            self.drop_in_tree(&from, &dir, self.modifiers.alt_key());
+        }
+        if dragged {
+            self.changed(false);
+        }
+        if self.sidebar.resizing {
+            self.sidebar.resizing = false;
+            self.remember();
+        }
+    }
+}
+
+/// What Replace All puts in place of the panel's hits: its last search's
+/// pattern and the replace field. `None` when there was no search.
+fn replacement_of(panel: &crate::search_panel::Panel) -> Option<Replacement> {
+    let query = &panel.params.as_ref()?.query;
+    Some(Replacement {
+        re: query.compile().ok().flatten()?,
+        expand: panel.regex,
+        template: panel.replacement(),
+        multi_line: nimbus_core::search::spans_lines(query),
+    })
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -5779,7 +6106,7 @@ impl ApplicationHandler<AppEvent> for App {
             let _ = self.find.find.ed().insert(&pattern);
             self.search(true);
         }
-        if self.options.find.is_none() && self.options.diff.is_none() {
+        if self.options.find.is_none() && self.options.diff.is_none() && !self.note_encoding() {
             self.note_conflict_markers();
         }
         if let Some(args) = self.options.merge.clone() {
@@ -5956,33 +6283,7 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::Ime(ime) => self.ime(ime, event_loop),
 
-            WindowEvent::CursorMoved { position, .. } => {
-                self.mouse = position;
-                if self.sidebar.resizing {
-                    if let Some(layout) = self.window_layout() {
-                        self.sidebar.drag_to(&layout, to_f32(position.x));
-                        self.changed(false);
-                    }
-                } else if let Some(d) = self.groups.dragging {
-                    self.drag_group_divider(d, to_f32(position.x));
-                } else if let Some(grab) = self.clicks.scrollbar_grab {
-                    self.drag_scrollbar_to(to_f32(position.y) - grab);
-                } else if self.sidebar.drag.is_some() {
-                    let at = (to_f32(position.x), to_f32(position.y));
-                    let copy = self.modifiers.alt_key();
-                    if let Some(layout) = self.window_layout()
-                        && self.sidebar.drag_over(&layout, at, copy)
-                    {
-                        self.changed(false);
-                    }
-                } else if self.clicks.dragging {
-                    self.mouse_drag();
-                }
-                self.update_scrollbar_hover();
-                self.update_fold_hover();
-                self.update_cursor_icon();
-                self.update_search_hover();
-            }
+            WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
 
             WindowEvent::CursorLeft { .. } => {
                 if self.sidebar.search.hover_gone() {
@@ -6001,20 +6302,7 @@ impl ApplicationHandler<AppEvent> for App {
                         self.run(cmd, event_loop);
                     }
                 } else {
-                    self.clicks.dragging = false;
-                    self.clicks.scrollbar_grab = None;
-                    self.groups.dragging = None;
-                    let dragged = self.sidebar.drag.is_some_and(|d| d.moving);
-                    if let Some((from, dir)) = self.sidebar.end_drag() {
-                        self.drop_in_tree(&from, &dir, self.modifiers.alt_key());
-                    }
-                    if dragged {
-                        self.changed(false);
-                    }
-                    if self.sidebar.resizing {
-                        self.sidebar.resizing = false;
-                        self.remember();
-                    }
+                    self.left_released();
                 }
             }
 

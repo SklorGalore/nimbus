@@ -665,7 +665,7 @@ mod tests {
         assert_eq!(want.len(), 1);
         assert_eq!(want[0].1, 3);
         assert_eq!(want[0].2, 4);
-        for block in 1..text.len() + 1 {
+        for block in 1..=text.len() {
             assert_eq!(multi(r"\{\n\s*\}", text, block, 16), want, "block {block}");
         }
         assert!(spans_lines(&Query {

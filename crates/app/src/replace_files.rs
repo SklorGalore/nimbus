@@ -198,6 +198,15 @@ fn replace_one(rep: &Replacement, job: &Job) -> (Outcome, Option<Vec<u8>>, Optio
     if edits.is_empty() {
         return (Outcome::Changed, None, None);
     }
+    // Replacement text is UTF-8. Spliced into a file in another encoding
+    // (M17), anything beyond ASCII would be bytes of the wrong encoding.
+    if edits.iter().any(|(_, t)| !t.is_ascii()) && std::str::from_utf8(&bytes).is_err() {
+        return (
+            Outcome::Failed("not UTF-8; open it to replace there".to_owned()),
+            None,
+            None,
+        );
+    }
     let new = MappedBuffer::from_bytes(apply(&bytes, &edits));
     match io::save(&job.path, &new, false) {
         Ok(meta) => (
@@ -382,5 +391,22 @@ mod tests {
         assert_eq!(restored, Vec::<PathBuf>::new());
         assert_eq!(failed[0].1, "changed since");
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "edited meanwhile\n");
+    }
+
+    #[test]
+    fn non_ascii_replacements_skip_files_that_are_not_utf8() {
+        let w = temp("w1252.txt");
+        std::fs::write(&w, b"caf\xe9 foo\n").unwrap();
+        let job = Job {
+            path: w.clone(),
+            ranges: std::iter::once(5..8).collect(),
+        };
+        let report = run(&rep("foo", "bär", false), std::slice::from_ref(&job));
+        assert!(matches!(report.files[0].1, Outcome::Failed(_)));
+        assert_eq!(std::fs::read(&w).unwrap(), b"caf\xe9 foo\n");
+        // ASCII is the same bytes in every Western encoding: written.
+        let report = run(&rep("foo", "bar", false), &[job]);
+        assert_eq!(report.files[0].1, Outcome::Replaced(1));
+        assert_eq!(std::fs::read(&w).unwrap(), b"caf\xe9 bar\n");
     }
 }

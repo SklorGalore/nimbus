@@ -5,6 +5,7 @@
 //! A child module of `app`, so it can reach the app's fields; it lives in
 //! its own file to keep `app.rs` about events and editing.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,7 @@ use winit::event_loop::EventLoopProxy;
 
 use super::{App, AppEvent, MESSAGE_TIME, Message, Tab, wrap_for};
 use crate::config::Config;
-use crate::docs::Docs;
+use crate::docs::{DocId, Docs};
 use crate::document::Document;
 use crate::groups::Groups;
 use crate::input::Command;
@@ -88,6 +89,22 @@ pub(super) struct Workspace {
     pub(super) undo_ops: Vec<crate::tree_ops::Op>,
 }
 
+impl Workspace {
+    /// A workspace at startup, nothing done yet.
+    pub(super) fn new(state: State, session_root: Option<PathBuf>) -> Self {
+        Self {
+            state,
+            session_root,
+            save_at: None,
+            restore_started: false,
+            closed: Vec::new(),
+            moving: Vec::new(),
+            undo_moves: Vec::new(),
+            undo_ops: Vec::new(),
+        }
+    }
+}
+
 /// Most tree operations Undo Move remembers.
 pub(super) const MAX_UNDO_MOVES: usize = 50;
 
@@ -127,12 +144,38 @@ impl UndoMove {
 /// Most closed tabs remembered for Reopen Closed Tab.
 const MAX_CLOSED: usize = 50;
 
-/// A restored tab's cursor and top of view, as byte offsets, until its
-/// file is read and they can be clamped to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A restored tab's cursor, top of view and folds, as byte offsets, until
+/// its file is read and they can be clamped to it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Pending {
     pub(super) cursor: usize,
     pub(super) scroll: usize,
+    /// Folds saved with the session, made only if the file is unchanged.
+    pub(super) folds: Vec<Range<usize>>,
+    /// The file's size and time when the folds were saved.
+    pub(super) disk: Option<[u64; 2]>,
+}
+
+/// Most folds saved per tab. Fold All on a big file can make a hundred
+/// thousand; saving them all would make the state file megabytes, so past
+/// this only the outermost are kept, and past it again none.
+const MAX_SAVED_FOLDS: usize = 1_000;
+
+/// The folds of a view worth saving: all of them, or only those hiding
+/// text now when there are too many, or none.
+fn saveable(folds: &nimbus_core::fold::Folds) -> Vec<Range<usize>> {
+    if folds.all().count() <= MAX_SAVED_FOLDS {
+        folds.all().cloned().collect()
+    } else if folds.len() <= MAX_SAVED_FOLDS {
+        folds.active().to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Folds as the state file holds them.
+fn saved_folds(folds: &[Range<usize>]) -> Vec<[usize; 2]> {
+    folds.iter().map(|f| [f.start, f.end]).collect()
 }
 
 impl App {
@@ -176,26 +219,18 @@ impl App {
     }
 
     /// The session as it stands, named after `root`: the open files with
-    /// their cursors and views, the workspace's other roots, the expanded
-    /// folders, the sidebar's mode and the Search panel's history.
-    /// Untitled tabs are left out; there is no autosave to bring their text
-    /// back.
+    /// their cursors, views and folds, the editor groups, the workspace's
+    /// other roots, the expanded folders, the sidebar's mode and the Search
+    /// panel's history. Untitled tabs are left out; there is no autosave to
+    /// bring their text back. A file open in two groups is listed in each.
     pub(super) fn snapshot_session(&self, root: PathBuf) -> Session {
-        // One entry per document, in the order first shown: a file split
-        // into two groups is one file to reopen until groups are saved too.
-        // The active tab speaks for its document.
-        let active_doc = self.tabs[self.active].doc;
+        let fronts: Vec<usize> = (0..self.groups.len())
+            .map(|g| self.group_active(g))
+            .collect();
         let tabs = self
             .tabs
             .iter()
             .enumerate()
-            .filter(|&(i, t)| {
-                if t.doc == active_doc {
-                    i == self.active
-                } else {
-                    !self.tabs[..i].iter().any(|o| o.doc == t.doc)
-                }
-            })
             .filter_map(|(i, t)| {
                 let doc = &self.docs[t.doc];
                 let path = if doc.is_placeholder() {
@@ -203,16 +238,27 @@ impl App {
                 } else {
                     doc.canonical.clone()?
                 };
-                let (cursor, scroll) = t
-                    .pending
-                    .map_or((t.carets.cursor(&doc.buffer), t.view.scroll_top), |p| {
-                        (p.cursor, p.scroll)
-                    });
+                let (cursor, scroll, folds, disk) = if let Some(p) = &t.pending {
+                    (p.cursor, p.scroll, saved_folds(&p.folds), p.disk)
+                } else {
+                    let disk = doc.disk_stamp();
+                    let folds = if disk.is_some() {
+                        saved_folds(&saveable(&t.view.folds))
+                    } else {
+                        Vec::new()
+                    };
+                    (t.carets.cursor(&doc.buffer), t.view.scroll_top, folds, disk)
+                };
+                let disk = disk.filter(|_| !folds.is_empty());
                 Some(SessionTab {
                     path,
                     cursor,
                     scroll,
                     active: i == self.active,
+                    group: t.group,
+                    front: fronts.get(t.group) == Some(&i),
+                    folds,
+                    disk,
                 })
             })
             .collect();
@@ -228,12 +274,18 @@ impl App {
                     .map_or_else(|_| p.clone(), Path::to_path_buf)
             })
             .collect();
+        let groups = if self.groups.len() > 1 {
+            self.groups.list.iter().map(|g| g.share).collect()
+        } else {
+            Vec::new()
+        };
         Session {
             roots: tree.roots().into_iter().skip(1).collect(),
             root,
             mode: self.sidebar.mode.into(),
             expanded,
             tabs,
+            groups,
             search: self.sidebar.search.history.clone(),
         }
     }
@@ -373,10 +425,18 @@ impl App {
         };
         let (cursor, scroll) = tab
             .pending
+            .as_ref()
             .map_or((tab.carets.cursor(&doc.buffer), tab.view.scroll_top), |p| {
                 (p.cursor, p.scroll)
             });
-        self.ws.closed.push((path, Pending { cursor, scroll }));
+        self.ws.closed.push((
+            path,
+            Pending {
+                cursor,
+                scroll,
+                ..Pending::default()
+            },
+        ));
         if self.ws.closed.len() > MAX_CLOSED {
             self.ws.closed.remove(0);
         }
@@ -462,7 +522,6 @@ impl App {
             }
         }
         self.find.open = false;
-        self.groups = Groups::default();
         self.root.clone_from(&session.root);
         let (visible, width) = (self.sidebar.visible, self.sidebar.width);
         self.sidebar = Sidebar::new(session.root.clone(), visible, width);
@@ -471,7 +530,7 @@ impl App {
             self.ws.session_root = Some(session.root.clone());
         }
         let mut state = std::mem::take(&mut self.ws.state);
-        let (tabs, active, note) = startup_tabs(
+        let (tabs, mut groups, active, note) = startup_tabs(
             Vec::new(),
             Some(restore),
             &mut state,
@@ -490,6 +549,7 @@ impl App {
             self.docs.remove(t.doc);
         }
         let opened = tabs.len();
+        // Tabs kept for their unsaved work join the first group.
         self.tabs = keep;
         for tab in &mut self.tabs {
             tab.group = 0;
@@ -497,14 +557,19 @@ impl App {
         let first_new = self.tabs.len();
         self.tabs.extend(tabs);
         self.active = if self.tabs.len() > first_new {
+            for g in &mut groups.list {
+                g.active += first_new;
+            }
             (first_new + active).min(self.tabs.len() - 1)
-        } else if self.tabs.is_empty() {
-            let id = self.docs.insert(Document::untitled());
-            self.tabs.push(Tab::new(id, self.config.soft_wrap));
-            0
         } else {
+            groups = Groups::default();
+            if self.tabs.is_empty() {
+                let id = self.docs.insert(Document::untitled());
+                self.tabs.push(Tab::new(id, self.config.soft_wrap));
+            }
             0
         };
+        self.groups = groups;
         self.ws.restore_started = false;
         self.title_key = None;
         self.preedit = None;
@@ -558,10 +623,11 @@ impl App {
 }
 
 /// The first tabs: the files named on the command line (noted as recent),
-/// or else a restored session's (the front one read, the rest
-/// placeholders, with the sidebar's mode and expanded folders and a note
-/// for files that are gone), or else one untitled tab. Returns them and
-/// the front tab's index. The documents go in `open`.
+/// or else a restored session's (the front ones read, the rest
+/// placeholders, in their editor groups, with the sidebar's mode and
+/// expanded folders and a note for files that are gone), or else one
+/// untitled tab. Returns them, the groups and the front tab's index. The
+/// documents go in `open`.
 pub(super) fn startup_tabs(
     docs: Vec<Document>,
     restore: Option<Restore>,
@@ -569,7 +635,7 @@ pub(super) fn startup_tabs(
     sidebar: &mut Sidebar,
     wrap: bool,
     open: &mut Docs,
-) -> (Vec<Tab>, usize, Option<String>) {
+) -> (Vec<Tab>, Groups, usize, Option<String>) {
     for c in docs.iter().filter_map(|d| d.canonical.as_deref()) {
         state.note_recent(c);
     }
@@ -579,6 +645,7 @@ pub(super) fn startup_tabs(
         .collect();
     let mut active = 0;
     let mut note = None;
+    let mut groups = Groups::default();
     if let Some(r) = restore.filter(|_| tabs.is_empty()) {
         if let Some(mode) = r.mode {
             sidebar.mode = mode;
@@ -592,12 +659,19 @@ pub(super) fn startup_tabs(
         // After the roots, so an open second root opens again.
         sidebar.tree.expand_later(r.expanded);
         note = session::dropped_note(&r.dropped);
-        let mut seen: Vec<PathBuf> = Vec::new();
+        let groups_saved = r.shares.len().max(1);
+        let mut fronts = vec![None; groups_saved];
+        // Each file once, as one document however many groups show it:
+        // two documents on one file would each save over the other.
+        let mut seen: Vec<(PathBuf, usize, DocId)> = Vec::new();
         for (k, t) in r.tabs.into_iter().enumerate() {
-            // A file listed twice (a split, saved by an earlier build) is
-            // one tab: two documents on one file would each save over the
-            // other.
-            if let Some(j) = seen.iter().position(|c| *c == t.canonical) {
+            let group = t.group.min(groups_saved - 1);
+            if let Some(j) = seen
+                .iter()
+                .position(|(c, g, _)| *c == t.canonical && *g == group)
+            {
+                // Listed twice in one group (a split saved by an M12
+                // build): one tab.
                 if k == r.active {
                     active = j;
                 }
@@ -606,22 +680,54 @@ pub(super) fn startup_tabs(
             if k == r.active {
                 active = tabs.len();
             }
-            seen.push(t.canonical);
-            let id = open.insert(t.doc);
+            if t.front {
+                fronts[group] = Some(tabs.len());
+            }
+            let id = match seen.iter().find(|(c, _, _)| *c == t.canonical) {
+                Some(&(_, _, id)) => {
+                    if open[id].is_placeholder() && !t.doc.is_placeholder() {
+                        open[id] = t.doc;
+                        open[id].journal_mut().keep = true;
+                    }
+                    id
+                }
+                None => open.insert(t.doc),
+            };
+            seen.push((t.canonical, group, id));
             let mut tab = Tab::new(id, wrap);
+            tab.group = group;
             tab.pending = Some(Pending {
                 cursor: t.cursor,
                 scroll: t.scroll,
+                folds: t.folds,
+                disk: t.disk,
             });
             tab.apply_pending(&mut open[id]);
             tabs.push(tab);
+        }
+        // A tab whose placeholder was replaced by a later group's read
+        // document can be placed now too.
+        for tab in &mut tabs {
+            tab.apply_pending(&mut open[tab.doc]);
+        }
+        if !tabs.is_empty() {
+            let focused = tabs[active.min(tabs.len() - 1)].group;
+            let fronts: Vec<usize> = fronts
+                .iter()
+                .enumerate()
+                .map(|(g, f)| {
+                    f.or_else(|| tabs.iter().position(|t| t.group == g))
+                        .unwrap_or(0)
+                })
+                .collect();
+            groups = Groups::restored(&r.shares, &fronts, focused);
         }
     }
     if tabs.is_empty() {
         tabs.push(Tab::new(open.insert(Document::untitled()), wrap));
     }
     let active = active.min(tabs.len() - 1);
-    (tabs, active, note)
+    (tabs, groups, active, note)
 }
 
 /// `nimbus DIR1 DIR2`: the folders after the first become the workspace's
@@ -690,6 +796,10 @@ mod tests {
             canonical: PathBuf::from(name),
             cursor,
             scroll: 0,
+            group: 0,
+            front: false,
+            folds: Vec::new(),
+            disk: None,
         }
     }
 
@@ -704,12 +814,13 @@ mod tests {
             active: 2,
             mode: None,
             expanded: Vec::new(),
+            shares: vec![1.0],
             ..Restore::default()
         };
         let mut state = State::default();
         let mut sidebar = Sidebar::new(PathBuf::from("/p"), false, 200.0);
         let mut open = Docs::default();
-        let (tabs, active, _) = startup_tabs(
+        let (tabs, _, active, _) = startup_tabs(
             Vec::new(),
             Some(restore),
             &mut state,
@@ -721,5 +832,80 @@ mod tests {
         assert_eq!(active, 1, "the duplicate's front place goes to its file");
         assert_eq!(open.iter().count(), 2);
         assert_eq!(tabs[1].carets.cursor(&open[tabs[1].doc].buffer), 2);
+    }
+
+    #[test]
+    fn a_file_in_two_groups_restores_as_one_document() {
+        let mut placeholder = restored("/p/b.rs", 4);
+        placeholder.doc = Document::placeholder(PathBuf::from("/p/b.rs"));
+        let restore = Restore {
+            tabs: vec![
+                RestoredTab {
+                    front: true,
+                    ..placeholder
+                },
+                RestoredTab {
+                    group: 1,
+                    front: true,
+                    ..restored("/p/b.rs", 7)
+                },
+            ],
+            active: 1,
+            shares: vec![0.75, 0.25],
+            ..Restore::default()
+        };
+        let mut state = State::default();
+        let mut sidebar = Sidebar::new(PathBuf::from("/p"), false, 200.0);
+        let mut open = Docs::default();
+        let (tabs, groups, active, _) = startup_tabs(
+            Vec::new(),
+            Some(restore),
+            &mut state,
+            &mut sidebar,
+            false,
+            &mut open,
+        );
+        assert_eq!(open.iter().count(), 1, "one document for both tabs");
+        assert_eq!(tabs[0].doc, tabs[1].doc);
+        assert!(!open[tabs[0].doc].is_placeholder(), "the read one is kept");
+        assert_eq!((tabs[0].group, tabs[1].group), (0, 1));
+        assert_eq!((active, groups.focused, groups.len()), (1, 1, 2));
+        assert!((groups.list[0].share - 0.75).abs() < 1e-6);
+        // Each tab keeps its own cursor in the shared text.
+        let d = &open[tabs[0].doc].buffer;
+        assert_eq!((tabs[0].carets.cursor(d), tabs[1].carets.cursor(d)), (4, 7));
+    }
+
+    #[test]
+    fn folds_come_back_only_on_an_unchanged_file() {
+        let dir = std::env::temp_dir().join(format!("nimbus-folds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f.rs");
+        let text = "fn a() {\n    x\n    y\n}\nfn b() {\n    z\n}\n";
+        std::fs::write(&path, text).unwrap();
+        let doc = Document::open(&path).unwrap();
+        let disk = doc.disk_stamp();
+        assert!(disk.is_some());
+        let fold = 8..20; // the end of `fn a() {` to the end of `    y`
+        assert_eq!(&text[fold.clone()], "\n    x\n    y");
+        let pending = |disk| Pending {
+            cursor: 0,
+            scroll: 0,
+            // The second is not a fold of this text: dropped.
+            folds: vec![fold.clone(), 3..9],
+            disk,
+        };
+        let mut open = Docs::default();
+        let id = open.insert(doc);
+        let mut tab = Tab::new(id, false);
+        tab.pending = Some(pending(disk));
+        tab.apply_pending(&mut open[id]);
+        assert_eq!(tab.view.folds.active(), std::slice::from_ref(&fold));
+        // The file changed since the folds were saved: none come back.
+        let mut tab = Tab::new(id, false);
+        tab.pending = Some(pending(disk.map(|[len, t]| [len, t + 1])));
+        tab.apply_pending(&mut open[id]);
+        assert!(tab.view.folds.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

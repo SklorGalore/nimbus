@@ -508,6 +508,20 @@ fn anchor(scroll_top: usize, t: &dyn Text, w: &mut WrapView<'_>) -> RowPos {
     wrap::row_pos_of(t, w, scroll_top.min(t.len_bytes()))
 }
 
+/// A status bar item that opens choices when clicked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StatusItem {
+    /// Indentation: "Spaces: 4" or "Tabs".
+    #[default]
+    Indent,
+    /// The line ending: "LF" or "CRLF".
+    LineEnding,
+    /// The encoding: "UTF-8", "Windows-1252", …
+    Encoding,
+    /// "Follow Tail" or "Following" (M12), once the file has grown.
+    Follow,
+}
+
 /// Scroll state and per-frame scratch space.
 #[derive(Debug, Default)]
 pub struct View {
@@ -540,11 +554,10 @@ pub struct View {
     runs: Vec<ColorRun>,
     /// Reused for the right side of the status bar.
     status: String,
-    /// The character columns of the indentation item ("Spaces: 4") within
-    /// `status`, so a click on it can be told apart.
-    status_indent: Range<usize>,
-    /// The same for the Follow Tail item (M12), empty when not shown.
-    status_follow: Range<usize>,
+    /// The character columns of the items that act when clicked, within
+    /// `status`: indentation ("Spaces: 4"), line ending ("CRLF"), encoding
+    /// ("UTF-8") and Follow Tail (M12). Empty ranges are items not shown.
+    status_items: [(StatusItem, Range<usize>); 4],
     /// How many bytes of text the last frame showed, for the scrollbar's
     /// thumb. Kept as a count rather than an end, so it stays right while
     /// a drag moves the scroll before the next frame.
@@ -833,17 +846,30 @@ impl View {
             }
         }
         out.push_str("   ");
+        let mut items = [
+            (StatusItem::Indent, 0..0),
+            (StatusItem::LineEnding, 0..0),
+            (StatusItem::Encoding, 0..0),
+            (StatusItem::Follow, 0..0),
+        ];
         let from = out.chars().count();
         out.push_str(&doc.indent.label());
-        self.status_indent = from..out.chars().count();
+        items[0].1 = from..out.chars().count();
         out.push_str("   ");
+        let from = out.chars().count();
         out.push_str(match doc.line_ending {
             LineEnding::Lf => "LF",
             LineEnding::CrLf => "CRLF",
         });
+        items[1].1 = from..out.chars().count();
         if let Some(encoding) = doc.encoding_label() {
             out.push_str("   ");
+            let from = out.chars().count();
             out.push_str(encoding);
+            items[2].1 = from..out.chars().count();
+        }
+        if doc.read_only.is_some() {
+            out.push_str("   Read-only");
         }
         if let Some(name) = doc.language_name() {
             out.push_str("   ");
@@ -855,7 +881,6 @@ impl View {
             let _ = write!(out, "   Counting lines {pct:.0}%");
         }
         // Offered once the file has grown on disk; a click toggles it.
-        self.status_follow = 0..0;
         let follow = match doc.tail {
             Tail::Fixed => None,
             Tail::Grew => Some("Follow Tail"),
@@ -865,33 +890,26 @@ impl View {
             out.push_str("   ");
             let from = out.chars().count();
             out.push_str(label);
-            self.status_follow = from..out.chars().count();
+            items[3].1 = from..out.chars().count();
         }
+        self.status_items = items;
         &self.status
     }
 
-    /// Whether `x` is over the Follow Tail item of the status bar.
+    /// The status bar item under `x`, as last built by
+    /// [`View::status_info`], which [`draw_status`] right-aligns.
     #[must_use]
-    pub fn follow_item_hit(&self, layout: &Layout, x: f32) -> bool {
-        self.status_item_hit(layout, x, &self.status_follow)
-    }
-
-    /// Whether `x` is over the indentation item of the status bar as last
-    /// built by [`View::status_info`], which [`draw_status`] right-aligns.
-    #[must_use]
-    pub fn indent_item_hit(&self, layout: &Layout, x: f32) -> bool {
-        self.status_item_hit(layout, x, &self.status_indent)
-    }
-
-    /// Whether `x` is over the characters `item` of the status bar.
-    fn status_item_hit(&self, layout: &Layout, x: f32, item: &Range<usize>) -> bool {
+    pub fn status_item_at(&self, layout: &Layout, x: f32) -> Option<StatusItem> {
         let cell = layout.metrics.cell_width;
         let info_w = f(self.status.chars().count()) * cell;
         let info_x = (layout.width - layout.margin - info_w)
             .round()
             .max(layout.margin);
         let col = (x - info_x) / cell;
-        col >= f(item.start) && col < f(item.end)
+        self.status_items
+            .iter()
+            .find(|(_, r)| col >= f(r.start) && col < f(r.end))
+            .map(|(item, _)| *item)
     }
 
     /// Scroll horizontally by `dx` pixels. Does nothing while wrapping.
@@ -2426,10 +2444,14 @@ mod tests {
         let l = layout(3);
         let cell = l.metrics.cell_width;
         let info_x = (l.width - l.margin - 33.0 * cell).round();
-        assert!(v.indent_item_hit(&l, info_x + 14.5 * cell));
-        assert!(v.indent_item_hit(&l, info_x + 17.5 * cell));
-        assert!(!v.indent_item_hit(&l, info_x + 2.0 * cell));
-        assert!(!v.indent_item_hit(&l, info_x + 18.5 * cell));
+        let at = |col: f32| v.status_item_at(&l, info_x + col * cell);
+        assert_eq!(at(14.5), Some(StatusItem::Indent));
+        assert_eq!(at(17.5), Some(StatusItem::Indent));
+        assert_eq!(at(2.0), None);
+        assert_eq!(at(18.5), None);
+        // "CRLF" at 21..25, "UTF-8" at 28..33.
+        assert_eq!(at(21.5), Some(StatusItem::LineEnding));
+        assert_eq!(at(30.0), Some(StatusItem::Encoding));
         // Line 2, after the tab (4 columns) and "let ": column 9.
         d.ed().click(12 + 1 + 4, false);
         assert_eq!(

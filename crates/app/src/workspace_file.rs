@@ -267,6 +267,7 @@ mod tests {
             cursor: 4,
             scroll: 2,
             active,
+            ..SessionTab::default()
         }
     }
 

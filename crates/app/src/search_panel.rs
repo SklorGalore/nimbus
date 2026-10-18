@@ -1084,6 +1084,19 @@ fn draw_toggles(gpu: &mut Gpu, ui: &Ui, layout: &Layout, panel: &Panel, geo: &Ge
     }
 }
 
+/// A hit's line number, counting from 1; a match across lines shows the
+/// span of lines it covers, and one cut short at the window says so.
+fn line_label(hit: &crate::find_files::Hit) -> String {
+    let (first, last) = (hit.line + 1, hit.last_line + 1);
+    if hit.truncated {
+        format!("{first}-{last}+ (cut short):")
+    } else if last > first {
+        format!("{first}-{last}:")
+    } else {
+        format!("{first}:")
+    }
+}
+
 /// The results, grouped by file; only the rows on screen are drawn.
 fn draw_list(
     gpu: &mut Gpu,
@@ -1158,12 +1171,7 @@ fn draw_list(
                     gpu.push_text_line([geo.left, y], mark, ui.gutter);
                 }
                 let preview = results.preview(hit);
-                // A match across lines shows the span of lines it covers.
-                let number = match (hit.last_line > hit.line, hit.truncated) {
-                    (_, true) => format!("{}-{}+ (truncated):", hit.line + 1, hit.last_line + 1),
-                    (true, false) => format!("{}-{}:", hit.line + 1, hit.last_line + 1),
-                    (false, false) => format!("{}:", hit.line + 1),
-                };
+                let number = line_label(hit);
                 let x0 = geo.left + indent;
                 gpu.push_text_line([x0, y], &number, ui.gutter);
                 let tx = x0 + f(number.len() + 1) * cell;
