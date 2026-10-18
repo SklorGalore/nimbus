@@ -49,7 +49,7 @@ still drawn on demand and within the typing budget.
       `--screenshot` of the same file in both modes is compared by eye.
       The result is a decision, recorded in `DESIGN.md` §4.3, not a
       shipped setting unless it wins.
-- [ ] Budgets: a keystroke with whitespace, guides and ligatures on stays
+- [x] Budgets: a keystroke with whitespace, guides and ligatures on stays
       under the M2 typing budget on the 10 MB file; the emoji page adds
       at most 16 MB of GPU memory (2048² RGBA) and is created only when
       the first colour glyph is drawn; `--smoke` is unchanged.
@@ -152,7 +152,7 @@ on the Apple M5 Pro.
 | Same, whitespace `all` + guides + ligatures on | p50 406 µs, p99 1.70 ms, max 3.01 ms |
 | Same, including the GPU frame (llvmpipe), off / on | p99 7.75 ms / 7.16 ms |
 | Emoji atlas page | 16 MB, created on the first colour glyph (the debug overlay shows "emoji 0 MB" until then) |
-| `--smoke` first frame, cold and warm | owner to measure; nothing new runs before the first frame (the font setting loads on a worker after it) |
+| `--smoke` first frame on the M5 Pro | warm 131–146 ms; 620 ms on the first run after a build (window + GPU ready 303 ms against about 80 ms warm), the same as other branches built the same day (516–632 ms), so it is the new binary's first launch, not M16. Nothing new runs before the first frame: the `font` setting loads on a worker after it |
 | Zoom refill, 14 pt and 24 pt | owner to measure: `RUST_LOG=nimbus=info` logs the first frame after each zoom step |
 
 The keystroke cost with everything on is the same as with everything
