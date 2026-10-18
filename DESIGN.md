@@ -583,6 +583,10 @@ introduces and points at the code.
 | 19 | Workspace and search, second pass | Planned | Several roots, named workspaces, drag and drop, search history and multi-line patterns | [m19](docs/milestones/m19-workspace-and-search-second-pass.md) |
 | 20 | Reading aids | Done | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
 | 21 | Foundations and 1.0 | Planned | Ropey 2, current winit and wgpu, fuzzing, a crash record, version 1.0 | [m21](docs/milestones/m21-foundations-and-1-0.md) |
+| 22 | Screen readers | Draft | Use Nimbus with VoiceOver, NVDA or Orca | [m22](docs/milestones/m22-screen-readers.md) |
+| 23 | Library upgrades | Draft, waiting | Ropey 2 and winit 0.31 once stable; Finder "Open With"; the macOS emoji picker | [m23](docs/milestones/m23-library-upgrades.md) |
+| 24 | Writing prose | Draft | Spell checking, a word count, images in the preview, export to HTML | [m24](docs/milestones/m24-writing-prose.md) |
+| 25 | International text | Draft | CJK and other scripts in the right fonts, East Asian encodings, editable huge files in legacy encodings | [m25](docs/milestones/m25-international-text.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
@@ -590,6 +594,8 @@ approved the six plans and their order on 2026-10-17 and answered their
 open questions (§9, §10). M10 and M11 landed; M12 is Next, and M13–M15
 follow in that order. M16–M21 were drafted on 2026-10-18 from what
 M9–M15 deferred and approved the same day (§9, §10); they follow M15.
+M22–M25 are the plans after 1.0, drafted on 2026-10-18 from what 1.0
+and the earlier plans deferred; they wait on the open questions in §9.
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -598,7 +604,36 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-None open. The questions the drafts of M16–M21 raised were answered on
+Raised by the drafts of M22–M25 (2026-10-18), the plans after 1.0:
+
+1. **Order.** Drafted as M22 (screen readers), M23 (library upgrades,
+   whenever ropey 2 and winit 0.31 are stable), M24 (prose), M25
+   (international text). `accesskit_winit` 0.34 targets winit 0.30, so
+   screen readers need not wait for the upgrade; the cost is moving the
+   adapter to its winit 0.31 version later. The alternative is to wait
+   and do M23 first.
+2. **M22: platforms checked by hand.** VoiceOver is checked on the
+   owner's Mac. Are NVDA (Windows) and Orca (Linux) checked by hand
+   before the release too, in a VM if needed, or only covered by the
+   tree tests?
+3. **M23: Finder "Open With" if winit 0.31 does not pass the files
+   on.** A small `objc2` hook in `app` would be new `unsafe` outside
+   `render` and the mmap buffer. Allow it, or leave the item in the
+   backlog?
+4. **M24: where spell checking runs.** Drafted for Markdown, plain
+   text, and comments and strings in code. The alternative is prose
+   files only, which is quieter in code.
+5. **M24: dictionaries.** Drafted with US English bundled (about
+   0.5 MB) and others from the config folder. The alternative bundles
+   nothing and needs a dictionary dropped in first.
+6. **M24: `words.txt`.** Added words are written to the config folder,
+   the first file Nimbus writes there. The alternative keeps them in
+   the state directory beside `state.toml`.
+7. **M25: East Asian encodings.** M17 measured that offering them costs
+   about 1 KB. Drafted to offer them by default (still never guessed)
+   and retire the cargo feature; the alternative keeps them behind it.
+
+The questions the drafts of M16–M21 raised were answered on
 2026-10-18, when the owner approved the six plans and their order:
 
 - Order: M16 (rendering) to M21 (1.0) as drafted; encodings first was
