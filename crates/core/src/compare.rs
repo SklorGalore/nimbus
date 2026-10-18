@@ -464,6 +464,7 @@ fn merge_touching(hunks: &mut Vec<Hunk>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::Whitespace;
     use crate::{Buffer, RopeBuffer};
 
     fn snap(text: &str) -> Arc<dyn Snapshot> {
@@ -490,19 +491,100 @@ mod tests {
         let loaded = t.elapsed();
         let (os, ns): (Arc<dyn Snapshot>, Arc<dyn Snapshot>) =
             (old.snapshot().into(), new.snapshot().into());
-        let t = std::time::Instant::now();
-        let c = compare(&os, &ns, Options::default()).expect("compare");
         println!(
-            "{spec}: {} MB + {} MB loaded in {loaded:?}; compared in {:?}: {} hunks, {} + {} lines, {} lines diffed, exact {}",
+            "{spec}: {} MB + {} MB loaded in {loaded:?}",
             os.len_bytes() >> 20,
             ns.len_bytes() >> 20,
+        );
+        // M18: each diff option, as toggling it in the view re-diffs.
+        let ws = |whitespace| Normalize {
+            whitespace,
+            ..Normalize::default()
+        };
+        let variants = [
+            ("exact", Normalize::default()),
+            ("ignore whitespace at ends", ws(Whitespace::Ends)),
+            ("ignore all whitespace", ws(Whitespace::All)),
+            (
+                "ignore case",
+                Normalize {
+                    case: true,
+                    ..Normalize::default()
+                },
+            ),
+            (
+                "ignore blank lines",
+                Normalize {
+                    blank_lines: true,
+                    ..Normalize::default()
+                },
+            ),
+        ];
+        for (name, normalize) in variants {
+            let t = std::time::Instant::now();
+            let options = Options {
+                normalize,
+                split: true,
+                ..Options::default()
+            };
+            let c = compare(&os, &ns, options).expect("compare");
+            println!(
+                "  {name}: {:?}, {} hunks, {} + {} units, {} diffed, exact {}",
+                t.elapsed(),
+                c.hunks.len(),
+                c.old_lines,
+                c.new_lines,
+                c.lines_diffed,
+                c.exact
+            );
+        }
+    }
+
+    /// `cargo test --release -p nimbus-core -- --ignored --nocapture one_line_bench`
+    ///
+    /// M18 budget: a 50 MB file that is one line (minified data) against a
+    /// copy edited in a few places diffs in pieces in under two seconds.
+    #[test]
+    #[ignore = "benchmark: run in release with --nocapture (M18)"]
+    fn one_line_bench() {
+        let words = [
+            "{\"id\":",
+            "1234,",
+            "\"name\":",
+            "\"alpha\",",
+            "[",
+            "],",
+            "true,",
+            "null}",
+        ];
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut old = String::with_capacity(50 << 20);
+        while old.len() < 50 << 20 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            old.push_str(words[usize::try_from(x % 8).unwrap()]);
+        }
+        let mut new = old.clone();
+        for k in 1..=5 {
+            let at = new.len() / 6 * k;
+            new.insert_str(at, "\"edited\":42,");
+        }
+        let (os, ns) = (snap(&old), snap(&new));
+        let t = std::time::Instant::now();
+        let options = Options {
+            split: true,
+            ..Options::default()
+        };
+        let c = compare(&os, &ns, options).expect("compare");
+        println!(
+            "one line, 50 MB: {:?}, {} hunks, {} + {} pieces",
             t.elapsed(),
             c.hunks.len(),
             c.old_lines,
-            c.new_lines,
-            c.lines_diffed,
-            c.exact
+            c.new_lines
         );
+        assert!(c.hunks.len() <= 10, "{:?}", c.hunks);
     }
 
     #[test]

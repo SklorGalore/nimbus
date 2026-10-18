@@ -45,7 +45,7 @@ repeated in each file:
 | 15 | [Distribution](m15-distribution.md) | Done |
 | 16 | [Rendering, second pass](m16-rendering-second-pass.md) | Planned |
 | 17 | [Encodings and line endings](m17-encodings.md) | Planned |
-| 18 | [Compare, second pass](m18-compare-second-pass.md) | Planned |
+| 18 | [Compare, second pass](m18-compare-second-pass.md) | Done |
 | 19 | [Workspace and search, second pass](m19-workspace-and-search-second-pass.md) | Planned |
 | 20 | [Reading aids](m20-reading-aids.md) | Planned |
 | 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | Planned |

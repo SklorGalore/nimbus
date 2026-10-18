@@ -541,7 +541,7 @@ introduces and points at the code.
 | 15 | Distribution | Done | Installers and packages for every platform (unsigned), an update check, signed checksums | [m15](docs/milestones/m15-distribution.md) |
 | 16 | Rendering, second pass | Planned | Colour emoji, ligatures, zoom, whitespace and indent guides | [m16](docs/milestones/m16-rendering-second-pass.md) |
 | 17 | Encodings and line endings | Planned | Open and save UTF-16 and Windows-1252; change encoding and line endings | [m17](docs/milestones/m17-encodings.md) |
-| 18 | Compare, second pass | Planned | Ignore whitespace, compare folders, diff one-line files, compare with HEAD | [m18](docs/milestones/m18-compare-second-pass.md) |
+| 18 | Compare, second pass | Done | Ignore whitespace, compare folders, diff one-line files, compare with HEAD | [m18](docs/milestones/m18-compare-second-pass.md) |
 | 19 | Workspace and search, second pass | Planned | Several roots, named workspaces, drag and drop, search history and multi-line patterns | [m19](docs/milestones/m19-workspace-and-search-second-pass.md) |
 | 20 | Reading aids | Planned | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
 | 21 | Foundations and 1.0 | Planned | Ropey 2, current winit and wgpu, fuzzing, a crash record, version 1.0 | [m21](docs/milestones/m21-foundations-and-1-0.md) |
@@ -704,3 +704,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-17 | Injections: child trees keyed by host node id, kept one screen either side of the view, parsed within the frame's 2 ms budget at one child per frame at least; Rust's injection query not used | §4.2, m14 |
 | 2026-10-17 | Spans carry a capture table per grammar so the inner language's colours win inside injections; wide nodes are queried child by child | §4.2, m14 |
 | 2026-10-18 | Per-language soft wrap is `[editor.NAME] wrap`, following M11's `[editor.NAME]` and `[indent.NAME]` tables rather than the planned `[languages.NAME]` (that table maps file patterns); Markdown wraps by default | §4.4, m14 |
+| 2026-10-18 | M18 landed: diff options normalise lines before hashing; lines over 4 KB are cut by a 64-byte gear hash and diffed in pieces (layered path only, within 256 MB); git read with `cat-file --filters` on its own thread; folder compare merges two sorted walks by `Path` order | §4.4, m18 |
