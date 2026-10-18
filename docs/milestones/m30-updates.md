@@ -55,7 +55,8 @@ a password prompt or a Gatekeeper or SmartScreen warning.
       `SHA256SUMS.minisig` is checked against the public key compiled
       into the binary; its trusted comment must read exactly
       `Nimbus X.Y.Z SHA256SUMS` for the version being installed (so an
-      older signed release cannot be replayed as a newer one); the
+      older signed release cannot be replayed as a newer one), and that
+      version must be newer than the running one (no downgrades); the
       package's SHA-256 must match its line in `SHA256SUMS`. Any failure
       stops the update, deletes the download and says why. A release
       with no signature is never installed; Nimbus falls back to Open
@@ -125,10 +126,12 @@ added.
 
 **Prerequisite: the signing key.** The owner's M15 step 1 (make the key,
 commit `minisign.pub`, set `MINISIGN_SECRET_KEY`) has to be done, and
-one release signed, before task 3 can be tested end to end. Losing the
-secret key means no further updates through Nimbus until people install
-a build with a new key by hand; the README says so, and the key is kept
-in a password manager as well as in Actions secrets.
+one release signed, before task 3 can be tested end to end. Where the
+secret key lives, its backup, rotation and revocation, and the signing
+pipeline itself are M31's. The contract between the two plans: the app
+trusts exactly the key or keys embedded at build time, the signature is
+over `SHA256SUMS`, and its trusted comment carries the version. If M31
+ships a second key for rotation, the updater accepts either.
 
 **Asset names, not JSON.** The release packages already have fixed
 names (`Nimbus-X.Y.Z-macos.zip`, `nimbus-X.Y.Z-windows-x86_64-setup.exe`,
@@ -188,7 +191,7 @@ Update, Cancel Update, Roll Back Update, in `action.rs` with stable ids.
 
 | Risk | Fallback |
 |---|---|
-| The signing key is lost or leaks | Lost: updates stop until a build with a new key is installed by hand. Leaked: a new key ships in a release signed with the old one, and the README says to install it by hand to be sure |
+| The signing key is lost or leaks | Updates through Nimbus stop until a build trusting a new key is installed; custody, backup and rotation are planned in M31 |
 | A swap fails halfway (power cut, full disk) | The two renames are atomic one at a time; at worst the old app is at `.previous` and the next start of Nimbus or the release page restores it |
 | `/Applications` is not writable for this user | Detected before downloading; Nimbus offers the release page instead |
 | Homebrew or winget sees a version it did not install | Homebrew installs are left to `brew`; winget uses the same installer, so its record stays right |
