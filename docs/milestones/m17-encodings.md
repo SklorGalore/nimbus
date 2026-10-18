@@ -1,6 +1,6 @@
 # M17 — Encodings and line endings
 
-**Status: done** (2026-10-18; smoke numbers to be recorded on the Mac). Written on 2026-10-18. Config and data files are
+**Status: done** (2026-10-18). Written on 2026-10-18. Config and data files are
 the third content type `DESIGN.md` §1 names, and logs, CSV exports and
 Windows-born text files are often not UTF-8. Today such a file opens
 through M7's byte path with every non-UTF-8 byte shown as `�` (SUB
@@ -125,8 +125,13 @@ Landed 2026-10-18 (nimbus 0.6.0, nimbus-core 0.5.0).
   feature only decides whether they are offered. All of it costs 0.30 MB,
   so the feature is kept off for the reason `DESIGN.md` §9 gives
   (unreliable to guess) rather than for size.
-- **`--smoke`**: not measurable in the container (no GPU); to be recorded
-  on the Mac. Nothing new runs at startup: the `[encodings]` table is
+- **`--smoke`** (release, M5 Pro, Metal; owner's run on 2026-10-18):
+  132–150 ms warm (M11: 147 ms, M10: 150 ms), window and GPU ready at
+  77–90 ms. Cold, the first run after `sudo purge`: 516 ms, window and
+  GPU ready at 222 ms; the rest of the gap is the binary, the font and
+  the system libraries coming from disk. It is the first cold run
+  recorded, so there is no earlier one to compare. Nothing new runs at
+  startup: the `[encodings]` table is
   compiled once with the config, and only the files on the command line
   are sniffed (64 KB each, at most).
 - **Surprises**:
