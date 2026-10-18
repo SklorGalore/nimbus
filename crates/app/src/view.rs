@@ -2550,7 +2550,14 @@ pub(crate) fn draw_field(
     let visible = ((width / cell).floor() as usize).saturating_sub(1).max(1);
     let first = cursor_col.saturating_sub(visible);
     let x0 = origin[0] - f(first) * cell;
-    gpu.begin_layer(Some([origin[0], origin[1], width, m.line_height]));
+    // The field gets a layer clipped to itself, inside the caller's clip;
+    // the caller's layer is restored after, so a field in the sidebar does
+    // not leave the rest of the sidebar unclipped.
+    let outer = gpu.clip();
+    gpu.begin_layer(Some(intersect(
+        [origin[0], origin[1], width, m.line_height],
+        outer,
+    )));
     if let Some((a, b)) = field_selection(field, &text) {
         gpu.push_rect(
             [x0 + f(a) * cell, origin[1]],
@@ -2574,7 +2581,20 @@ pub(crate) fn draw_field(
             ui.cursor,
         );
     }
-    gpu.begin_layer(None);
+    gpu.begin_layer(outer);
+}
+
+/// `rect` (`[x, y, width, height]`) cut down to lie inside `clip`, or
+/// `rect` itself when there is no clip. Rectangles that do not overlap
+/// give an empty one, which draws nothing.
+fn intersect(rect: [f32; 4], clip: Option<[f32; 4]>) -> [f32; 4] {
+    let Some([cx, cy, cw, ch]) = clip else {
+        return rect;
+    };
+    let [x, y, w, h] = rect;
+    let (left, top) = (x.max(cx), y.max(cy));
+    let (right, bottom) = ((x + w).min(cx + cw), (y + h).min(cy + ch));
+    [left, top, (right - left).max(0.0), (bottom - top).max(0.0)]
 }
 
 /// One tab's label, and whether it has unsaved changes.
@@ -2847,6 +2867,18 @@ fn field_selection(field: &Solo, text: &str) -> Option<(usize, usize)> {
 mod tests {
     use super::*;
     use crate::document::{Editor, Solo};
+
+    #[test]
+    fn intersect_keeps_a_field_inside_its_clip() {
+        let field = [10.0, 20.0, 300.0, 16.0];
+        assert_eq!(intersect(field, None), field);
+        // A sidebar 200 px wide cuts the field off at its edge.
+        let sidebar = Some([0.0, 0.0, 200.0, 900.0]);
+        assert_eq!(intersect(field, sidebar), [10.0, 20.0, 190.0, 16.0]);
+        // No overlap at all: nothing to draw.
+        let below = Some([0.0, 100.0, 200.0, 50.0]);
+        assert_eq!(intersect(field, below)[3], 0.0);
+    }
 
     fn layout(len_lines: usize) -> Layout {
         let metrics = Metrics {

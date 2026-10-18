@@ -14,6 +14,8 @@ other one's key switches to it.
 
 ## Command palette
 
+<img src="../../assets/screenshots/palette.png" alt="The command palette listing commands with their shortcuts" width="800">
+
 `Cmd+Shift+P` / `Ctrl+Shift+P`. Every command in Nimbus, with its
 current shortcut beside it. Plain cursor movement and typing keys are
 left out, since nobody looks those up by name. Use it to find a command
@@ -22,6 +24,8 @@ key at all. The full list is in
 [Keyboard shortcuts and commands](keybindings.md).
 
 ## Go to File
+
+<img src="../../assets/screenshots/files.png" alt="Go to File narrowed to two files by typing "buf"" width="800">
 
 `Cmd+P` / `Ctrl+P`. Lists the files in the project folder (see
 [Getting started](getting-started.md#opening-files-and-folders)) and

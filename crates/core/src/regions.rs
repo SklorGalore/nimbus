@@ -198,11 +198,16 @@ impl Regions {
         // The lines touched run from the one holding the start to the one
         // holding the byte after the removed text. When the new text ends
         // at a line start (it ends with a newline, or nothing was inserted
-        // there), that following line is whole and untouched.
+        // there), that following line is whole and untouched. When the
+        // edit reaches the end of the text, nothing follows it: the line
+        // there was the last one, and if it had no newline the edit took
+        // it too (the line count drops by one more than the newlines
+        // removed), so it must stay among the lines touched.
         let join = span.start + span.inserted;
         let joins_at_line_start = join == 0 || after.byte_at(join - 1) == Some(b'\n');
+        let reaches_end = join == after.len_bytes();
         let mut last_line = span.first_line + span.removed_lines;
-        if joins_at_line_start && last_line > first_line {
+        if joins_at_line_start && !reaches_end && last_line > first_line {
             last_line -= 1;
         }
         self.result_lines = new_total;
@@ -489,6 +494,26 @@ mod tests {
         assert_eq!(r.all()[0].result, 0..1);
         assert_eq!(r.all()[1].result, 1..2);
         assert_eq!(r.result_lines(), 2);
+    }
+
+    #[test]
+    fn deleting_through_a_last_line_without_newline_takes_its_region() {
+        // Ours ends without a newline; the regions are "a", "b" (theirs
+        // changed it) and "c", the last line.
+        let (mut r, mut result, _) = setup("a\nb\nc", "a\nb\nc", "a\nB\nc", None);
+        assert_eq!(r.all().len(), 3, "{:?}", r.all());
+        // Delete from the start of line 1 to the end: "b\nc" goes, one
+        // newline but two lines, so the region holding "c" goes too.
+        let before = text(&result);
+        result.replace(2..5, "").unwrap();
+        r.apply_edit(&result, span(&before, 2, 3, ""));
+        assert_eq!(text(&result), "a\n");
+        assert_eq!(r.result_lines(), 1);
+        assert_eq!(r.all().len(), 2, "{:?}", r.all());
+        assert_eq!(r.all()[0].result, 0..1);
+        assert_eq!(r.all()[1].result, 1..1);
+        assert_eq!(r.all()[1].resolution, Resolution::Edited);
+        assert_eq!(r.all()[1].ours, 1..3);
     }
 
     #[test]

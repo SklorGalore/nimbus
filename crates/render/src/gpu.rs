@@ -786,6 +786,22 @@ impl Gpu {
             .begin_layer(clip.map(|[x, y, w, h]| [to_px(x), to_px(y), to_px(w), to_px(h)]));
     }
 
+    /// The current layer's clip, in the form [`Gpu::begin_layer`] takes
+    /// (rounded to whole pixels). A helper that needs a layer of its own
+    /// reads this first and passes it back to `begin_layer` when done, so
+    /// whatever it was drawn inside, such as the sidebar, stays clipped.
+    #[must_use]
+    pub fn clip(&self) -> Option<[f32; 4]> {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "window pixel coordinates, far below 2^24"
+        )]
+        let to_f = |v: u32| v as f32;
+        self.frame
+            .clip()
+            .map(|[x, y, w, h]| [to_f(x), to_f(y), to_f(w), to_f(h)])
+    }
+
     /// Queue a filled rectangle for this frame. Within a layer, rectangles
     /// draw under text.
     pub fn push_rect(&mut self, pos: [f32; 2], size: [f32; 2], color: [f32; 4]) {

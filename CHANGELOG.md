@@ -130,6 +130,12 @@ section before tagging.
 - A new file, or one whose indentation cannot be detected, indents with
   four spaces rather than a tab; `[indent]` can change that.
 
+### Fixed
+
+- Find in Files results, and anything else drawn in the sidebar after a
+  text field, were no longer clipped to the sidebar: long result lines
+  ran on across the editor.
+
 ## 0.2.1
 
 - `--version` prints the app's version, not the core crate's.
