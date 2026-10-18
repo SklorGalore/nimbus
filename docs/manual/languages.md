@@ -6,6 +6,8 @@ shows the language of the active tab.
 
 ## Built-in languages
 
+<img src="../../assets/screenshots/languages.png" alt="Python, shell, TOML and YAML files, each highlighted" width="900">
+
 | Language | Name in config | Chosen for |
 |---|---|---|
 | Rust | `rust` | `.rs` |

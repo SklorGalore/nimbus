@@ -122,6 +122,8 @@ Dragging a folder adds it to the workspace.
 
 ### Workspaces: several folders at once
 
+<img src="../../assets/screenshots/workspace.png" alt="A workspace of two folders, core and syntax, each with its own row at the top of its tree" width="800">
+
 A workspace is the folders in the sidebar and the files you had open.
 Nimbus remembers one per project folder by itself (see
 [Sessions](getting-started.md#sessions-picking-up-where-you-left-off)).
@@ -218,6 +220,8 @@ example), Nimbus reloads it as described in
 [Updates and troubleshooting](troubleshooting.md#when-a-file-changes-on-disk).
 
 ## Zoom, whitespace and indent guides
+
+<img src="../../assets/screenshots/guides.png" alt="Spaces drawn as dots and a thin indent guide at each indentation level" width="800">
 
 Zoom In (`Cmd+=` / `Ctrl+=`), Zoom Out (`Cmd+-` / `Ctrl+-`) and Reset
 Zoom (`Cmd+0` / `Ctrl+0`) change the text size by one point at a time,

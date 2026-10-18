@@ -70,6 +70,8 @@ gets there.
 
 ## Go to Symbol
 
+<img src="../../assets/screenshots/symbols.png" alt="Go to Symbol narrowed to three methods by typing "record", each with its kind and line" width="800">
+
 `Cmd+Shift+R` / `Ctrl+Shift+R`. Lists the definitions in the current
 file, such as functions, types, classes, constants and macros, with
 their kind and line, and moves the cursor to the one you choose. In
