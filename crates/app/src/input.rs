@@ -136,6 +136,16 @@ pub enum Command<'a> {
     ToggleIgnored,
     /// Show or hide the debug overlay: frame time, latency, atlas use.
     ToggleDebugOverlay,
+    /// Make the editor font one point larger (M16).
+    ZoomIn,
+    /// Make the editor font one point smaller.
+    ZoomOut,
+    /// Go back to the config's `font_size`.
+    ResetZoom,
+    /// Cycle where whitespace shows: none, selection, all.
+    ToggleWhitespace,
+    /// Show or hide indent guides.
+    ToggleIndentGuides,
     /// Select the word under the cursor, or add the next occurrence of the
     /// selection as another cursor.
     AddNextOccurrence,
@@ -278,7 +288,8 @@ impl Command<'_> {
     }
 
     /// Whether this arranges the editor rather than editing: the groups
-    /// and folds of M13. These run whatever field has the keyboard.
+    /// and folds of M13, the zoom and view toggles of M16. These run
+    /// whatever field has the keyboard.
     #[must_use]
     pub fn is_layout(self) -> bool {
         matches!(
@@ -294,6 +305,11 @@ impl Command<'_> {
                 | Self::FoldAll
                 | Self::UnfoldAll
                 | Self::FoldLevel(_)
+                | Self::ZoomIn
+                | Self::ZoomOut
+                | Self::ResetZoom
+                | Self::ToggleWhitespace
+                | Self::ToggleIndentGuides
         )
     }
 

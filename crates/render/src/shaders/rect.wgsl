@@ -1,7 +1,9 @@
 // Solid rectangles: backgrounds, cursor, selection, gutter.
 
 // Viewport size in physical pixels, padded to 16 bytes for uniform layout rules.
-struct Globals { viewport: vec2<f32>, pad: vec2<f32> };
+// `linear` is 1 when the target is sRGB (--linear-blend): colours are
+// turned into linear light so blending happens there.
+struct Globals { viewport: vec2<f32>, linear: f32, pad: f32 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
 struct RectIn {
@@ -36,5 +38,16 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: RectIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color.rgb * in.color.a, in.color.a); // premultiply
+    return vec4<f32>(space(in.color.rgb) * in.color.a, in.color.a); // premultiply
+}
+
+// The sRGB curve undone, per channel: theme colours are written in sRGB.
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+fn space(c: vec3<f32>) -> vec3<f32> {
+    return select(c, to_linear(c), globals.linear > 0.5);
 }

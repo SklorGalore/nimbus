@@ -12,6 +12,10 @@ use serde::Deserialize;
 /// Settings read from the config file.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent on/off settings, each one key in the file"
+)]
 pub struct Config {
     /// Editor font size in points.
     pub font_size: f64,
@@ -35,6 +39,56 @@ pub struct Config {
     /// Indentation defaults and detection, with per-language overrides
     /// (`[indent.python]`).
     pub indent: IndentSettings,
+    /// The editor font: an installed font's family name
+    /// (`"JetBrains Mono"`) or a font file's path. Empty means the bundled Hack Nerd Font
+    /// Mono. A named font is looked up on a worker after the first frame,
+    /// which draws with the bundled font.
+    pub font: String,
+    /// Let the font join characters such as `->` and `!=` into ligatures,
+    /// for fonts that have them (Hack has none).
+    pub ligatures: bool,
+    /// Start with the zoom the last session ended with (kept in
+    /// `state.toml`); `false` starts every session at `font_size`.
+    pub remember_zoom: bool,
+    /// Where spaces and tabs show as `·` and `→`.
+    pub render_whitespace: Whitespace,
+    /// Draw a hairline at each indentation level.
+    pub indent_guides: bool,
+}
+
+/// Which spaces and tabs are drawn visibly (`render_whitespace`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Whitespace {
+    /// Nowhere.
+    None,
+    /// Inside selections, as VS Code does by default.
+    #[default]
+    Selection,
+    /// Everywhere.
+    All,
+}
+
+impl Whitespace {
+    /// The next mode, for the palette's toggle: none, selection, all.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::None => Self::Selection,
+            Self::Selection => Self::All,
+            Self::All => Self::None,
+        }
+    }
+
+    /// The mode's name as the config spells it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Selection => "selection",
+            Self::All => "all",
+        }
+    }
 }
 
 /// The `[editor]` table and its per-language sub-tables. Every field is
@@ -159,6 +213,11 @@ impl Default for Config {
             check_updates: false,
             editor: EditorSettings::default(),
             indent: IndentSettings::default(),
+            font: String::new(),
+            ligatures: false,
+            remember_zoom: true,
+            render_whitespace: Whitespace::Selection,
+            indent_guides: false,
         }
     }
 }
@@ -189,6 +248,11 @@ const KNOWN: &[&str] = &[
     "check_updates",
     "editor",
     "indent",
+    "font",
+    "ligatures",
+    "remember_zoom",
+    "render_whitespace",
+    "indent_guides",
 ];
 
 /// A commented starting point written by "Open Config File" when there is
@@ -200,6 +264,18 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # soft_wrap = false
 # theme = "dark"            # or "light", or NAME for themes/NAME.toml here
 # check_updates = false     # true: ask GitHub for a newer release at startup
+
+# The editor font: an installed font's name or a font file's path. Empty is
+# the bundled Hack Nerd Font Mono. ligatures joins -> != => and friends in
+# fonts that have them (Fira Code, JetBrains Mono, Cascadia Code).
+# font = "JetBrains Mono"
+# ligatures = false
+# Zoom (View > Zoom In/Out, Primary+= and Primary+-) is remembered between
+# sessions; false starts every session at font_size.
+# remember_zoom = true
+# Show spaces as · and tabs as →: "selection", "all" or "none".
+# render_whitespace = "selection"
+# indent_guides = false     # true: a hairline at each indentation level
 
 # Key bindings: action id = list of chords. "Primary" is Cmd on macOS and
 # Ctrl elsewhere. An empty list unbinds the action. The command palette
@@ -287,6 +363,26 @@ impl Config {
         );
         take(&table, "editor", &mut config.editor, &mut warnings);
         take(&table, "indent", &mut config.indent, &mut warnings);
+        take(&table, "font", &mut config.font, &mut warnings);
+        take(&table, "ligatures", &mut config.ligatures, &mut warnings);
+        take(
+            &table,
+            "remember_zoom",
+            &mut config.remember_zoom,
+            &mut warnings,
+        );
+        take(
+            &table,
+            "render_whitespace",
+            &mut config.render_whitespace,
+            &mut warnings,
+        );
+        take(
+            &table,
+            "indent_guides",
+            &mut config.indent_guides,
+            &mut warnings,
+        );
         if let Some(w) = config.indent.width.filter(|w| !(1..=16).contains(w)) {
             warnings.push(format!("config: indent.width {w} out of range 1–16"));
             config.indent.width = None;
@@ -419,6 +515,22 @@ mod tests {
         let (c, w) = Config::parse("[indent]\nwidth = 99\n");
         assert_eq!(w.len(), 1, "{w:?}");
         assert_eq!(c.indent.for_language(None).indent.width, 4);
+    }
+
+    #[test]
+    fn rendering_settings_parse() {
+        let (c, w) = Config::parse(
+            "font = \"Fira Code\"\nligatures = true\nremember_zoom = false\n\
+             render_whitespace = \"all\"\nindent_guides = true\n",
+        );
+        assert_eq!(w, Vec::<String>::new());
+        assert_eq!(c.font, "Fira Code");
+        assert!(c.ligatures && !c.remember_zoom && c.indent_guides);
+        assert_eq!(c.render_whitespace, Whitespace::All);
+        let (c, w) = Config::parse("render_whitespace = \"some\"\n");
+        assert_eq!(c.render_whitespace, Whitespace::Selection);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(Whitespace::All.next(), Whitespace::None);
     }
 
     #[test]

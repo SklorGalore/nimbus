@@ -2,8 +2,8 @@
 //!
 //! The config file is the user's, edited by hand and full of their comments,
 //! so Nimbus never writes to it. What the app remembers by itself (whether
-//! the sidebar is shown, how wide it was dragged) goes in this separate file
-//! instead. A missing or broken file just means the defaults.
+//! the sidebar is shown, how wide it was dragged, the zoom) goes in this
+//! separate file instead. A missing or broken file just means the defaults.
 
 use std::path::PathBuf;
 
@@ -19,6 +19,10 @@ pub struct State {
     pub sidebar_visible: bool,
     /// Sidebar width in logical pixels.
     pub sidebar_width: f32,
+    /// The editor font size the zoom actions left, in points (M16); `None`
+    /// when it is the config's `font_size`, so a later change to the config
+    /// still takes effect. Read at startup unless `remember_zoom = false`.
+    pub font_size: Option<f64>,
 }
 
 impl Default for State {
@@ -26,6 +30,7 @@ impl Default for State {
         Self {
             sidebar_visible: true,
             sidebar_width: DEFAULT_WIDTH,
+            font_size: None,
         }
     }
 }
@@ -74,11 +79,13 @@ mod tests {
         let s = State {
             sidebar_visible: false,
             sidebar_width: 300.0,
+            font_size: Some(18.0),
         };
         let text = toml::to_string(&s).unwrap();
         assert_eq!(toml::from_str::<State>(&text).unwrap(), s);
         let partial: State = toml::from_str("sidebar_width = 200.0\n").unwrap();
         assert!(partial.sidebar_visible);
         assert_eq!(partial.sidebar_width, 200.0);
+        assert_eq!(partial.font_size, None);
     }
 }

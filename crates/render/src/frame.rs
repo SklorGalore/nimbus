@@ -8,8 +8,8 @@
 
 use std::ops::Range;
 
-use crate::atlas::{Atlas, AtlasSlot};
-use crate::pipeline::{GlyphInstance, Pipelines, RectInstance};
+use crate::atlas::{Atlas, AtlasPage, AtlasSlot};
+use crate::pipeline::{GLYPH_COLOR, GlyphInstance, Pipelines, RectInstance};
 
 /// One layer: a clip region and the instances drawn in it.
 #[derive(Debug, Clone)]
@@ -82,6 +82,11 @@ impl FrameBuilder {
             uv_min: slot.uv_min,
             uv_max: slot.uv_max,
             color,
+            flags: if slot.page == AtlasPage::Color {
+                GLYPH_COLOR
+            } else {
+                0
+            },
         });
     }
 

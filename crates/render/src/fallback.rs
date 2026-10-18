@@ -17,8 +17,16 @@
 //! has the character is chosen, so loading costs a few megabytes, not the
 //! 50 MB of a full CJK font, when a smaller one will do (owner's choice:
 //! copying the file rather than mapping it, which would have needed
-//! `unsafe`). Fonts made only of bitmaps (most colour emoji fonts) are
-//! skipped, since the atlas holds coverage masks, not colour images.
+//! `unsafe`).
+//!
+//! **Colour emoji (M16).** Since the atlas gained a colour page, fonts made
+//! of colour bitmaps or colour layers count too. For an emoji character
+//! the colour fonts are tried first, so 🎉 comes from Apple Color Emoji,
+//! Segoe UI Emoji or Noto Color Emoji rather than from a small font with a
+//! black-and-white drawing of it. Apple Color Emoji is close to 200 MB, far
+//! over [`MAX_FONT_FILE`], so a colour font that large is *mapped* rather
+//! than read: the operating system pages in only the parts holding the
+//! emoji actually drawn (see [`map`] and its safety note).
 //! Nothing here runs before the first missing character, so startup is
 //! unaffected.
 
@@ -150,6 +158,9 @@ struct Candidate {
     /// Smaller is tried first: (not upright, distance from regular weight,
     /// file size).
     rank: (bool, u16, u64),
+    /// The file is over [`MAX_FONT_FILE`]: kept only in case it is a colour
+    /// font, which is mapped rather than read.
+    large: bool,
 }
 
 /// The worker thread: answer each character asked about, in order.
@@ -202,7 +213,14 @@ fn candidates(db: &fontdb::Database) -> Vec<Candidate> {
                 return None;
             }
             let size = std::fs::metadata(&path).ok()?.len();
-            (size <= MAX_FONT_FILE).then(|| Candidate {
+            let large = size > MAX_FONT_FILE;
+            // Only a font with "emoji" in its name is worth mapping when
+            // large; anything else that size is a CJK font and skipped.
+            let emoji = face
+                .families
+                .iter()
+                .any(|(name, _)| name.to_ascii_lowercase().contains("emoji"));
+            (!large || emoji).then(|| Candidate {
                 id: face.id,
                 path,
                 index: face.index,
@@ -211,6 +229,7 @@ fn candidates(db: &fontdb::Database) -> Vec<Candidate> {
                     face.weight.0.abs_diff(400),
                     size,
                 ),
+                large,
             })
         })
         .collect();
@@ -236,18 +255,44 @@ fn script_sample(c: char) -> &'static str {
     }
 }
 
-/// Whether a font has an outline glyph for `c` (not just a bitmap), and for
-/// the common characters of its script.
+/// Whether a font has a glyph for `c` it can draw, and for the common
+/// characters of its script.
 fn draws_script(font: FontRef<'_>, c: char) -> bool {
     draws(font, c) && script_sample(c).chars().all(|s| font.charmap().map(s) != 0)
 }
 
-/// Whether a font has an outline glyph for `c` (not just a bitmap).
+/// Whether `font` has `table`.
+fn has(font: FontRef<'_>, table: [u8; 4]) -> bool {
+    font.table(swash::tag_from_bytes(&table)).is_some()
+}
+
+/// Whether a font has colour glyphs: colour bitmaps (`CBDT`, `sbix`) or
+/// colour layers (`COLR`).
+fn is_color(font: FontRef<'_>) -> bool {
+    [*b"CBDT", *b"sbix", *b"COLR"]
+        .into_iter()
+        .any(|t| has(font, t))
+}
+
+/// Whether a font has a glyph for `c` it can draw: an outline, or a colour
+/// glyph now that the atlas has a colour page. (Black-and-white bitmap
+/// fonts are still skipped.)
 fn draws(font: FontRef<'_>, c: char) -> bool {
-    let outlines = [b"glyf", b"CFF ", b"CFF2"]
-        .iter()
-        .any(|t| font.table(swash::tag_from_bytes(t)).is_some());
-    outlines && font.charmap().map(c) != 0
+    let outlines = [*b"glyf", *b"CFF ", *b"CFF2"]
+        .into_iter()
+        .any(|t| has(font, t));
+    (outlines || is_color(font)) && font.charmap().map(c) != 0
+}
+
+/// Whether `c` is usually drawn as an emoji: the pictographic blocks, plus
+/// the older symbols (☀, ❤, ✂) that emoji fonts draw in colour. For these
+/// a colour font is tried before any other.
+#[must_use]
+pub fn is_emoji(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0x2300..=0x23FF
+    )
 }
 
 /// Find a face for `c`: one already loaded, else the best system font that
@@ -259,12 +304,43 @@ fn find(
     loaded: &mut Vec<(Font, PathBuf, u32)>,
     useless: &mut HashSet<fontdb::ID>,
 ) -> Option<(u8, Option<Font>)> {
-    if let Some(i) = loaded
+    let emoji = is_emoji(c);
+    // For an emoji, a loaded colour font first, then any loaded font.
+    let loaded_hit = loaded
         .iter()
-        .position(|(f, _, _)| draws_script(f.face(), c))
-    {
+        .position(|(f, _, _)| emoji && f.has_color() && draws(f.face(), c))
+        .or_else(|| {
+            loaded
+                .iter()
+                .position(|(f, _, _)| draws_script(f.face(), c))
+        });
+    if let Some(i) = loaded_hit {
         return Some((face_number(i)?, None));
     }
+    // Two passes for an emoji: colour fonts, then the rest.
+    let passes: &[Option<bool>] = if emoji {
+        &[Some(true), Some(false)]
+    } else {
+        &[None]
+    };
+    for &want_color in passes {
+        if let Some(found) = find_in(c, want_color, db, candidates, loaded, useless) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// One pass of [`find`] over the system fonts: those with colour glyphs
+/// when `want_color` is `Some(true)`, without when `Some(false)`, or all.
+fn find_in(
+    c: char,
+    want_color: Option<bool>,
+    db: &fontdb::Database,
+    candidates: &[Candidate],
+    loaded: &mut Vec<(Font, PathBuf, u32)>,
+    useless: &mut HashSet<fontdb::ID>,
+) -> Option<(u8, Option<Font>)> {
     for cand in candidates {
         if useless.contains(&cand.id)
             || loaded
@@ -274,7 +350,12 @@ fn find(
             continue;
         }
         let has = db.with_face_data(cand.id, |data, index| {
-            FontRef::from_index(data, index as usize).map(|f| draws_script(f, c))
+            FontRef::from_index(data, index as usize).map(|f| {
+                let color = is_color(f);
+                // A large file is usable only as a colour font, mapped.
+                let wanted = want_color.is_none_or(|w| w == color) && (!cand.large || color);
+                wanted && draws_script(f, c)
+            })
         });
         match has {
             Some(Some(true)) => {}
@@ -284,7 +365,12 @@ fn find(
                 continue;
             }
         }
-        let Some(font) = load(&cand.path, cand.index) else {
+        let font = if cand.large {
+            map(&cand.path, cand.index)
+        } else {
+            load(&cand.path, cand.index)
+        };
+        let Some(font) = font else {
             useless.insert(cand.id);
             continue;
         };
@@ -314,6 +400,91 @@ fn load(path: &PathBuf, index: u32) -> Option<Font> {
     Font::from_data(data, index)
 }
 
+/// A font the config names for the editor (`font = "JetBrains Mono"`), with
+/// its bold weight when the family has one.
+#[derive(Debug, Clone, Copy)]
+pub struct EditorFont {
+    /// The regular weight, which shapes every line.
+    pub regular: Font,
+    /// The bold weight, for themes that make captures bold; `None` draws
+    /// bold text from the regular weight.
+    pub bold: Option<Font>,
+}
+
+/// Find the font the config names: a font file's path, or the family name
+/// of an installed font. Listing the system's fonts takes tens to hundreds
+/// of milliseconds, so call this on a worker thread, never before the first
+/// frame (DESIGN.md §4.3). `None` when there is no such font.
+#[must_use]
+pub fn find_editor_font(name: &str) -> Option<EditorFont> {
+    let lower = name.to_ascii_lowercase();
+    if [".ttf", ".otf", ".ttc"].iter().any(|e| lower.ends_with(e)) {
+        let regular = load(&PathBuf::from(name), 0)?;
+        return Some(EditorFont {
+            regular,
+            bold: None,
+        });
+    }
+    let started = std::time::Instant::now();
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    let face = |weight: fontdb::Weight| {
+        let id = db.query(&fontdb::Query {
+            families: &[fontdb::Family::Name(name)],
+            weight,
+            stretch: fontdb::Stretch::Normal,
+            style: fontdb::Style::Normal,
+        })?;
+        let info = db.face(id)?;
+        let path = match &info.source {
+            fontdb::Source::File(p) | fontdb::Source::SharedFile(p, _) => p.clone(),
+            fontdb::Source::Binary(_) => return None,
+        };
+        Some((info.weight, path, info.index))
+    };
+    let (_, path, index) = face(fontdb::Weight::NORMAL)?;
+    let regular = load(&path, index)?;
+    // A family with no bold answers the bold query with its regular face.
+    let bold = face(fontdb::Weight::BOLD)
+        .filter(|(w, _, _)| w.0 >= 600)
+        .and_then(|(_, p, i)| load(&p, i));
+    log::info!(
+        "editor font {name:?}: {} (bold: {}) in {:?}",
+        path.display(),
+        bold.is_some(),
+        started.elapsed()
+    );
+    Some(EditorFont { regular, bold })
+}
+
+/// Map a large colour font file into memory instead of reading it: the
+/// operating system reads in only the pages swash touches, so drawing a few
+/// emoji from a 200 MB file costs a few megabytes. Like [`load`], the
+/// mapping lives for the rest of the session.
+#[expect(
+    unsafe_code,
+    reason = "mapping a file is unsafe in Rust; the invariant is stated below"
+)]
+fn map(path: &std::path::Path, index: u32) -> Option<Font> {
+    let file = std::fs::File::open(path).ok()?;
+    // SAFETY: a mapped file must not change while it is mapped, or reads
+    // through the mapping see torn data (Rust's rules for `&[u8]` assume the
+    // bytes never change). Only system font files reach here: files under
+    // the operating system's font folders, which are replaced only by OS
+    // updates, and an update replaces the file (a new inode) rather than
+    // writing into it, so the mapped pages keep the old contents. The map is
+    // read-only, so we never write through it either.
+    let mapped = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+    let leaked: &'static memmap2::Mmap = Box::leak(Box::new(mapped));
+    let data: &'static [u8] = leaked;
+    log::debug!(
+        "font fallback: mapped {} ({} MB)",
+        path.display(),
+        data.len() >> 20
+    );
+    Font::from_data(data, index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +494,14 @@ mod tests {
         assert_eq!(face_number(0), Some(2));
         assert_eq!(face_number(253), Some(255));
         assert_eq!(face_number(254), None);
+    }
+
+    #[test]
+    fn emoji_are_told_apart_from_text() {
+        assert!(is_emoji('🎉'));
+        assert!(is_emoji('❤'));
+        assert!(!is_emoji('a'));
+        assert!(!is_emoji('漢'));
     }
 
     #[test]

@@ -31,6 +31,21 @@ static BUNDLED_BOLD: &[u8] = include_bytes!("../assets/HackNerdFontMono-Bold-NoI
 #[derive(Clone, Copy)]
 pub struct Font {
     face: FontRef<'static>,
+    /// The font has colour glyphs (bitmap strikes or layered outlines),
+    /// such as an emoji font; worked out once when it is opened.
+    color: bool,
+}
+
+/// Tables that hold colour glyphs: `CBDT` (Google's bitmaps, Noto Color
+/// Emoji), `sbix` (Apple's bitmaps, Apple Color Emoji) and `COLR` (layered
+/// outlines, Segoe UI Emoji).
+const COLOR_TABLES: [&[u8; 4]; 3] = [b"CBDT", b"sbix", b"COLR"];
+
+fn wrap(face: FontRef<'static>) -> Font {
+    let color = COLOR_TABLES
+        .iter()
+        .any(|t| face.table(swash::tag_from_bytes(t)).is_some());
+    Font { face, color }
 }
 
 impl std::fmt::Debug for Font {
@@ -79,9 +94,7 @@ impl Font {
     /// Returns [`FontError`] if the bundled bytes are not a font, which would
     /// mean the asset file was replaced with something broken.
     pub fn bundled() -> Result<Self, FontError> {
-        FontRef::from_index(BUNDLED, 0)
-            .map(|face| Self { face })
-            .ok_or(FontError)
+        FontRef::from_index(BUNDLED, 0).map(wrap).ok_or(FontError)
     }
 
     /// A font from `data`, face `index` of it (a `.ttc` file holds several).
@@ -89,7 +102,7 @@ impl Font {
     /// rest of the session.
     #[must_use]
     pub fn from_data(data: &'static [u8], index: u32) -> Option<Self> {
-        FontRef::from_index(data, usize::try_from(index).ok()?).map(|face| Self { face })
+        FontRef::from_index(data, usize::try_from(index).ok()?).map(wrap)
     }
 
     /// The bold weight of the bundled font.
@@ -99,8 +112,14 @@ impl Font {
     /// As for [`Font::bundled`].
     pub fn bundled_bold() -> Result<Self, FontError> {
         FontRef::from_index(BUNDLED_BOLD, 0)
-            .map(|face| Self { face })
+            .map(wrap)
             .ok_or(FontError)
+    }
+
+    /// Whether the font has colour glyphs (an emoji font).
+    #[must_use]
+    pub fn has_color(&self) -> bool {
+        self.color
     }
 
     /// The swash font reference, for shaping and rasterizing.
