@@ -32,6 +32,10 @@ pub struct Restore {
     pub expanded: Vec<PathBuf>,
     /// Files of the session that are gone, for a message-line note.
     pub dropped: Vec<PathBuf>,
+    /// Further root folders of the workspace (M19) that are still there.
+    pub roots: Vec<PathBuf>,
+    /// The Search panel's history and saved searches.
+    pub search: crate::state::SearchHistory,
 }
 
 /// One restored tab.
@@ -91,6 +95,13 @@ pub fn restore(
             .iter()
             .map(|p| session.root.join(p))
             .collect(),
+        roots: session
+            .roots
+            .iter()
+            .filter(|p| p.is_dir())
+            .cloned()
+            .collect(),
+        search: session.search.clone(),
         ..Restore::default()
     };
     let mut warnings = Vec::new();
@@ -225,6 +236,7 @@ mod tests {
                 tab(&b, true),
                 tab(&a, false),
             ],
+            ..Session::default()
         };
         let mut opened = Vec::new();
         let (r, warnings) = restore(&session, |p| {
@@ -252,6 +264,7 @@ mod tests {
             mode: SidebarMode::Files,
             expanded: Vec::new(),
             tabs: vec![tab(&a, true), tab(&b, false)],
+            ..Session::default()
         };
         let (r, warnings) = restore(&session, |p| {
             if p.ends_with("a.txt") {
@@ -281,6 +294,7 @@ mod tests {
             mode: SidebarMode::Files,
             expanded: Vec::new(),
             tabs: Vec::new(),
+            ..Session::default()
         });
         assert_eq!(
             launch(&state, None, false, false),

@@ -57,6 +57,9 @@ pub struct Sidebar {
     wheel: f32,
     /// The inline field naming a new file or folder, or renaming one.
     pub edit: Option<TreeEdit>,
+    /// The open named workspace, shown in the header instead of the
+    /// root's name.
+    pub workspace: Option<String>,
 }
 
 /// The tree's inline text field: New File, New Folder or Rename. The field
@@ -100,6 +103,7 @@ impl Sidebar {
             tree: Tree::new(root),
             wheel: 0.0,
             edit: None,
+            workspace: None,
         }
     }
 
@@ -115,7 +119,8 @@ impl Sidebar {
         };
         let mut requests = Vec::new();
         let (dir, node) = if kind == EditKind::Rename {
-            let id = selected?;
+            // A root is the workspace's, not a file to rename here.
+            let id = selected.filter(|&id| !self.tree.is_root(id))?;
             let n = self.tree.node(id)?;
             let dir = n.path.parent()?.to_path_buf();
             let mut ed = field.ed();
@@ -451,10 +456,16 @@ pub fn draw(
     // The project's name sits against the right edge, apart from the
     // tabs, so it does not read as a third one; a name that would run
     // into the tabs is left out rather than clipped.
-    let title = sidebar
-        .tree
-        .node(crate::tree::ROOT)
-        .map_or("", |n| n.name.as_str());
+    // A named workspace shows its name; several roots without one show
+    // none, since each root has a row of its own.
+    let title = match &sidebar.workspace {
+        Some(name) => name.as_str(),
+        None if sidebar.tree.multi() => "",
+        None => sidebar
+            .tree
+            .node(crate::tree::ROOT)
+            .map_or("", |n| n.name.as_str()),
+    };
     let title_w = cols(title.chars().count()) * cell;
     let title_x = w - pad - title_w;
     if !title.is_empty() && title_x >= x + cell {

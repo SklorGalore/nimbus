@@ -9,6 +9,7 @@
 //! opening files and starting searches is the app's job.
 
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,7 @@ use nimbus_render::Gpu;
 use crate::document::Solo;
 use crate::find_files::{self, Batch, Params, Results};
 use crate::input::Motion;
+use crate::state::{SavedSearch, SearchHistory};
 use crate::theme::Ui;
 use crate::view::{self, Layout};
 
@@ -71,6 +73,9 @@ pub enum Target {
 /// One row of the results list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
+    /// A saved search, listed above the results: index into
+    /// [`SearchHistory::saved`].
+    Saved(usize),
     /// A file header: index into [`Results::files`].
     File(usize),
     /// A hit: file index and hit index within it.
@@ -86,6 +91,9 @@ pub struct Reply {
     pub search: bool,
     /// Replace All was asked for.
     pub replace_all: bool,
+    /// A saved search was picked: it has been loaded into the fields, and
+    /// the app should run it.
+    pub saved: bool,
 }
 
 /// The panel's state.
@@ -138,6 +146,12 @@ pub struct Panel {
     tooltip_at: Option<Instant>,
     /// The tooltip is showing.
     pub tooltip: bool,
+    /// Patterns and replacements searched lately, and saved searches, for
+    /// this workspace (M19).
+    pub history: SearchHistory,
+    /// Where `Up` and `Down` are in the history of the focused field:
+    /// `None` while showing what was typed.
+    history_at: Option<usize>,
 }
 
 impl Default for Panel {
@@ -164,8 +178,39 @@ impl Default for Panel {
             hover: None,
             tooltip_at: None,
             tooltip: false,
+            history: SearchHistory::default(),
+            history_at: None,
         }
     }
+}
+
+/// Split the include field into folders and globs (M19). An entry that is
+/// an absolute path, or starts with `~` (the home folder, `home`), names a
+/// folder to search instead of the workspace, which is how a search runs
+/// outside the roots; the rest are globs as before. Returns the folders
+/// and the globs, joined again with commas.
+#[must_use]
+pub fn scope(include: &str, home: Option<&Path>) -> (Vec<PathBuf>, String) {
+    let mut folders = Vec::new();
+    let mut globs = Vec::new();
+    for entry in include.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let tilde = entry == "~" || entry.starts_with("~/") || entry.starts_with("~\\");
+        if let (true, Some(home)) = (tilde, home) {
+            let rest = entry[1..].trim_start_matches(['/', '\\']);
+            folders.push(crate::io::canonical(&home.join(rest)));
+        } else if Path::new(entry).is_absolute() {
+            folders.push(crate::io::canonical(Path::new(entry)));
+        } else {
+            globs.push(entry);
+        }
+    }
+    (folders, globs.join(","))
+}
+
+/// Replace a field's text with `text`, the cursor at its end.
+fn set_text(field: &mut Solo, text: &str) {
+    *field = Solo::default();
+    let _ = field.ed().insert(text);
 }
 
 /// Text of a single-line field document.
@@ -366,13 +411,19 @@ impl Panel {
         true
     }
 
-    /// The parameters a search now would use, under `root`.
+    /// The parameters a search now would use, over the workspace's
+    /// `roots`, unless the include field names folders of its own.
     #[must_use]
-    pub fn params(&self, root: &std::path::Path, show_ignored: bool) -> Params {
+    pub fn params(&self, roots: &[PathBuf], show_ignored: bool) -> Params {
         let (include, exclude) = self.globs();
+        let (folders, include) = scope(&include, dirs::home_dir().as_deref());
         Params {
             query: self.query(),
-            root: root.to_path_buf(),
+            roots: if folders.is_empty() {
+                roots.to_vec()
+            } else {
+                folders
+            },
             include,
             exclude,
             show_ignored,
@@ -391,16 +442,16 @@ impl Panel {
         self.generation.bump();
         self.selected = None;
         self.scroll = 0;
-        self.rows.clear();
         if params.query.pattern.is_empty() {
             self.results = None;
             self.params = None;
             self.error = None;
+            self.rebuild_rows();
             return;
         }
         match find_files::start(&params, snapshots, &self.generation, send) {
             Ok(generation) => {
-                self.results = Some(Results::new(generation, params.root.clone()));
+                self.results = Some(Results::new(generation, params.roots.clone()));
                 self.error = None;
             }
             Err(e) => {
@@ -409,6 +460,7 @@ impl Panel {
             }
         }
         self.params = Some(params);
+        self.rebuild_rows();
     }
 
     /// Forget the results and the query.
@@ -417,11 +469,11 @@ impl Panel {
         self.results = None;
         self.params = None;
         self.error = None;
-        self.rows.clear();
         self.selected = None;
         self.scroll = 0;
         self.query = Solo::default();
         self.focus = Focus::Query;
+        self.rebuild_rows();
     }
 
     /// Take a batch from a worker. Returns `false` if it was stale.
@@ -436,9 +488,12 @@ impl Panel {
         true
     }
 
-    /// The list's rows as the results stand.
-    fn rebuild_rows(&mut self) {
+    /// The list's rows as the saved searches and results stand: call after
+    /// changing [`Panel::history`]'s saved searches.
+    pub fn rebuild_rows(&mut self) {
         self.rows.clear();
+        self.rows
+            .extend((0..self.history.saved.len()).map(Row::Saved));
         if let Some(results) = &self.results {
             for (i, file) in results.files.iter().enumerate() {
                 self.rows.push(Row::File(i));
@@ -460,8 +515,116 @@ impl Panel {
     pub fn selected_hit(&self) -> Option<(usize, usize)> {
         match self.selected.and_then(|r| self.rows.get(r))? {
             Row::Hit(i, j) => Some((*i, *j)),
-            Row::File(_) => None,
+            Row::File(_) | Row::Saved(_) => None,
         }
+    }
+
+    /// The saved search on the selected row, if it is one.
+    #[must_use]
+    pub fn selected_saved(&self) -> Option<usize> {
+        match self.selected.and_then(|r| self.rows.get(r))? {
+            Row::Saved(i) => Some(*i),
+            Row::File(_) | Row::Hit(..) => None,
+        }
+    }
+
+    /// The search as it stands, to pin under `name`.
+    #[must_use]
+    pub fn to_saved(&self, name: &str) -> SavedSearch {
+        let (include, exclude) = self.globs();
+        SavedSearch {
+            name: name.to_owned(),
+            pattern: field_text(&self.query),
+            replace: self.replace_mode.then(|| self.replacement()),
+            include,
+            exclude,
+            regex: self.regex,
+            case_sensitive: self.case_sensitive,
+            whole_word: self.whole_word,
+        }
+    }
+
+    /// Put saved search `i` in the fields and toggles. Returns whether
+    /// there was one.
+    pub fn load_saved(&mut self, i: usize) -> bool {
+        let Some(saved) = self.history.saved.get(i).cloned() else {
+            return false;
+        };
+        set_text(&mut self.query, &saved.pattern);
+        set_text(&mut self.include, &saved.include);
+        set_text(&mut self.exclude, &saved.exclude);
+        if let Some(rep) = &saved.replace {
+            set_text(&mut self.replace, rep);
+        }
+        self.replace_mode = saved.replace.is_some();
+        self.regex = saved.regex;
+        self.case_sensitive = saved.case_sensitive;
+        self.whole_word = saved.whole_word;
+        self.history_at = None;
+        true
+    }
+
+    /// Forget saved search `i`.
+    pub fn forget_saved(&mut self, i: usize) {
+        if i < self.history.saved.len() {
+            self.history.saved.remove(i);
+            self.rebuild_rows();
+            self.selected = self
+                .selected
+                .map(|s| s.min(self.rows.len().saturating_sub(1)));
+            if self.rows.is_empty() {
+                self.selected = None;
+            }
+        }
+    }
+
+    /// Note what is in the query (and the replacement, when `replaced`)
+    /// as searched, for `Up` and `Down` to bring back.
+    pub fn note_history(&mut self, replaced: bool) {
+        self.history.note_pattern(&field_text(&self.query));
+        if replaced {
+            self.history.note_replacement(&field_text(&self.replace));
+        }
+        self.history_at = None;
+    }
+
+    /// `Up` (`older`) or `Down` in the query or replacement field: show
+    /// the next older or newer entry of its history. Down past the newest
+    /// empties the field. Returns whether the field changed; a field
+    /// without history, or another part of the panel, is left alone.
+    pub fn history_step(&mut self, older: bool) -> bool {
+        let list = match self.focus {
+            Focus::Query => &self.history.patterns,
+            Focus::Replace => &self.history.replacements,
+            _ => return false,
+        };
+        if list.is_empty() {
+            return false;
+        }
+        let next = match (self.history_at, older) {
+            (None, true) => Some(0),
+            (None, false) => return false,
+            (Some(i), true) => Some((i + 1).min(list.len() - 1)),
+            (Some(0), false) => None,
+            (Some(i), false) => Some(i - 1),
+        };
+        if next == self.history_at {
+            return false;
+        }
+        let text = next.and_then(|i| list.get(i)).cloned().unwrap_or_default();
+        self.history_at = next;
+        let field = if self.focus == Focus::Query {
+            &mut self.query
+        } else {
+            &mut self.replace
+        };
+        set_text(field, &text);
+        true
+    }
+
+    /// The user typed in a field: `Up` starts from the newest entry again.
+    pub fn typed(&mut self) {
+        self.history_at = None;
     }
 
     /// The count line: how many hits in how many files, and what else the
@@ -600,7 +763,8 @@ impl Panel {
         None
     }
 
-    /// Tick or untick a row: a file row changes all of its hits.
+    /// Tick or untick a row: a file row changes all of its hits; a saved
+    /// search has nothing to tick.
     pub fn toggle_tick(&mut self, row: usize) {
         let Some(results) = &mut self.results else {
             return;
@@ -619,7 +783,7 @@ impl Panel {
                     h.ticked = !h.ticked;
                 }
             }
-            None => {}
+            Some(Row::Saved(_)) | None => {}
         }
     }
 
@@ -716,7 +880,8 @@ impl Panel {
         if row >= self.rows.len() {
             return Target::Nothing;
         }
-        if self.replace_mode && x < g.left + 4.0 * cell {
+        if self.replace_mode && x < g.left + 4.0 * cell && !matches!(self.rows[row], Row::Saved(_))
+        {
             return Target::Checkbox(row);
         }
         Target::Row(row)
@@ -734,6 +899,9 @@ impl Panel {
                 self.focus = Focus::List;
                 self.select(row, layout);
                 reply.open = self.selected_hit();
+                if let Some(i) = self.selected_saved() {
+                    reply.saved = self.load_saved(i);
+                }
             }
             Target::Checkbox(row) => {
                 self.focus = Focus::List;
@@ -760,8 +928,8 @@ pub fn draw(gpu: &mut Gpu, ui: &Ui, layout: &Layout, panel: &Panel, focused: boo
         ui.gutter
     };
     gpu.push_text_line([geo.left, geo.count], &status, color);
-    if let Some(results) = &panel.results {
-        draw_list(gpu, ui, layout, (panel, results), &geo, focused);
+    if !panel.rows.is_empty() {
+        draw_list(gpu, ui, layout, panel, &geo, focused);
     }
     if let Some(toggle) = panel.hover
         && panel.tooltip
@@ -904,10 +1072,12 @@ fn draw_list(
     gpu: &mut Gpu,
     ui: &Ui,
     layout: &Layout,
-    (panel, results): (&Panel, &Results),
+    panel: &Panel,
     geo: &Geometry,
     focused: bool,
 ) {
+    let empty = Results::default();
+    let results = panel.results.as_ref().unwrap_or(&empty);
     let (cell, lh) = (layout.metrics.cell_width, layout.metrics.line_height);
     let width = layout.left;
     let mut y = geo.list;
@@ -925,6 +1095,15 @@ fn draw_list(
             gpu.push_rect([0.0, y], [width, lh], color);
         }
         match *row {
+            Row::Saved(i) => {
+                let Some(saved) = panel.history.saved.get(i) else {
+                    continue;
+                };
+                let name = format!("\u{2605} {}", saved.name);
+                gpu.push_text_line([geo.left, y], &name, ui.search_file);
+                let x = geo.left + f(name.chars().count() + 2) * cell;
+                gpu.push_text_span([x, y], &saved.pattern, 0, ui.gutter, 0.0);
+            }
             Row::File(i) => {
                 let Some(file) = results.files.get(i) else {
                     continue;
@@ -1012,7 +1191,6 @@ mod tests {
     use super::*;
     use crate::find_files::{FileBatch, RawHit};
     use nimbus_render::Metrics;
-    use std::path::PathBuf;
 
     fn layout() -> Layout {
         let metrics = Metrics {
@@ -1039,7 +1217,7 @@ mod tests {
     fn panel() -> Panel {
         let mut p = Panel::default();
         let _ = p.query.ed().insert("foo");
-        p.results = Some(Results::new(1, PathBuf::from("/r")));
+        p.results = Some(Results::new(1, vec![PathBuf::from("/r")]));
         p.receive(Batch {
             generation: 1,
             items: vec![
@@ -1174,6 +1352,90 @@ mod tests {
         let (at_x, at_y) = replace_all_at(&l, &p).unwrap();
         assert!(p.click(&l, at_x, at_y).replace_all);
         assert_eq!(p.hit(&l, 10.0, 399.0), Target::Nothing);
+    }
+
+    #[test]
+    fn up_and_down_walk_the_history_of_the_focused_field() {
+        let mut p = Panel::default();
+        assert!(!p.history_step(true), "no history yet");
+        for q in ["first", "second"] {
+            set_text(&mut p.query, q);
+            p.note_history(false);
+        }
+        set_text(&mut p.query, "typed");
+        assert!(p.history_step(true));
+        assert_eq!(field_text(&p.query), "second");
+        assert!(p.history_step(true));
+        assert_eq!(field_text(&p.query), "first");
+        assert!(!p.history_step(true), "the oldest stays");
+        assert!(p.history_step(false));
+        assert!(p.history_step(false));
+        assert_eq!(field_text(&p.query), "", "past the newest: empty");
+        assert!(!p.history_step(false));
+        // Replacements have their own list; the include field none.
+        p.focus = Focus::Replace;
+        assert!(!p.history_step(true));
+        set_text(&mut p.replace, "new");
+        p.note_history(true);
+        set_text(&mut p.replace, "");
+        assert!(p.history_step(true));
+        assert_eq!(field_text(&p.replace), "new");
+        p.focus = Focus::Include;
+        assert!(!p.history_step(true));
+    }
+
+    #[test]
+    fn saved_searches_are_listed_first_and_load_into_the_fields() {
+        let l = layout();
+        let mut p = panel();
+        p.regex = true;
+        p.replace_mode = true;
+        set_text(&mut p.replace, "bar");
+        set_text(&mut p.include, "*.rs");
+        let saved = p.to_saved("foo to bar");
+        assert_eq!(saved.replace.as_deref(), Some("bar"));
+        p.history.save(saved);
+        p.rebuild_rows();
+        assert_eq!(p.rows()[0], Row::Saved(0));
+        assert_eq!(p.rows()[1], Row::File(0));
+        // F4 steps over it.
+        assert_eq!(p.step(false, &l), Some((0, 0)));
+        p.regex = false;
+        p.replace_mode = false;
+        set_text(&mut p.include, "");
+        let geo = Geometry::of(&l, false);
+        let reply = p.click(&l, 100.0, geo.list + 1.0);
+        assert!(reply.saved && reply.open.is_none());
+        assert!(p.regex && p.replace_mode);
+        assert_eq!(p.globs().0, "*.rs");
+        p.forget_saved(0);
+        assert_eq!(p.rows()[0], Row::File(0));
+        // With no results, the saved searches still show.
+        p.history.save(p.to_saved("x"));
+        p.clear();
+        assert_eq!(p.rows(), &[Row::Saved(0)]);
+    }
+
+    #[test]
+    fn folders_in_the_include_field_set_the_scope() {
+        let home = Path::new("/home/me");
+        let (folders, globs) = scope("*.rs, ~/notes ,src/**", Some(home));
+        assert_eq!(folders, vec![PathBuf::from("/home/me/notes")]);
+        assert_eq!(globs, "*.rs,src/**");
+        let (folders, globs) = scope("~", Some(home));
+        assert_eq!((folders, globs.as_str()), (vec![home.to_path_buf()], ""));
+        let (folders, _) = scope("~/x", None);
+        assert!(folders.is_empty(), "no home folder: a glob");
+        #[cfg(unix)]
+        {
+            let (folders, globs) = scope("/no-such-nimbus-folder", None);
+            assert_eq!(folders, vec![PathBuf::from("/no-such-nimbus-folder")]);
+            assert_eq!(globs, "");
+        }
+        let mut p = Panel::default();
+        let _ = p.query.ed().insert("x");
+        let roots = [PathBuf::from("/a"), PathBuf::from("/b")];
+        assert_eq!(p.params(&roots, false).roots, roots);
     }
 
     #[test]

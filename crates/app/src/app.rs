@@ -62,9 +62,10 @@ mod geometry;
 mod tail;
 mod tree_ops;
 mod workspace;
+mod workspaces;
 
 pub use workspace::Startup;
-use workspace::{Pending, Workspace, configure_tabs, startup_message, startup_tabs};
+use workspace::{Pending, Workspace, configure_tabs, startup_message};
 
 /// Events sent to the event loop from other threads.
 #[derive(Debug)]
@@ -552,12 +553,14 @@ impl App {
         (config, languages, docs, root): (Config, Languages, Vec<Document>, PathBuf),
         startup: Startup,
         proxy: EventLoopProxy<AppEvent>,
-        warnings: Vec<String>,
+        mut warnings: Vec<String>,
     ) -> Self {
         let Startup {
             mut state,
             restore,
             session_root,
+            more_roots,
+            workspace,
         } = startup;
         let session_root = session_root.filter(|_| !options.unattended());
         let debug_overlay = options.debug_overlay;
@@ -565,15 +568,13 @@ impl App {
         let (theme, theme_warnings) = Theme::load(&config.theme);
         let disk_proxy = proxy.clone();
         let warn_proxy = proxy.clone();
-        let mut sidebar = Sidebar::new(
-            io::canonical(&root),
-            state.sidebar_visible,
-            state.sidebar_width,
-        );
-        let wrap = options.wrap || config.soft_wrap;
         let mut open = Docs::default();
-        let (mut tabs, active, note) =
-            startup_tabs(docs, restore, &mut state, &mut sidebar, wrap, &mut open);
+        let (mut sidebar, (mut tabs, active, note)) = workspaces::startup_tabs_and_roots(
+            (&root, docs, restore),
+            (more_roots, workspace, session_root.as_deref()),
+            (&mut state, &mut open, &mut warnings),
+            options.wrap || config.soft_wrap,
+        );
         configure_tabs(&mut tabs, &mut open, &config, options.wrap);
         // `--search`: the Search panel open, searching once the window is
         // up (the first frame schedules it like a typed query).
@@ -2977,7 +2978,11 @@ impl App {
         });
         self.picker = Some(match kind {
             Kind::Palette => Picker::palette(notify),
-            Kind::Files => Picker::files(&self.root, self.recent_under_root(), notify),
+            Kind::Files => Picker::files(
+                &self.sidebar.tree.roots(),
+                self.recent_in_workspace(),
+                notify,
+            ),
             Kind::Recent => {
                 let paths: Vec<PathBuf> = self
                     .ws
@@ -3006,6 +3011,8 @@ impl App {
                 }
                 Picker::symbols(notify, symbols)
             }
+            Kind::Name(naming) => Picker::name(naming, notify),
+            Kind::Workspaces => Picker::workspaces(crate::workspace_file::names(), notify),
             Kind::Tabs => {
                 let names = self
                     .tabs
@@ -3048,12 +3055,13 @@ impl App {
             }
             Command::Newline => {
                 let chosen = p.chosen();
-                let root = p.root.clone();
+                let kind = p.kind;
                 self.picker = None;
                 match chosen {
                     Some(Item::Action(a)) => self.run(a.command, event_loop),
-                    Some(Item::File(rel)) => self.open_path(&root.join(rel)),
-                    Some(Item::Recent(path)) => self.open_path(&path),
+                    Some(Item::Name(name)) => self.name_chosen(kind, &name),
+                    Some(Item::Workspace(name)) => self.open_named_workspace(&name),
+                    Some(Item::File(path) | Item::Recent(path)) => self.open_path(&path),
                     Some(Item::Line(n)) => self.go_to_line(n),
                     Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
@@ -3959,11 +3967,12 @@ impl App {
             Some(row) => {
                 picker.selected = picker.scroll + row;
                 let chosen = picker.chosen();
-                let root = picker.root.clone();
+                let kind = picker.kind;
                 self.picker = None;
                 match chosen {
-                    Some(Item::File(rel)) => self.open_path(&root.join(rel)),
-                    Some(Item::Recent(path)) => self.open_path(&path),
+                    Some(Item::Name(name)) => self.name_chosen(kind, &name),
+                    Some(Item::Workspace(name)) => self.open_named_workspace(&name),
+                    Some(Item::File(path) | Item::Recent(path)) => self.open_path(&path),
                     Some(Item::Action(a)) => self.pending_action = Some(a.command),
                     Some(Item::Line(n)) => self.go_to_line(n),
                     Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
@@ -4335,6 +4344,13 @@ impl App {
                 self.sidebar.search.clear();
                 self.search_files_at = None;
             }
+            Command::SaveSearch => {
+                if self.sidebar.search.query().pattern.is_empty() {
+                    self.say("Type a search in the Search panel first", false);
+                } else {
+                    self.open_picker(Kind::Name(crate::picker::Naming::Search));
+                }
+            }
             _ => {}
         }
     }
@@ -4377,11 +4393,33 @@ impl App {
             Command::Newline if in_list => {
                 if let Some(hit) = self.sidebar.search.selected_hit() {
                     self.open_result(hit, true);
+                } else if let Some(i) = self.sidebar.search.selected_saved()
+                    && self.sidebar.search.load_saved(i)
+                {
+                    self.search_files();
                 }
             }
-            Command::Newline => self.search_files(),
+            Command::Newline => {
+                self.search_files();
+                self.note_search_history(false);
+            }
             Command::Move(motion, _) if in_list => {
                 self.sidebar.search.move_selection(motion, &layout);
+            }
+            Command::DeleteForward | Command::DeleteBack if in_list => {
+                if let Some(i) = self.sidebar.search.selected_saved() {
+                    self.sidebar.search.forget_saved(i);
+                    self.session_changed();
+                }
+            }
+            // Up and Down in the query or replacement walk its history.
+            Command::Move(m @ (Motion::Up | Motion::Down), false)
+                if matches!(self.sidebar.search.focus, Focus::Query | Focus::Replace) =>
+            {
+                let panel = &mut self.sidebar.search;
+                if panel.history_step(m == Motion::Up) && panel.focus == Focus::Query {
+                    self.search_files_at = Some(Instant::now() + SEARCH_FILES_DELAY);
+                }
             }
             Command::Insert(" ") if in_list => {
                 if let Some(row) = self.sidebar.search.selected {
@@ -4429,30 +4467,37 @@ impl App {
             | Command::PrevConflict
             | Command::ResolveMarkers
             | Command::MergeWithDisk => return false,
-            _ if cmd.is_find_in_files() || cmd.is_layout() => return false,
+            _ if cmd.is_find_in_files() || cmd.is_layout() || cmd.is_workspace() => return false,
             _ if in_list => {}
-            _ => {
-                let paste = (cmd == Command::Paste)
-                    .then(|| self.clipboard_get())
-                    .flatten();
-                let tab_width = self.tab_width();
-                let panel = &mut self.sidebar.search;
-                let searches = panel.focus != Focus::Replace;
-                let Some(field) = panel.field_mut() else {
-                    return true;
-                };
-                let before = field.doc.version;
-                let copied = edit_field(field, cmd, paste.as_deref(), tab_width);
-                let changed = field.doc.version != before;
-                if let Some(text) = copied {
-                    self.clipboard_set(text);
-                }
-                if changed && searches {
-                    self.search_files_at = Some(Instant::now() + SEARCH_FILES_DELAY);
-                }
-            }
+            _ => self.edit_search_field(cmd),
         }
         true
+    }
+
+    /// An editing key in one of the Search panel's fields: edit it, and
+    /// search again once typing pauses (not for the replacement).
+    fn edit_search_field(&mut self, cmd: Command<'_>) {
+        let paste = (cmd == Command::Paste)
+            .then(|| self.clipboard_get())
+            .flatten();
+        let tab_width = self.tab_width();
+        let panel = &mut self.sidebar.search;
+        let searches = panel.focus != Focus::Replace;
+        let Some(field) = panel.field_mut() else {
+            return;
+        };
+        let before = field.doc.version;
+        let copied = edit_field(field, cmd, paste.as_deref(), tab_width);
+        let changed = field.doc.version != before;
+        if let Some(text) = copied {
+            self.clipboard_set(text);
+        }
+        if changed {
+            self.sidebar.search.typed();
+        }
+        if changed && searches {
+            self.search_files_at = Some(Instant::now() + SEARCH_FILES_DELAY);
+        }
     }
 
     /// Do what a click in the Search panel asked for.
@@ -4466,6 +4511,26 @@ impl App {
         if let Some(hit) = reply.open {
             self.open_result(hit, false);
         }
+        if reply.saved {
+            self.search_files();
+        }
+    }
+
+    /// Pin the Search panel's search as `name`, at the top of its list.
+    fn save_search(&mut self, name: &str) {
+        let panel = &mut self.sidebar.search;
+        let saved = panel.to_saved(name);
+        panel.history.save(saved);
+        panel.rebuild_rows();
+        self.session_changed();
+        self.say(format!("Saved the search as {name}"), false);
+    }
+
+    /// Note the Search panel's query (and replacement) in its history, as
+    /// one the user meant rather than a prefix typed on the way.
+    fn note_search_history(&mut self, replaced: bool) {
+        self.sidebar.search.note_history(replaced);
+        self.session_changed();
     }
 
     /// Snapshots of the open tabs with unsaved edits, for the search to
@@ -4489,11 +4554,11 @@ impl App {
     /// search under way.
     fn search_files(&mut self) {
         self.search_files_at = None;
-        let root = self.sidebar.tree.root().to_path_buf();
+        let roots = self.sidebar.tree.roots();
         let params = self
             .sidebar
             .search
-            .params(&root, self.sidebar.tree.show_ignored);
+            .params(&roots, self.sidebar.tree.show_ignored);
         let snapshots = self.snapshots();
         let proxy = self.proxy.clone();
         self.sidebar.search.start(params, snapshots, move |b| {
@@ -4507,6 +4572,9 @@ impl App {
     /// its first match selected, or its start when none is left. With
     /// `focus_editor`, the keyboard goes to the text.
     fn open_result(&mut self, (file, hit): (usize, usize), focus_editor: bool) {
+        if self.sidebar.search.results.is_some() {
+            self.note_search_history(false);
+        }
         let Some(results) = &self.sidebar.search.results else {
             return;
         };
@@ -4607,6 +4675,7 @@ impl App {
             self.say("Nothing ticked to replace", true);
             return;
         }
+
         let Some(re) = panel
             .params
             .as_ref()
@@ -4680,6 +4749,7 @@ impl App {
     /// so the results show the text as it is now.
     fn replaced(&mut self, report: replace_files::Report) {
         self.sidebar.search.replacing = false;
+        self.note_search_history(true);
         let summary = std::mem::take(&mut self.replace_summary);
         let (disk_replaced, disk_files) = report.totals();
         let plural =
@@ -4899,7 +4969,7 @@ fn draw_headless_picker(
     let (kind, query) = spec.split_once(':').unwrap_or((spec, ""));
     let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
     let mut p = match kind {
-        "files" => Picker::files(root, Vec::new(), notify),
+        "files" => Picker::files(&[root.to_path_buf()], Vec::new(), notify),
         "recent" => {
             let paths = State::load().recent.into_iter().map(|r| r.path).collect();
             Picker::recent(paths, root, notify)
@@ -5105,7 +5175,7 @@ pub fn paint_status(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
 pub fn run_headless(
     options: &Options,
     config: &Config,
-    (docs, root): (Vec<Document>, PathBuf),
+    (docs, root, more_roots): (Vec<Document>, PathBuf, Vec<PathBuf>),
     size: (u32, u32),
     context: GpuContext,
 ) -> i32 {
@@ -5146,7 +5216,7 @@ pub fn run_headless(
     );
     headless_cursors(options, &doc, &mut carets);
     let (sidebar, layout) = headless_sidebar(
-        &root,
+        (&root, more_roots),
         layout_for(&gpu, to_f32(scale), &doc, &find),
         doc.canonical.as_deref(),
         options.search.as_deref(),
@@ -5360,7 +5430,7 @@ fn headless_search(sidebar: &mut Sidebar, pattern: &str, layout: &Layout) {
     sidebar.focused = true;
     let panel = &mut sidebar.search;
     panel.focus_query(Some(pattern.to_owned()));
-    let params = panel.params(sidebar.tree.root(), sidebar.tree.show_ignored);
+    let params = panel.params(&sidebar.tree.roots(), sidebar.tree.show_ignored);
     let (tx, rx) = std::sync::mpsc::channel();
     panel.start(params, find_files::Snapshots::new(), move |b| {
         tx.send(b).is_ok()
@@ -5376,7 +5446,7 @@ fn headless_search(sidebar: &mut Sidebar, pattern: &str, layout: &Layout) {
 /// The sidebar as the window would show it, listed here in place, and the
 /// layout with room for it; with `search`, showing the Search panel.
 fn headless_sidebar(
-    root: &Path,
+    (root, more_roots): (&Path, Vec<PathBuf>),
     layout: Layout,
     file: Option<&Path>,
     search: Option<&str>,
@@ -5387,6 +5457,14 @@ fn headless_sidebar(
         state.sidebar_visible,
         state.sidebar_width,
     );
+    for r in more_roots {
+        if let Err(e) = sidebar.tree.add_root(r) {
+            print_err(&format!("nimbus: {e}"));
+        }
+    }
+    // Every root shown open, so a screenshot shows what each holds.
+    let roots = sidebar.tree.roots();
+    sidebar.tree.expand_later(roots);
     let layout = layout.with_sidebar(sidebar.px(layout.scale));
     if sidebar.visible {
         let mut requests = sidebar.tree.start();
@@ -5426,14 +5504,16 @@ fn draw_picker_overlay(
         (Kind::Files, false) => "files",
         (Kind::Symbols, true) => "symbol",
         (Kind::Symbols, false) => "symbols",
-        (Kind::Line, _) => "",
+        (Kind::Line | Kind::Name(_), _) => "",
+        (Kind::Workspaces, true) => "workspace",
+        (Kind::Workspaces, false) => "workspaces",
         (Kind::Tabs, true) => "tab",
         (Kind::Tabs, false) => "tabs",
         (Kind::Recent, true) => "recent file",
         (Kind::Recent, false) => "recent files",
     };
     let more = if p.loading() { "…" } else { "" };
-    let status = if p.kind == Kind::Line {
+    let status = if matches!(p.kind, Kind::Line | Kind::Name(_)) {
         String::new()
     } else {
         format!("{n} {noun}{more}")
@@ -5445,6 +5525,9 @@ fn draw_picker_overlay(
         Kind::Symbols => "Type a function, type or heading name",
         Kind::Tabs => "Type a tab name",
         Kind::Recent => "Type a file name or folder",
+        Kind::Name(crate::picker::Naming::Workspace) => "Name the workspace",
+        Kind::Name(crate::picker::Naming::Search) => "Name the search",
+        Kind::Workspaces => "Type a workspace name",
     };
     let pv = PickerView {
         input: &p.input,

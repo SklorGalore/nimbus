@@ -60,8 +60,10 @@ const BATCH_TIME: Duration = Duration::from_millis(16);
 pub struct Params {
     /// The pattern and its options.
     pub query: Query,
-    /// The folder searched; paths in results are relative to it.
-    pub root: PathBuf,
+    /// The folders searched: the workspace's roots, or the folders typed in
+    /// the include field (M19). Paths in results are relative to the root
+    /// they are in, prefixed with its name when there are several.
+    pub roots: Vec<PathBuf>,
     /// Comma-separated globs a file must match, or empty for all.
     pub include: String,
     /// Comma-separated globs for files and folders left out.
@@ -217,19 +219,19 @@ pub struct Results {
     pub capped: bool,
     /// The search these belong to.
     pub generation: u64,
-    /// Where the root is, to make paths relative.
-    root: PathBuf,
+    /// The folders searched, to make paths relative.
+    roots: Vec<PathBuf>,
     /// Index into `files` by path.
     index: HashMap<PathBuf, usize>,
 }
 
 impl Results {
-    /// Empty results for the search `generation` under `root`.
+    /// Empty results for the search `generation` under `roots`.
     #[must_use]
-    pub fn new(generation: u64, root: PathBuf) -> Self {
+    pub fn new(generation: u64, roots: Vec<PathBuf>) -> Self {
         Self {
             generation,
-            root,
+            roots,
             ..Self::default()
         }
     }
@@ -249,10 +251,8 @@ impl Results {
             let i = if let Some(&i) = self.index.get(&item.path) {
                 i
             } else {
-                let rel = item
-                    .path
-                    .strip_prefix(&self.root)
-                    .unwrap_or(&item.path)
+                let rel = crate::tree::shown_path(&self.roots, &item.path)
+                    .unwrap_or_else(|| item.path.clone())
                     .to_string_lossy()
                     .into_owned();
                 self.files.push(FileHits {
@@ -347,7 +347,7 @@ pub type Snapshots = HashMap<PathBuf, Arc<dyn Snapshot>>;
 struct Shared {
     re: Regex,
     filter: Filter,
-    root: PathBuf,
+    roots: Vec<PathBuf>,
     snapshots: Snapshots,
     generation: Arc<Generation>,
     /// The generation this search runs as.
@@ -426,7 +426,12 @@ impl<S: Fn(Batch) -> bool> Worker<S> {
             return WalkState::Continue;
         }
         let path = entry.path();
-        let Ok(rel) = path.strip_prefix(&self.shared.root) else {
+        let Some(rel) = self
+            .shared
+            .roots
+            .iter()
+            .find_map(|r| path.strip_prefix(r).ok())
+        else {
             return WalkState::Continue;
         };
         let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
@@ -600,11 +605,17 @@ pub fn start(
         .map_err(|e| e.0)?
         .ok_or_else(|| "nothing to search for".to_owned())?;
     let filter = Filter::new(&params.include, &params.exclude)?;
+    let Some(first) = params.roots.first().cloned() else {
+        return Err("no folder to search".to_owned());
+    };
+    if let Some(r) = params.roots.iter().find(|r| !r.is_dir()) {
+        return Err(format!("{} is not a folder", r.display()));
+    }
     let ours = generation.bump();
     let shared = Arc::new(Shared {
         re,
         filter,
-        root: params.root.clone(),
+        roots: params.roots.clone(),
         snapshots,
         generation: Arc::clone(generation),
         ours,
@@ -620,7 +631,13 @@ pub fn start(
             let threads = std::thread::available_parallelism()
                 .map_or(2, |n| n.get().saturating_sub(1))
                 .max(1);
-            let walker = WalkBuilder::new(&shared.root)
+            // One walk over every root: the walker takes several starting
+            // folders, and each keeps its own `.gitignore`.
+            let mut builder = WalkBuilder::new(&first);
+            for r in shared.roots.iter().skip(1) {
+                builder.add(r);
+            }
+            let walker = builder
                 .hidden(false)
                 .git_ignore(!show_ignored)
                 .git_exclude(!show_ignored)
@@ -670,7 +687,7 @@ mod tests {
         let generation = Arc::new(Generation::default());
         let (tx, rx) = mpsc::channel();
         let g = start(params, snapshots, &generation, move |b| tx.send(b).is_ok()).unwrap();
-        let mut results = Results::new(g, params.root.clone());
+        let mut results = Results::new(g, params.roots.clone());
         while !results.done {
             assert!(results.receive(rx.recv().unwrap()));
         }
@@ -683,7 +700,7 @@ mod tests {
                 pattern: pattern.into(),
                 ..Query::default()
             },
-            root: root.to_path_buf(),
+            roots: vec![root.to_path_buf()],
             ..Params::default()
         }
     }
@@ -718,7 +735,7 @@ mod tests {
             tx.send(b).is_ok()
         })
         .unwrap();
-        let mut results = Results::new(g, p.root.clone());
+        let mut results = Results::new(g, p.roots.clone());
         let mut first = None;
         while !results.done {
             assert!(results.receive(rx.recv().unwrap()));
@@ -791,6 +808,31 @@ mod tests {
         bad.include = "[".into();
         let g = Arc::new(Generation::default());
         assert!(start(&bad, Snapshots::new(), &g, |_| true).is_err());
+    }
+
+    #[test]
+    fn searches_every_root_and_names_them() {
+        let first = tree();
+        let second = tempfile_dir::Dir::new("find-files-second");
+        second.write("lib.rs", "needle in the second root\n");
+        second.write("skip/x.rs", "needle\n");
+        let mut p = params(first.path(), "needle");
+        p.roots.push(second.path().to_path_buf());
+        p.exclude = "skip".into();
+        let r = search(&p, Snapshots::new());
+        let name = |d: &Path| d.file_name().unwrap().to_string_lossy().into_owned();
+        let mut want = vec![
+            format!("{}/a.txt", name(first.path())),
+            format!("{}/lib.rs", name(second.path())),
+            format!("{}/src/b.rs", name(first.path())),
+        ];
+        want.sort_unstable();
+        assert_eq!(rels(&r), want, "excludes apply within each root");
+        p.roots.push(first.path().join("no-such-folder"));
+        let g = Arc::new(Generation::default());
+        assert!(start(&p, Snapshots::new(), &g, |_| true).is_err());
+        p.roots.clear();
+        assert!(start(&p, Snapshots::new(), &g, |_| true).is_err());
     }
 
     #[test]

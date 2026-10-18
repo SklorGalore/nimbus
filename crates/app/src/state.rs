@@ -113,10 +113,14 @@ impl From<SidebarMode> for Mode {
 }
 
 /// One project folder as it was left.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Session {
-    /// The project folder (canonical).
+    /// The project folder (canonical): the workspace's first root, which
+    /// names the session.
     pub root: PathBuf,
+    /// Further root folders added to the workspace (M19), canonical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<PathBuf>,
     /// What the sidebar showed.
     #[serde(default)]
     pub mode: SidebarMode,
@@ -126,6 +130,83 @@ pub struct Session {
     /// The tabs, in order.
     #[serde(default)]
     pub tabs: Vec<SessionTab>,
+    /// Find in files' history and saved searches for this workspace.
+    #[serde(default, skip_serializing_if = "SearchHistory::is_empty")]
+    pub search: SearchHistory,
+}
+
+/// Most patterns, and most replacements, remembered per workspace.
+pub const MAX_HISTORY: usize = 50;
+
+/// What the Search panel remembers per workspace (M19): the patterns and
+/// replacements searched lately, newest first, and searches pinned with a
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchHistory {
+    /// Patterns, newest first, at most [`MAX_HISTORY`].
+    pub patterns: Vec<String>,
+    /// Replacements, newest first, at most [`MAX_HISTORY`].
+    pub replacements: Vec<String>,
+    /// Searches saved with a name, listed at the top of the panel.
+    pub saved: Vec<SavedSearch>,
+}
+
+impl SearchHistory {
+    /// Nothing remembered: left out of the file.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty() && self.replacements.is_empty() && self.saved.is_empty()
+    }
+
+    /// Note a pattern searched for: it moves to the front.
+    pub fn note_pattern(&mut self, text: &str) {
+        note(&mut self.patterns, text);
+    }
+
+    /// Note a replacement used: it moves to the front.
+    pub fn note_replacement(&mut self, text: &str) {
+        note(&mut self.replacements, text);
+    }
+
+    /// Pin `search` under its name, replacing one with the same name.
+    pub fn save(&mut self, search: SavedSearch) {
+        self.saved.retain(|s| s.name != search.name);
+        self.saved.push(search);
+        self.saved.sort_by_key(|s| s.name.to_lowercase());
+    }
+}
+
+/// Put `text` at the front of `list`, once, keeping [`MAX_HISTORY`].
+fn note(list: &mut Vec<String>, text: &str) {
+    if text.is_empty() || text.len() > 1000 {
+        return;
+    }
+    list.retain(|t| t != text);
+    list.insert(0, text.to_owned());
+    list.truncate(MAX_HISTORY);
+}
+
+/// A search pinned with a name: everything needed to run it again.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedSearch {
+    /// What the user called it.
+    pub name: String,
+    /// The pattern.
+    pub pattern: String,
+    /// The replacement, if the replace field was shown.
+    pub replace: Option<String>,
+    /// Include globs or a folder.
+    pub include: String,
+    /// Exclude globs.
+    pub exclude: String,
+    /// Regular expression.
+    pub regex: bool,
+    /// Match case.
+    pub case_sensitive: bool,
+    /// Whole word.
+    pub whole_word: bool,
 }
 
 /// One tab of a session.
@@ -218,6 +299,7 @@ impl State {
         }
         session.tabs.retain(|t| writable(&t.path));
         session.expanded.retain(|p| writable(p));
+        session.roots.retain(|p| writable(p));
         self.sessions.retain(|s| s.root != session.root);
         self.sessions.insert(0, session);
         self.sessions.truncate(MAX_SESSIONS);
@@ -254,7 +336,11 @@ pub fn missing(paths: &[PathBuf]) -> Vec<PathBuf> {
 
 /// Write `bytes` to `path` through a temporary file beside it and a rename,
 /// creating the folder if needed.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+///
+/// # Errors
+///
+/// Returns the error creating, writing or renaming the file.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -291,7 +377,53 @@ mod tests {
             mode: SidebarMode::Search,
             expanded: vec![PathBuf::from("src"), PathBuf::from("src/view")],
             tabs: vec![tab("/p/a.rs", 10, false), tab("/p/b.rs", 99, true)],
+            ..Session::default()
         }
+    }
+
+    #[test]
+    fn search_history_is_newest_first_capped_and_round_trips() {
+        let mut h = SearchHistory::default();
+        for i in 0..MAX_HISTORY + 5 {
+            h.note_pattern(&format!("p{i}"));
+        }
+        h.note_pattern("p10");
+        h.note_pattern("");
+        assert_eq!(h.patterns.len(), MAX_HISTORY);
+        assert_eq!(h.patterns[0], "p10");
+        assert_eq!(h.patterns.iter().filter(|p| *p == "p10").count(), 1);
+        h.note_replacement("x");
+        h.save(SavedSearch {
+            name: "todos".into(),
+            pattern: "TODO".into(),
+            ..SavedSearch::default()
+        });
+        h.save(SavedSearch {
+            name: "Apples".into(),
+            ..SavedSearch::default()
+        });
+        h.save(SavedSearch {
+            name: "todos".into(),
+            pattern: "FIXME".into(),
+            ..SavedSearch::default()
+        });
+        let names: Vec<&str> = h.saved.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Apples", "todos"]);
+        assert_eq!(h.saved[1].pattern, "FIXME", "same name replaces");
+        let mut sess = session("/p");
+        sess.search = h;
+        sess.roots = vec![PathBuf::from("/q")];
+        let mut s = State::default();
+        s.put_session(sess.clone());
+        assert_eq!(
+            State::parse(&toml::to_string(&s).unwrap()).sessions[0],
+            sess
+        );
+        // Nothing remembered: not written at all.
+        let mut s = State::default();
+        s.put_session(session("/p"));
+        let text = toml::to_string(&s).unwrap();
+        assert!(!text.contains("sessions.search") && !text.contains("roots ="));
     }
 
     #[test]

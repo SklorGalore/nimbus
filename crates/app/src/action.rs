@@ -208,6 +208,50 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::ReopenLastSession,
         Keys::NONE,
     ),
+    act("tree.undoMove", "Undo Move", Command::UndoMove, Keys::NONE),
+    act(
+        "tree.searchInFolder",
+        "Search in Folder",
+        Command::SearchInFolder,
+        Keys::NONE,
+    ),
+    // Workspaces (M19).
+    act(
+        "workspace.addFolder",
+        "Add Folder to Workspace…",
+        Command::AddRoot,
+        Keys::NONE,
+    ),
+    act(
+        "workspace.removeFolder",
+        "Remove Folder from Workspace",
+        Command::RemoveRoot,
+        Keys::NONE,
+    ),
+    act(
+        "workspace.saveAs",
+        "Save Workspace As…",
+        Command::SaveWorkspaceAs,
+        Keys::NONE,
+    ),
+    act(
+        "workspace.open",
+        "Open Workspace…",
+        Command::OpenWorkspace,
+        Keys::NONE,
+    ),
+    act(
+        "workspace.saveHere",
+        "Save Workspace Here",
+        Command::SaveWorkspaceHere,
+        Keys::NONE,
+    ),
+    act(
+        "workspace.openHere",
+        "Open Project Workspace",
+        Command::OpenProjectWorkspace,
+        Keys::NONE,
+    ),
     act(
         "file.save",
         "Save",
@@ -758,6 +802,12 @@ pub const ACTIONS: &[ActionInfo] = &[
         "search.clear",
         "Clear Search Results",
         Command::ClearSearch,
+        Keys::NONE,
+    ),
+    act(
+        "search.save",
+        "Save Search…",
+        Command::SaveSearch,
         Keys::NONE,
     ),
     // View.

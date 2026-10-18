@@ -11,6 +11,14 @@
 //! the children when the result arrives ([`Tree::loaded`]). Listing again
 //! after a change on disk keeps the nodes that are still there, so expanded
 //! folders stay expanded.
+//!
+//! A workspace can hold several root folders (M19). The first root is
+//! node [`ROOT`]; each further root is a node of its own with no parent.
+//! With one root the tree looks as it always did: the root's children are
+//! the top rows. With more, each root is a row at the top, and its
+//! contents are drawn one step in, so the folders read as separate
+//! projects. Every root keeps its own `.gitignore`, because listing walks
+//! up from the folder being listed, never from another root.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -130,6 +138,8 @@ pub struct ListRequest {
 #[derive(Debug)]
 pub struct Tree {
     root: PathBuf,
+    /// Every root folder's node, the first being [`ROOT`].
+    roots: Vec<NodeId>,
     nodes: Vec<Node>,
     free: Vec<NodeId>,
     /// What is on screen, top to bottom, rebuilt when the shape changes.
@@ -156,12 +166,8 @@ impl Tree {
     /// A tree for `root`, with nothing listed yet.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        let name = root.file_name().map_or_else(
-            || root.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
         let node = Node {
-            name,
+            name: folder_name(&root),
             path: root.clone(),
             is_dir: true,
             depth: 0,
@@ -174,6 +180,7 @@ impl Tree {
         };
         Self {
             root,
+            roots: vec![ROOT],
             nodes: vec![node],
             free: Vec::new(),
             rows: Vec::new(),
@@ -186,10 +193,111 @@ impl Tree {
         }
     }
 
-    /// The folder the tree shows.
+    /// The folder the tree shows: the first root.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Every root folder, the first one first.
+    #[must_use]
+    pub fn roots(&self) -> Vec<PathBuf> {
+        self.roots
+            .iter()
+            .map(|&id| self.nodes[id].path.clone())
+            .collect()
+    }
+
+    /// The root nodes, in order.
+    #[must_use]
+    pub fn root_ids(&self) -> &[NodeId] {
+        &self.roots
+    }
+
+    /// Whether `id` is one of the root folders.
+    #[must_use]
+    pub fn is_root(&self, id: NodeId) -> bool {
+        self.roots.contains(&id)
+    }
+
+    /// More than one root: each root is a row of its own.
+    #[must_use]
+    pub fn multi(&self) -> bool {
+        self.roots.len() > 1
+    }
+
+    /// The root `path` is in, if any.
+    #[must_use]
+    pub fn root_of(&self, path: &Path) -> Option<NodeId> {
+        self.roots
+            .iter()
+            .copied()
+            .find(|&r| path.starts_with(&self.nodes[r].path))
+    }
+
+    /// Add `path` (canonical) as another root, after the others. It starts
+    /// closed, as any folder does, so a second root costs nothing until it
+    /// is opened; [`Tree::expand_later`] opens a restored one. A root inside
+    /// another, or holding one, is refused, since the outer one already
+    /// shows it and two nodes for one folder would disagree.
+    ///
+    /// # Errors
+    ///
+    /// Returns why it cannot be added, for the message line.
+    pub fn add_root(&mut self, path: PathBuf) -> Result<(), String> {
+        for &r in &self.roots {
+            let have = &self.nodes[r].path;
+            if *have == path {
+                return Err(format!("{} is already in the workspace", path.display()));
+            }
+            if path.starts_with(have) {
+                return Err(format!(
+                    "{} is inside {}, which is already in the workspace",
+                    path.display(),
+                    have.display()
+                ));
+            }
+            if have.starts_with(&path) {
+                return Err(format!(
+                    "{} holds {}, which is already in the workspace; remove that first",
+                    path.display(),
+                    have.display()
+                ));
+            }
+        }
+        let id = self.alloc(Node {
+            name: folder_name(&path),
+            path,
+            is_dir: true,
+            depth: 0,
+            children: None,
+            expanded: false,
+            loading: false,
+            relist: false,
+            parent: None,
+            dead: false,
+        });
+        self.roots.push(id);
+        self.rebuild();
+        Ok(())
+    }
+
+    /// Take root `id` out of the workspace (not the first, which the
+    /// session is named after). Returns whether it was removed.
+    pub fn remove_root(&mut self, id: NodeId) -> bool {
+        if id == ROOT || !self.roots.contains(&id) {
+            return false;
+        }
+        self.roots.retain(|&r| r != id);
+        if self.selected.is_some_and(|s| {
+            self.node(s)
+                .is_none_or(|n| n.path.starts_with(&self.nodes[id].path))
+        }) {
+            self.selected = None;
+        }
+        self.remove(id);
+        self.rebuild();
+        true
     }
 
     /// A node.
@@ -221,11 +329,13 @@ impl Tree {
         });
     }
 
-    /// Listings to start now: the root's, the first time.
+    /// Listings to start now: each root's, the first time.
     pub fn start(&mut self) -> Vec<ListRequest> {
         let mut out = Vec::new();
-        if self.nodes[ROOT].children.is_none() {
-            self.request(ROOT, &mut out);
+        for r in self.roots.clone() {
+            if self.nodes[r].children.is_none() && self.nodes[r].expanded {
+                self.request(r, &mut out);
+            }
         }
         out
     }
@@ -289,7 +399,7 @@ impl Tree {
         if !fits {
             return Vec::new();
         }
-        let depth = if req.node == ROOT {
+        let depth = if self.is_root(req.node) {
             0
         } else {
             self.nodes[req.node].depth + 1
@@ -394,22 +504,32 @@ impl Tree {
         }
     }
 
-    /// Recompute the visible rows.
+    /// Recompute the visible rows. With several roots, each root is a row
+    /// and everything under it is drawn one step in.
     fn rebuild(&mut self) {
         self.rows.clear();
-        let mut stack: Vec<NodeId> = self.nodes[ROOT]
-            .children
-            .iter()
-            .flatten()
-            .rev()
-            .copied()
-            .collect();
+        let multi = self.multi();
+        let mut stack: Vec<NodeId> = if multi {
+            self.roots.iter().rev().copied().collect()
+        } else {
+            self.nodes[ROOT]
+                .children
+                .iter()
+                .flatten()
+                .rev()
+                .copied()
+                .collect()
+        };
         while let Some(id) = stack.pop() {
             let node = &self.nodes[id];
-            self.rows.push(Row {
-                node: id,
-                depth: node.depth,
-            });
+            let depth = if !multi {
+                node.depth
+            } else if self.roots.contains(&id) {
+                0
+            } else {
+                node.depth + 1
+            };
+            self.rows.push(Row { node: id, depth });
             if node.expanded
                 && let Some(children) = &node.children
             {
@@ -444,9 +564,17 @@ impl Tree {
     /// Open the folders at `paths` (absolute) once their parents are
     /// listed, as a restored session asks. A folder that is no longer
     /// there is never listed, so it is quietly left out.
+    /// A root other than the first opens at once (listed by the next
+    /// [`Tree::start`]).
     pub fn expand_later(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
-        self.expand_later
-            .extend(paths.into_iter().filter(|p| p.starts_with(&self.root)));
+        for p in paths {
+            if let Some(&r) = self.roots.iter().find(|&&r| self.nodes[r].path == p) {
+                self.nodes[r].expanded = true;
+            } else if self.root_of(&p).is_some() {
+                self.expand_later.insert(p);
+            }
+        }
+        self.rebuild();
     }
 
     /// Select `path` once a listing shows it, and list its folder again now
@@ -465,7 +593,7 @@ impl Tree {
             .nodes
             .iter()
             .enumerate()
-            .filter(|(i, n)| *i != ROOT && !n.dead && n.is_dir && n.expanded)
+            .filter(|&(i, n)| i != ROOT && !n.dead && n.is_dir && n.expanded)
             .map(|(_, n)| n.path.clone())
             .chain(self.expand_later.iter().cloned())
             .collect();
@@ -485,7 +613,7 @@ impl Tree {
     /// Expand the folders down to `path` and select it, loading them as
     /// needed. Returns listings to start.
     pub fn reveal(&mut self, path: &Path) -> Vec<ListRequest> {
-        if !path.starts_with(&self.root) {
+        if self.root_of(path).is_none() {
             return Vec::new();
         }
         self.reveal = Some(path.to_path_buf());
@@ -501,7 +629,10 @@ impl Tree {
         let Some(target) = self.reveal.clone() else {
             return;
         };
-        let mut at = ROOT;
+        let Some(mut at) = self.root_of(&target) else {
+            self.reveal = None;
+            return;
+        };
         loop {
             if self.nodes[at].path == target {
                 self.selected = Some(at);
@@ -531,11 +662,38 @@ impl Tree {
         self.rows.iter().position(|r| r.node == id)
     }
 
-    /// The parent folder of `id` (not the root).
+    /// The parent folder of `id`: not the root when it is the only one,
+    /// since it has no row then.
     #[must_use]
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
-        self.node(id)?.parent.filter(|&p| p != ROOT)
+        let multi = self.multi();
+        self.node(id)?.parent.filter(|&p| multi || p != ROOT)
     }
+}
+
+/// How `path` is shown in a workspace of `roots`: relative to the root it
+/// is in, prefixed with that root's folder name when there is more than
+/// one root, so `app/src/main.rs` and `lib/src/main.rs` can be told apart.
+/// `None` when it is in no root.
+#[must_use]
+pub fn shown_path(roots: &[PathBuf], path: &Path) -> Option<PathBuf> {
+    let root = roots.iter().find(|r| path.starts_with(r))?;
+    let rel = path.strip_prefix(root).ok()?;
+    Some(if roots.len() > 1 {
+        PathBuf::from(folder_name(root)).join(rel)
+    } else {
+        rel.to_path_buf()
+    })
+}
+
+/// A folder's name for display: its last component, or the whole path for
+/// `/` or a drive.
+#[must_use]
+pub fn folder_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 #[cfg(test)]
@@ -726,6 +884,69 @@ mod tests {
         );
         t.loaded(&again[0], entries(&[("new", false)]));
         assert_eq!(names(&t), ["new"]);
+    }
+
+    #[test]
+    fn paths_show_their_root_when_there_are_several() {
+        let one = [PathBuf::from("/p")];
+        let two = [PathBuf::from("/p"), PathBuf::from("/w/q")];
+        let file = Path::new("/w/q/src/a.rs");
+        assert_eq!(shown_path(&one, file), None);
+        assert_eq!(
+            shown_path(&one, Path::new("/p/a.rs")),
+            Some(PathBuf::from("a.rs"))
+        );
+        assert_eq!(
+            shown_path(&two, file),
+            Some(Path::new("q").join("src/a.rs"))
+        );
+    }
+
+    #[test]
+    fn several_roots_are_rows_of_their_own() {
+        let mut t = Tree::new(PathBuf::from("/p"));
+        let req = t.start();
+        t.loaded(&req[0], entries(&[("src", true), ("a.rs", false)]));
+        assert_eq!(names(&t), ["src", "a.rs"], "one root: as before");
+        assert!(t.add_root(PathBuf::from("/p/src")).is_err(), "inside /p");
+        assert!(t.add_root(PathBuf::from("/")).is_err(), "holds /p");
+        assert!(t.add_root(PathBuf::from("/p")).is_err(), "already there");
+        t.add_root(PathBuf::from("/q")).unwrap();
+        assert!(t.start().is_empty(), "a new root starts closed");
+        assert_eq!(names(&t), ["p", "  src", "  a.rs", "q"]);
+        let q = t.root_of(Path::new("/q/b.rs")).unwrap();
+        let req = t.toggle(q);
+        assert_eq!(req.len(), 1);
+        t.loaded(&req[0], entries(&[("b.rs", false)]));
+        assert_eq!(names(&t), ["p", "  src", "  a.rs", "q", "  b.rs"]);
+        assert_eq!(t.roots(), [PathBuf::from("/p"), PathBuf::from("/q")]);
+        assert!(t.is_root(q) && t.multi());
+        // Left from a top-level file goes to its root's row.
+        let b = t.rows()[4].node;
+        assert_eq!(t.parent(b), Some(q));
+        // Revealing works in any root; roots are never "expanded folders".
+        let src = t.rows()[1].node;
+        let req = t.toggle(src);
+        t.loaded(&req[0], entries(&[("lib.rs", false)]));
+        assert_eq!(
+            t.expanded_dirs(),
+            [PathBuf::from("/p/src"), PathBuf::from("/q")],
+            "an open second root is remembered"
+        );
+        t.toggle(q);
+        assert_eq!(names(&t).len(), 5, "q closed: b.rs hidden");
+        assert_eq!(t.reveal(Path::new("/q/b.rs")), Vec::new());
+        assert_eq!(t.node(t.selected.unwrap()).unwrap().name, "b.rs");
+        // The first root stays; another can go.
+        assert!(!t.remove_root(ROOT));
+        assert!(t.remove_root(q));
+        assert!(t.selected.is_none());
+        assert_eq!(names(&t), ["src", "  lib.rs", "a.rs"]);
+        assert_eq!(t.parent(t.rows()[0].node), None);
+        // A restored second root opens as it is added back.
+        t.add_root(PathBuf::from("/q")).unwrap();
+        t.expand_later([PathBuf::from("/q")]);
+        assert_eq!(t.start().len(), 1);
     }
 
     #[test]
