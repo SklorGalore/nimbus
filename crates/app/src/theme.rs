@@ -126,6 +126,12 @@ ui_colors! {
     merge_conflict,
     /// Behind the chip after a folded line (M13).
     fold_chip,
+    /// Behind the lines pinned by sticky scroll (M20).
+    sticky,
+    /// The shadow under the pinned lines.
+    sticky_shadow,
+    /// The minimap's mark over the lines on screen (M20).
+    minimap_slider,
     /// The `·` and `→` of visible whitespace (M16).
     whitespace,
     /// Indent guides.

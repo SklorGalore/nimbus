@@ -33,6 +33,7 @@ mod search_panel;
 mod session;
 mod sidebar;
 mod state;
+mod sticky;
 mod theme;
 mod tree;
 mod tree_ops;

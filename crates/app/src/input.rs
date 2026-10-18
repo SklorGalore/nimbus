@@ -152,6 +152,10 @@ pub enum Command<'a> {
     ToggleWhitespace,
     /// Show or hide indent guides.
     ToggleIndentGuides,
+    /// Turn sticky scroll on or off (M20).
+    ToggleStickyScroll,
+    /// Show or hide the minimap (M20).
+    ToggleMinimap,
     /// Select the word under the cursor, or add the next occurrence of the
     /// selection as another cursor.
     AddNextOccurrence,
@@ -354,6 +358,8 @@ impl Command<'_> {
                 | Self::ResetZoom
                 | Self::ToggleWhitespace
                 | Self::ToggleIndentGuides
+                | Self::ToggleStickyScroll
+                | Self::ToggleMinimap
         )
     }
 

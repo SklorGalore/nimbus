@@ -22,6 +22,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::config::Whitespace;
 use crate::document::{Carets, Document, Solo, Tail};
 use crate::find::{Field, FindBar};
+use crate::sticky::Sticky;
 use crate::theme::{Color, Theme, Ui};
 
 #[expect(
@@ -93,6 +94,8 @@ pub struct Decorations<'a> {
     /// Indent guides, with the columns per indentation level; `None`
     /// draws none.
     pub guides: Option<usize>,
+    /// Pin the scopes around the top line above the text (M20).
+    pub sticky: bool,
 }
 
 /// How long the scrollbar stays after the last scroll before it hides
@@ -233,6 +236,9 @@ pub struct Layout {
     pub tabs_h: f32,
     /// Left edge of the editor column: 0, or the sidebar's width.
     pub left: f32,
+    /// Width of the minimap at the column's right edge (M20), 0 when
+    /// none. The text stops at [`Layout::text_right`].
+    pub minimap: f32,
 }
 
 impl Layout {
@@ -266,7 +272,15 @@ impl Layout {
             wrap_cols,
             tabs_h: 0.0,
             left: 0.0,
+            minimap: 0.0,
         }
+    }
+
+    /// Right edge of the text: the column's edge, or the minimap's left
+    /// edge when one is shown.
+    #[must_use]
+    pub fn text_right(&self) -> f32 {
+        self.width - self.minimap
     }
 
     /// Move the editor column right of a sidebar `left` pixels wide.
@@ -713,6 +727,8 @@ pub struct View {
     /// The line under the pointer, by its start, when it can be folded:
     /// its gutter shows the fold marker.
     pub fold_hover: Option<usize>,
+    /// The lines pinned above the text (M20's sticky scroll).
+    sticky: Sticky,
 }
 
 /// The scrollbar as drawn: a track down the right edge of the text and a
@@ -1058,9 +1074,16 @@ impl View {
         let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width, &self.folds);
         let cursor_row = wrap::row_pos_of(t, &mut w, cursor);
         let top_row = anchor(self.scroll_top, t, &mut w);
-        let new_anchor = if cursor_row < top_row || (cursor_row == top_row && self.scroll_px > 0.0)
-        {
-            Some(cursor_row)
+        // Rows pinned by sticky scroll cover the top of the text: a cursor
+        // under them is scrolled to just below them.
+        let pinned = self.sticky.lines().len();
+        let under_pinned = pinned > 0
+            && cursor_row >= top_row
+            && wrap::rows_between(t, &mut w, top_row, cursor_row, pinned) < pinned;
+        let above = cursor_row < top_row || (cursor_row == top_row && self.scroll_px > 0.0);
+        let new_anchor = if above || under_pinned {
+            let back = isize::try_from(pinned).unwrap_or(0);
+            Some(wrap::step_rows(t, &mut w, cursor_row, -back).0)
         } else if wrap::rows_between(t, &mut w, top_row, cursor_row, full) >= full {
             let back = isize::try_from(full - 1).unwrap_or(0);
             Some(wrap::step_rows(t, &mut w, cursor_row, -back).0)
@@ -1254,6 +1277,17 @@ impl View {
             highlight_ranges(t, &mut w, at, layout, scroll_x, &mut self.hl_ranges);
             self.highlighter.spans(&doc.syntax, t, &self.hl_ranges)
         };
+        // Sticky scroll (M20): asked again only when the text, its tree,
+        // the top row, the wrapping or the folds changed.
+        let key = (
+            doc.version,
+            doc.syntax.rev(),
+            self.scroll_top,
+            wrapping.then_some(layout.wrap_cols),
+            self.folds.len(),
+        );
+        self.sticky
+            .update(deco.sticky.then_some(key), doc, &mut w, at);
         let mut top = layout.top - px;
         let mut painter = Painter {
             spans,
@@ -1321,6 +1355,29 @@ impl View {
         }
         self.cursor_at = painter.cursor_at;
         self.shown = shown_end.saturating_sub(self.scroll_top);
+        draw_sticky(&mut painter, &mut self.sticky, doc, geom);
+    }
+
+    /// The pinned line at window `y`, by its start, if `y` is on a sticky
+    /// row of the last frame.
+    #[must_use]
+    pub fn sticky_at(&self, layout: &Layout, y: f32) -> Option<usize> {
+        if y < layout.top {
+            return None;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small non-negative row index"
+        )]
+        let row = ((y - layout.top) / layout.metrics.line_height).floor() as usize;
+        self.sticky.lines().get(row).copied()
+    }
+
+    /// Scroll so the line starting at `start` is the top row.
+    pub fn scroll_to_line(&mut self, start: usize) {
+        self.scroll_top = start;
+        self.scroll_px = 0.0;
     }
 
     /// Queue the rows of one column of a compare view: each entry of
@@ -1530,6 +1587,60 @@ impl View {
         let target = frac * f64_of(len.saturating_sub(shown));
         self.scroll_to_fraction(target / f64_of(len.max(1)), doc, layout, tab_width);
     }
+}
+
+/// Draw the pinned rows of sticky scroll over the top of the text: each
+/// line's first row on the sticky background with its line number, then
+/// a shadow under the last.
+fn draw_sticky<'a>(
+    painter: &mut Painter<'a, '_>,
+    sticky: &'a mut Sticky,
+    doc: &Document,
+    (scroll_col, width_cols, scroll_x): (usize, usize, f64),
+) {
+    let t = &doc.buffer;
+    let (spans, lines) = sticky.parts(doc, painter.deco.looks.is_some());
+    if lines.is_empty() {
+        return;
+    }
+    painter.spans = spans;
+    painter.sels = &[];
+    painter.next_sel = 0;
+    let layout = painter.layout;
+    // A layer of its own: rects in a layer are drawn under all of its
+    // glyphs, and the pinned rows must cover the text's.
+    begin_column(painter.gpu, layout);
+    let lh = layout.metrics.line_height;
+    let ui = painter.deco.ui;
+    let right = layout.text_right();
+    let (shift, first) = if painter.wrapping {
+        (0.0, 0)
+    } else {
+        (row_shift(scroll_x), scroll_col)
+    };
+    let mut top = layout.top;
+    for &start in lines {
+        painter
+            .gpu
+            .push_rect([layout.left, top], [right - layout.left, lh], ui.sticky);
+        painter.gutter(t.line_number(start), false, top);
+        let span = t.line_span(start);
+        let text = t.slice(start..span.end.min(start + crate::sticky::LINE_BYTES));
+        painter.span(
+            &text,
+            Some(start),
+            0,
+            [layout.text_left - shift, top],
+            (first, width_cols),
+        );
+        top += lh;
+    }
+    let h = (2.0 * layout.scale).round().max(1.0);
+    painter.gpu.push_rect(
+        [layout.left, top],
+        [right - layout.left, h],
+        ui.sticky_shadow,
+    );
 }
 
 /// Draws rows for one frame; holds what every row needs.
@@ -2672,6 +2783,7 @@ mod tests {
                     looks: None,
                     whitespace,
                     guides,
+                    sticky: false,
                 };
                 view.draw(&mut gpu, &doc.doc, &doc.carets, &layout, 4, &deco);
                 queue.push(t.elapsed());

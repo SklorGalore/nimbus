@@ -101,6 +101,8 @@ mod native {
                 "view.toggleTheme",
                 "view.toggleWhitespace",
                 "view.toggleIndentGuides",
+                "view.toggleStickyScroll",
+                "view.toggleMinimap",
                 "-",
                 "view.zoomIn",
                 "view.zoomOut",

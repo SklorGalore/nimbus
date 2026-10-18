@@ -58,6 +58,19 @@ pub struct Config {
     pub render_whitespace: Whitespace,
     /// Draw a hairline at each indentation level.
     pub indent_guides: bool,
+    /// Pin the enclosing scopes (function, impl, heading) of the top line
+    /// above the text (M20).
+    pub sticky_scroll: bool,
+    /// Show the minimap at the right edge of the text (M20). Off unless
+    /// set; "Toggle Minimap" switches it for the session.
+    pub minimap: bool,
+    /// The minimap's width in points (logical pixels), 40 to 400.
+    pub minimap_width: f64,
+    /// A proportional font for the interface: the sidebar, tabs, status
+    /// bar, palette and pickers (M20). An installed font's family name or
+    /// a font file's path; empty uses the bundled editor font, so the
+    /// first frame needs no font lookup. The editor text stays monospace.
+    pub ui_font: String,
 }
 
 /// Which spaces and tabs are drawn visibly (`render_whitespace`).
@@ -223,6 +236,10 @@ impl Default for Config {
             remember_zoom: true,
             render_whitespace: Whitespace::Selection,
             indent_guides: false,
+            sticky_scroll: true,
+            minimap: false,
+            minimap_width: 100.0,
+            ui_font: String::new(),
         }
     }
 }
@@ -259,6 +276,10 @@ const KNOWN: &[&str] = &[
     "remember_zoom",
     "render_whitespace",
     "indent_guides",
+    "sticky_scroll",
+    "minimap",
+    "minimap_width",
+    "ui_font",
 ];
 
 /// A commented starting point written by "Open Config File" when there is
@@ -282,6 +303,12 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # Show spaces as · and tabs as →: "selection", "all" or "none".
 # render_whitespace = "selection"
 # indent_guides = false     # true: a hairline at each indentation level
+# sticky_scroll = true      # pin the enclosing function or heading at the top
+# minimap = false           # true: a map of the lines around the view, at the right
+# minimap_width = 100       # in points
+# A proportional font for the sidebar, tabs, status bar and pickers, by
+# name or path. Empty uses the editor font. The text stays monospace.
+# ui_font = "Inter"
 
 # Key bindings: action id = list of chords. "Primary" is Cmd on macOS and
 # Ctrl elsewhere. An empty list unbinds the action. The command palette
@@ -390,6 +417,27 @@ impl Config {
             &mut config.indent_guides,
             &mut warnings,
         );
+        take(
+            &table,
+            "sticky_scroll",
+            &mut config.sticky_scroll,
+            &mut warnings,
+        );
+        take(&table, "minimap", &mut config.minimap, &mut warnings);
+        take(
+            &table,
+            "minimap_width",
+            &mut config.minimap_width,
+            &mut warnings,
+        );
+        take(&table, "ui_font", &mut config.ui_font, &mut warnings);
+        if !(40.0..=400.0).contains(&config.minimap_width) {
+            warnings.push(format!(
+                "config: minimap_width {} out of range 40–400",
+                config.minimap_width
+            ));
+            config.minimap_width = Self::default().minimap_width;
+        }
         if let Some(w) = config.indent.width.filter(|w| !(1..=16).contains(w)) {
             warnings.push(format!("config: indent.width {w} out of range 1–16"));
             config.indent.width = None;
@@ -538,6 +586,22 @@ mod tests {
         assert_eq!(c.render_whitespace, Whitespace::Selection);
         assert_eq!(w.len(), 1, "{w:?}");
         assert_eq!(Whitespace::All.next(), Whitespace::None);
+    }
+
+    #[test]
+    fn reading_aid_settings_parse() {
+        let c = Config::default();
+        assert!(c.sticky_scroll && !c.minimap && c.ui_font.is_empty());
+        let (c, w) = Config::parse(
+            "sticky_scroll = false\nminimap = true\nminimap_width = 120\nui_font = \"Inter\"\n",
+        );
+        assert_eq!(w, Vec::<String>::new());
+        assert!(!c.sticky_scroll && c.minimap);
+        assert!((c.minimap_width - 120.0).abs() < f64::EPSILON);
+        assert_eq!(c.ui_font, "Inter");
+        let (c, w) = Config::parse("minimap_width = 5\n");
+        assert!((c.minimap_width - 100.0).abs() < f64::EPSILON);
+        assert_eq!(w.len(), 1, "{w:?}");
     }
 
     #[test]

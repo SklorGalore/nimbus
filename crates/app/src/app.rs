@@ -548,6 +548,12 @@ pub struct App {
     /// Indent guides on: the config's `indent_guides`, toggled from the
     /// palette.
     indent_guides: bool,
+    /// Sticky scroll on: the config's `sticky_scroll`, toggled from the
+    /// palette (M20).
+    sticky_scroll: bool,
+    /// The minimap shown: the config's `minimap`, toggled from the
+    /// palette (M20).
+    minimap: bool,
     /// When the last zoom step started, until its first frame is drawn:
     /// that frame refills the atlas, and its time is logged.
     zoom_started: Option<Instant>,
@@ -664,6 +670,8 @@ impl App {
             font_size: starting_zoom(&config, &state),
             whitespace: config.render_whitespace,
             indent_guides: config.indent_guides,
+            sticky_scroll: config.sticky_scroll,
+            minimap: config.minimap,
             config,
             theme,
             languages,
@@ -3012,6 +3020,18 @@ impl App {
                 self.say(format!("Indent guides {state}"), false);
                 self.changed(false);
             }
+            Command::ToggleStickyScroll => {
+                self.sticky_scroll = !self.sticky_scroll;
+                let state = if self.sticky_scroll { "on" } else { "off" };
+                self.say(format!("Sticky scroll {state}"), false);
+                self.changed(false);
+            }
+            Command::ToggleMinimap => {
+                self.minimap = !self.minimap;
+                let state = if self.minimap { "shown" } else { "hidden" };
+                self.say(format!("Minimap {state}"), false);
+                self.changed(false);
+            }
             _ => {}
         }
     }
@@ -3278,6 +3298,12 @@ impl App {
         }
         if old.indent_guides != self.config.indent_guides {
             self.indent_guides = self.config.indent_guides;
+        }
+        if old.sticky_scroll != self.config.sticky_scroll {
+            self.sticky_scroll = self.config.sticky_scroll;
+        }
+        if old.minimap != self.config.minimap {
+            self.minimap = self.config.minimap;
         }
         if let Some(menu) = &self.menu_bar {
             menu.update(&self.keymap);
@@ -3899,6 +3925,17 @@ impl App {
         }
         if let Some(hit) = tab.view.scrollbar_hit(x, y) {
             self.grab_scrollbar(hit, y, &layout);
+            return;
+        }
+        // A pinned line of sticky scroll (M20): jump to it.
+        if let Some(line) = tab.view.sticky_at(&layout, y) {
+            tab.view.scroll_to_line(line);
+            let doc = &mut self.docs[tab.doc];
+            let start = nimbus_core::movement::smart_home(&doc.buffer, line);
+            Editor::new(doc, &mut tab.carets).click(start, false);
+            doc.stop_following();
+            self.blink.reset(now);
+            self.changed(false);
             return;
         }
         if self.fold_click(&layout, x, y) {
@@ -4524,6 +4561,7 @@ impl App {
                 tab_width,
                 whitespace: self.whitespace,
                 guides: self.indent_guides,
+                sticky: self.sticky_scroll,
             };
             paint_pane(gpu, pane, &mut scene);
             hide_at = hide_at
@@ -5532,6 +5570,8 @@ pub struct Scene<'a> {
     whitespace: Whitespace,
     /// Indent guides on.
     guides: bool,
+    /// Sticky scroll on (M20).
+    sticky: bool,
 }
 
 /// The config's tab width, ligatures and font for a headless render. With
@@ -5625,6 +5665,7 @@ pub fn paint_pane(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
                         indent.width
                     }
                 }),
+                sticky: scene.sticky,
             },
         );
         // A nested language that came into view loads its grammar or was
@@ -5735,6 +5776,7 @@ pub fn run_headless(
                 tab_width: config.tab_width,
                 whitespace: config.render_whitespace,
                 guides: config.indent_guides,
+                sticky: config.sticky_scroll,
             },
         );
         let ui = &theme.ui;

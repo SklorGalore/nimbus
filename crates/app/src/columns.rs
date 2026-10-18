@@ -417,6 +417,7 @@ impl<T: Copy> Columns<T> {
                 // Compare and merge columns keep their plain look.
                 whitespace: crate::config::Whitespace::None,
                 guides: None,
+                sticky: false,
             };
             view.draw_rows(
                 gpu,
