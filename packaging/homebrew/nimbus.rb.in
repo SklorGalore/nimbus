@@ -1,0 +1,33 @@
+# Homebrew cask for Nimbus. The release workflow fills in @VERSION@ and
+# @SHA256@ from the published .dmg and attaches the result to the release
+# as nimbus.rb; copy it into a tap (a repository named homebrew-TAP, under
+# Casks/nimbus.rb) and `brew install --cask TAP/nimbus` installs it.
+#
+# The app is unsigned, so Gatekeeper refuses the first launch; the caveat
+# below says what to do. (Homebrew's `--no-quarantine` flag skips the
+# quarantine attribute at install time instead.)
+cask "nimbus" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "https://github.com/SklorGalore/nimbus/releases/download/v#{version}/Nimbus-#{version}-macos.dmg"
+  name "Nimbus"
+  desc "Fast, lightweight, modeless text editor with its own GPU text renderer"
+  homepage "https://github.com/SklorGalore/nimbus"
+
+  depends_on macos: ">= :big_sur"
+
+  app "Nimbus.app"
+  binary "#{appdir}/Nimbus.app/Contents/MacOS/nimbus"
+
+  caveats <<~EOS
+    Nimbus is not signed or notarised. The first time, open it with
+    right-click > Open, or run:
+      xattr -d com.apple.quarantine "#{appdir}/Nimbus.app"
+    or install with `brew install --cask --no-quarantine nimbus`.
+  EOS
+
+  zap trash: [
+    "~/Library/Application Support/nimbus",
+  ]
+end
