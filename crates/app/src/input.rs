@@ -198,6 +198,10 @@ pub enum Command<'a> {
     ReloadConfig,
     /// Open the config file in a tab, creating it if needed.
     OpenConfig,
+    /// Ask GitHub whether a newer release exists.
+    CheckUpdates,
+    /// Open the latest release's page in the browser.
+    OpenRelease,
     /// Quit (asking about unsaved changes first).
     /// Compare the active tab with its file on disk (M9).
     CompareSaved,
@@ -237,6 +241,16 @@ pub enum Command<'a> {
 }
 
 impl Command<'_> {
+    /// Whether the command is about the editor itself rather than a
+    /// document: the config file and the update check.
+    #[must_use]
+    pub fn is_setup(self) -> bool {
+        matches!(
+            self,
+            Command::OpenConfig | Command::CheckUpdates | Command::OpenRelease
+        )
+    }
+
     /// Whether the command belongs to find in files (the sidebar's Search
     /// panel), which runs the same wherever the keyboard is.
     #[must_use]
