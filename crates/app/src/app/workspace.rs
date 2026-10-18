@@ -187,6 +187,7 @@ impl App {
     /// Put `doc`, just read, in place of tab `i`'s placeholder.
     pub(super) fn adopt_restored(&mut self, i: usize, mut doc: Document) {
         doc.detect_language(&self.languages);
+        self.configure_indent(&mut doc);
         let tab = &mut self.tabs[i];
         tab.doc = doc;
         tab.apply_pending();
@@ -358,6 +359,10 @@ impl App {
         );
         self.ws.state = state;
         let opened = tabs.len();
+        let mut tabs = tabs;
+        for tab in tabs.iter_mut().filter(|t| !t.doc.is_placeholder()) {
+            self.configure_indent(&mut tab.doc);
+        }
         self.tabs = keep;
         let first_new = self.tabs.len();
         self.tabs

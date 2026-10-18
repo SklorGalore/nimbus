@@ -8,8 +8,8 @@
 use winit::keyboard::KeyCode;
 use winit::keyboard::{Key, ModifiersState, PhysicalKey};
 
-use crate::action::When;
-use crate::keymap::Keymap;
+use crate::action::{ActionInfo, When};
+use crate::keymap::{Chord, Keymap, Lookup};
 
 /// A cursor movement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +63,46 @@ pub enum Command<'a> {
     DeleteWordForward,
     /// Delete back to the start of the line, or the selection.
     DeleteToLineStart,
+    /// Comment or uncomment the selected lines with the language's line
+    /// comment.
+    ToggleLineComment,
+    /// Wrap the selection in the language's block comment, or unwrap it.
+    ToggleBlockComment,
+    /// Insert the selection again after itself, or the cursor's line below.
+    Duplicate,
+    /// Swap the selected lines with the line above.
+    MoveLineUp,
+    /// Swap the selected lines with the line below.
+    MoveLineDown,
+    /// Delete the selected lines whole.
+    DeleteLine,
+    /// Join each selection's lines into one.
+    JoinLines,
+    /// Open a new line below the cursor's, without breaking it.
+    InsertLineBelow,
+    /// Open a new line above the cursor's.
+    InsertLineAbove,
+    /// Select the cursor's line; again, the line below too.
+    SelectLine,
+    /// Grow the selection to the word, pair, line, then everything.
+    ExpandSelection,
+    /// Undo the last Expand Selection.
+    ShrinkSelection,
+    /// Move to the bracket pairing with the one at the cursor; with
+    /// `true`, select up to it.
+    MatchingBracket(bool),
+    /// Change the selected text's case.
+    ChangeCase(nimbus_core::transform::Case),
+    /// Sort, reverse-sort or deduplicate the selected lines.
+    RewriteLines(nimbus_core::transform::Lines),
+    /// Remove trailing whitespace from the selected lines, or all.
+    TrimWhitespace,
+    /// Indent this file with spaces, at the configured width.
+    IndentUsingSpaces,
+    /// Indent this file with tabs.
+    IndentUsingTabs,
+    /// Work the indentation out from the file again.
+    DetectIndent,
     /// Undo the last change.
     Undo,
     /// Redo the last undone change.
@@ -255,6 +295,18 @@ impl Command<'_> {
                 | Command::Redo
                 | Command::Cut
                 | Command::Paste
+                | Command::ToggleLineComment
+                | Command::ToggleBlockComment
+                | Command::Duplicate
+                | Command::MoveLineUp
+                | Command::MoveLineDown
+                | Command::DeleteLine
+                | Command::JoinLines
+                | Command::InsertLineBelow
+                | Command::InsertLineAbove
+                | Command::ChangeCase(_)
+                | Command::RewriteLines(_)
+                | Command::TrimWhitespace
         )
     }
 }
@@ -308,30 +360,94 @@ fn repeats(cmd: Command<'_>) -> bool {
             | Command::DeleteToLineStart
             | Command::Undo
             | Command::Redo
+            | Command::Duplicate
+            | Command::MoveLineUp
+            | Command::MoveLineDown
+            | Command::DeleteLine
+            | Command::JoinLines
+            | Command::SelectLine
+            | Command::ExpandSelection
+            | Command::ShrinkSelection
     )
+}
+
+/// What a key press resolved to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolved<'a> {
+    /// Run this.
+    Command(Command<'a>),
+    /// The first chord of a two-chord binding: wait for the second.
+    Prefix(Chord),
+    /// Nothing: an unbound chord, a key release, or a modifier alone.
+    Nothing,
 }
 
 /// Turn a key press into a command: the action bound to it in `keymap` if
 /// that action applies now (`find_open` says whether find-bar actions do),
 /// otherwise the text the key types, if any.
-pub fn resolve<'a>(keymap: &Keymap, k: KeyPress<'a>, find_open: bool) -> Option<Command<'a>> {
+///
+/// With `pending`, the first chord of a two-chord binding was just
+/// pressed: the key completes it, or cancels it, and never types. A
+/// modifier pressed on its own is ignored, so holding Ctrl for the second
+/// chord does not cancel the first.
+pub fn resolve<'a>(
+    keymap: &Keymap,
+    k: KeyPress<'a>,
+    find_open: bool,
+    pending: Option<Chord>,
+) -> Resolved<'a> {
     if !k.pressed {
-        return None;
+        return Resolved::Nothing;
     }
-    if let Some(action) = keymap.lookup(k.key, k.physical, k.mods) {
-        let applies = match action.when {
-            When::Always => true,
-            When::FindBar => find_open,
-        };
-        if applies {
-            return (!k.repeat || repeats(action.command)).then_some(action.command);
+    let applies = |action: &ActionInfo| match action.when {
+        When::Always => true,
+        When::FindBar => find_open,
+    };
+    if let Some(first) = pending {
+        if is_modifier(k.key) {
+            return Resolved::Prefix(first);
         }
+        return match keymap.lookup_second(first, k.key, k.physical, k.mods) {
+            Some(action) if applies(action) && !k.repeat => Resolved::Command(action.command),
+            _ => Resolved::Nothing,
+        };
     }
-    let text = k.text?;
+    match keymap.lookup(k.key, k.physical, k.mods, find_open) {
+        Lookup::Action(action) if applies(action) => {
+            return if !k.repeat || repeats(action.command) {
+                Resolved::Command(action.command)
+            } else {
+                Resolved::Nothing
+            };
+        }
+        Lookup::Prefix(chord) if !k.repeat => return Resolved::Prefix(chord),
+        _ => {}
+    }
+    let Some(text) = k.text else {
+        return Resolved::Nothing;
+    };
     // Control characters (\r, \x08, \x1b, \x7f) arrive as text on some
     // platforms for keys like Enter; never type them.
-    (may_insert_text(k.mods) && !text.chars().any(char::is_control))
-        .then_some(Command::Insert(text))
+    if may_insert_text(k.mods) && !text.chars().any(char::is_control) {
+        Resolved::Command(Command::Insert(text))
+    } else {
+        Resolved::Nothing
+    }
+}
+
+/// Whether the key is a modifier on its own (Shift, Control, Alt, Super).
+fn is_modifier(key: &Key) -> bool {
+    matches!(
+        key,
+        Key::Named(
+            winit::keyboard::NamedKey::Shift
+                | winit::keyboard::NamedKey::Control
+                | winit::keyboard::NamedKey::Alt
+                | winit::keyboard::NamedKey::Super
+                | winit::keyboard::NamedKey::Meta
+                | winit::keyboard::NamedKey::AltGraph
+        )
+    )
 }
 
 #[cfg(test)]
@@ -372,6 +488,14 @@ mod tests {
         Keymap::new(&HashMap::new()).0
     }
 
+    /// The command a press resolves to, with no chord pending.
+    fn resolve<'a>(km: &Keymap, k: KeyPress<'a>, find_open: bool) -> Option<Command<'a>> {
+        match super::resolve(km, k, find_open, None) {
+            Resolved::Command(c) => Some(c),
+            Resolved::Prefix(_) | Resolved::Nothing => None,
+        }
+    }
+
     #[test]
     fn primary_chords_never_type_and_save_does_not_repeat() {
         let km = km();
@@ -395,11 +519,11 @@ mod tests {
             Some(Command::Undo),
             "undo repeats"
         );
-        let unbound = ch("j");
+        let unbound = ch("u");
         assert_eq!(
             resolve(
                 &km,
-                press(&unbound, KeyCode::KeyJ, Some("j"), primary()),
+                press(&unbound, KeyCode::KeyU, Some("u"), primary()),
                 false
             ),
             None
@@ -463,6 +587,59 @@ mod tests {
         let omega = ch("Ω");
         let k = press(&omega, KeyCode::KeyZ, Some("Ω"), ModifiersState::ALT);
         assert_eq!(resolve(&km, k, false), Some(Command::ToggleWrap));
+    }
+
+    #[test]
+    fn two_chord_bindings_wait_for_the_second_chord() {
+        let mut o = HashMap::new();
+        o.insert(
+            "edit.toggleLineComment".to_owned(),
+            vec!["Ctrl+K Ctrl+C".to_owned()],
+        );
+        let (km, warnings) = Keymap::new(&o);
+        assert_eq!(warnings, Vec::<String>::new());
+        let k = ch("k");
+        let first = super::resolve(
+            &km,
+            press(&k, KeyCode::KeyK, Some("k"), ModifiersState::CONTROL),
+            false,
+            None,
+        );
+        let Resolved::Prefix(chord) = first else {
+            panic!("{first:?}");
+        };
+        // Releasing and pressing Control again does not cancel.
+        let ctrl = Key::Named(NamedKey::Control);
+        assert_eq!(
+            super::resolve(
+                &km,
+                press(&ctrl, KeyCode::ControlLeft, None, ModifiersState::CONTROL),
+                false,
+                Some(chord)
+            ),
+            Resolved::Prefix(chord)
+        );
+        let c = ch("c");
+        assert_eq!(
+            super::resolve(
+                &km,
+                press(&c, KeyCode::KeyC, Some("c"), ModifiersState::CONTROL),
+                false,
+                Some(chord)
+            ),
+            Resolved::Command(Command::ToggleLineComment)
+        );
+        // An unknown second chord cancels and types nothing.
+        let x = ch("x");
+        assert_eq!(
+            super::resolve(
+                &km,
+                press(&x, KeyCode::KeyX, Some("x"), ModifiersState::empty()),
+                false,
+                Some(chord)
+            ),
+            Resolved::Nothing
+        );
     }
 
     #[cfg(not(target_os = "macos"))]
