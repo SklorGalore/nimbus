@@ -163,6 +163,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use memchr::{memchr, memchr_iter, memrchr, memrchr_iter};
 
@@ -172,6 +173,52 @@ use crate::buffer::{
 };
 use crate::line_index::{IndexChunk, LineIndex, MergeError, Spacing, meter};
 use crate::source::{Source, VecSource};
+
+/// Gives each new document's stores a number of their own (its lineage).
+static NEXT_LINEAGE: AtomicU64 = AtomicU64::new(1);
+
+/// How many bytes at each end of the old source
+/// [`MappedBuffer::extend_source`] compares with the new one.
+const EXTEND_CHECK: usize = 64;
+
+/// Why [`MappedBuffer::extend_source`] refused a new source.
+#[derive(Debug)]
+pub enum ExtendError {
+    /// The new source is shorter than the old: the file was cut short, and
+    /// must be opened again.
+    Shorter {
+        /// The old source's length.
+        old: usize,
+        /// The new source's length.
+        new: usize,
+    },
+    /// The new source does not start with the old one's bytes: the file
+    /// was rewritten or replaced, not appended to.
+    Differs,
+    /// Reading either source to compare them failed.
+    Read(std::io::Error),
+}
+
+impl fmt::Display for ExtendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Shorter { old, new } => {
+                write!(f, "the file shrank from {old} to {new} bytes")
+            }
+            Self::Differs => f.write_str("the file was rewritten, not appended to"),
+            Self::Read(e) => write!(f, "could not compare the file: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ExtendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 /// Removals longer than this many bytes are kept in undo as pieces instead
 /// of copied: 256 KiB.
@@ -423,6 +470,10 @@ struct Frontier {
 pub struct MappedSnapshot {
     /// The original file.
     source: Arc<dyn Source>,
+    /// Which document's stores these are: set when the document is made,
+    /// and kept when its source grows ([`MappedBuffer::extend_source`]),
+    /// so a [`PieceRun`] recorded before the growth still belongs here.
+    lineage: u64,
     /// Line breaks of the original file, perhaps only of a prefix of it.
     /// Shared with snapshots, and copied on write like the piece list.
     index: Arc<LineIndex>,
@@ -444,6 +495,7 @@ impl MappedSnapshot {
         let len = source.len();
         let mut snap = Self {
             source,
+            lineage: NEXT_LINEAGE.fetch_add(1, Ordering::Relaxed),
             index: Arc::new(index),
             sealed: Arc::new(Vec::new()),
             open: Vec::new(),
@@ -967,7 +1019,9 @@ impl MappedSnapshot {
     }
 
     /// Whether `run` refers to this document's stores: the same original
-    /// file and the very same sealed segments, each piece within its store.
+    /// file (or an earlier, shorter mapping of it, see
+    /// [`MappedBuffer::extend_source`]) and the very same sealed segments,
+    /// each piece within its store.
     fn owns(&self, run: &PieceRun) -> bool {
         let run = &*run.0;
         let fits = |p: &Piece, store_len: usize| {
@@ -975,7 +1029,7 @@ impl MappedSnapshot {
                 .checked_add(p.len)
                 .is_some_and(|end| end <= store_len)
         };
-        std::ptr::addr_eq(Arc::as_ptr(&self.source), Arc::as_ptr(&run.source))
+        self.lineage == run.lineage
             && run.pieces.iter().all(|p| match p.store {
                 Store::Original => fits(p, self.source.len()),
                 Store::Add(n) => match (self.sealed.get(n), run.sealed.get(n)) {
@@ -1278,6 +1332,8 @@ struct Run {
     /// `None` if a piece's count was unknown when the run was made.
     newlines: Option<usize>,
     source: Arc<dyn Source>,
+    /// The document's lineage ([`MappedSnapshot`]).
+    lineage: u64,
     /// The document's sealed segments when the run was made. Segments are
     /// only ever added, so the numbers in `pieces` mean the same in the
     /// document for as long as it keeps this add buffer.
@@ -1344,7 +1400,7 @@ impl PieceRun {
 }
 
 /// Two runs are equal when they name the same pieces of the same stores:
-/// the same original file and the very same segments.
+/// the same original file (by lineage) and the very same segments.
 impl PartialEq for PieceRun {
     fn eq(&self, other: &Self) -> bool {
         let (mine, theirs) = (&*self.0, &*other.0);
@@ -1361,7 +1417,7 @@ impl PartialEq for PieceRun {
         };
         Arc::ptr_eq(&self.0, &other.0)
             || (mine.len == theirs.len
-                && std::ptr::addr_eq(Arc::as_ptr(&mine.source), Arc::as_ptr(&theirs.source))
+                && mine.lineage == theirs.lineage
                 && mine.pieces.len() == theirs.pieces.len()
                 && mine
                     .pieces
@@ -1579,6 +1635,76 @@ impl MappedBuffer {
         Ok(())
     }
 
+    /// The original file grew: read it from `source` from now on, and
+    /// append its new bytes to the end of the document as one piece of the
+    /// original, unindexed until [`MappedBuffer::merge_index`] reaches it.
+    /// Returns the edit, for whatever follows edits (the syntax state); it
+    /// is not meant for the undo history, since the document still matches
+    /// the file.
+    ///
+    /// `source` must hold the old source's bytes first, then the new ones:
+    /// a second mapping of the same file at its new length. Every piece of
+    /// the original names bytes below the old length, so they read the
+    /// same through either source, and the pieces, line counts and undo
+    /// runs recorded so far all stay right. Only a few bytes at each end of
+    /// the old source are compared, to refuse a file that was replaced
+    /// rather than appended to; a file rewritten in the middle with both
+    /// ends kept is taken as appended, like the watcher's other checks.
+    /// Snapshots keep the source they were taken with.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtendError`] when `source` is shorter, starts or ends its
+    /// old part differently, or cannot be read; nothing changes then.
+    pub fn extend_source(&mut self, source: Arc<dyn Source>) -> Result<Edit, ExtendError> {
+        let old = self.state.source.len();
+        let new = source.len();
+        if new < old {
+            return Err(ExtendError::Shorter { old, new });
+        }
+        let check = EXTEND_CHECK.min(old);
+        for at in [0, old - check] {
+            let mut mine = [0; EXTEND_CHECK];
+            let mut theirs = [0; EXTEND_CHECK];
+            let (mine, theirs) = (&mut mine[..check], &mut theirs[..check]);
+            self.state
+                .source
+                .read_at(at, mine)
+                .map_err(ExtendError::Read)?;
+            source.read_at(at, theirs).map_err(ExtendError::Read)?;
+            if mine != theirs {
+                return Err(ExtendError::Differs);
+            }
+        }
+        self.state.source = source;
+        let end = self.state.len();
+        if new == old {
+            return Ok(Edit {
+                start: end,
+                removed: Content::Bytes(Vec::new()),
+                inserted: Content::Bytes(Vec::new()),
+            });
+        }
+        // Copies the index's chunk list first if a snapshot shares it.
+        Arc::make_mut(&mut self.state.index).reopen();
+        // Invariant 6 holds: the new piece is last in the document and
+        // starts past every byte any other piece of the original names.
+        let run = PieceRun(Arc::new(Run {
+            pieces: vec![Piece {
+                store: Store::Original,
+                start: old,
+                len: new - old,
+                newlines: None,
+            }],
+            len: new - old,
+            newlines: None,
+            source: Arc::clone(&self.state.source),
+            lineage: self.state.lineage,
+            sealed: Arc::clone(&self.state.sealed),
+        }));
+        Ok(self.apply(end..end, Insert::Run(&run)))
+    }
+
     /// How many pieces the document is made of: 1 for an unedited file,
     /// growing by up to two per edit in a new place.
     #[must_use]
@@ -1666,6 +1792,7 @@ impl MappedBuffer {
             pieces,
             len: range.len(),
             source: Arc::clone(&self.state.source),
+            lineage: self.state.lineage,
             sealed: Arc::clone(&self.state.sealed),
         })))
     }
@@ -2195,6 +2322,63 @@ mod tests {
         while hist.redo(&mut b, &mut |_, _| {}).unwrap().is_some() {
             check_invariants(&b);
         }
+    }
+
+    #[test]
+    fn a_grown_source_extends_the_document_and_keeps_its_undo_runs() {
+        let first: &[u8] = b"one\ntwo\nthree\nfour\n";
+        let (mut b, _) = partly_indexed(first, first.len(), TINY);
+        // A removal recorded as pieces before the growth.
+        let e = b.replace(2..15, "").unwrap();
+        assert!(matches!(e.removed, Content::Pieces(_)));
+        let before = b.snapshot();
+        let mut grown = first.to_vec();
+        grown.extend_from_slice(b"five\nsix");
+        let edit = b
+            .extend_source(Arc::new(VecSource::new(grown.clone())))
+            .unwrap();
+        assert_eq!(edit.new_range(), 6..14);
+        assert!(edit.removed.is_empty());
+        check_invariants(&b);
+        assert_eq!(text(&b), "onour\nfive\nsix");
+        assert_eq!(before.len_bytes(), 6, "a snapshot keeps its text");
+        assert!(!b.is_fully_indexed(), "the new bytes are not counted yet");
+
+        // Undo still puts the old pieces back, and they join up again.
+        b.put(2..2, &e.removed).unwrap();
+        assert_eq!(text(&b), "one\ntwo\nthree\nfour\nfive\nsix");
+        assert_eq!(b.piece_count(), 1);
+        check_invariants(&b);
+
+        // Counting lines carries on where it stopped.
+        let mut more = Scanner::resume(b.line_index(), Spacing::new(2, 5));
+        more.feed(&grown[first.len()..]);
+        more.finish();
+        b.merge_index(more.take_chunk()).unwrap();
+        assert!(b.is_fully_indexed());
+        assert_eq!(b.line_number(b.len_bytes()), Some(5));
+        assert_eq!(
+            b.line_index().checkpoints().collect::<Vec<_>>(),
+            LineIndex::build(&grown, Spacing::new(2, 5))
+                .checkpoints()
+                .collect::<Vec<_>>(),
+            "the same checkpoints as indexing it whole"
+        );
+        check_invariants(&b);
+
+        // Refused: a shorter source, or one whose start differs.
+        assert!(matches!(
+            b.extend_source(Arc::new(VecSource::new(first.to_vec()))),
+            Err(ExtendError::Shorter { .. })
+        ));
+        let mut other = grown.clone();
+        other[0] = b'O';
+        other.push(b'\n');
+        assert!(matches!(
+            b.extend_source(Arc::new(VecSource::new(other))),
+            Err(ExtendError::Differs)
+        ));
+        assert_eq!(b.len_bytes(), grown.len(), "nothing changed");
     }
 
     #[test]

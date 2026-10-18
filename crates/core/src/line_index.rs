@@ -196,6 +196,23 @@ impl Scanner {
         }
     }
 
+    /// A scanner that carries on where `index` ends, for a file that grew
+    /// after it was indexed (M12's Follow Tail): fed the bytes from
+    /// [`LineIndex::indexed`] on, its chunks merge into `index`. `spacing`
+    /// must be the one the index was built with.
+    #[must_use]
+    pub fn resume(index: &LineIndex, spacing: Spacing) -> Self {
+        Self {
+            spacing,
+            pos: index.upto,
+            lines: index.lines,
+            last: index.checkpoints().last().map_or(0, |c| c.offset),
+            pending: Vec::new(),
+            chunk_from: index.upto,
+            done: false,
+        }
+    }
+
     /// Bytes fed so far.
     #[must_use]
     pub fn position(&self) -> u64 {
@@ -384,6 +401,12 @@ impl LineIndex {
         self.lines = chunk.lines;
         self.done |= chunk.done;
         Ok(())
+    }
+
+    /// The file grew after it was indexed to its end: it is not done any
+    /// more, and chunks from a [`Scanner::resume`]d scanner can follow.
+    pub fn reopen(&mut self) {
+        self.done = false;
     }
 
     /// Bytes from the start of the file that the index covers.

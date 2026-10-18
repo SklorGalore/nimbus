@@ -11,11 +11,19 @@
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
-use nimbus_core::{Buffer, Text};
+use nimbus_core::{Buffer, ExtendError, Source, Text};
 
 use super::{Document, Stamp};
+use crate::indexer;
 use crate::io;
+use crate::mapping::MappedFile;
+
+/// The least time between two extensions of a following mapped document
+/// ([`Document::extend_mapping`]): each maps the file again.
+pub(super) const EXTEND_GAP: Duration = Duration::from_millis(200);
 
 /// Whether a document's file grew on disk while it was open, and whether
 /// the view follows its end.
@@ -107,6 +115,80 @@ impl Document {
             len: old.len + text.len() as u64,
             modified: now.modified,
         });
+        Ok(true)
+    }
+
+    /// The file of this mapped document, which has no unsaved edits, grew
+    /// to `now`: map it again at its new length and append the new bytes
+    /// (M12, `DESIGN.md` §9). Returns `false`, changing nothing, when the
+    /// file was rewritten rather than appended to, or for a document not
+    /// backed by a mapping.
+    ///
+    /// A mapping has a fixed length, so growth means a second mapping of
+    /// the same file. Its first bytes are the very bytes the first one
+    /// maps, so every piece of the document reads the same through it; the
+    /// piece table checks a few of them, takes the new mapping as its
+    /// source and appends one piece for the new bytes
+    /// ([`nimbus_core::MappedBuffer::extend_source`]). The old mapping is
+    /// unmapped when the last snapshot or undo step holding it goes. Memory
+    /// does not grow with the file: mapped pages are the system's file
+    /// cache, as in M7, and the line index grows by a checkpoint per 1024
+    /// lines.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the file could not be mapped or read.
+    pub(super) fn extend_mapping(&mut self, path: &Path, now: Stamp) -> Result<bool, String> {
+        let Some(old) = self.mapping.as_ref() else {
+            return Ok(false);
+        };
+        // A byte order mark stays left out, as when the file was opened.
+        let skip = usize::try_from(old.file_len() - old.len() as u64).unwrap_or(0);
+        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let mapped = Arc::new(
+            MappedFile::new(file)
+                .map_err(|e| e.to_string())?
+                .skip_prefix(skip),
+        );
+        if !mapped.continues(old).map_err(|e| e.to_string())? {
+            return Ok(false);
+        }
+        let counting = self.counting_lines();
+        let Some(buffer) = self.buffer.as_mapped_mut() else {
+            return Ok(false);
+        };
+        let source: Arc<dyn Source> = mapped.clone();
+        let edit = match buffer.extend_source(source) {
+            Ok(edit) => edit,
+            Err(ExtendError::Shorter { .. } | ExtendError::Differs) => return Ok(false),
+            Err(e) => return Err(e.to_string()),
+        };
+        // Count the new lines: here, for the little a log adds at a time,
+        // or on a worker for more, or when one is still counting (it
+        // stops, and the new one carries on from what it merged).
+        let gap = mapped.len() as u64 - buffer.line_index().indexed();
+        if counting || gap > indexer::FIRST_BLOCK as u64 {
+            let job = indexer::resume(&mapped, buffer.line_index());
+            self.adopt_indexing(Some(job));
+        } else {
+            let chunks = indexer::catch_up(&mapped, buffer.line_index())?;
+            for chunk in chunks {
+                if let Err(e) = buffer.merge_index(chunk) {
+                    log::warn!("line index chunk refused: {e}");
+                    break;
+                }
+            }
+        }
+        self.edits.note(&self.buffer, &edit);
+        self.syntax.edit(&self.buffer, &edit);
+        self.syntax.touch();
+        self.version += 1;
+        self.disk = Some(Stamp {
+            len: mapped.file_len(),
+            modified: now.modified,
+        });
+        self.mapping = Some(mapped);
+        self.conflict = false;
         Ok(true)
     }
 
@@ -212,6 +294,53 @@ mod tests {
         std::fs::write(&path, "ONE\ntwo\nthr\u{e9} and more").unwrap();
         assert_eq!(doc.disk_changed(&languages), DiskChange::Reloaded);
         assert_eq!(doc.buffer.slice(0..3), "ONE");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_following_mapped_document_maps_the_grown_file() {
+        let dir = std::env::temp_dir().join(format!("nimbus-tail-map-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.log");
+        std::fs::write(&path, "\u{feff}one\ntwo\n").unwrap();
+        let languages = Languages::default();
+        let mut doc = Document::open_mapped(&path).unwrap();
+        assert!(doc.buffer.is_mapped() && doc.bom);
+
+        // Not following: the file stays as it was loaded.
+        append(&path, b"three\n");
+        assert_eq!(doc.disk_changed(&languages), DiskChange::NotReloaded);
+        assert_eq!(doc.tail, Tail::Grew);
+        assert_eq!(doc.buffer.len_bytes(), 8);
+
+        doc.tail = Tail::Following;
+        assert_eq!(doc.disk_changed(&languages), DiskChange::Appended);
+        let all = |d: &Document| d.buffer.slice(0..d.buffer.len_bytes()).into_owned();
+        assert_eq!(all(&doc), "one\ntwo\nthree\n");
+        assert!(!doc.is_dirty() && !doc.conflict);
+        assert!(
+            doc.buffer.is_fully_indexed(),
+            "the few new lines are counted at once"
+        );
+        assert_eq!(doc.buffer.line_number(doc.buffer.len_bytes()), Some(3));
+        assert_eq!(doc.backing_file().unwrap().file_len(), 17);
+
+        // Soon after, it waits; later it maps again.
+        append(&path, b"four\n");
+        assert!(matches!(doc.disk_changed(&languages), DiskChange::Later(_)));
+        doc.extended_at = None;
+        assert_eq!(doc.disk_changed(&languages), DiskChange::Appended);
+        assert_eq!(all(&doc), "one\ntwo\nthree\nfour\n");
+
+        // Rewritten, not appended to: not taken as an append.
+        doc.extended_at = None;
+        std::fs::write(&path, "\u{feff}ONE\ntwo\nthree\nfour\nfive\n").unwrap();
+        assert_eq!(doc.disk_changed(&languages), DiskChange::NotReloaded);
+        // (Rewritten in place, so the mapped bytes changed too: M7's
+        // documented hazard. The document is just not extended.)
+        assert_eq!(doc.buffer.len_bytes(), 19);
+        drop(doc);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

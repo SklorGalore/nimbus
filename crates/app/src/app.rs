@@ -1687,6 +1687,15 @@ impl App {
             let name = tab.doc.display_name();
             let note = match tab.doc.disk_changed(&self.languages) {
                 DiskChange::None | DiskChange::Appended => continue,
+                DiskChange::Later(due) => {
+                    self.recheck_at = Some(self.recheck_at.map_or(due, |t| t.min(due)));
+                    if let Some(p) = &tab.doc.canonical
+                        && !self.recheck.contains(p)
+                    {
+                        self.recheck.push(p.clone());
+                    }
+                    continue;
+                }
                 DiskChange::Reloaded => format!("{name} changed on disk; reloaded"),
                 DiskChange::Conflict => {
                     is_error = true;
@@ -1697,7 +1706,8 @@ impl App {
                 }
                 DiskChange::NotReloaded => format!(
                     "{name} changed on disk; huge files do not reload by themselves. \
-                     Run Reload from Disk from the command palette to see the changes"
+                     Run Reload from Disk from the command palette to see the changes, \
+                     or Follow Tail for a file being added to"
                 ),
                 DiskChange::Truncated { reloaded: true } => {
                     is_error = true;

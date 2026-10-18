@@ -81,6 +81,9 @@ pub enum DiskChange {
         /// Whether it was reloaded.
         reloaded: bool,
     },
+    /// A following mapped document's file grew again soon after it was
+    /// last extended: look again at this time.
+    Later(Instant),
     /// Deleted on disk.
     Deleted,
     /// Changed on disk, but reading it failed.
@@ -232,6 +235,10 @@ pub struct Document {
     /// Whether the file grew on disk while open, and whether the view
     /// follows its end (M12's Follow Tail).
     pub tail: Tail,
+    /// When a following mapped document last mapped its grown file, so a
+    /// log written in many small pieces is mapped again a few times a
+    /// second, not on every write.
+    extended_at: Option<Instant>,
 }
 
 /// A snapshot of the text as the file held it, or none; a wrapper only
@@ -604,6 +611,27 @@ impl Document {
             // not replace this file is not reading this file: cutting it
             // short takes nothing from under the document.
             let truncated = mapping.temp_path().is_none() && stamp.len < mapping.file_len();
+            if grew
+                && !truncated
+                && self.tail == Tail::Following
+                && mapping.temp_path().is_none()
+                && !self.is_dirty()
+            {
+                let now = Instant::now();
+                if let Some(at) = self.extended_at
+                    && now.duration_since(at) < tail::EXTEND_GAP
+                {
+                    return DiskChange::Later(at + tail::EXTEND_GAP);
+                }
+                match self.extend_mapping(&path, stamp) {
+                    Ok(true) => {
+                        self.extended_at = Some(now);
+                        return DiskChange::Appended;
+                    }
+                    Ok(false) => {} // rewritten, not appended to
+                    Err(e) => return DiskChange::Failed(e),
+                }
+            }
             return self.mapped_disk_changed(truncated, languages);
         }
         if self.is_dirty() {

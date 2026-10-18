@@ -25,12 +25,16 @@ impl App {
             );
             return;
         }
+        // Catch up with what arrived; a mapped document extends only while
+        // following, so that goes first.
+        doc.tail = Tail::Following;
         if let DiskChange::Failed(e) = doc.disk_changed(&self.languages) {
+            doc.tail = Tail::Grew;
             self.say(format!("Cannot read the file: {e}"), true);
             return;
         }
-        doc.tail = Tail::Following;
         doc.follow_end();
+        self.start_indexing();
         self.changed(true);
     }
 
@@ -38,6 +42,8 @@ impl App {
     /// the new end. Returns whether the active tab follows, so its view
     /// scrolls there.
     pub(super) fn follow_tails(&mut self) -> bool {
+        // A grown mapped file may need its new lines counted on a worker.
+        self.start_indexing();
         for tab in &mut self.tabs {
             if tab.doc.tail == Tail::Following {
                 tab.doc.follow_end();

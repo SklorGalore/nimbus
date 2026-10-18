@@ -70,6 +70,12 @@ pub struct MappedFile {
     map: Option<Mmap>,
     /// Bytes at the start of the file that are not part of the document.
     skip: usize,
+    /// The file's first and last few bytes when it was mapped, copied, so
+    /// a later mapping can tell whether the file only grew since
+    /// ([`MappedFile::continues`]): a file rewritten in place changes the
+    /// mapped bytes too, so they cannot be compared with themselves.
+    head: Vec<u8>,
+    tail: Vec<u8>,
     /// A temporary file to delete when this is dropped. Last, so it is
     /// dropped last.
     temp: Option<TempPath>,
@@ -94,6 +100,9 @@ impl Drop for TempPath {
         }
     }
 }
+
+/// How many bytes at each end of a file [`MappedFile`] copies.
+const SAMPLE: u64 = 64;
 
 impl MappedFile {
     /// Map all of `file`, which must be open for reading. The mapping's
@@ -146,14 +155,57 @@ impl MappedFile {
             // warning loudly about one with unsaved edits. Logs, the files
             // this is for, are appended to, which is harmless: the new
             // bytes are simply not in the mapping.
+            //
+            // Following such a log (M12's Follow Tail) maps the grown file
+            // again through this same call: a second, longer mapping
+            // beside the first, with the same hazards and nothing more.
+            // The document swaps it in for the first only after
+            // `continues` has checked that the file still holds the first
+            // mapping's bytes where they were, which is what keeps every
+            // piece of the document reading the same text through it. The
+            // first mapping stays valid, and mapped, until the last
+            // snapshot or undo step holding it is dropped.
             Some(unsafe { Mmap::map(&file)? })
         };
+        // Sampled beside the mapping, from the length that was mapped.
+        let mapped = map.as_deref().map_or(0, <[u8]>::len) as u64;
+        let n = SAMPLE.min(mapped);
+        let mut head = vec![0; usize::try_from(n).unwrap_or(0)];
+        let mut tail = head.clone();
+        read_exact_at(&file, &mut head, 0)?;
+        read_exact_at(&file, &mut tail, mapped - n)?;
         Ok(Self {
             file,
             map,
             skip: 0,
+            head,
+            tail,
             temp: None,
         })
+    }
+
+    /// Whether this mapping is of `earlier`'s file grown at its end: it is
+    /// at least as long, and holds the bytes `earlier` had at its start
+    /// and its end. Follow Tail (M12) maps a growing file again and swaps
+    /// this mapping in for the earlier one, which is right only when the
+    /// earlier one's bytes are still where they were. A file rewritten
+    /// with both ends kept would pass, as with the watcher's other checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns the system's error from reading this file.
+    pub fn continues(&self, earlier: &Self) -> io::Result<bool> {
+        let len = earlier.file_len();
+        if self.file_len() < len || self.skip != earlier.skip {
+            return Ok(false);
+        }
+        let mut buf = vec![0; earlier.head.len()];
+        read_exact_at(&self.file, &mut buf, 0)?;
+        if buf != earlier.head {
+            return Ok(false);
+        }
+        read_exact_at(&self.file, &mut buf, len - earlier.tail.len() as u64)?;
+        Ok(buf == earlier.tail)
     }
 
     /// Delete the file at `path`, which must be the mapped file, when this
