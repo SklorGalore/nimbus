@@ -4,18 +4,13 @@
 
 # Nimbus
 
-**A fast, lightweight, modeless text editor with its own GPU text renderer.**
+**A fast, lightweight text editor for macOS, Linux and Windows, with its own GPU text renderer.**
 
 [![CI](https://github.com/SklorGalore/nimbus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SklorGalore/nimbus/actions/workflows/ci.yml)
-[![Release](https://github.com/SklorGalore/nimbus/actions/workflows/release.yml/badge.svg)](https://github.com/SklorGalore/nimbus/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/badge/latest%20release-v0.2.0-blue)](https://github.com/SklorGalore/nimbus/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-<br>
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#installation)
-[![GPU: wgpu](https://img.shields.io/badge/GPU-wgpu%2030-purple)](https://wgpu.rs/)
-[![Binary budget](https://img.shields.io/badge/binary-%3C%2035%20MB-informational)](DESIGN.md#5-quality-and-performance-enforcement)
-[![Unsafe: render and mmap only](https://img.shields.io/badge/unsafe-render%20%2B%20mmap%20only-yellow)](CLAUDE.md#code-quality-and-linting)
 
 [Features](#features) ·
 [Installation](#installation) ·
@@ -31,164 +26,178 @@
 
 ## About
 
-Nimbus is a desktop text editor written in Rust. It draws every glyph
-itself: text is shaped and rasterized with [swash](https://github.com/dfrg/swash)
-into a glyph atlas and drawn with [wgpu](https://wgpu.rs/), inside a
-[winit](https://github.com/rust-windowing/winit) window. That keeps it small,
-quick to start and the same on macOS, Linux and Windows.
+Nimbus is a desktop text editor written in Rust. It opens in a blink,
+handles multi-gigabyte files, and stays out of your way: you type to
+insert, use the usual Cmd (macOS) or Ctrl shortcuts, and the mouse works
+as you expect. There are no modes to learn.
 
-It is modeless: you type to insert, use Cmd (macOS) or Ctrl (elsewhere)
-shortcuts, and the mouse works the way you expect. It is aimed at source
-code first, then prose and notes in Markdown, then config and data files
-and logs.
+Nimbus draws every glyph itself. Text is rasterized with
+[swash](https://github.com/dfrg/swash) into a glyph atlas and drawn on
+the GPU with [wgpu](https://wgpu.rs/), so the editor is small, starts
+quickly and looks the same on every platform.
 
-The [user manual](docs/manual/README.md) covers everything from opening
-your first file to themes, languages and key bindings.
+It is built for source code first, then Markdown prose and notes, then
+config files, data and logs.
 
-Nimbus is a personal tool that is being built in the open, one milestone
-at a time. It is usable every day, but it is still pre-1.0: expect rough
-edges, and see the [roadmap](#roadmap) for what is coming.
+Nimbus is in active development and has not reached 1.0. It is stable
+enough for daily use, and the [roadmap](#roadmap) shows what is still
+to come. The [user manual](docs/manual/README.md) covers everything
+from opening your first file to themes, languages and key bindings.
 
 ## Features
 
-**Speed and scale**
+**Fast at any size**
 
-- First frame in well under the 500 ms budget (about 120 ms warm on an
-  Apple M5 Pro, most of it the operating system creating the window).
-- Huge files: a 4 GB log opens in a fraction of a second through a
-  memory-mapped buffer whose line index is built lazily in the background.
-- Rendering on demand only. When nothing changes, Nimbus draws nothing.
+- Starts in a fraction of a second, with most of that time spent by the
+  operating system opening the window.
+- Opens a 4 GB log almost instantly by mapping it from disk and counting
+  its lines in the background.
+- Draws only when something changes, so an idle window uses no CPU or
+  GPU time.
 
 **Editing**
 
-- Several cursors: add the next occurrence, add cursors above and below,
+- Multiple cursors: add the next occurrence, add cursors above and below,
   or Alt+click to place them.
-- Everyday line and selection operations: duplicate, move and delete
-  lines, join lines, toggle comments, select line, smart indentation.
-- Undo and redo across every kind of edit, and safe atomic saves.
-- Common non-UTF-8 encodings and either line ending, shown in the status
+- Line and selection commands: duplicate, move and delete lines, join
+  lines, toggle comments, select line, and smart indentation.
+- Undo and redo for every kind of edit, and atomic saves that never leave a
+  half-written file.
+- Common non-UTF-8 encodings and both line endings, shown in the status
   bar and changeable.
-- Soft wrap, a find bar with replace, and Go to Line, Go to File and Go
-  to Symbol pickers.
+- Soft wrap, find and replace, and pickers for Go to Line, Go to File
+  and Go to Symbol.
 
 **Code**
 
-- Tree-sitter syntax highlighting for fourteen languages: Rust, C, Go,
-  Python, JavaScript, TypeScript, TSX, HTML, CSS, Bash, JSON, TOML, YAML
-  and Markdown, with code inside other code (such as fenced blocks in
-  Markdown) coloured too.
-- Your own languages and highlight queries from the config folder.
-- Code folding, from each grammar's fold regions.
+- Tree-sitter syntax highlighting for Rust, C, Go, Python, JavaScript,
+  TypeScript, TSX, HTML, CSS, Bash, JSON, TOML, YAML and Markdown,
+  including code embedded in other code, such as fenced blocks in
+  Markdown.
+- Add your own languages and highlight queries.
+- Code folding based on each language's structure.
 
 **Projects**
 
-- Tabs, a file tree sidebar that lists folders lazily, and a fuzzy file
-  opener.
-- Find and replace in files, across the whole project folder.
-- Split editor groups side by side, sharing the same documents.
-- Watches open files and refreshes them when another program changes them,
-  and can follow a log that is still being written.
-- Remembers your last session and recent files; the sidebar creates,
-  renames, moves and deletes files.
+- Tabs, a file tree sidebar, and a fuzzy file finder.
+- Find and replace across every file in a project.
+- Side-by-side editor groups that share the same documents.
 - Workspaces made of several folders.
+- Your last session and recent files come back when you reopen Nimbus;
+  create, rename, move and delete files from the sidebar.
+- Open files refresh when another program changes them, and a log that
+  is still being written can be followed as it grows.
 
 **Compare and merge**
 
-- Two-way compare of any two files, and a three-way merge view that
-  resolves conflicts. Both work as `git difftool` and `git mergetool`.
+- Compare any two files side by side, or resolve a three-way merge.
+  Both work as `git difftool` and `git mergetool`.
+- Ignore whitespace, case or blank lines; compare two folders; compare
+  a file with HEAD or any git revision. Minified one-line files are
+  compared in pieces, so a small edit shows as a small change.
 
 **Look and feel**
 
-- A command palette where every action lives, with its key binding.
-- Light and dark themes, plus your own themes that override only what
-  they change.
-- Font fallback, bold and italic, and a bundled Nerd Font, or any
-  installed font with optional ligatures.
-- Colour emoji, zoom that is remembered between runs, visible whitespace
-  and indent guides.
+- A command palette that lists every action with its key binding.
+- Light and dark themes, plus your own themes that change only what
+  they need to.
+- Any installed font, with optional ligatures, font fallback, bold and
+  italic, and color emoji. A Nerd Font is bundled.
+- Zoom that is remembered between sessions, visible whitespace and
+  indent guides.
 
 ## Installation
 
-Packages for macOS, Linux and Windows are attached to each
-[release](https://github.com/SklorGalore/nimbus/releases):
+Download Nimbus from the
+[releases page](https://github.com/SklorGalore/nimbus/releases).
 
-| System | Package |
+| System | Download |
 |---|---|
-| macOS | `.dmg` (drag `Nimbus.app` to Applications), `.zip`, or the Homebrew cask `nimbus.rb` |
-| Windows | `nimbus-VERSION-windows-x86_64-setup.exe`, the bare `nimbus.exe` in a `.zip`, or the winget manifest |
-| Linux | `.deb` for Debian and Ubuntu, an `.AppImage`, or a tarball with the bare binary |
+| macOS | `Nimbus-VERSION-macos.zip`, containing `Nimbus.app` |
+| Windows | `nimbus-VERSION-windows-x86_64.zip`, containing `nimbus.exe` |
+| Linux | `nimbus-VERSION-linux-x86_64.tar.gz`, containing the `nimbus` binary |
 
-None is signed (that needs paid developer accounts), so macOS and Windows
-warn the first time you open Nimbus. The
-[installation guide](docs/manual/getting-started.md#installing) walks
-through each package and how to get past that warning once.
+> [!NOTE]
+> The current release, v0.2.0, predates many of the features listed
+> above. To use them today, [build from source](#building-from-source).
+> The next release adds a macOS `.dmg` and Homebrew cask, a Windows
+> installer and winget manifest, and a Linux `.deb` and AppImage.
 
-To run `nimbus` from a terminal: on macOS the binary is
-`/Applications/Nimbus.app/Contents/MacOS/nimbus`, so link it into a
-folder on your `PATH`:
+The builds are not code-signed yet, so macOS and Windows show a warning
+the first time you open Nimbus. On macOS, right-click `Nimbus.app` and
+choose Open, or run:
+
+```sh
+xattr -d com.apple.quarantine /Applications/Nimbus.app
+```
+
+On Windows, when SmartScreen says "Windows protected your PC", click
+"More info", then "Run anyway". The
+[installation guide](docs/manual/getting-started.md#installing) covers
+each package in detail.
+
+### Running from a terminal
+
+On macOS, the command-line binary is inside the app bundle. Link it into
+a folder on your `PATH`:
 
 ```sh
 ln -s /Applications/Nimbus.app/Contents/MacOS/nimbus /usr/local/bin/nimbus
 ```
 
-The Windows installer does not add `nimbus.exe` to your `PATH`; add its
-install folder yourself if you want it there. On Linux the `.deb` puts
-`nimbus` in `/usr/bin`; with the AppImage or tarball, put it on your
-`PATH` yourself.
+On Windows and Linux, put `nimbus.exe` or `nimbus` in a folder on your
+`PATH`.
 
-### Checking a download
+### Verifying a download
 
-Each release has a `SHA256SUMS` file. To check that a download is intact,
-put both in one folder and run:
+Each release includes a `SHA256SUMS` file. Put it in the same folder as
+your download and run:
 
 ```sh
 shasum -a 256 -c SHA256SUMS --ignore-missing   # macOS
 sha256sum -c SHA256SUMS --ignore-missing       # Linux
 ```
 
-On Windows, compare the output of `Get-FileHash FILE` with its line.
+On Windows, compare the output of `Get-FileHash FILE` with the matching
+line in `SHA256SUMS`.
 
-A hash proves the file is undamaged; it does not prove who made it. For
-that, `SHA256SUMS.minisig` is a [minisign](https://jedisct1.github.io/minisign/)
-signature by the release key, whose public half is `minisign.pub` at the
-root of this repository (releases made before the key existed have no
-signature). With minisign installed (`brew install minisign`,
-`apt install minisign`, or `scoop install minisign`):
+A matching hash shows the file arrived intact. When a release also
+includes `SHA256SUMS.minisig`, you can confirm it was signed by the
+project's release key with [minisign](https://jedisct1.github.io/minisign/)
+and `minisign.pub` from the root of this repository:
 
 ```sh
 minisign -V -p minisign.pub -m SHA256SUMS
 ```
 
-It prints "Signature and comment signature verified" when the file is
-the one that was signed.
-
 ### Updates
 
-Nimbus never contacts the network unless you ask it to. "Check for
-Updates" in the command palette asks GitHub whether a newer release
-exists; see [checking for updates](docs/manual/troubleshooting.md#checking-for-updates)
-for the startup option.
+Nimbus never connects to the network unless you ask it to. Run "Check
+for Updates" from the command palette to see whether a newer release is
+available, or turn on the check at startup as described in
+[checking for updates](docs/manual/troubleshooting.md#checking-for-updates).
 
 ## Usage
 
 Open files, folders, or both. A folder becomes the root of the sidebar
-and the file opener; each file opens in its own tab.
+and the file finder, and each file opens in its own tab.
 
 ```sh
 nimbus                       # empty window
 nimbus notes.md              # one file
 nimbus . src/main.rs         # a project folder, with one file open
 nimbus --diff old.rs new.rs  # compare two files
+nimbus --diff dir-a dir-b    # compare two folders
 nimbus --merge BASE LOCAL REMOTE -o RESULT   # three-way merge
 ```
 
-`nimbus --help` lists every option, among them `--wrap`, `--find PATTERN`,
-`--theme NAME` and `--version`.
+Run `nimbus --help` to see every option, such as `--wrap`,
+`--find PATTERN`, `--theme NAME` and `--version`.
 
 ### Key bindings
 
-`Primary` is Cmd on macOS and Ctrl on Linux and Windows. Every action is
-in the command palette with its current keys, so this is only a start.
+`Primary` means Cmd on macOS and Ctrl on Linux and Windows. These are
+the most common bindings; the command palette shows the rest.
 
 | Keys | Action |
 |---|---|
@@ -205,14 +214,14 @@ in the command palette with its current keys, so this is only a start.
 | `Primary+B` | Toggle sidebar |
 | `Primary+\` | Split right |
 | `Primary+K Primary+0` | Fold all |
-| `F12` | Debug overlay (frame time, latency, atlas, buffer backend) |
 
-Any binding can be changed in `config.toml`, including two-chord
-bindings such as `Primary+K Primary+L`.
+You can change any binding in `config.toml`, including two-step chords
+such as `Primary+K Primary+L`. See the
+[key bindings reference](docs/manual/keybindings.md).
 
 ## Configuration
 
-Settings, themes, languages and highlight queries live in the config
+Settings, themes, languages and highlight queries live in your config
 folder:
 
 | System | Folder |
@@ -221,13 +230,10 @@ folder:
 | Linux | `~/.config/nimbus/` |
 | Windows | `%APPDATA%\nimbus\` |
 
-"Open Config File" in the command palette opens `config.toml`, creating
-it from a commented template; "Reload Config" applies your changes. A
-mistake costs only the setting that has it and is reported in the
-message line. Nimbus never writes `config.toml` itself; window size and
-other remembered state go in a separate `state.toml`.
-
-A small example:
+Run "Open Config File" from the command palette to open `config.toml`.
+The first time, it is created with every setting listed and commented.
+Run "Reload Config" to apply your changes. If a setting has a mistake,
+Nimbus reports it and keeps the rest.
 
 ```toml
 font_size = 15
@@ -236,20 +242,19 @@ soft_wrap = true
 theme = "light"
 ```
 
-The [user manual](docs/manual/README.md) covers every setting, writing
-your own theme, adding a language, indentation rules, key bindings and
-changing a language's highlighting.
+The [user manual](docs/manual/README.md) covers every setting, custom
+themes, adding languages, indentation and highlighting.
 
 ## Building from source
 
-You need a stable Rust toolchain ([rustup](https://rustup.rs/)). On
-Linux, also install the Wayland and xkbcommon headers:
+Install a stable Rust toolchain with [rustup](https://rustup.rs/). On
+Debian and Ubuntu, also install the Wayland and xkbcommon headers:
 
 ```sh
-sudo apt install libwayland-dev libxkbcommon-dev   # Debian and Ubuntu
+sudo apt install libwayland-dev libxkbcommon-dev
 ```
 
-Then:
+Then build and run:
 
 ```sh
 git clone https://github.com/SklorGalore/nimbus.git
@@ -258,160 +263,129 @@ cargo build --release
 ./target/release/nimbus FILE_OR_FOLDER
 ```
 
-The release profile uses fat LTO, one codegen unit, `panic = "abort"` and
-stripping, so a release build takes a while but gives a small, fast
-single binary. Debug builds optimize dependencies only and are quick to
-iterate on.
+Release builds are fully optimized, so they take a while to compile. Debug builds
+(`cargo build`) are much quicker to compile and still fast to run.
 
-Each tree-sitter grammar is a cargo feature of `nimbus-syntax`, all on
-by default, so a build can leave out languages it does not need.
+Each language grammar is a cargo feature of `nimbus-syntax`. All are on
+by default; turn off the ones you don't need for a smaller binary.
 
 ## How it works
 
-Nimbus is a Cargo workspace of four crates, with dependencies pointing
-only downward:
+Nimbus is a Cargo workspace of four crates:
 
 | Crate | Role |
 |---|---|
-| [`nimbus-core`](crates/core) | Text buffers (a rope and a memory-mapped piece table behind one `Buffer` trait), edits, undo, cursors, search and diff. No I/O, GPU or windowing, so it is tested headlessly. |
-| [`nimbus-syntax`](crates/syntax) | Tree-sitter parsing and highlighting, fed every edit. Large files fall back to fast line-by-line rules. Runs no threads of its own; it hands jobs to the app. |
-| [`nimbus-render`](crates/render) | The wgpu surface, glyph atlas, text layout and two instanced pipelines: one for rectangles, one for glyph quads. |
-| [`nimbus`](crates/app) | The application: the winit event loop, editor state, panels, key map, actions and config. |
+| [`nimbus-core`](crates/core) | Text buffers (an in-memory rope and a memory-mapped piece table for huge files), edits, undo, cursors, search and diff. No I/O, GPU or windowing code. |
+| [`nimbus-syntax`](crates/syntax) | Tree-sitter parsing and highlighting, with a fast line-by-line fallback for very large files. |
+| [`nimbus-render`](crates/render) | The GPU renderer: the wgpu surface, glyph atlas, text layout and drawing pipelines. |
+| [`nimbus`](crates/app) | The application: the window and event loop, editor state, panels, key map, actions and config. |
 
-A few rules shape the code:
-
-- Positions are byte offsets into UTF-8, and nothing assumes the whole
-  file is in memory.
-- The event loop waits for input and redraws only when something
-  changed; there is no continuous render loop.
-- Every user-visible operation is an action with a stable id, title and
-  default keys. The palette, menus and key overrides all come from that
-  one registry.
-
-[`DESIGN.md`](DESIGN.md) is the full design: goals and budgets,
-architecture, testing, dependencies, open questions and the decision log.
+Each crate depends only on the ones above it in this table. Every command
+in the editor is a named action, so the command palette, menus and key
+bindings all come from one list. [`DESIGN.md`](DESIGN.md) describes the
+architecture in depth.
 
 ## Performance
 
-These budgets are enforced in CI or measured at every milestone:
+Nimbus is held to these targets:
 
-| Budget | Target | How it is checked |
-|---|---|---|
-| Startup | First frame under 500 ms from the top of `main` | `nimbus --smoke` prints `first-frame-ms` |
-| Typing latency | Keystroke to pixels within one frame | Debug overlay (`F12`), `--bench-typing N` |
-| Huge files | A 4 GB log interactive in under a second | `bench/gen.sh logs` |
-| Binary size | Under 35 MB | The `release-size` CI job fails above it |
+| Target | Goal |
+|---|---|
+| Startup | First frame in under 500 ms |
+| Typing | Each keystroke on screen within one frame |
+| Huge files | A 4 GB log usable in under a second |
+| Size | A single binary under 35 MB, enforced in CI |
 
-Each milestone plan in [`docs/milestones/`](docs/milestones) records its
-measured startup time and binary size in its Results section.
+`nimbus --smoke` prints the time to first frame, and the debug overlay
+(`F12`) shows frame time and keystroke latency.
 
 ## Development
 
 ```sh
-cargo test --workspace                       # all tests
-cargo fmt --all --check                      # formatting
-RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets   # lints, as CI runs them
-cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp   # render without a window
-bench/gen.sh                                 # generate the 10 MB and 100 MB bench files
-cargo test --release -p nimbus-core -- --ignored --nocapture     # opt-in benchmarks
+cargo test --workspace                                          # all tests
+cargo fmt --all --check                                         # formatting
+RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets  # lints, as CI runs them
+cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp  # render without a window
+bench/gen.sh                                                    # generate large test files
 ```
 
-The lints are strict: clippy pedantic, no `unwrap`, `expect` or `panic!`
-outside tests, documentation on every public item, and `unsafe` denied
-except in the renderer and the memory-mapped buffer, where each block
-states why it is sound. [`CLAUDE.md`](CLAUDE.md) has the full rule set
-and the complete list of development commands.
+The lints are strict: no `unwrap`, `expect` or `panic!` outside tests,
+documentation on every public item, and `unsafe` only where it is
+unavoidable, with a comment explaining why each use is sound.
 
-CI ([`ci.yml`](.github/workflows/ci.yml)) runs formatting, clippy and
-tests on macOS, Ubuntu and Windows, `cargo deny` for dependency licences
-and advisories, and the release binary size check, on every push and
-pull request.
+[CI](.github/workflows/ci.yml) runs formatting, lints and tests on
+macOS, Linux and Windows, checks dependency licenses and security
+advisories, and enforces the binary size limit on every push and pull
+request.
 
 ## Roadmap
 
-Nimbus grows in milestones, each with a plan, a done-when checklist and
-measured results. The full table is in
-[`docs/milestones/README.md`](docs/milestones/README.md).
+<!-- Mirrors the status column of docs/milestones/README.md. When a
+milestone lands, move its line up to "Available now". -->
 
-| Milestones | Status |
-|---|---|
-| M0 to M13: scaffold, GPU text, editing, tabs, highlighting, file tree, huge files, polish, compare and merge, find in files, everyday editing, workspace, splits and folding | Done |
-| M15 distribution, M16 rendering second pass, M17 encodings and line endings, M18 compare second pass, M19 workspace and search second pass | Done |
-| M14 languages, second pass | In progress |
-| M20 reading aids, such as a minimap | Planned |
-| M21 foundations and 1.0 | Planned |
+**Available now** (on `main`)
 
-Some things are deliberately out of scope for now: a Vim mode, plugins,
-LSP, terminals, collaborative editing and right-to-left text. See
-[`DESIGN.md` §2](DESIGN.md#2-non-goals-for-now) for the full list and
-the reasons.
+- GPU text rendering, editing, tabs, syntax highlighting and the file tree
+- Huge files, multiple cursors, compare and merge
+- Find in files and everyday editing commands
+- Session restore and file management
+- Split views and code folding
+- Installers and packages for every platform
+- Rendering polish: color emoji, ligatures and zoom
+- Text encodings and line endings
+- Multi-folder workspaces and search history
+- Compare, second pass: ignore whitespace, compare folders and minified
+  files, and Compare with HEAD
+
+**In progress**
+
+- Languages, second pass: better Markdown and embedded code
+
+**Planned**
+
+- Reading aids, such as a minimap
+- Foundations for 1.0
+
+Some things are out of scope for now, including a Vim mode, plugins,
+LSP, a built-in terminal, collaborative editing and right-to-left text.
+[`DESIGN.md`](DESIGN.md#2-non-goals-for-now) explains why. The detailed
+plan for each stage is in [`docs/milestones/`](docs/milestones/README.md).
 
 ## Contributing
 
-Bug reports and ideas are welcome as
-[issues](https://github.com/SklorGalore/nimbus/issues). For a code
-change:
+Bug reports and feature ideas are welcome as
+[issues](https://github.com/SklorGalore/nimbus/issues). For a larger
+change, please open an issue first so we can agree on the approach.
 
-1. Read [`DESIGN.md`](DESIGN.md) and the plan for the milestone your
-   change belongs to in [`docs/milestones/`](docs/milestones).
-2. Make the change on a branch, with tests next to the code
-   (`#[cfg(test)] mod tests` in the same file).
-3. Run `cargo fmt --all`, strict clippy and `cargo test --workspace`
-   before opening a pull request; CI runs the same on all three
+When you send a pull request:
+
+1. Put tests next to the code they cover, in a `#[cfg(test)] mod tests`
+   block in the same file.
+2. Run `cargo fmt --all`, the strict clippy command above, and
+   `cargo test --workspace`. CI runs the same checks on all three
    platforms.
-4. Add a line to the "Unreleased" section of
-   [`CHANGELOG.md`](CHANGELOG.md) for anything a user would notice.
+3. Add a line to the "Unreleased" section of
+   [`CHANGELOG.md`](CHANGELOG.md) for anything users will notice.
+4. Explain any new dependency in the commit message; the binary has a
+   size limit to stay within.
 
-A new dependency needs a reason in the commit message and has to fit the
-binary-size budget.
-
-## Releasing
-
-Set the version in `Cargo.toml` (`[workspace.package]`), move the
-`CHANGELOG.md` "Unreleased" notes under a heading for that version,
-commit, then push a tag with that version, such as `v0.8.0`. The release
-workflow ([`release.yml`](.github/workflows/release.yml)) builds every
-platform, makes a draft release with the packages, the Homebrew cask,
-the winget manifest and `SHA256SUMS` attached, and signs the checksums;
-publish it on GitHub when it looks right.
-
-<details>
-<summary>Packaging scripts and signing setup</summary>
-
-The packaging steps are `scripts/bundle-macos.sh`,
-`scripts/dmg-macos.sh`, `scripts/deb-linux.sh`,
-`scripts/appimage-linux.sh`, `packaging/windows/nimbus.iss` and
-`scripts/manifests.sh`. The app icon is drawn by `scripts/make-icons.py`.
-
-Signing `SHA256SUMS` needs a one-time setup: run `minisign -G -W` (no
-password, since the key lives in a secret), commit the public key as
-`minisign.pub`, and put the secret key file's contents in the
-repository's `MINISIGN_SECRET_KEY` Actions secret. Until then the
-workflow says the signing step was skipped and the release has no
-`.minisig`.
-
-The cask and winget manifest are attached for copying on: the cask goes
-in a tap (`Casks/nimbus.rb` in a `homebrew-TAP` repository) and the
-manifest in a pull request to `microsoft/winget-pkgs`.
-
-</details>
+Maintainers cutting a release can follow [`docs/releasing.md`](docs/releasing.md).
 
 ## License
 
-Nimbus is released under the [MIT License](LICENSE). The bundled font,
-Hack Nerd Font Mono, has its own licence
-([`crates/render/assets/HackNerdFont-LICENSE.md`](crates/render/assets/HackNerdFont-LICENSE.md));
-both ship with every release.
+Nimbus is released under the [MIT License](LICENSE). The bundled Hack
+Nerd Font Mono has its
+[own license](crates/render/assets/HackNerdFont-LICENSE.md).
 
 ## Acknowledgements
 
-Nimbus stands on [wgpu](https://wgpu.rs/),
+Nimbus is built on [wgpu](https://wgpu.rs/),
 [winit](https://github.com/rust-windowing/winit),
 [swash](https://github.com/dfrg/swash),
 [ropey](https://github.com/cessen/ropey),
 [tree-sitter](https://tree-sitter.github.io/),
 [nucleo](https://github.com/helix-editor/nucleo),
 [imara-diff](https://github.com/pascalkuthe/imara-diff) and
-[muda](https://github.com/tauri-apps/muda), and on the
-[Hack](https://sourcefoundry.org/hack/) and
-[Nerd Fonts](https://www.nerdfonts.com/) projects.
+[muda](https://github.com/tauri-apps/muda), and uses the
+[Hack](https://sourcefoundry.org/hack/) font with
+[Nerd Fonts](https://www.nerdfonts.com/) glyphs.
