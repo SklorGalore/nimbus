@@ -66,6 +66,8 @@ edges, and see the [roadmap](#roadmap) for what is coming.
 - Everyday line and selection operations: duplicate, move and delete
   lines, join lines, toggle comments, select line, smart indentation.
 - Undo and redo across every kind of edit, and safe atomic saves.
+- Common non-UTF-8 encodings and either line ending, shown in the status
+  bar and changeable.
 - Soft wrap, a find bar with replace, and Go to Line, Go to File and Go
   to Symbol pickers.
 
@@ -84,7 +86,11 @@ edges, and see the [roadmap](#roadmap) for what is coming.
   opener.
 - Find and replace in files, across the whole project folder.
 - Split editor groups side by side, sharing the same documents.
-- Watches open files and refreshes them when another program changes them.
+- Watches open files and refreshes them when another program changes them,
+  and can follow a log that is still being written.
+- Remembers your last session and recent files; the sidebar creates,
+  renames, moves and deletes files.
+- Workspaces made of several folders.
 
 **Compare and merge**
 
@@ -326,13 +332,11 @@ measured results. The full table is in
 
 | Milestones | Status |
 |---|---|
-| M0 to M11: scaffold, GPU text, editing, tabs, highlighting, file tree, huge files, polish, compare and merge, find in files, everyday editing | Done |
-| M13 splits and folding, M14 languages, M15 distribution | Done |
-| M12 workspace: session restore and file management in the sidebar | In progress |
+| M0 to M13: scaffold, GPU text, editing, tabs, highlighting, file tree, huge files, polish, compare and merge, find in files, everyday editing, workspace, splits and folding | Done |
+| M15 distribution, M17 encodings and line endings, M19 workspace and search, second pass | Done |
+| M14 languages, second pass | In progress |
 | M16 rendering, second pass: colour emoji and finer text | Planned |
-| M17 encodings and line endings | Planned |
 | M18 compare, second pass, with Compare with HEAD | Planned |
-| M19 workspace and search, second pass: multi-folder projects | Planned |
 | M20 reading aids, such as a minimap | Planned |
 | M21 foundations and 1.0 | Planned |
 
