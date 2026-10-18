@@ -16,7 +16,8 @@ released code.
    CI passes.
 4. Tag the merge commit on `main` with that version, such as `v1.1.0`,
    and push the tag. The tag must match the version in `Cargo.toml`.
-5. Merge `main` back into `development`, so the version, changelog and
+5. Merge `main` back into `development` (the back-merge workflow opens
+   that pull request for you), so the version, changelog and
    any release fixes are there too.
 
 The release workflow ([`release.yml`](../.github/workflows/release.yml))
