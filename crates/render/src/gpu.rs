@@ -41,7 +41,7 @@ pub struct Gpu {
     text: TextRenderer,
     /// The interface font (M20), when `ui_font` names one and it has
     /// loaded; `None` draws the interface on the editor's grid.
-    ui_font: Option<crate::Font>,
+    ui_font: Option<crate::EditorFont>,
     frame: FrameBuilder,
     /// Set by [`Gpu::request_capture`]; the next frame is copied back.
     capture_requested: bool,
@@ -658,7 +658,7 @@ impl Gpu {
 
     /// Draw the interface (sidebar, tabs, status bar, pickers) in `font`,
     /// a proportional font, or on the editor's grid with `None` (M20).
-    pub fn set_ui_font(&mut self, font: Option<crate::Font>) {
+    pub fn set_ui_font(&mut self, font: Option<crate::EditorFont>) {
         self.ui_font = font;
         self.text.clear_ui_glyphs();
     }
@@ -669,9 +669,47 @@ impl Gpu {
     pub fn ui_font(&self) -> UiFont {
         let editor = self.text.metrics();
         match self.ui_font {
-            Some(font) => UiFont::new(font, editor),
+            Some(font) => UiFont::new(font.regular, editor).with_bold(font.bold),
             None => UiFont::grid(editor),
         }
+    }
+
+    /// The font the Markdown preview (M20) is drawn in: the interface
+    /// font when one is set, else the editor font. Unlike [`Gpu::ui_font`]
+    /// it is never the grid, because the preview needs sizes and weights
+    /// the grid cannot draw.
+    #[must_use]
+    pub fn preview_font(&self) -> UiFont {
+        if self.ui_font.is_some() {
+            return self.ui_font();
+        }
+        let (regular, bold) = self.text.editor_faces();
+        UiFont::new(regular, self.text.metrics()).with_bold(Some(bold))
+    }
+
+    /// Queue a line of text in `ui` and `style` (a heading's size, bold,
+    /// italic) with its top-left corner at `origin`. Returns the x where it
+    /// ends. `ui` should come from [`Gpu::preview_font`] or
+    /// [`Gpu::ui_font`] at the current size.
+    pub fn push_styled_text(
+        &mut self,
+        origin: [f32; 2],
+        text: &str,
+        color: [f32; 4],
+        (ui, style): (&UiFont, crate::UiStyle),
+    ) -> f32 {
+        if !ui.is_proportional() {
+            return self.push_ui_text(origin, text, color);
+        }
+        self.text.push_ui_styled(
+            &self.queue,
+            &mut self.atlas,
+            &mut self.frame,
+            (origin, color),
+            text,
+            ui,
+            style,
+        )
     }
 
     /// Queue a line of interface text with its top-left corner at

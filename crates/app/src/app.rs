@@ -64,6 +64,7 @@ use crate::watch::{Change, Watch};
 use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
 
 mod geometry;
+mod preview_tab;
 mod tail;
 mod tree_ops;
 mod workspace;
@@ -127,6 +128,8 @@ pub enum AppEvent {
     Revision(Revision),
     /// Rows from a folder compare's workers (M18).
     FolderCompare(folder_compare::Batch),
+    /// A Markdown preview's page, laid out on a worker (M20).
+    Preview(crate::preview::Laid),
 }
 
 /// A file read at a git revision on a worker (M18).
@@ -291,6 +294,8 @@ pub struct Tab {
     /// A merge view on this tab (M9): the inputs and the regions of the
     /// result, which is this tab's document.
     pub merge: Option<Box<MergeView>>,
+    /// A Markdown preview of the document (M20), instead of its text.
+    pub preview: Option<Box<crate::preview::Preview>>,
     /// Where a restored tab's cursor and view go once its file is read.
     pending: Option<Pending>,
 }
@@ -331,6 +336,7 @@ impl Tab {
             discard_at: None,
             compare: None,
             merge: None,
+            preview: None,
             pending: None,
         }
     }
@@ -533,6 +539,8 @@ pub struct App {
     /// When a scrollbar shown by a recent scroll hides (M16): the one
     /// wakeup that draws the frame without it.
     scrollbar_hide_at: Option<Instant>,
+    /// When to look again at a preview waiting for a pause in typing.
+    preview_at: Option<Instant>,
     /// Connected on first copy or paste, not at startup.
     clipboard: Option<arboard::Clipboard>,
     clicks: Clicks,
@@ -582,6 +590,8 @@ pub struct App {
     ws: Workspace,
     /// The pointer shows the resize cursor.
     resize_cursor: bool,
+    /// The pointer is over a link in a Markdown preview (M20).
+    link_cursor: bool,
     /// Watching has started (after the first frame).
     watching: bool,
     /// A go-to-line waiting for a huge file's lines to be counted.
@@ -721,6 +731,7 @@ impl App {
             title_key: None,
             hidden_retry: None,
             scrollbar_hide_at: None,
+            preview_at: None,
             clipboard: None,
             clicks: Clicks::default(),
             find: FindBar::default(),
@@ -738,6 +749,7 @@ impl App {
             zoom_started: None,
             ws: Workspace::new(state, session_root),
             resize_cursor: false,
+            link_cursor: false,
             watching: false,
             pending_line: None,
             recheck: Vec::new(),
@@ -888,7 +900,7 @@ impl App {
         }
         match (found, self.gpu.as_mut()) {
             (Some(font), Some(gpu)) => {
-                gpu.set_ui_font(Some(font.regular));
+                gpu.set_ui_font(Some(font));
                 self.changed(false);
             }
             (None, _) => self.say(
@@ -1185,6 +1197,10 @@ impl App {
             return;
         }
         if self.run_app_command(cmd, event_loop) {
+            return;
+        }
+        if self.is_preview(self.active) {
+            self.run_preview(cmd);
             return;
         }
         let result = self.run_edit(cmd);
@@ -3308,6 +3324,7 @@ impl App {
                 self.say(format!("Sticky scroll {state}"), false);
                 self.changed(false);
             }
+            Command::OpenPreview => self.open_preview(),
             Command::ToggleMinimap => {
                 self.minimap = !self.minimap;
                 let state = if self.minimap { "shown" } else { "hidden" };
@@ -4203,6 +4220,10 @@ impl App {
         let layout = *layout;
         self.find.focused = false;
         let tab_width = self.tab_width();
+        if self.is_preview(self.active) {
+            self.preview_click(self.active, &layout, x, y);
+            return;
+        }
         let tab = &mut self.tabs[self.active];
         if tab.compare.is_some() || tab.merge.is_some() {
             if let Some(hit) = self.columns_scrollbar_hit(&layout, x, y) {
@@ -4593,6 +4614,8 @@ impl App {
         };
         if self.sidebar.contains(&window, x) {
             self.sidebar.wheel(-dy, &window);
+        } else if self.preview_wheel(i, -dy, &layout) {
+            // A preview scrolls on its own; its source stays put.
         } else {
             let tab_width = self.tab_width();
             let tab = &mut self.tabs[i];
@@ -4667,11 +4690,15 @@ impl App {
             || self.sidebar.on_divider(&layout, x)
             || (self.groups.len() > 1
                 && Groups::on_divider(&self.group_columns(&layout), x, layout.scale).is_some());
-        if resize != self.resize_cursor {
+        let link = !resize && self.over_preview_link();
+        if resize != self.resize_cursor || link != self.link_cursor {
             self.resize_cursor = resize;
+            self.link_cursor = link;
             if let Some(window) = &self.window {
                 window.set_cursor(if resize {
                     CursorIcon::ColResize
+                } else if link {
+                    CursorIcon::Pointer
                 } else {
                     CursorIcon::Default
                 });
@@ -4686,7 +4713,7 @@ impl App {
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
-        if tab.compare.is_some() || tab.merge.is_some() {
+        if tab.compare.is_some() || tab.merge.is_some() || tab.preview.is_some() {
             return;
         }
         if let Some(from) = self.clicks.column {
@@ -4735,6 +4762,12 @@ impl App {
                 }
                 let d = &self.docs[self.tabs[i].doc];
                 let name = d.display_name();
+                if self.tabs[i].preview.is_some() {
+                    return TabLabel {
+                        name: format!("Preview {name}"),
+                        dirty: false,
+                    };
+                }
                 let name = if d.deleted {
                     format!("{name} (deleted)")
                 } else if d.conflict {
@@ -4847,6 +4880,7 @@ impl App {
     /// the dividers between groups, the status bar, then the overlays.
     /// `panes` holds each group's layout, `layout` the window's.
     fn paint(&mut self, gpu: &mut Gpu, layout: &Layout, panes: &[Layout]) {
+        self.prepare_previews(gpu, panes);
         let tab_width = self.tab_width();
         let chord_message = self.pending_chord.map(|(chord, until)| Message {
             text: format!("{} …", chord_label(chord)),
@@ -4875,6 +4909,7 @@ impl App {
                 view: &mut tab.view,
                 compare: tab.compare.as_deref_mut(),
                 merge: tab.merge.as_deref_mut(),
+                preview: tab.preview.as_deref_mut(),
                 theme: &mut self.theme,
                 find,
                 message: chord_message.as_ref().or(self.message.as_ref()),
@@ -5894,6 +5929,8 @@ pub struct Scene<'a> {
     compare: Option<&'a mut Compare>,
     /// A merge on the tab: three columns, the result in the middle.
     merge: Option<&'a mut MergeView>,
+    /// A Markdown preview (M20): the page instead of the text.
+    preview: Option<&'a mut crate::preview::Preview>,
     theme: &'a mut Theme,
     find: &'a FindBar,
     message: Option<&'a Message>,
@@ -5907,6 +5944,34 @@ pub struct Scene<'a> {
     guides: bool,
     /// Sticky scroll on (M20).
     sticky: bool,
+}
+
+/// `--preview`: the document's Markdown preview, laid out here, to draw
+/// instead of its text.
+fn headless_preview(
+    options: &Options,
+    doc: &Document,
+    gpu: &Gpu,
+    layout: &Layout,
+) -> Option<Box<crate::preview::Preview>> {
+    if !options.preview {
+        return None;
+    }
+    let mut p = Box::<crate::preview::Preview>::default();
+    let params = crate::preview::Params {
+        width: layout.width - layout.left,
+        font: gpu.preview_font(),
+    };
+    let (job, _) = p.wants(
+        (&doc.buffer, doc.version, &doc.syntax),
+        params,
+        Instant::now(),
+    );
+    if let Some(job) = job {
+        p.arrived(&mut Some(job.run()));
+    }
+    p.follow(0);
+    Some(p)
 }
 
 /// The config's tab width, ligatures and font for a headless render. With
@@ -5923,7 +5988,7 @@ fn headless_fonts(gpu: &mut Gpu, config: &Config) {
     }
     if !config.ui_font.is_empty() {
         match nimbus_render::find_editor_font(&config.ui_font) {
-            Some(f) => gpu.set_ui_font(Some(f.regular)),
+            Some(f) => gpu.set_ui_font(Some(f)),
             None => log::warn!(
                 "interface font {:?} not found; using the editor font",
                 config.ui_font
@@ -5987,7 +6052,11 @@ pub fn paint_pane(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     } else {
         &[]
     };
-    if let Some(c) = scene.compare.as_deref_mut() {
+    if let Some(p) = scene.preview.as_deref_mut() {
+        // Code blocks are coloured by their languages' tables.
+        scene.theme.resolve_tables();
+        p.draw(gpu, layout, scene.theme);
+    } else if let Some(c) = scene.compare.as_deref_mut() {
         c.draw(
             gpu,
             layout,
@@ -6128,6 +6197,7 @@ pub fn run_headless(
     view.ensure_cursor_visible(&doc, &carets, &layout, config.tab_width);
     // One frame only: parse here rather than on a worker.
     doc.syntax.parse_now(&doc.buffer);
+    let mut preview = headless_preview(options, &doc, &gpu, &layout);
     print_warnings(nimbus_syntax::registry::take_warnings());
     let (mut theme, warnings) = Theme::load(&config.theme);
     print_warnings(warnings);
@@ -6146,6 +6216,7 @@ pub fn run_headless(
                 view: &mut view,
                 compare: compare.as_deref_mut(),
                 merge: merge.as_deref_mut(),
+                preview: preview.as_deref_mut(),
                 theme: &mut theme,
                 find: &find,
                 message: None,
@@ -6671,6 +6742,7 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::Folded(result) => self.folded(result),
             AppEvent::Revision(r) => self.revision_read(r),
             AppEvent::FolderCompare(batch) => self.folder_compare_arrived(batch),
+            AppEvent::Preview(laid) => self.preview_arrived(laid),
             AppEvent::Save(event) => {
                 self.save_event(event, event_loop);
                 self.changed(false);
@@ -6842,6 +6914,10 @@ impl ApplicationHandler<AppEvent> for App {
         if scrollbar_due {
             self.scrollbar_hide_at = None;
         }
+        let preview_due = self.preview_at.is_some_and(|at| now >= at);
+        if preview_due {
+            self.preview_at = None;
+        }
         if self.research_at.is_some_and(|t| now >= t) {
             self.research_at = None;
             if self.find.open {
@@ -6884,7 +6960,7 @@ impl ApplicationHandler<AppEvent> for App {
                 window.request_redraw();
             }
         }
-        if (blink_changed || retry_due || scrollbar_due)
+        if (blink_changed || retry_due || scrollbar_due || preview_due)
             && let Some(window) = &self.window
         {
             window.request_redraw();
@@ -6946,6 +7022,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.blink.next,
             self.hidden_retry.map(|(at, _)| at),
             self.scrollbar_hide_at,
+            self.preview_at,
             self.message.as_ref().map(|m| m.until),
             self.pending_chord.map(|(_, until)| until),
             self.research_at,

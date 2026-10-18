@@ -334,6 +334,13 @@ impl Theme {
             .flatten()
     }
 
+    /// The look the theme gives a capture name such as `text.title`,
+    /// falling back to its parents (`text`) as captures do.
+    #[must_use]
+    pub fn named(&self, capture: &str) -> Option<Look> {
+        lookup(&self.syntax, capture)
+    }
+
     /// Resolve every capture table whose grammar is loaded, so
     /// [`Theme::look`] answers for spans from any of them (a Markdown
     /// file's fenced Rust block is coloured by Rust's table).

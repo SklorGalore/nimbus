@@ -13,7 +13,7 @@ use crate::font::{Font, Metrics};
 use crate::frame::FrameBuilder;
 use crate::raster::{BOLD, GlyphKey, REGULAR, Rasterizer};
 use crate::shape::{Grid, MissingCells, ShapedGlyph, Shaper};
-use crate::ui::UiFont;
+use crate::ui::{UiFont, UiStyle};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// A colour and style for part of a line: from the end of the previous run
@@ -119,6 +119,11 @@ impl TextRenderer {
 
     pub(crate) fn metrics(&self) -> Metrics {
         self.metrics
+    }
+
+    /// The editor font's regular and bold faces.
+    pub(crate) fn editor_faces(&self) -> (Font, Font) {
+        (self.faces[0], self.faces[1])
     }
 
     pub(crate) fn grid(&self) -> Grid {
@@ -324,17 +329,46 @@ impl TextRenderer {
         color: [f32; 4],
         ui: &UiFont,
     ) -> f32 {
-        let Some(font) = ui.font() else {
+        if ui.font().is_none() {
             self.push_line(queue, atlas, frame, origin, text, plain(color));
             return origin[0] + ui.width(text);
-        };
-        let size_px = self.metrics.size_px;
-        let baseline_y = origin[1] + ui.baseline();
+        }
+        self.push_ui_styled(
+            queue,
+            atlas,
+            frame,
+            (origin, color),
+            text,
+            ui,
+            UiStyle::PLAIN,
+        )
+    }
+
+    /// Queue a line of interface text in `style` (size, weight, slant)
+    /// with its top-left corner at `origin`; returns the x where it ends.
+    /// Graphemes neither weight has are drawn by the editor font in its
+    /// cells, at its own size.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the renderer's parts plus the text"
+    )]
+    pub(crate) fn push_ui_styled(
+        &mut self,
+        queue: &wgpu::Queue,
+        atlas: &mut Atlas,
+        frame: &mut FrameBuilder,
+        (origin, color): ([f32; 2], [f32; 4]),
+        text: &str,
+        ui: &UiFont,
+        style: UiStyle,
+    ) -> f32 {
+        let size_px = self.metrics.size_px * style.scale;
+        let baseline_y = origin[1] + ui.styled_baseline(style);
         let mut pen = origin[0];
         let mut col = 0;
         for (i, g) in text.grapheme_indices(true) {
-            let (adv, cols) = ui.advance(g, col);
-            if UiFont::has(font, g) {
+            let (adv, cols, font) = ui.styled_advance(g, col, style);
+            if let Some((font, bold)) = font {
                 let scaled = font.face().glyph_metrics(&[]).scale(size_px);
                 let mut x = pen;
                 for c in g.chars() {
@@ -342,7 +376,14 @@ impl TextRenderer {
                     if id == 0 {
                         continue;
                     }
-                    self.push_ui_glyph(queue, atlas, frame, (font, id), [x, baseline_y], color);
+                    let glyph = UiGlyph {
+                        font,
+                        id,
+                        size_px,
+                        bold,
+                        italic: style.italic,
+                    };
+                    self.push_ui_glyph(queue, atlas, frame, glyph, [x, baseline_y], color);
                     x += scaled.advance_width(id);
                 }
             } else if let Some(g) = text.get(i..i + g.len()) {
@@ -354,14 +395,14 @@ impl TextRenderer {
         pen
     }
 
-    /// Queue glyph `id` of the interface font with its pen position at
+    /// Queue one glyph of the interface font with its pen position at
     /// `at` (x, baseline y).
     fn push_ui_glyph(
         &mut self,
         queue: &wgpu::Queue,
         atlas: &mut Atlas,
         frame: &mut FrameBuilder,
-        (font, id): (Font, u16),
+        glyph: UiGlyph,
         [x, baseline_y]: [f32; 2],
         color: [f32; 4],
     ) {
@@ -369,12 +410,16 @@ impl TextRenderer {
             return;
         }
         let whole = x.floor();
-        // Face 0 of the one-font list the interface glyphs rasterize from.
-        let key = GlyphKey::new(id, self.metrics.size_px, x - whole).styled(REGULAR, false);
+        // The glyph rasterizes from a list holding just its own font, so
+        // its face is 0; the key's face still tells the weights apart, as
+        // their glyph ids differ.
+        let face = if glyph.bold { BOLD } else { REGULAR };
+        let key = GlyphKey::new(glyph.id, glyph.size_px, x - whole).styled(face, glyph.italic);
         let cached = if let Some(entry) = self.ui_cache.get(&key) {
             *entry
         } else {
-            match load_glyph(&[font], &mut self.raster, atlas, queue, key) {
+            let raster_key = key.styled(REGULAR, glyph.italic);
+            match load_glyph(&[glyph.font], &mut self.raster, atlas, queue, raster_key) {
                 Loaded::Glyph(g) => {
                     self.ui_cache.insert(key, Some(g));
                     Some(g)
@@ -498,6 +543,16 @@ impl TextRenderer {
             None => key.styled(REGULAR, look.italic),
         }
     }
+}
+
+/// One glyph of the interface font and how to draw it.
+#[derive(Clone, Copy)]
+struct UiGlyph {
+    font: Font,
+    id: u16,
+    size_px: f32,
+    bold: bool,
+    italic: bool,
 }
 
 /// A whole line in one colour, on the grid from column 0.

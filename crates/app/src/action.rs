@@ -1038,6 +1038,12 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::NONE,
     ),
     act(
+        "view.openPreview",
+        "Open Preview",
+        Command::OpenPreview,
+        Keys::all(&["Primary+Shift+V"]),
+    ),
+    act(
         "view.toggleIgnored",
         "Show/Hide Ignored Files in Sidebar",
         Command::ToggleIgnored,

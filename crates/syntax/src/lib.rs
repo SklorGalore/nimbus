@@ -5,6 +5,7 @@ pub mod highlight;
 pub mod inject;
 pub mod language;
 pub mod lexical;
+pub mod markdown;
 pub mod registry;
 pub mod split;
 pub mod state;

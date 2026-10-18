@@ -26,13 +26,39 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::font::{Font, Metrics};
 
+/// How a run of interface text is drawn: its size relative to the editor
+/// font's, and its weight and slant. The Markdown preview (M20) uses it for
+/// headings, bold and italic; the rest of the interface draws
+/// [`UiStyle::PLAIN`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UiStyle {
+    /// Size as a multiple of the editor font's.
+    pub scale: f32,
+    /// Drawn from the bold face, when the font has one.
+    pub bold: bool,
+    /// Slanted.
+    pub italic: bool,
+}
+
+impl UiStyle {
+    /// The editor font's size, regular and upright.
+    pub const PLAIN: Self = Self {
+        scale: 1.0,
+        bold: false,
+        italic: false,
+    };
+}
+
 /// How interface text is measured and placed: a proportional font, or the
 /// editor's grid. Cheap to copy, so a layout can carry one and measure
-/// without the GPU.
+/// without the GPU, or hand it to a worker thread.
 #[derive(Debug, Clone, Copy)]
 pub struct UiFont {
     /// The proportional font, if one is configured and loaded.
     font: Option<Font>,
+    /// Its bold weight, if there is one; bold text is otherwise drawn from
+    /// the regular weight.
+    bold: Option<Font>,
     /// The editor font's size and grid, for the grid case and for
     /// characters the interface font lacks.
     editor: Metrics,
@@ -40,6 +66,8 @@ pub struct UiFont {
     /// its glyphs are centred in the editor's line height, so rows keep
     /// their height whichever font draws them.
     baseline: f32,
+    /// The same before rounding, to scale for larger text.
+    exact_baseline: f32,
 }
 
 impl UiFont {
@@ -48,8 +76,10 @@ impl UiFont {
     pub fn grid(editor: Metrics) -> Self {
         Self {
             font: None,
+            bold: None,
             editor,
             baseline: editor.baseline,
+            exact_baseline: editor.baseline,
         }
     }
 
@@ -58,12 +88,20 @@ impl UiFont {
     pub fn new(font: Font, editor: Metrics) -> Self {
         let m = font.face().metrics(&[]).scale(editor.size_px);
         let own = m.ascent + m.descent;
-        let baseline = ((editor.line_height - own) / 2.0 + m.ascent).round();
+        let exact = (editor.line_height - own) / 2.0 + m.ascent;
         Self {
             font: Some(font),
+            bold: None,
             editor,
-            baseline,
+            baseline: exact.round(),
+            exact_baseline: exact,
         }
+    }
+
+    /// The same, with `bold` as the bold weight.
+    #[must_use]
+    pub fn with_bold(self, bold: Option<Font>) -> Self {
+        Self { bold, ..self }
     }
 
     /// Whether a proportional font draws the interface.
@@ -84,10 +122,42 @@ impl UiFont {
         self.editor
     }
 
-    /// From the top of a line to the interface font's baseline.
+    /// From the top of a line of text in `style` to its baseline.
     #[must_use]
-    pub(crate) fn baseline(&self) -> f32 {
-        self.baseline
+    pub(crate) fn styled_baseline(&self, style: UiStyle) -> f32 {
+        if (style.scale - 1.0).abs() < f32::EPSILON {
+            self.baseline
+        } else {
+            (self.exact_baseline * style.scale).round()
+        }
+    }
+
+    /// From the top of a line of text in `style` to where its underline
+    /// goes: a little below the baseline.
+    #[must_use]
+    pub fn underline(&self, style: UiStyle) -> f32 {
+        self.styled_baseline(style) + (self.editor.size_px * style.scale * 0.12).round().max(1.0)
+    }
+
+    /// The height of a line of text in `style`: the editor's line height,
+    /// scaled.
+    #[must_use]
+    pub fn line_height(&self, style: UiStyle) -> f32 {
+        (self.editor.line_height * style.scale).round()
+    }
+
+    /// The width of `text` in `style`, as [`crate::Gpu::push_styled_text`]
+    /// draws it.
+    #[must_use]
+    pub fn styled_width(&self, text: &str, style: UiStyle) -> f32 {
+        let mut w = 0.0;
+        let mut col = 0;
+        for g in text.graphemes(true) {
+            let (adv, cols, _) = self.styled_advance(g, col, style);
+            w += adv;
+            col += cols;
+        }
+        w
     }
 
     /// The width of `text` in pixels as [`crate::Gpu::push_ui_text`]
@@ -141,19 +211,38 @@ impl UiFont {
     /// One grapheme's advance in pixels and its width in columns (for tab
     /// stops after it), starting at column `col`.
     pub(crate) fn advance(&self, g: &str, col: usize) -> (f32, usize) {
+        let (adv, cols, _) = self.styled_advance(g, col, UiStyle::PLAIN);
+        (adv, cols)
+    }
+
+    /// As [`Self::advance`] for text in `style`, with the font that draws
+    /// the grapheme and whether that is the bold weight: `None` when
+    /// neither weight has it and the editor font draws it in its cells.
+    pub(crate) fn styled_advance(
+        &self,
+        g: &str,
+        col: usize,
+        style: UiStyle,
+    ) -> (f32, usize, Option<(Font, bool)>) {
         let cols = column::grapheme_cols(g, col, 4);
-        match self.font {
-            Some(font) if Self::has(font, g) => {
-                let scaled = font.face().glyph_metrics(&[]).scale(self.editor.size_px);
+        let pick = match (self.font, self.bold) {
+            (_, Some(bold)) if style.bold && Self::has(bold, g) => Some((bold, true)),
+            (Some(font), _) if Self::has(font, g) => Some((font, false)),
+            _ => None,
+        };
+        match pick {
+            Some((font, is_bold)) => {
+                let size = self.editor.size_px * style.scale;
+                let scaled = font.face().glyph_metrics(&[]).scale(size);
                 let adv = g
                     .chars()
                     .map(|c| font.glyph_id(c))
                     .filter(|&id| id != 0)
                     .map(|id| scaled.advance_width(id))
                     .sum();
-                (adv, cols)
+                (adv, cols, Some((font, is_bold)))
             }
-            _ => (cell_count(cols) * self.editor.cell_width, cols),
+            None => (cell_count(cols) * self.editor.cell_width, cols, None),
         }
     }
 
@@ -207,5 +296,18 @@ mod tests {
         let with_cjk = ui.width("a漢");
         assert!((with_cjk - (adv + 2.0 * m.cell_width)).abs() < 1e-3);
         assert_eq!(ui.fit("aaaa", 2.5 * adv), 2);
+    }
+
+    #[test]
+    fn larger_styles_measure_wider_and_taller() {
+        let ui = UiFont::new(Font::bundled().unwrap(), metrics());
+        let big = UiStyle {
+            scale: 2.0,
+            ..UiStyle::PLAIN
+        };
+        let plain = ui.styled_width("abc", UiStyle::PLAIN);
+        assert!((ui.styled_width("abc", big) - 2.0 * plain).abs() < 1e-2);
+        assert!(ui.line_height(big) > ui.line_height(UiStyle::PLAIN));
+        assert!(ui.styled_baseline(big) > ui.styled_baseline(UiStyle::PLAIN));
     }
 }

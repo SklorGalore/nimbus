@@ -385,6 +385,18 @@ impl SyntaxState {
         }
     }
 
+    /// The tree, only when it describes the text as it is now: no edit
+    /// since the last parse, and no reparse running.
+    #[must_use]
+    pub fn current_tree(&self) -> Option<&Tree> {
+        match &self.phase {
+            Phase::Ready {
+                tree, dirty: false, ..
+            } => Some(tree),
+            _ => None,
+        }
+    }
+
     /// Record an edit just applied to `text` (the text after the edit).
     pub fn edit(&mut self, text: &dyn Text, edit: &Edit) {
         if let Phase::Lexical(lexical) = &self.phase {

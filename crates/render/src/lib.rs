@@ -21,4 +21,4 @@ pub use gpu::{
 };
 pub use pipeline::{GLYPH_COLOR, GlyphInstance, RectInstance};
 pub use text::{ColorRun, Style};
-pub use ui::UiFont;
+pub use ui::{UiFont, UiStyle};

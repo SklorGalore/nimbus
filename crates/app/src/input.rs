@@ -156,6 +156,9 @@ pub enum Command<'a> {
     ToggleStickyScroll,
     /// Show or hide the minimap (M20).
     ToggleMinimap,
+    /// Open a Markdown preview of the current file in a column on the
+    /// right (M20), or go to the one already open.
+    OpenPreview,
     /// Select the word under the cursor, or add the next occurrence of the
     /// selection as another cursor.
     AddNextOccurrence,
@@ -372,6 +375,7 @@ impl Command<'_> {
                 | Self::ToggleIndentGuides
                 | Self::ToggleStickyScroll
                 | Self::ToggleMinimap
+                | Self::OpenPreview
         )
     }
 

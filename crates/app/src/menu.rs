@@ -103,6 +103,7 @@ mod native {
                 "view.toggleIndentGuides",
                 "view.toggleStickyScroll",
                 "view.toggleMinimap",
+                "view.openPreview",
                 "-",
                 "view.zoomIn",
                 "view.zoomOut",
