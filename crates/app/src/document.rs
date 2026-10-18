@@ -1171,6 +1171,24 @@ impl Document {
         (std::mem::take(&mut self.edits.spans), reset)
     }
 
+    /// The file's size and modification time (nanoseconds since 1970) as
+    /// last read or written, when the text here is still what is on disk:
+    /// what folds saved with the session are checked against (M13). `None`
+    /// with unsaved edits, a change on disk not taken in, or no time.
+    #[must_use]
+    pub fn disk_stamp(&self) -> Option<[u64; 2]> {
+        if self.is_dirty() || self.conflict || self.deleted {
+            return None;
+        }
+        let d = self.disk?;
+        let since = d.modified?.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+        let nanos = u64::try_from(since.as_nanos()).ok()?;
+        // TOML integers are signed 64-bit; a larger value would stop the
+        // whole state file from writing.
+        let fits = |n: u64| i64::try_from(n).is_ok();
+        (fits(d.len) && fits(nanos)).then_some([d.len, nanos])
+    }
+
     /// Whether there are unsaved changes.
     #[must_use]
     pub fn is_dirty(&self) -> bool {
