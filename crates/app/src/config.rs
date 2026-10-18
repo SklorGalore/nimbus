@@ -306,8 +306,9 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # sticky_scroll = true      # pin the enclosing function or heading at the top
 # minimap = false           # true: a map of the lines around the view, at the right
 # minimap_width = 100       # in points
-# A proportional font for the sidebar, tabs, status bar and pickers, by
-# name or path. Empty uses the editor font. The text stays monospace.
+# A proportional font for the sidebar, tabs, status bar, pickers and the
+# Markdown preview, by name or path. Empty uses the editor font. The text
+# stays monospace.
 # ui_font = "Inter"
 
 # Key bindings: action id = list of chords. "Primary" is Cmd on macOS and

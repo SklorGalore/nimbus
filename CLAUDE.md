@@ -38,6 +38,9 @@ cargo test --release -p nimbus-core -- --ignored --nocapture # opt-in benchmarks
 bench/gen.sh logs && ./target/release/nimbus bench/out/log-4gb.log --headless 1400x700 --screenshot /tmp/l.bmp --wait-index   # huge-file check (mapped buffer, all lines counted first)
 ./target/release/nimbus FILE --backend rope|mapped ...      # force a buffer backend (measurement)
 cargo run -- FILE --debug-overlay --headless 1400x500 --screenshot /tmp/d.bmp   # the F12 overlay, shown from the start
+cargo run -- README.md --preview --headless 1200x1100 --screenshot /tmp/p.bmp   # M20: the Markdown preview instead of the text
+cargo test --release -p nimbus --bin nimbus -- --ignored --nocapture m20_preview_bench   # preview layout time for a 1 MB document
+NIMBUS_BENCH_FILE=$PWD/bench/out/src-10mb.rs cargo test --release -p nimbus -- --ignored --nocapture m20_scroll_bench   # scroll frame cost with sticky scroll and the minimap on vs off (needs a GPU)
 cargo run -- FILE --linear-blend --headless 1400x500 --screenshot /tmp/lin.bmp  # M16 experiment: blend text in linear light (sRGB target)
 NIMBUS_BENCH_FILE=$PWD/bench/out/src-10mb.rs cargo test --release -p nimbus -- --ignored --nocapture m16_typing_bench   # keystroke cost with whitespace, guides and ligatures on vs off (needs a GPU)
 cargo run -- FILE --cursors 4,19,33 --headless 900x300 --screenshot /tmp/m.bmp  # several cursors (byte offsets; the last is primary)

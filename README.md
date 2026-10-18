@@ -105,6 +105,12 @@ from opening your first file to themes, languages and key bindings.
   italic, and color emoji. A Nerd Font is bundled.
 - Zoom that is remembered between sessions, visible whitespace and
   indent guides.
+- Sticky scroll keeps the function or section you are in pinned at the
+  top; an optional minimap shows the lines around the view.
+- A Markdown preview beside the file that follows as you type and
+  scroll, with code blocks colored like the editor's.
+- An optional proportional font, such as Inter or SF Pro, for the
+  sidebar, tabs, status bar and pickers, while the text stays monospace.
 
 ## Installation
 
@@ -214,6 +220,7 @@ the most common bindings; the command palette shows the rest.
 | `Primary+B` | Toggle sidebar |
 | `Primary+\` | Split right |
 | `Primary+K Primary+0` | Fold all |
+| `Primary+Shift+V` | Markdown preview |
 
 You can change any binding in `config.toml`, including two-step chords
 such as `Primary+K Primary+L`. See the
@@ -336,6 +343,8 @@ milestone lands, move its line up to "Available now". -->
 - Multi-folder workspaces and search history
 - Compare, second pass: ignore whitespace, compare folders and minified
   files, and Compare with HEAD
+- Reading aids: sticky scroll, a minimap, a Markdown preview and an
+  interface font
 
 **In progress**
 
@@ -343,7 +352,6 @@ milestone lands, move its line up to "Available now". -->
 
 **Planned**
 
-- Reading aids, such as a minimap
 - Foundations for 1.0
 
 Some things are out of scope for now, including a Vim mode, plugins,
