@@ -773,7 +773,10 @@ mod tests {
         // A relative root is taken from the crate folder, where cargo runs
         // tests; the app always searches under a canonical root.
         let root = std::fs::canonicalize(&root).unwrap();
-        let p = params(&root, &pattern);
+        let mut p = params(&root, &pattern);
+        // `NIMBUS_BENCH_REGEX=1` reads the pattern as a regex (M19: one
+        // with `\n` takes the multi-line path).
+        p.query.regex = std::env::var_os("NIMBUS_BENCH_REGEX").is_some();
         let generation = Arc::new(Generation::default());
         let (tx, rx) = mpsc::channel();
         let started = Instant::now();

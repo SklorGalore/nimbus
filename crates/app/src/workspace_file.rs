@@ -12,8 +12,8 @@
 //!   clone somewhere else opens the same files. This is the one file
 //!   Nimbus ever writes inside a project, and only on that action.
 //!
-//! The file holds the roots and the session fields from M12 (sidebar mode,
-//! expanded folders, tabs), and nothing else: no settings, which stay in
+//! The file holds the roots and the session fields from M12 and M13
+//! (sidebar mode, expanded folders, editor groups, tabs), and nothing else: no settings, which stay in
 //! the one `config.toml`.
 
 use std::path::{Component, Path, PathBuf};
@@ -42,7 +42,7 @@ impl std::fmt::Display for WorkspaceError {
 impl std::error::Error for WorkspaceError {}
 
 /// The file's contents, as TOML spells them.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct File {
     /// Root folders, the first naming the session.
@@ -51,6 +51,9 @@ struct File {
     mode: SidebarMode,
     /// Folders open in the tree.
     expanded: Vec<PathBuf>,
+    /// Each editor group's share of the width (M13); empty for one group.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<f32>,
     /// The tabs, in order.
     tabs: Vec<SessionTab>,
 }
@@ -180,6 +183,7 @@ pub fn to_text(session: &Session, base: Option<&Path>) -> Result<String, Workspa
                 ..t.clone()
             })
             .collect(),
+        groups: session.groups.clone(),
     };
     let head = "# A Nimbus workspace: its folders and the files it had open.\n";
     toml::to_string(&file)
@@ -223,6 +227,7 @@ pub fn from_text(text: &str, base: Option<&Path>) -> Result<Session, WorkspaceEr
         mode: file.mode,
         expanded,
         tabs,
+        groups: file.groups,
         ..Session::default()
     })
 }
@@ -278,6 +283,7 @@ mod tests {
             mode: SidebarMode::Search,
             expanded: vec![PathBuf::from("src"), PathBuf::from("/w/lib/core")],
             tabs: vec![tab("/w/app/src/main.rs", false), tab("/w/lib/x.rs", true)],
+            groups: vec![0.5, 0.5],
             ..Session::default()
         }
     }

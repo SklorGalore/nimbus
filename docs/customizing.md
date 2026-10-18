@@ -25,6 +25,49 @@ once at each start (off by default, so the editor never phones home
 unless told to); "Check for Updates" in the palette does the same on
 demand.
 
+## Workspaces
+
+A workspace is a set of folders and the files you had open in them.
+Nimbus keeps one for each folder you open, in `state.toml`, without being
+asked. To keep one under a name, or to work on several folders at once:
+
+- **Add Folder to Workspace…** (File menu, palette, or a folder dropped
+  on the window) shows another folder in the sidebar. The file opener and
+  find in files then cover every folder, and show each path with its
+  folder's name in front. `nimbus app lib` starts with both. A folder
+  inside one already shown is refused, since the outer one shows it.
+- **Save Workspace As…** writes `workspaces/NAME.toml` here in the config
+  folder. **Open Workspace…** lists them, and `nimbus --workspace NAME`
+  opens one from the command line.
+- **Save Workspace Here** writes `.nimbus/workspace.toml` in the first
+  folder instead, with paths relative to it, so the workspace travels with
+  the repository. It is the only file Nimbus ever writes inside a project,
+  and only when you ask. Add `.nimbus/` to `.gitignore` unless the project
+  should share it. When you open a folder that has one and this computer
+  has no session for it yet, the message line offers **Open Project
+  Workspace**; nothing loads on its own.
+
+A workspace file holds only the folders, the sidebar's mode, the open
+folders in the tree and the tabs. Settings stay in `config.toml`.
+
+```toml
+# A Nimbus workspace: its folders and the files it had open.
+roots = [".", "/Users/me/src/shared-lib"]
+mode = "files"
+expanded = ["src"]
+
+[[tabs]]
+path = "src/main.rs"
+cursor = 120
+scroll = 0
+active = true
+```
+
+The Search panel remembers the last 50 patterns and replacements for each
+workspace (`Up` and `Down` in a field walk them), and searches pinned
+with **Save Search…** are listed at the top of the panel. Both are kept in
+`state.toml` with the workspace's session.
+
 ## Themes
 
 ```

@@ -1089,7 +1089,7 @@ fn draw_toggles(gpu: &mut Gpu, ui: &Ui, layout: &Layout, panel: &Panel, geo: &Ge
 fn line_label(hit: &crate::find_files::Hit) -> String {
     let (first, last) = (hit.line + 1, hit.last_line + 1);
     if hit.truncated {
-        format!("{first}-{last}+ (cut short):")
+        format!("{first}-{last}+ (truncated):")
     } else if last > first {
         format!("{first}-{last}:")
     } else {
