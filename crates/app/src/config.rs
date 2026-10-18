@@ -26,6 +26,9 @@ pub struct Config {
     pub keys: HashMap<String, Vec<String>>,
     /// File name or `*.ext` pattern to language name.
     pub languages: HashMap<String, String>,
+    /// Ask GitHub for the latest release once at startup. Off unless set:
+    /// a personal tool should not phone home without being asked.
+    pub check_updates: bool,
     /// Editing behaviour: auto-pairs and what happens on save, with
     /// per-language overrides (`[editor.rust]`).
     pub editor: EditorSettings,
@@ -153,6 +156,7 @@ impl Default for Config {
             theme: "dark".to_owned(),
             keys: HashMap::new(),
             languages: HashMap::new(),
+            check_updates: false,
             editor: EditorSettings::default(),
             indent: IndentSettings::default(),
         }
@@ -182,6 +186,7 @@ const KNOWN: &[&str] = &[
     "theme",
     "keys",
     "languages",
+    "check_updates",
     "editor",
     "indent",
 ];
@@ -194,6 +199,7 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # tab_width = 4
 # soft_wrap = false
 # theme = "dark"            # or "light", or NAME for themes/NAME.toml here
+# check_updates = false     # true: ask GitHub for a newer release at startup
 
 # Key bindings: action id = list of chords. "Primary" is Cmd on macOS and
 # Ctrl elsewhere. An empty list unbinds the action. The command palette
@@ -273,6 +279,12 @@ impl Config {
         take(&table, "theme", &mut config.theme, &mut warnings);
         take(&table, "keys", &mut config.keys, &mut warnings);
         take(&table, "languages", &mut config.languages, &mut warnings);
+        take(
+            &table,
+            "check_updates",
+            &mut config.check_updates,
+            &mut warnings,
+        );
         take(&table, "editor", &mut config.editor, &mut warnings);
         take(&table, "indent", &mut config.indent, &mut warnings);
         if let Some(w) = config.indent.width.filter(|w| !(1..=16).contains(w)) {

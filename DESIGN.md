@@ -509,6 +509,7 @@ it.
 | `memmap2`, `memchr` | 0.9, 2 | mapped buffer, newline scanning | M7 |
 | `fontdb` | 0.24 | system font discovery and fallback | M8 |
 | `imara-diff` | 0.2 | line diff (Myers) over our own tokens | M9 |
+| `ureq` | 3 | HTTPS for the update check; rustls with the system's certificate store | M15 |
 
 ## 8. Milestones
 
@@ -664,6 +665,7 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-17 | Up to three editor columns, no nesting; one file may be open in two columns, so documents and panes are split | §9, m13 |
 | 2026-10-17 | Grammars to add: C, Go, HTML, CSS, TSX, each measured against the 35 MB budget; Go to Symbol is `Primary+Shift+R` | §9, m14 |
 | 2026-10-17 | No signing accounts: builds stay unsigned and the README keeps its `xattr` step; update check off unless `check_updates = true`; checksums signed with `minisign` | §9, m15 |
+| 2026-10-17 | Update check over `ureq` with rustls and the platform verifier (+1.7 MB), the one JSON field scanned by hand; packages built by shell scripts and Inno Setup in the workflow, manifests generated from the tag | §7, m15 |
 | 2026-10-17 | M14 grammars all kept: C, Go, HTML, CSS and TSX add 2.3 MB on Linux (21.4 MB of 35); drop order is now TSX, Bash, TypeScript | §4.2, m14 |
 | 2026-10-17 | Injections: child trees keyed by host node id, kept one screen either side of the view, parsed within the frame's 2 ms budget at one child per frame at least; Rust's injection query not used | §4.2, m14 |
 | 2026-10-17 | Spans carry a capture table per grammar so the inner language's colours win inside injections; wide nodes are queried child by child | §4.2, m14 |
