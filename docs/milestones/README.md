@@ -42,7 +42,7 @@ repeated in each file:
 | 12 | [Workspace](m12-workspace.md) | Next |
 | 13 | [Split views and folding](m13-splits-and-folding.md) | Planned |
 | 14 | [Languages, second pass](m14-languages.md) | Planned |
-| 15 | [Distribution](m15-distribution.md) | Planned |
+| 15 | [Distribution](m15-distribution.md) | Done |
 
 **Next** is the milestone to start; **Planned** plans are approved and
 queued in table order. M10–M15 were drafted after M8 and approved, with
