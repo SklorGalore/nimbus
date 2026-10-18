@@ -26,8 +26,10 @@ pub struct Docs {
 }
 
 impl Docs {
-    /// Add `doc`, returning its id.
-    pub fn insert(&mut self, doc: Document) -> DocId {
+    /// Add `doc`, returning its id. Its edits are kept for its tabs to
+    /// follow ([`crate::document::Journal`]).
+    pub fn insert(&mut self, mut doc: Document) -> DocId {
+        doc.journal_mut().keep = true;
         if let Some(i) = self.free.pop() {
             self.slots[i] = doc;
             self.open[i] = true;

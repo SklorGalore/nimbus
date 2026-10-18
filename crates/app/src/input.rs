@@ -204,6 +204,18 @@ pub enum Command<'a> {
     FocusRightGroup,
     /// Move the current tab to the next group, making one if needed.
     MoveTabToNextGroup,
+    /// Fold the region the cursor's line starts, or the one around it.
+    Fold,
+    /// Unfold the fold on the cursor's line.
+    Unfold,
+    /// Fold or unfold at the cursor's line.
+    ToggleFold,
+    /// Fold every region of the file (on a worker).
+    FoldAll,
+    /// Open every fold.
+    UnfoldAll,
+    /// Fold the regions nested n deep (1 for the outermost).
+    FoldLevel(usize),
     /// Open the fuzzy file opener.
     QuickOpen,
     /// Open the command palette.
@@ -262,6 +274,26 @@ impl Command<'_> {
         matches!(
             self,
             Command::OpenConfig | Command::CheckUpdates | Command::OpenRelease
+        )
+    }
+
+    /// Whether this arranges the editor rather than editing: the groups
+    /// and folds of M13. These run whatever field has the keyboard.
+    #[must_use]
+    pub fn is_layout(self) -> bool {
+        matches!(
+            self,
+            Self::SplitRight
+                | Self::CloseGroup
+                | Self::FocusLeftGroup
+                | Self::FocusRightGroup
+                | Self::MoveTabToNextGroup
+                | Self::Fold
+                | Self::Unfold
+                | Self::ToggleFold
+                | Self::FoldAll
+                | Self::UnfoldAll
+                | Self::FoldLevel(_)
         )
     }
 

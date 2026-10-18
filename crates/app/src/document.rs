@@ -224,8 +224,8 @@ impl Carets {
         if self.synced == end {
             return &[];
         }
-        // Edits that went by unrecorded (the document was not shared
-        // then) leave the cursors where they are, made valid.
+        // Edits that went by unrecorded (a document not kept) leave the
+        // cursors where they are, made valid.
         let shifts = doc.journal().since(self.synced).unwrap_or(&[]);
         self.synced = end;
         self.selections.transform(|_, s| {
@@ -308,14 +308,15 @@ impl Shift {
     }
 }
 
-/// The edits a document went through, for the panes that show it (M13).
-/// Every edit counts towards [`Journal::end`]; while the document is in
-/// more than one pane each is also kept, until every pane has followed
-/// it. A document in one pane keeps nothing.
+/// The edits a document went through, for the panes that show it (M13):
+/// another pane's cursors follow them, and every pane's folds do. Every
+/// edit counts towards [`Journal::end`]; a document open in tabs also
+/// keeps each one until every tab has followed it, which the app sees to
+/// before each command and frame. A one-line field keeps nothing.
 #[derive(Debug, Default)]
 pub struct Journal {
-    /// Keep the edits: another pane shows the document.
-    pub shared: bool,
+    /// Keep the edits: the document is open in a tab.
+    pub keep: bool,
     /// How many edits came before `shifts[0]`.
     base: u64,
     /// The edits kept, in the order they were made.
@@ -330,7 +331,7 @@ impl Journal {
     }
 
     fn note(&mut self, edit: &Edit) {
-        if self.shared {
+        if self.keep {
             self.shifts.push(Shift {
                 start: edit.start,
                 removed: edit.removed.len(),
@@ -611,7 +612,7 @@ impl Document {
         &self.edits.journal
     }
 
-    /// The same, to mark the document shared or drop followed edits.
+    /// The same, to keep edits or drop the ones every tab followed.
     pub(crate) fn journal_mut(&mut self) -> &mut Journal {
         &mut self.edits.journal
     }
@@ -2366,7 +2367,7 @@ mod tests {
     fn a_second_pane_follows_edits_and_undo_from_the_first() {
         // One document, two panes: `a` edits, `b` watches (M13).
         let mut d = Document::from_text("one two three");
-        d.journal_mut().shared = true;
+        d.journal_mut().keep = true;
         let (mut a, mut b) = (Carets::default(), Carets::default());
         Editor::new(&mut d, &mut b).click(8, false); // before "three"
         Editor::new(&mut d, &mut a).click(4, false); // before "two"
@@ -2397,7 +2398,7 @@ mod tests {
     #[test]
     fn a_pane_inside_deleted_text_lands_at_the_deletion() {
         let mut d = Document::from_text("abcdef\nghi");
-        d.journal_mut().shared = true;
+        d.journal_mut().keep = true;
         let (mut a, mut b) = (Carets::default(), Carets::default());
         Editor::new(&mut d, &mut b).select(3..9);
         let mut ed = Editor::new(&mut d, &mut a);

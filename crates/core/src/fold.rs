@@ -117,6 +117,28 @@ impl Folds {
         true
     }
 
+    /// Fold every range in `regions` and keep the folds already made, as
+    /// that many [`Folds::fold`] calls would but in one sort, so Fold All
+    /// over a hundred thousand regions costs milliseconds. A range that
+    /// crosses one before it is left out.
+    pub fn fold_many(&mut self, mut regions: Vec<Range<usize>>) {
+        regions.append(&mut self.active);
+        regions.append(&mut self.inner);
+        sort_nested(&mut regions);
+        let mut stack: Vec<Range<usize>> = Vec::new();
+        for r in regions {
+            while stack.last().is_some_and(|top| top.end <= r.start) {
+                stack.pop();
+            }
+            match stack.last() {
+                Some(top) if r.end > top.end => continue,
+                Some(_) => self.inner.push(r.clone()),
+                None => self.active.push(r.clone()),
+            }
+            stack.push(r);
+        }
+    }
+
     /// The active fold hiding position `pos` (see the module notes).
     #[must_use]
     pub fn hiding(&self, pos: usize) -> Option<Range<usize>> {
@@ -230,11 +252,34 @@ impl Folds {
         if edits.is_empty() || (self.active.is_empty() && self.inner.is_empty()) {
             return;
         }
-        let opened_any = map_list(&mut self.active, edits);
-        let opened_inner = map_list(&mut self.inner, edits);
+        let n = edits.len();
+        // Edits in text order are `edits` reversed.
+        let at = |i: usize| {
+            let e = &edits[n - 1 - i];
+            (e.old_range(), e.growth())
+        };
+        let opened_any = map_list(&mut self.active, n, at);
+        let opened_inner = map_list(&mut self.inner, n, at);
         if opened_any || opened_inner {
             // A fold that opened leaves the folds kept inside it without
             // an active fold around them.
+            self.promote();
+        }
+    }
+
+    /// Follow one edit that replaced `removed` bytes at `start` with
+    /// `inserted` bytes, as [`Folds::apply_edits`] does for a batch: for
+    /// a view following another view's edit, which it knows only by size.
+    pub fn apply_change(&mut self, start: usize, removed: usize, inserted: usize) {
+        if self.active.is_empty() && self.inner.is_empty() {
+            return;
+        }
+        let old = start..start + removed;
+        let growth = inserted.cast_signed() - removed.cast_signed();
+        let at = |_| (old.clone(), growth);
+        let opened_any = map_list(&mut self.active, 1, at);
+        let opened_inner = map_list(&mut self.inner, 1, at);
+        if opened_any || opened_inner {
             self.promote();
         }
     }
@@ -303,21 +348,22 @@ pub fn touches(f: &Range<usize>, old: &Range<usize>) -> bool {
 /// fold's start, which is why one pass works for both lists. The scan for
 /// a touching edit starts at that pointer and stops at the first edit
 /// past the fold, so a fold costs one step plus the edits inside it.
-fn map_list(list: &mut Vec<Range<usize>>, edits: &[Edit]) -> bool {
-    // Edits in text order are `edits` reversed.
-    let n = edits.len();
-    let at = |i: usize| &edits[n - 1 - i];
+fn map_list(
+    list: &mut Vec<Range<usize>>,
+    n: usize,
+    at: impl Fn(usize) -> (Range<usize>, isize),
+) -> bool {
     let mut before = 0; // edits wholly before the current fold
     let mut shift: isize = 0;
     let mut dropped = false;
     list.retain_mut(|f| {
-        while before < n && at(before).old_range().end <= f.start {
-            shift += at(before).growth();
+        while before < n && at(before).0.end <= f.start {
+            shift += at(before).1;
             before += 1;
         }
         let mut j = before;
-        while j < n && at(j).start <= f.end {
-            if touches(f, &at(j).old_range()) {
+        while j < n && at(j).0.start <= f.end {
+            if touches(f, &at(j).0) {
                 dropped = true;
                 return false;
             }
@@ -401,6 +447,91 @@ pub fn indent_region(
     }
     let last = last.filter(|_| deeper)?;
     Some(head.end..last.end)
+}
+
+/// Every indentation region of the text, as [`indent_region`] finds
+/// them line by line, in one pass with a stack of the lines still open:
+/// for Fold All over a whole file on a worker. Only the first
+/// [`INDENT_PEEK`] bytes of a line are read for its indentation, so a
+/// huge line costs no more than a short one. `stop` is asked every few
+/// thousand lines and ends the scan early when it says so (the text
+/// changed). Regions come out in no particular order.
+pub fn indent_regions(
+    t: &dyn Text,
+    tab_width: usize,
+    out: &mut Vec<Range<usize>>,
+    stop: &dyn Fn() -> bool,
+) {
+    // (end of the line that opens it, its indentation, a deeper line seen)
+    let mut open: Vec<(usize, usize, bool)> = Vec::new();
+    let mut prev_end = 0;
+    let mut next = Some(0);
+    let mut lines = 0usize;
+    let close = |open: &mut Vec<(usize, usize, bool)>, out: &mut Vec<_>, level, prev_end| {
+        while let Some(&(head_end, indent, deeper)) = open.last() {
+            if indent < level {
+                break;
+            }
+            open.pop();
+            if deeper && prev_end > head_end {
+                out.push(head_end..prev_end);
+            }
+        }
+    };
+    while let Some(start) = next {
+        lines += 1;
+        if lines.is_multiple_of(4096) && stop() {
+            return;
+        }
+        let span = t.line_span(start);
+        let peek = t.slice(span.start..span.end.min(span.start + INDENT_PEEK));
+        let blank = is_blank(&peek) && span.end - span.start <= INDENT_PEEK;
+        if !blank {
+            let level = indent_width(&peek, tab_width);
+            close(&mut open, out, level, prev_end);
+            if let Some(top) = open.last_mut() {
+                top.2 = true;
+            }
+            open.push((span.end, level, false));
+        }
+        prev_end = span.end;
+        next = span.next;
+    }
+    close(&mut open, out, 0, prev_end);
+}
+
+/// How much of a line [`indent_regions`] reads for its indentation.
+pub const INDENT_PEEK: usize = 256;
+
+/// The regions of `regions` nested exactly `depth` deep (1 for those in
+/// no other region), for Fold Level N. Ranges that cross another are
+/// left out, as [`Folds::fold`] would refuse them.
+#[must_use]
+pub fn at_depth(mut regions: Vec<Range<usize>>, depth: usize) -> Vec<Range<usize>> {
+    sort_nested(&mut regions);
+    let mut stack: Vec<Range<usize>> = Vec::new();
+    let mut out = Vec::new();
+    for r in regions {
+        while stack.last().is_some_and(|top| top.end <= r.start) {
+            stack.pop();
+        }
+        if stack.last().is_some_and(|top| r.end > top.end) {
+            continue; // crosses the region it starts in
+        }
+        if stack.len() + 1 == depth {
+            out.push(r.clone());
+        }
+        stack.push(r);
+    }
+    out
+}
+
+/// Sort by start, then by end descending (a region before the ones it
+/// contains), and drop empty ranges and repeats.
+fn sort_nested(regions: &mut Vec<Range<usize>>) {
+    regions.retain(|r| r.start < r.end);
+    regions.sort_unstable_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+    regions.dedup();
 }
 
 /// The bracket region starting at the line containing `pos`: from the
@@ -579,6 +710,65 @@ mod tests {
         let mut f = fold();
         f.apply_edits(&[edit(9, "g", "G")]);
         assert_eq!(spans(&f), [(2, 8)]);
+        // Known only by its size, an edit does the same.
+        let mut f = fold();
+        f.apply_change(2, 0, 2);
+        assert_eq!(spans(&f), [(4, 10)]);
+        f.apply_change(0, 2, 0);
+        assert_eq!(spans(&f), [(2, 8)]);
+        f.apply_change(4, 0, 1);
+        assert!(f.is_empty());
+    }
+
+    #[test]
+    fn folding_many_at_once_matches_folding_one_by_one() {
+        let regions = [2..20, 4..8, 10..18, 12..14, 3..30, 22..26, 40..44, 0..1];
+        let mut one = Folds::new();
+        for r in &regions {
+            one.fold(r.clone());
+        }
+        let mut many = Folds::new();
+        many.fold(40..44);
+        many.fold_many(regions.to_vec());
+        assert_eq!(many, one);
+        // A range crossing one before it is left out, as fold refuses it.
+        let mut f = Folds::new();
+        f.fold_many(vec![0..10, 5..15]);
+        assert_eq!(spans(&f), [(0, 10)]);
+    }
+
+    #[test]
+    fn regions_by_depth() {
+        let regions = vec![0..100, 10..20, 30..90, 40..50, 200..300, 95..120];
+        assert_eq!(at_depth(regions.clone(), 1), [0..100, 200..300]);
+        assert_eq!(at_depth(regions.clone(), 2), [10..20, 30..90]);
+        let third = at_depth(regions, 3);
+        assert_eq!((third.len(), third.first()), (1, Some(&(40..50))));
+    }
+
+    #[test]
+    fn whole_file_indent_regions_match_line_by_line() {
+        let samples = [
+            "fn a\n    b\n\n    c\nd\n    e\n",
+            "a\n  b\n    c\n  d\n\n\ne\n\tf\n\t\tg",
+            "x\n\n  \n    y\n  z\n",
+            "",
+            "one line",
+        ];
+        for s in samples {
+            let t = text(s);
+            let mut whole = Vec::new();
+            indent_regions(&t, 4, &mut whole, &|| false);
+            whole.sort_by_key(|r| r.start);
+            let mut each = Vec::new();
+            let mut pos = Some(0);
+            while let Some(p) = pos {
+                let span = t.line_span(p);
+                each.extend(indent_region(&t, p, 4, usize::MAX));
+                pos = span.next;
+            }
+            assert_eq!(whole, each, "{s:?}");
+        }
     }
 
     #[test]

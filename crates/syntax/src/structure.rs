@@ -11,6 +11,7 @@ use nimbus_core::Text;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::QueryCursor;
 
+use crate::LanguageId;
 use crate::registry;
 use crate::state::SyntaxState;
 use crate::text::NodeChunks;
@@ -60,7 +61,55 @@ pub fn fold_regions(
     let Some((tree, _)) = state.tree() else {
         return;
     };
-    let Some(query) = state.language().and_then(registry::folds_query) else {
+    let Some(language) = state.language() else {
+        return;
+    };
+    regions_in(tree, language, text, range, out);
+}
+
+/// What a worker needs to find the fold regions of a whole file away
+/// from the main thread (M13's Fold All): the tree as it is now and its
+/// language. A tree is cheap to copy, sharing its nodes with the
+/// original until either is edited.
+#[derive(Debug, Clone)]
+pub struct FoldSource {
+    tree: tree_sitter::Tree,
+    language: LanguageId,
+}
+
+impl FoldSource {
+    /// The tree of `state`, when it describes the text as it is now and
+    /// its language has a fold query.
+    #[must_use]
+    pub fn of(state: &SyntaxState) -> Option<Self> {
+        let language = state.language()?;
+        registry::folds_query(language)?;
+        if !ready(state) {
+            return None;
+        }
+        let (tree, _) = state.tree()?;
+        Some(Self {
+            tree: tree.clone(),
+            language,
+        })
+    }
+
+    /// As [`fold_regions`], for `text`, which must be the text the tree
+    /// was taken from (a snapshot of it).
+    pub fn regions(&self, text: &dyn Text, range: Range<usize>, out: &mut Vec<Range<usize>>) {
+        regions_in(&self.tree, self.language, text, range, out);
+    }
+}
+
+/// [`fold_regions`] over a given tree.
+fn regions_in(
+    tree: &tree_sitter::Tree,
+    language: LanguageId,
+    text: &dyn Text,
+    range: Range<usize>,
+    out: &mut Vec<Range<usize>>,
+) {
+    let Some(query) = registry::folds_query(language) else {
         return;
     };
     let first = out.len();

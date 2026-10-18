@@ -36,6 +36,7 @@ use crate::document::{Carets, DiskChange, Document, Editor, MAX_COPY_BYTES, Occu
 use crate::editing::Outcome;
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::find_files::{self, Batch as FilesBatch};
+use crate::folding;
 use crate::groups::{self, Groups};
 use crate::input::{self, Command, Motion, Resolved};
 use crate::io;
@@ -93,6 +94,8 @@ pub enum AppEvent {
     /// A check for updates finished; `true` when it was the startup
     /// check, which stays quiet unless a newer release exists.
     Update(Result<update::Outcome, UpdateError>, bool),
+    /// A Fold All or Fold Level N scan finished on a worker (M13).
+    Folded(folding::FoldResult),
 }
 
 /// Ask GitHub for the latest release on its own thread.
@@ -199,6 +202,8 @@ pub struct Tab {
     pub doc: DocId,
     /// The editor group whose strip it is in (M13).
     pub group: usize,
+    /// A Fold All or Fold Level N waiting for its worker.
+    fold_job: Option<folding::FoldAll>,
     /// This tab's cursors and selections in it.
     pub carets: Carets,
     /// Its scroll position and wrap setting.
@@ -266,6 +271,7 @@ impl Tab {
         Self {
             doc,
             group: 0,
+            fold_job: None,
             carets: Carets::default(),
             view,
             noted_size: false,
@@ -413,6 +419,9 @@ pub struct App {
     docs: Docs,
     /// The editor groups side by side; tabs say which one they are in.
     groups: Groups,
+    /// The tab, document version and line the fold marker was last worked
+    /// out for under the pointer.
+    fold_hover_key: Option<(usize, u64, usize)>,
     tabs: Vec<Tab>,
     active: usize,
     blink: Blink,
@@ -582,6 +591,7 @@ impl App {
             frames: 0,
             docs: open,
             groups: Groups::default(),
+            fold_hover_key: None,
             tabs,
             active: 0,
             blink: Blink::new(started),
@@ -847,6 +857,14 @@ impl App {
 
     /// Something changed what is on screen.
     fn changed(&mut self, keep_cursor_visible: bool) {
+        self.sync_panes();
+        if keep_cursor_visible {
+            // A cursor put inside a fold (a search match, Go to Line, an
+            // edit elsewhere) opens it.
+            let tab = &mut self.tabs[self.active];
+            let cursor = tab.carets.cursor(&self.docs[tab.doc].buffer);
+            tab.view.folds.reveal(cursor);
+        }
         if keep_cursor_visible && let Some(layout) = self.layout() {
             let tab_width = self.tab_width();
             let tab = &mut self.tabs[self.active];
@@ -883,6 +901,9 @@ impl App {
 
     /// Run a command from a key, menu, the palette or the IME.
     fn run(&mut self, cmd: Command<'_>, event_loop: &ActiveEventLoop) {
+        // Edits made from another group since the last frame move this
+        // tab's cursors and folds first.
+        self.sync_panes();
         if self.picker.is_some() && self.run_picker(cmd, event_loop) {
             self.changed(false);
             return;
@@ -950,15 +971,7 @@ impl App {
                     self.switch_to(t);
                 }
             }
-            Command::SplitRight => self.split_right(),
-            Command::CloseGroup => self.close_group(event_loop),
-            Command::FocusLeftGroup => {
-                if let Some(g) = self.groups.focused.checked_sub(1) {
-                    self.focus_group(g);
-                }
-            }
-            Command::FocusRightGroup => self.focus_group(self.groups.focused + 1),
-            Command::MoveTabToNextGroup => self.move_tab_to_next_group(),
+            _ if cmd.is_layout() => self.run_layout_command(cmd, event_loop),
             Command::QuickOpen => self.open_picker(Kind::Files),
             Command::GoToLine => self.open_picker(Kind::Line),
             Command::GoToSymbol => self.open_picker(Kind::Symbols),
@@ -1661,13 +1674,32 @@ impl App {
         let layout = self.layout();
         let tab = &mut self.tabs[self.active];
         match &layout {
-            Some(layout) if tab.view.wrap => {
+            // Row by row through soft wrap, and over folded lines.
+            Some(layout) if tab.view.wrap || !tab.view.folds.is_empty() => {
                 let mut w = tab.view.wrap_view(layout, tab_width);
                 Editor::new(&mut self.docs[tab.doc], &mut tab.carets)
                     .move_cursor_wrapped(motion, extend, &mut w, page);
             }
             _ => Editor::new(&mut self.docs[tab.doc], &mut tab.carets)
                 .move_cursor(motion, extend, tab_width, page),
+        }
+        if !tab.view.folds.is_empty() {
+            // Left and right step over a fold rather than into it.
+            let back = matches!(
+                motion,
+                Motion::Left | Motion::WordLeft | Motion::LineStart | Motion::DocStart
+            );
+            let t = &self.docs[tab.doc].buffer;
+            let folds = &tab.view.folds;
+            tab.carets.selections.transform(|_, sel| {
+                let head = match folds.hiding(sel.head) {
+                    Some(f) if back => f.start,
+                    Some(f) => t.line_span(f.end).next.unwrap_or(sel.head),
+                    None => sel.head,
+                };
+                let anchor = if extend { sel.anchor } else { head };
+                nimbus_core::Selection { anchor, head }
+            });
         }
         if matches!(motion, Motion::PageUp | Motion::PageDown)
             && let Some(layout) = layout
@@ -2019,7 +2051,6 @@ impl App {
         if let Some(&other) = showing.first() {
             let tab = Tab::new(self.tabs[other].doc, self.tabs[other].view.wrap);
             let i = self.add_tab(tab);
-            self.update_shared();
             self.switch_to(i);
             return;
         }
@@ -2468,21 +2499,13 @@ impl App {
             .any(|(j, t)| j != i && t.doc == doc)
     }
 
-    /// Mark each document shared while more than one tab shows it, so its
-    /// edits are kept for the other tabs to follow.
-    fn update_shared(&mut self) {
-        for (id, doc) in self.docs.iter_mut() {
-            let shown = self.tabs.iter().filter(|t| t.doc == id).count();
-            doc.journal_mut().shared = shown > 1;
-        }
-    }
-
     /// Let every tab catch up with the edits other tabs made to its
     /// document: cursors and the top of the view move through them, so
     /// both stay on the same text. Then the edits are dropped, since every
     /// tab has followed them. Runs before each frame.
     fn sync_panes(&mut self) {
         for tab in &mut self.tabs {
+            tab.view.follow(&self.docs[tab.doc]);
             let shifts = tab.carets.fit(&self.docs[tab.doc]);
             for shift in shifts {
                 tab.view.scroll_top = shift.map(tab.view.scroll_top);
@@ -2491,6 +2514,130 @@ impl App {
         for (_, doc) in self.docs.iter_mut() {
             doc.journal_mut().trim();
         }
+    }
+
+    /// The groups and folds commands ([`Command::is_layout`]).
+    fn run_layout_command(&mut self, cmd: Command<'_>, event_loop: &ActiveEventLoop) {
+        match cmd {
+            Command::SplitRight => self.split_right(),
+            Command::CloseGroup => self.close_group(event_loop),
+            Command::FocusLeftGroup => {
+                if let Some(g) = self.groups.focused.checked_sub(1) {
+                    self.focus_group(g);
+                }
+            }
+            Command::FocusRightGroup => self.focus_group(self.groups.focused + 1),
+            Command::MoveTabToNextGroup => self.move_tab_to_next_group(),
+            Command::Fold => self.fold_at_cursor(false),
+            Command::ToggleFold => self.fold_at_cursor(true),
+            Command::Unfold => self.unfold_at_cursor(),
+            Command::FoldAll => self.fold_all(None),
+            Command::FoldLevel(n) => self.fold_all(Some(n)),
+            Command::UnfoldAll => {
+                self.tabs[self.active].view.folds.clear();
+                self.changed(true);
+            }
+            _ => {}
+        }
+    }
+
+    /// Fold the region the cursor's line starts, or else the one around
+    /// the cursor (M13). With `toggle`, a folded line unfolds instead.
+    fn fold_at_cursor(&mut self, toggle: bool) {
+        let tab_width = self.tab_width();
+        let tab = &mut self.tabs[self.active];
+        if tab.compare.is_some() || tab.merge.is_some() {
+            return;
+        }
+        let doc = &self.docs[tab.doc];
+        let cursor = tab.carets.cursor(&doc.buffer);
+        let span = doc.buffer.line_span(cursor);
+        if toggle && tab.view.folds.unfold_line(span).is_some() {
+            self.changed(true);
+            return;
+        }
+        let mut window = Vec::new();
+        let folded = |r: &Range<usize>| tab.view.folds.active().contains(r);
+        let region = folding::region_at(doc, cursor, tab_width, &mut window)
+            .filter(|r| !folded(r))
+            .or_else(|| folding::enclosing(doc, cursor, tab_width, &mut window))
+            .filter(|r| !folded(r));
+        let Some(region) = region else {
+            self.say("Nothing to fold here", false);
+            return;
+        };
+        tab.view.folds.fold(region);
+        self.cursor_out_of_folds(self.active);
+        self.changed(false);
+    }
+
+    /// Unfold the fold on the cursor's line.
+    fn unfold_at_cursor(&mut self) {
+        let tab = &mut self.tabs[self.active];
+        let t = &self.docs[tab.doc].buffer;
+        let cursor = tab.carets.cursor(t);
+        if tab.view.folds.unfold_line(t.line_span(cursor)).is_some()
+            || tab.view.folds.reveal(cursor)
+        {
+            self.changed(true);
+        }
+    }
+
+    /// A fold just made may hide the cursor: put it at the end of the
+    /// fold's first line, where it stays in view.
+    fn cursor_out_of_folds(&mut self, i: usize) {
+        let tab = &mut self.tabs[i];
+        let cursor = tab.carets.cursor(&self.docs[tab.doc].buffer);
+        if let Some(f) = tab.view.folds.hiding(cursor) {
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets).click(f.start, false);
+        }
+    }
+
+    /// Fold All (`level` `None`) or Fold Level N: the regions are found on
+    /// a worker, and fold when it reports ([`App::folded`]).
+    fn fold_all(&mut self, level: Option<usize>) {
+        let tab_width = self.tab_width();
+        let tab = &self.tabs[self.active];
+        if tab.compare.is_some() || tab.merge.is_some() {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        let started = folding::start(&self.docs[tab.doc], tab_width, level, move |r| {
+            let _ = proxy.send_event(AppEvent::Folded(r));
+        });
+        match started {
+            Ok(job) => self.tabs[self.active].fold_job = Some(job),
+            Err(e) => self.say(e, true),
+        }
+    }
+
+    /// A Fold All scan finished: fold what it found, unless the text
+    /// changed meanwhile.
+    fn folded(&mut self, result: folding::FoldResult) {
+        let Some(i) = self
+            .tabs
+            .iter()
+            .position(|t| t.fold_job.as_ref().is_some_and(|j| j.token == result.token))
+        else {
+            return; // closed meanwhile
+        };
+        let tab = &mut self.tabs[i];
+        let Some(job) = tab.fold_job.take() else {
+            return;
+        };
+        let doc = &self.docs[tab.doc];
+        if doc.version != job.version {
+            self.say("The file changed while folding; fold again", false);
+            return;
+        }
+        if result.regions.is_empty() {
+            self.say("Nothing to fold", false);
+            return;
+        }
+        tab.view.follow(doc);
+        tab.view.folds.fold_many(result.regions);
+        self.cursor_out_of_folds(i);
+        self.changed(false);
     }
 
     /// Split Right: a new group right of the focused one, showing the
@@ -2518,7 +2665,6 @@ impl App {
         tab.view.scroll_top = from.view.scroll_top;
         tab.view.scroll_px = from.view.scroll_px;
         self.tabs.push(tab);
-        self.update_shared();
         self.switch_to(self.tabs.len() - 1);
     }
 
@@ -2587,7 +2733,6 @@ impl App {
             tab.group = g;
         }
         self.unpark_focus();
-        self.update_shared();
     }
 
     /// Quit, offering to save every tab with unsaved changes. If a huge
@@ -2949,11 +3094,6 @@ impl App {
             | Command::NextTab
             | Command::PrevTab
             | Command::GoToTab(_)
-            | Command::SplitRight
-            | Command::CloseGroup
-            | Command::FocusLeftGroup
-            | Command::FocusRightGroup
-            | Command::MoveTabToNextGroup
             | Command::QuickOpen
             | Command::Palette
             | Command::ReloadConfig
@@ -2977,7 +3117,7 @@ impl App {
             | Command::MergeWithDisk
             | Command::CheckUpdates
             | Command::OpenRelease => return false,
-            _ if cmd.is_find_in_files() => return false,
+            _ if cmd.is_find_in_files() || cmd.is_layout() => return false,
             _ => {
                 let paste = (cmd == Command::Paste)
                     .then(|| self.clipboard_get())
@@ -3235,6 +3375,10 @@ impl App {
             self.grab_scrollbar(hit, y, &layout);
             return;
         }
+        if self.fold_click(&layout, x, y) {
+            return;
+        }
+        let tab = &mut self.tabs[self.active];
         let pos = tab.view.hit(x, y, &self.docs[tab.doc], &layout, tab_width);
         let count = self.clicks.press(now, (x, y), layout.metrics.cell_width);
         // Shift+Alt+press: a column selection, grown by dragging.
@@ -3281,6 +3425,72 @@ impl App {
         self.clicks.dragging = !(count == 1 && self.modifiers.alt_key() && !self.clicks.adding);
         self.blink.reset(now);
         self.changed(false);
+    }
+
+    /// A press on a fold chip (it unfolds) or on the gutter's fold marker
+    /// column (the line folds or unfolds). Returns whether it was one.
+    fn fold_click(&mut self, layout: &Layout, x: f32, y: f32) -> bool {
+        let tab_width = self.tab_width();
+        let tab = &mut self.tabs[self.active];
+        let doc = &self.docs[tab.doc];
+        if let Some(start) = tab.view.chip_at(x, y, layout.metrics.line_height) {
+            tab.view.folds.unfold_line(doc.buffer.line_span(start));
+            self.changed(false);
+            return true;
+        }
+        if !View::on_fold_marker(layout, x) {
+            return false;
+        }
+        let pos = tab.view.hit(layout.text_left, y, doc, layout, tab_width);
+        let span = doc.buffer.line_span(pos);
+        if tab.view.folds.unfold_line(span).is_none() {
+            let mut window = Vec::new();
+            let Some(region) = folding::region_at(doc, span.start, tab_width, &mut window) else {
+                return false;
+            };
+            tab.view.folds.fold(region);
+            self.cursor_out_of_folds(self.active);
+        }
+        self.changed(false);
+        true
+    }
+
+    /// Show the fold marker on the line under the pointer while it is in
+    /// the gutter, if that line can fold. Asks about a line only when the
+    /// pointer moves to another one.
+    fn update_fold_hover(&mut self) {
+        let Some(layout) = self.layout() else { return };
+        let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        let tab_width = self.tab_width();
+        let active = self.active;
+        let tab = &mut self.tabs[active];
+        let doc = &self.docs[tab.doc];
+        let in_gutter = x >= layout.left
+            && x < layout.text_left
+            && y >= layout.top
+            && y < layout.bottom
+            && tab.compare.is_none()
+            && tab.merge.is_none();
+        let line = in_gutter.then(|| {
+            let pos = tab.view.hit(layout.text_left, y, doc, &layout, tab_width);
+            doc.buffer.line_span(pos).start
+        });
+        let key = line.map(|l| (active, doc.version, l));
+        if key == self.fold_hover_key {
+            return;
+        }
+        self.fold_hover_key = key;
+        let mut window = Vec::new();
+        let foldable = line.filter(|&l| {
+            tab.view.folds.on_line(doc.buffer.line_span(l)).is_none()
+                && folding::region_at(doc, l, tab_width, &mut window).is_some()
+        });
+        if tab.view.fold_hover != foldable {
+            tab.view.fold_hover = foldable;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
     }
 
     /// A press in the sidebar: the tree, or the Search panel.
@@ -4093,11 +4303,6 @@ impl App {
             | Command::NextTab
             | Command::PrevTab
             | Command::GoToTab(_)
-            | Command::SplitRight
-            | Command::CloseGroup
-            | Command::FocusLeftGroup
-            | Command::FocusRightGroup
-            | Command::MoveTabToNextGroup
             | Command::QuickOpen
             | Command::Palette
             | Command::ReloadConfig
@@ -4119,7 +4324,7 @@ impl App {
             | Command::PrevConflict
             | Command::ResolveMarkers
             | Command::MergeWithDisk => return false,
-            _ if cmd.is_find_in_files() => return false,
+            _ if cmd.is_find_in_files() || cmd.is_layout() => return false,
             _ if in_list => {}
             _ => {
                 let paste = (cmd == Command::Paste)
@@ -5253,6 +5458,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
             AppEvent::Disk(paths) => self.disk_changed(&paths),
             AppEvent::Index(token, chunk, error) => self.index_arrived(token, chunk, error),
+            AppEvent::Folded(result) => self.folded(result),
             AppEvent::Save(event) => {
                 self.save_event(event, event_loop);
                 self.changed(false);
@@ -5554,6 +5760,7 @@ impl ApplicationHandler<AppEvent> for App {
                     self.mouse_drag();
                 }
                 self.update_scrollbar_hover();
+                self.update_fold_hover();
                 self.update_cursor_icon();
                 self.update_search_hover();
             }
