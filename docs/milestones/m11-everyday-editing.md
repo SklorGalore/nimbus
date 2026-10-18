@@ -237,7 +237,7 @@ with three cursors, in `crates/core` and `crates/app/src/editing.rs`).
 | What | Value |
 |---|---|
 | Release binary, Linux x86_64 (container) | 20.3 MB (20,323,200 bytes), under the 35 MB budget |
-| `--smoke` first frame | needs a GPU; owner's machine |
+| `--smoke` first frame, release, M5 Pro (Metal) | 147.3 ms (window and GPU ready at 86 ms); M1 measured 116–132 ms, so M5–M10 and this milestone together cost about 20 ms, well inside the 500 ms budget |
 | Line operation on the 4 GB log | not measured here; every operation reads only the selected lines (`Block::of` walks `line_span`), and the mapped buffer's `replace_sorted` rebuilds its pieces once per batch, so the cost is the selection's size, capped at 64 MB |
 
 **Surprises**
