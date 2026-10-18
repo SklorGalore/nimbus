@@ -24,9 +24,10 @@
 //! the colour fonts are tried first, so 🎉 comes from Apple Color Emoji,
 //! Segoe UI Emoji or Noto Color Emoji rather than from a small font with a
 //! black-and-white drawing of it. Apple Color Emoji is close to 200 MB, far
-//! over [`MAX_FONT_FILE`], so a colour font that large is *mapped* rather
-//! than read: the operating system pages in only the parts holding the
-//! emoji actually drawn (see [`map`] and its safety note).
+//! over [`MAX_FONT_FILE`], so a colour font is allowed up to
+//! [`MAX_EMOJI_FILE`] and read into memory like any other fallback font.
+//! That costs its whole size in memory on the first emoji (owner's choice
+//! in M16: copying, again, rather than mapping with `unsafe`).
 //! Nothing here runs before the first missing character, so startup is
 //! unaffected.
 
@@ -42,6 +43,11 @@ use crate::font::Font;
 /// Font files larger than this are never loaded: reading one into memory
 /// would cost more than the budget allows for one script's characters.
 pub const MAX_FONT_FILE: u64 = 64 * 1024 * 1024;
+
+/// The size limit for a colour emoji font, which has no smaller
+/// alternative: Apple Color Emoji is about 200 MB. Anything past this is
+/// skipped, and emoji then draw from an outline font or as a box.
+pub const MAX_EMOJI_FILE: u64 = 512 * 1024 * 1024;
 
 /// The first face index fallback fonts get; 0 and 1 are the bundled
 /// regular and bold faces.
@@ -159,7 +165,7 @@ struct Candidate {
     /// file size).
     rank: (bool, u16, u64),
     /// The file is over [`MAX_FONT_FILE`]: kept only in case it is a colour
-    /// font, which is mapped rather than read.
+    /// font (up to [`MAX_EMOJI_FILE`]).
     large: bool,
 }
 
@@ -214,13 +220,13 @@ fn candidates(db: &fontdb::Database) -> Vec<Candidate> {
             }
             let size = std::fs::metadata(&path).ok()?.len();
             let large = size > MAX_FONT_FILE;
-            // Only a font with "emoji" in its name is worth mapping when
+            // Only a font with "emoji" in its name is worth reading when
             // large; anything else that size is a CJK font and skipped.
             let emoji = face
                 .families
                 .iter()
                 .any(|(name, _)| name.to_ascii_lowercase().contains("emoji"));
-            (!large || emoji).then(|| Candidate {
+            (!large || (emoji && size <= MAX_EMOJI_FILE)).then(|| Candidate {
                 id: face.id,
                 path,
                 index: face.index,
@@ -352,7 +358,7 @@ fn find_in(
         let has = db.with_face_data(cand.id, |data, index| {
             FontRef::from_index(data, index as usize).map(|f| {
                 let color = is_color(f);
-                // A large file is usable only as a colour font, mapped.
+                // A large file is usable only as a colour font.
                 let wanted = want_color.is_none_or(|w| w == color) && (!cand.large || color);
                 wanted && draws_script(f, c)
             })
@@ -365,12 +371,7 @@ fn find_in(
                 continue;
             }
         }
-        let font = if cand.large {
-            map(&cand.path, cand.index)
-        } else {
-            load(&cand.path, cand.index)
-        };
-        let Some(font) = font else {
+        let Some(font) = load(&cand.path, cand.index) else {
             useless.insert(cand.id);
             continue;
         };
@@ -455,34 +456,6 @@ pub fn find_editor_font(name: &str) -> Option<EditorFont> {
         started.elapsed()
     );
     Some(EditorFont { regular, bold })
-}
-
-/// Map a large colour font file into memory instead of reading it: the
-/// operating system reads in only the pages swash touches, so drawing a few
-/// emoji from a 200 MB file costs a few megabytes. Like [`load`], the
-/// mapping lives for the rest of the session.
-#[expect(
-    unsafe_code,
-    reason = "mapping a file is unsafe in Rust; the invariant is stated below"
-)]
-fn map(path: &std::path::Path, index: u32) -> Option<Font> {
-    let file = std::fs::File::open(path).ok()?;
-    // SAFETY: a mapped file must not change while it is mapped, or reads
-    // through the mapping see torn data (Rust's rules for `&[u8]` assume the
-    // bytes never change). Only system font files reach here: files under
-    // the operating system's font folders, which are replaced only by OS
-    // updates, and an update replaces the file (a new inode) rather than
-    // writing into it, so the mapped pages keep the old contents. The map is
-    // read-only, so we never write through it either.
-    let mapped = unsafe { memmap2::Mmap::map(&file) }.ok()?;
-    let leaked: &'static memmap2::Mmap = Box::leak(Box::new(mapped));
-    let data: &'static [u8] = leaked;
-    log::debug!(
-        "font fallback: mapped {} ({} MB)",
-        path.display(),
-        data.len() >> 20
-    );
-    Font::from_data(data, index)
 }
 
 #[cfg(test)]

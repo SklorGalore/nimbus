@@ -164,8 +164,8 @@ instances. Both stay inside the 8 ms frame budget.
 - Colour page: `crates/render/src/atlas.rs` (`AtlasPage`, the lazy
   colour texture), `raster.rs` (colour sources, premultiplying),
   `shaders/glyph.wgsl` (the `GLYPH_COLOR` flag picks the page).
-- Emoji fonts: `fallback.rs` (`is_emoji`, colour fonts first, memory
-  mapping fonts over 64 MB).
+- Emoji fonts: `fallback.rs` (`is_emoji`, colour fonts first, emoji
+  fonts allowed up to `MAX_EMOJI_FILE`).
 - Ligatures: `shape.rs` (`joined_at`, the reshape with ligatures off at
   a split, `place` keeping one glyph per cell), `view.rs` (`edges` feeds
   the cursor and selection edges as splits).
@@ -182,10 +182,10 @@ instances. Both stay inside the 8 ms frame budget.
 
 - **Apple Color Emoji is about 200 MB**, past M8's 64 MB limit on
   fallback fonts, which are copied into memory. Emoji fonts over the
-  limit are memory-mapped instead (`fallback.rs`, `map`). That is new
-  `unsafe` outside the mmap buffer, with a `SAFETY` comment; it needs
-  the owner's yes, and the alternative is copying 200 MB on the first
-  emoji.
+  limit are now allowed up to 512 MB and copied into memory like other
+  fallback fonts. Mapping the file instead would page in only the emoji
+  drawn but needs new `unsafe`; the owner chose copying, so the first
+  emoji costs about 200 MB of memory on macOS. Measure it on the Mac.
 - **Hack has no ligatures**, so the setting would do nothing with the
   default font. A new `font` setting takes a family name or a file path
   (`.ttf`, `.otf`, `.ttc`); it loads on a worker after the first frame

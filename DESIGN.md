@@ -365,8 +365,9 @@ true` lets the font's `liga`, `calt` and `clig` features join characters
 (they are switched off otherwise); a ligature keeps the cells of the
 characters it replaces, and a line with a cursor or selection edge inside
 one is shaped again with ligatures off. Colour emoji come through the M8
-fallback, which now prefers colour fonts for emoji and maps (rather than
-reads) a colour font over 64 MB, such as the 200 MB Apple Color Emoji.
+fallback, which now prefers colour fonts for emoji and reads a colour font
+up to 512 MB, such as the 200 MB Apple Color Emoji, into memory (copied,
+not mapped, so no `unsafe`; it costs its full size on the first emoji).
 
 **Startup path (M1).** M0 creates the GPU instance, adapter and device on the
 main thread after the window exists. M1 moves that work to a thread spawned
@@ -722,4 +723,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-17 | Injections: child trees keyed by host node id, kept one screen either side of the view, parsed within the frame's 2 ms budget at one child per frame at least; Rust's injection query not used | §4.2, m14 |
 | 2026-10-17 | Spans carry a capture table per grammar so the inner language's colours win inside injections; wide nodes are queried child by child | §4.2, m14 |
 | 2026-10-18 | Per-language soft wrap is `[editor.NAME] wrap`, following M11's `[editor.NAME]` and `[indent.NAME]` tables rather than the planned `[languages.NAME]` (that table maps file patterns); Markdown wraps by default | §4.4, m14 |
-| 2026-10-18 | M16: a colour font over 64 MB (Apple Color Emoji) is memory-mapped, the one new `unsafe` in `render`, rather than read; `font` names an installed family or a file, looked up on a worker; indent guides default off; linear blending tried and declined (gamma space stays) | §4.3, m16 |
+| 2026-10-18 | M16: a colour font over 64 MB (Apple Color Emoji, about 200 MB) is copied into memory, up to 512 MB, rather than mapped with new `unsafe` (owner's choice); `font` names an installed family or a file, looked up on a worker; indent guides default off; linear blending tried and declined (gamma space stays) | §4.3, m16 |

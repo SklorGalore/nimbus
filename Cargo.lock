@@ -1506,7 +1506,6 @@ dependencies = [
  "bytemuck",
  "fontdb",
  "log",
- "memmap2",
  "nimbus-core",
  "pollster 1.0.1",
  "proptest",
