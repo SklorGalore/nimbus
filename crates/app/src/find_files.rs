@@ -53,7 +53,7 @@ const BINARY_PROBE: usize = 8 * 1024;
 const BATCH_HITS: usize = 64;
 
 /// The longest a found hit waits before it is sent.
-const BATCH_TIME: Duration = Duration::from_millis(16);
+pub(crate) const BATCH_TIME: Duration = Duration::from_millis(16);
 
 /// What to search for and where.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

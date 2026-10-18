@@ -22,6 +22,14 @@
 //!   O(log hunks).
 //! - Only the rows on screen are planned and drawn ([`Columns`]), and the
 //!   changed-word marks are worked out for those rows alone.
+//!
+//! M18 adds three things. A header row above the columns toggles the diff
+//! options (ignore whitespace, case, blank lines), which re-diff on the
+//! worker like a fresh compare. A text with lines over 4 KB is diffed in
+//! pieces ([`nimbus_core::split`]): such a pair always takes the layered
+//! [`compare`] path, recomputed after a pause, because the live diff
+//! follows edits line by line. And the left side can be a revision from
+//! git ([`Other::Revision`]).
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -31,12 +39,13 @@ use std::time::{Duration, Instant};
 
 use nimbus_core::align::{Change, Folding, MAX_COLUMNS, Row, Rows};
 use nimbus_core::compare::{Comparison, Options, compare};
-use nimbus_core::diff::{DIFF_LIMIT, Hunk};
+use nimbus_core::diff::{DIFF_LIMIT, Hunk, Normalize, Whitespace};
 use nimbus_core::live_diff::{LiveDiff, Side};
+use nimbus_core::split::{Splits, has_long_lines};
 use nimbus_core::{Buffer, Snapshot, Text};
 use nimbus_render::Gpu;
 
-use crate::columns::{Click, Columns, Live};
+use crate::columns::{Bytes, Click, Columns, Live};
 use crate::document::{Carets, Document};
 use crate::theme::Theme;
 use crate::view::{Layout, Preedit, View};
@@ -50,6 +59,23 @@ pub enum Other {
     File(PathBuf),
     /// A copy of another tab's text, by its name.
     Tab(String),
+    /// The file at a git revision (M18), by the revision's name.
+    Revision(String),
+    /// Nothing: a folder compare's file that only the right folder has.
+    Missing,
+}
+
+/// A toggle in the compare view's header row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Toggle {
+    /// Ignore whitespace: off, at the ends, everywhere.
+    Whitespace,
+    /// Ignore ASCII case.
+    Case,
+    /// Drop changes of blank lines only.
+    BlankLines,
+    /// One column instead of two.
+    Unified,
 }
 
 /// A finished diff from the worker.
@@ -83,6 +109,8 @@ enum State {
         old_lines: usize,
         new_lines: usize,
         exact: bool,
+        /// Cut lines per side; when any, the above count units.
+        splits: Box<[Splits; 2]>,
     },
     Failed(String),
 }
@@ -131,6 +159,8 @@ pub struct Compare {
     /// In the fixed state: when an edit last made the diff stale.
     dirty_since: Option<Instant>,
     status: String,
+    /// What counts as an equal line (M18).
+    normalize: Normalize,
 }
 
 impl std::fmt::Debug for Compare {
@@ -147,7 +177,13 @@ impl std::fmt::Debug for Compare {
 impl Compare {
     /// Start comparing `doc` (the right side) with `other`. Begins noting
     /// `doc`'s edits and starts the first diff on a worker.
-    pub fn start(doc: &mut Document, other: Document, what: Other, send: Send) -> Self {
+    pub fn start(
+        doc: &mut Document,
+        other: Document,
+        what: Other,
+        normalize: Normalize,
+        send: Send,
+    ) -> Self {
         doc.watch_edits(true);
         let mut c = Self {
             other,
@@ -162,6 +198,7 @@ impl Compare {
             unified: false,
             dirty_since: None,
             status: String::new(),
+            normalize,
         };
         c.other_view.wrap = false;
         c.restart(doc);
@@ -177,18 +214,31 @@ impl Compare {
     /// Like [`start`](Compare::start), but diffs on this thread before
     /// returning: for headless rendering and tests, which have no event
     /// loop to deliver a worker's result.
-    pub fn start_sync(doc: &mut Document, other: Document, what: Other) -> Self {
+    pub fn start_sync(
+        doc: &mut Document,
+        other: Document,
+        what: Other,
+        normalize: Normalize,
+    ) -> Self {
         let send: Send = Arc::new(|_| false);
-        let mut c = Self::start(doc, other, what, send);
+        let mut c = Self::start(doc, other, what, normalize, send);
         let old: Arc<dyn Snapshot> = c.other.buffer.snapshot().into();
         let new: Arc<dyn Snapshot> = doc.buffer.snapshot().into();
         let result = DiffResult {
             generation: c.generation,
             version: doc.version,
-            outcome: diff_now(&old, &new),
+            outcome: diff_now(&old, &new, normalize),
         };
         c.receive(doc, result);
         c
+    }
+
+    /// Diff with other options: a fresh compare on the worker.
+    pub fn set_normalize(&mut self, doc: &Document, normalize: Normalize) {
+        if normalize != self.normalize {
+            self.normalize = normalize;
+            self.restart(doc);
+        }
     }
 
     /// Whether `result` answers this compare's latest request.
@@ -208,11 +258,12 @@ impl Compare {
         let old: Arc<dyn Snapshot> = self.other.buffer.snapshot().into();
         let new: Arc<dyn Snapshot> = doc.buffer.snapshot().into();
         let send = Arc::clone(&self.send);
+        let normalize = self.normalize;
         let work = move || {
             send(DiffResult {
                 generation,
                 version,
-                outcome: diff_now(&old, &new),
+                outcome: diff_now(&old, &new, normalize),
             });
         };
         if let Err(e) = std::thread::Builder::new().name("diff".into()).spawn(work) {
@@ -238,6 +289,7 @@ impl Compare {
                 old_lines: c.old_lines,
                 new_lines: c.new_lines,
                 exact: c.exact,
+                splits: Box::new([c.old_splits, c.new_splits]),
             },
             Err(e) => State::Failed(e),
         };
@@ -322,6 +374,13 @@ impl Compare {
     }
 
     fn rebuild_rows(&mut self) {
+        let units = match &self.state {
+            State::Fixed { splits, .. } => {
+                let [a, b] = (**splits).clone();
+                [a, b, Splits::default()]
+            }
+            _ => Default::default(),
+        };
         let Some((hunks, old_lines, new_lines)) = self.hunks() else {
             return;
         };
@@ -332,6 +391,7 @@ impl Compare {
             Rows::two_way(hunks, old_lines, new_lines, folding)
         };
         self.columns.set_rows(rows);
+        self.columns.set_units(units);
     }
 
     /// Switch between two columns and one.
@@ -343,13 +403,21 @@ impl Compare {
 
     /// Scroll by `dy` pixels (positive is down).
     pub fn scroll_by(&mut self, dy: f32, layout: &Layout) {
-        self.columns.scroll_by(dy, layout);
+        self.columns.scroll_by(dy, &Self::body(layout));
+    }
+
+    /// The columns' area: `layout` below the header row.
+    #[must_use]
+    pub fn body(layout: &Layout) -> Layout {
+        let mut body = *layout;
+        body.top = (body.top + layout.metrics.line_height).min(body.bottom);
+        body
     }
 
     /// Keep the right side's cursor on screen, opening a fold it is in.
     pub fn ensure_cursor_visible(&mut self, doc: &Document, cursor: usize, layout: &Layout) {
         let line = doc.buffer.byte_to_line(cursor);
-        self.columns.ensure_line_visible(line, layout);
+        self.columns.ensure_line_visible(line, &Self::body(layout));
     }
 
     /// Go to the next change after the cursor (or the current one).
@@ -371,7 +439,9 @@ impl Compare {
         layout: &Layout,
     ) -> Option<usize> {
         let line = doc.buffer.byte_to_line(cursor);
-        let start = self.columns.step_change(forward, line, layout)?;
+        let start = self
+            .columns
+            .step_change(forward, line, &Self::body(layout))?;
         // The cursor goes to the change's first line on the right, or to
         // the line after a pure removal; at the very end, the last line.
         let line = self
@@ -379,6 +449,80 @@ impl Compare {
             .live_line_from(start)
             .unwrap_or_else(|| doc.buffer.len_lines().saturating_sub(1));
         Some(doc.buffer.line_to_byte(line))
+    }
+
+    /// The header toggle at `(x, y)`, if the press is on one.
+    #[must_use]
+    pub fn header_hit(&self, layout: &Layout, x: f32, y: f32) -> Option<Toggle> {
+        let lh = layout.metrics.line_height;
+        if y < layout.top || y >= layout.top + lh {
+            return None;
+        }
+        self.header_items(layout)
+            .into_iter()
+            .find(|(_, range, _, _)| range.contains(&x))
+            .map(|(t, ..)| t)
+    }
+
+    /// The header's toggles: each with its x range, label and whether on.
+    fn header_items(&self, layout: &Layout) -> Vec<(Toggle, Range<f32>, &'static str, bool)> {
+        let cell = layout.metrics.cell_width;
+        let n = self.normalize;
+        let items = [
+            (
+                Toggle::Whitespace,
+                match n.whitespace {
+                    Whitespace::Exact => "Ignore whitespace",
+                    Whitespace::Ends => "Ignore whitespace: ends",
+                    Whitespace::All => "Ignore whitespace: all",
+                },
+                n.whitespace != Whitespace::Exact,
+            ),
+            (Toggle::Case, "Ignore case", n.case),
+            (Toggle::BlankLines, "Ignore blank lines", n.blank_lines),
+            (Toggle::Unified, "Unified", self.unified),
+        ];
+        let mut x = layout.left + layout.margin;
+        items
+            .into_iter()
+            .map(|(t, label, on)| {
+                #[expect(clippy::cast_precision_loss, reason = "a short label's length")]
+                let w = label.chars().count() as f32 * cell;
+                let item = (t, x..x + w, label, on);
+                x += w + 2.0 * cell;
+                item
+            })
+            .collect()
+    }
+
+    /// Draw the header row: the toggles, bright when on.
+    fn draw_header(&self, gpu: &mut Gpu, layout: &Layout, theme: &Theme) {
+        let ui = theme.ui;
+        let lh = layout.metrics.line_height;
+        gpu.begin_layer(Some([
+            layout.left,
+            layout.top,
+            layout.width,
+            layout.top + lh,
+        ]));
+        gpu.push_rect(
+            [layout.left, layout.top],
+            [layout.width - layout.left, lh],
+            ui.tab_bar,
+        );
+        let accent = (2.0 * layout.scale).round().max(1.0);
+        for (_, range, label, on) in self.header_items(layout) {
+            let color = if on { ui.text } else { ui.gutter };
+            gpu.push_text_line([range.start, layout.top], label, color);
+            if on {
+                gpu.push_rect(
+                    [range.start, layout.top + lh - accent],
+                    [range.end - range.start, accent],
+                    ui.tab_accent,
+                );
+            }
+        }
+        gpu.begin_layer(None);
     }
 
     /// A click at `(x, y)`. `view` is the right side's view, which maps
@@ -392,7 +536,8 @@ impl Compare {
         x: f32,
         y: f32,
     ) -> Click {
-        self.columns.click(doc, view, layout, tab_width, x, y)
+        self.columns
+            .click(doc, view, &Self::body(layout), tab_width, x, y)
     }
 
     /// The summary for the status bar, followed by the editor's own
@@ -409,9 +554,10 @@ impl Compare {
                     p.file_name().and_then(|n| n.to_str()).unwrap_or("file")
                 );
             }
-            Other::Tab(name) => {
+            Other::Tab(name) | Other::Revision(name) => {
                 let _ = write!(self.status, "Compare with {name}");
             }
+            Other::Missing => self.status.push_str("Only in the right folder"),
         }
         match &self.state {
             State::Pending => self.status.push_str(" · comparing…"),
@@ -433,6 +579,11 @@ impl Compare {
                 if let State::Fixed { exact: false, .. } = &self.state {
                     self.status
                         .push_str(" · large file: changes may not be minimal");
+                }
+                if let State::Fixed { splits, .. } = &self.state
+                    && splits.iter().any(|s| !s.is_empty())
+                {
+                    self.status.push_str(" · long lines compared in pieces");
                 }
                 if self.dirty_since.is_some() {
                     self.status.push_str(" · updating…");
@@ -464,11 +615,10 @@ impl Compare {
             (Some((Change::Changed, _)), _) => Some(ui.diff_changed),
             (None, _) => None,
         };
-        let (other, this) = (&self.other.buffer, &doc.buffer);
-        let marks = |r: &Row<Change>| -> [Option<Range<usize>>; MAX_COLUMNS] {
-            use nimbus_core::align::Cell;
-            if let (Some((Change::Changed, _)), Cell::Line(a), Cell::Line(b)) =
-                (r.change, r.cells[0], r.cells[1])
+        let (other, this): (&dyn Text, &dyn Text) = (&self.other.buffer, &doc.buffer);
+        let marks = |r: &Row<Change>, bytes: &Bytes| -> [Option<Range<usize>>; MAX_COLUMNS] {
+            if let (Some((Change::Changed, _)), Some(a), Some(b)) =
+                (r.change, bytes[0].clone(), bytes[1].clone())
             {
                 let (ma, mb) = word_marks(other, a, this, b);
                 [ma, mb, None]
@@ -476,7 +626,7 @@ impl Compare {
                 [None, None, None]
             }
         };
-        self.columns.plan(layout, background, marks)
+        self.columns.plan(layout, &[other, this], background, marks)
     }
 
     /// Queue the compare area: both columns and their scrollbars. The
@@ -498,6 +648,8 @@ impl Compare {
         preedit: Option<&Preedit>,
         matches: (&[Range<usize>], Option<Range<usize>>),
     ) {
+        self.draw_header(gpu, layout, theme);
+        let layout = &Self::body(layout);
         self.plan(doc, layout, theme);
         let live = Live {
             cursor_visible,
@@ -517,28 +669,41 @@ impl Compare {
 }
 
 /// The diff itself: live within the limit, layered past it.
-fn diff_now(old: &Arc<dyn Snapshot>, new: &Arc<dyn Snapshot>) -> Result<DiffKind, String> {
-    if old.len_bytes() <= DIFF_LIMIT && new.len_bytes() <= DIFF_LIMIT {
-        LiveDiff::new(old, new)
+///
+/// A pair with a line over the split threshold takes the layered path
+/// with splitting on, even within the limit: the live diff follows edits
+/// line by line and knows nothing of pieces.
+fn diff_now(
+    old: &Arc<dyn Snapshot>,
+    new: &Arc<dyn Snapshot>,
+    normalize: Normalize,
+) -> Result<DiffKind, String> {
+    let within = old.len_bytes() <= DIFF_LIMIT && new.len_bytes() <= DIFF_LIMIT;
+    if within && !has_long_lines(&**old) && !has_long_lines(&**new) {
+        LiveDiff::with_normalize(old, new, normalize)
             .map(|d| DiffKind::Live(Box::new(d)))
             .map_err(|e| e.to_string())
     } else {
-        compare(old, new, Options::default())
+        let options = Options {
+            normalize,
+            split: within,
+            ..Options::default()
+        };
+        compare(old, new, options)
             .map(DiffKind::Fixed)
             .map_err(|e| e.to_string())
     }
 }
 
-/// The differing middle of two lines (common start and end trimmed), as
-/// byte ranges in each text, for lines of ordinary length.
+/// The differing middle of two lines or pieces `sa` and `sb` (common start
+/// and end trimmed), as byte ranges in each text, for ones of ordinary
+/// length.
 fn word_marks(
     a: &dyn Text,
-    la: usize,
+    sa: Range<usize>,
     b: &dyn Text,
-    lb: usize,
+    sb: Range<usize>,
 ) -> (Option<Range<usize>>, Option<Range<usize>>) {
-    let sa = a.line_span(a.line_to_byte(la));
-    let sb = b.line_span(b.line_to_byte(lb));
     if sa.end - sa.start > MARK_LIMIT || sb.end - sb.start > MARK_LIMIT {
         return (None, None);
     }
@@ -582,12 +747,12 @@ pub(crate) mod tests {
     fn word_marks_trim_common_ends() {
         let a = Solo::from_text("let x = compute(1, 2);\n");
         let b = Solo::from_text("let x = compute(1, 3);\n");
-        let (ma, mb) = word_marks(&a.buffer, 0, &b.buffer, 0);
+        let (ma, mb) = word_marks(&a.buffer, 0..22, &b.buffer, 0..22);
         assert_eq!(ma, Some(19..20));
         assert_eq!(mb, Some(19..20));
         let a = Solo::from_text("é\n");
         let b = Solo::from_text("ê\n");
-        let (ma, _) = word_marks(&a.buffer, 0, &b.buffer, 0);
+        let (ma, _) = word_marks(&a.buffer, 0..2, &b.buffer, 0..2);
         assert_eq!(ma, Some(0..2), "widened to the character");
     }
 
@@ -645,7 +810,7 @@ pub(crate) mod tests {
         let mut doc = Solo::of(Document::open(&new).unwrap());
         let other = Document::open(&old).unwrap();
         let t = std::time::Instant::now();
-        let mut c = Compare::start_sync(&mut doc, other, Other::File(old));
+        let mut c = Compare::start_sync(&mut doc, other, Other::File(old), Normalize::default());
         println!(
             "compare built in {:?}: {} rows, {} changes",
             t.elapsed(),
@@ -683,7 +848,7 @@ pub(crate) mod tests {
     fn a_compare_follows_edits_and_counts_changes() {
         let mut doc = Solo::from_text("a\nb\nc\nd\n");
         let other = Document::from_text("a\nB\nc\nd\n");
-        let mut c = Compare::start_sync(&mut doc, other, Other::Saved);
+        let mut c = Compare::start_sync(&mut doc, other, Other::Saved, Normalize::default());
         assert_eq!(c.columns.rows.changes(), 1);
         assert!(c.status("").starts_with("Compare with saved · 1 change"));
         // Type on the last line: a second change appears after a sync.
@@ -725,7 +890,7 @@ pub(crate) mod tests {
         });
         let mut doc = Solo::from_text(&base);
         let other = Document::from_text(&base);
-        let mut c = Compare::start_sync(&mut doc, other, Other::Saved);
+        let mut c = Compare::start_sync(&mut doc, other, Other::Saved, Normalize::default());
         assert_eq!(c.columns.rows.changes(), 0);
         let at = doc.buffer.line_to_byte(10);
         doc.ed().click(at, false);
@@ -751,7 +916,7 @@ pub(crate) mod tests {
     fn plans_cover_the_screen_with_fillers_and_backgrounds() {
         let mut doc = Solo::from_text("a\nx\ny\nb\n");
         let other = Document::from_text("a\nb\n");
-        let mut c = Compare::start_sync(&mut doc, other, Other::Saved);
+        let mut c = Compare::start_sync(&mut doc, other, Other::Saved, Normalize::default());
         let layout = layout();
         let theme = Theme::default();
         let ui = theme.ui;
@@ -765,6 +930,91 @@ pub(crate) mod tests {
         assert_eq!(left[3].line, Some(1));
         assert_eq!(right[3].line, Some(3));
         assert_eq!(right[3].background, None);
+    }
+
+    #[test]
+    fn options_re_diff_and_the_header_toggles_them() {
+        let mut doc = Solo::from_text("fn a() {\n    x\n}\nY\n");
+        let other = Document::from_text("fn a() {\n  x  \n}\ny\n");
+        let mut c = Compare::start_sync(&mut doc, other, Other::Saved, Normalize::default());
+        assert_eq!(c.columns.rows.changes(), 2);
+        let n = Normalize {
+            whitespace: Whitespace::Ends,
+            case: true,
+            blank_lines: false,
+        };
+        c.set_normalize(&doc, n);
+        // The re-diff runs on a worker; here, on this thread instead.
+        let old: Arc<dyn Snapshot> = c.other.buffer.snapshot().into();
+        let new: Arc<dyn Snapshot> = doc.buffer.snapshot().into();
+        let result = DiffResult {
+            generation: c.generation,
+            version: doc.version,
+            outcome: diff_now(&old, &new, n),
+        };
+        assert!(c.receive(&doc, result));
+        assert_eq!(c.columns.rows.changes(), 0, "{:?}", c.hunks());
+        // The header row sits above the columns; its first toggle is
+        // whitespace, its last unified.
+        let layout = layout();
+        let y = layout.top + 1.0;
+        let x0 = layout.left + layout.margin + 1.0;
+        assert_eq!(c.header_hit(&layout, x0, y), Some(Toggle::Whitespace));
+        assert_eq!(
+            c.header_hit(&layout, x0, y + layout.metrics.line_height),
+            None
+        );
+        assert_eq!(
+            Compare::body(&layout).top,
+            layout.top + layout.metrics.line_height
+        );
+    }
+
+    #[test]
+    fn long_lines_compare_in_pieces_with_continuation_rows() {
+        // Varied words, like real minified data (a short repeating cycle
+        // would give the content-defined cuts nothing to find).
+        let mut x = 7u64;
+        let words: String = (0..3000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                [
+                    "alpha ",
+                    "beta ",
+                    "{\"k\": 1}, ",
+                    "gamma ",
+                    "delta, ",
+                    "[2] ",
+                ][(x % 6) as usize]
+            })
+            .collect();
+        let at = words.len() / 2;
+        let edited = format!("{}CHANGED{}", &words[..at], &words[at..]);
+        let mut doc = Solo::from_text(&format!("head\n{edited}\n"));
+        let other = Document::from_text(&format!("head\n{words}\n"));
+        let mut c = Compare::start_sync(&mut doc, other, Other::Saved, Normalize::default());
+        // One small change among many pieces, not the whole line.
+        assert_eq!(c.columns.rows.changes(), 1, "{:?}", c.hunks());
+        let (hunks, old_units, _) = c.hunks().unwrap();
+        assert!(old_units > 3, "the long line is cut: {old_units} units");
+        assert_eq!(hunks[0].old.len(), 1, "{hunks:?}");
+        assert!(c.status("").contains("long lines compared in pieces"));
+        let layout = layout();
+        let theme = Theme::default();
+        c.plan(&doc, &Compare::body(&layout), &theme);
+        let right = &c.columns.plans()[1];
+        assert_eq!(right[0].line, Some(0));
+        assert!(right[0].piece.is_none(), "short lines draw whole");
+        assert_eq!(right[1].line, Some(1));
+        let (first, continued) = right[1].piece.clone().unwrap();
+        assert!(!continued);
+        assert_eq!(first.start, 5);
+        let (second, continued) = right[2].piece.clone().unwrap();
+        assert!(continued, "the second piece continues the line");
+        assert_eq!(second.start, first.end);
+        assert_eq!(right[2].line, Some(1));
     }
 
     #[test]

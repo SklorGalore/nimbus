@@ -59,12 +59,12 @@ impl State {
 
     /// Remember `n` as the compare options.
     pub fn set_diff_options(&mut self, n: Normalize) {
-        self.diff_ignore_whitespace = match n.whitespace {
+        match n.whitespace {
             Whitespace::Exact => "off",
             Whitespace::Ends => "ends",
             Whitespace::All => "all",
         }
-        .to_owned();
+        .clone_into(&mut self.diff_ignore_whitespace);
         self.diff_ignore_case = n.case;
         self.diff_ignore_blank_lines = n.blank_lines;
     }

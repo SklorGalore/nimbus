@@ -41,6 +41,8 @@ pub enum Item {
     Symbol(Symbol, Option<usize>),
     /// An open tab to compare with (M9): its index and name.
     Tab(usize, String),
+    /// A git revision to compare the tab's file with (M18), as typed.
+    Revision(String),
 }
 
 /// Which picker is open.
@@ -56,6 +58,8 @@ pub enum Kind {
     Symbols,
     /// Choosing another tab to compare with.
     Tabs,
+    /// Compare with Revision (M18): the query is a git revision or ref.
+    Revision,
 }
 
 /// One row to draw.
@@ -204,6 +208,21 @@ impl Picker {
         picker
     }
 
+    /// Open Compare with Revision: like go-to-line, no list; the query is
+    /// any revision git accepts (`HEAD~2`, a branch, a tag, a hash).
+    pub fn revision(notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let picker = Self::new(Kind::Revision, Config::DEFAULT, notify, PathBuf::new());
+        picker.walk_done.store(true, Ordering::Relaxed);
+        picker
+    }
+
+    /// The revision typed, trimmed; `None` while empty.
+    fn revision_target(&self) -> Option<String> {
+        let query = self.input.doc.buffer.line(0);
+        let rev = query.trim();
+        (!rev.is_empty()).then(|| rev.to_owned())
+    }
+
     /// Open Go to Symbol over `symbols`, each with its line number when
     /// known. Matching is by name only; the kind is shown, not matched.
     pub fn symbols(
@@ -249,7 +268,7 @@ impl Picker {
     /// Feed the current query to the matcher and let it work for up to a
     /// millisecond. Returns whether results changed or are still coming.
     pub fn tick(&mut self) -> bool {
-        if self.kind == Kind::Line {
+        if matches!(self.kind, Kind::Line | Kind::Revision) {
             return false;
         }
         let query = self.input.doc.buffer.line(0).into_owned();
@@ -277,6 +296,9 @@ impl Picker {
     pub fn match_count(&self) -> usize {
         if self.kind == Kind::Line {
             return usize::from(self.line_target().is_some());
+        }
+        if self.kind == Kind::Revision {
+            return usize::from(self.revision_target().is_some());
         }
         self.matcher.snapshot().matched_item_count() as usize
     }
@@ -309,6 +331,9 @@ impl Picker {
         if self.kind == Kind::Line {
             return self.line_target().map(Item::Line);
         }
+        if self.kind == Kind::Revision {
+            return self.revision_target().map(Item::Revision);
+        }
         let i = u32::try_from(self.selected).ok()?;
         self.matcher
             .snapshot()
@@ -331,6 +356,16 @@ impl Picker {
             let row = Row {
                 text: format!("Go to line {n}"),
                 detail,
+            };
+            return (vec![row], Some(0));
+        }
+        if self.kind == Kind::Revision {
+            let Some(rev) = self.revision_target() else {
+                return (Vec::new(), None);
+            };
+            let row = Row {
+                text: format!("Compare with {rev}"),
+                detail: "git revision".to_owned(),
             };
             return (vec![row], Some(0));
         }
@@ -358,7 +393,7 @@ impl Picker {
                         None => s.kind.label().to_owned(),
                     },
                 },
-                Item::Tab(_, name) => Row {
+                Item::Tab(_, name) | Item::Revision(name) => Row {
                     text: name.clone(),
                     detail: String::new(),
                 },

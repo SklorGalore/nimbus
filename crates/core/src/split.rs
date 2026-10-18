@@ -305,7 +305,15 @@ impl Splits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Buffer, RopeBuffer};
+    use crate::RopeBuffer;
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test data: small numbers mod small lengths"
+    )]
+    fn small(n: u64) -> usize {
+        n as usize
+    }
 
     /// Deterministic varied ASCII, like minified JSON.
     fn varied(len: usize, seed: u64) -> String {
@@ -316,7 +324,7 @@ mod tests {
                 x ^= x << 13;
                 x ^= x >> 7;
                 x ^= x << 17;
-                char::from(alphabet[(x % alphabet.len() as u64) as usize])
+                char::from(alphabet[small(x % alphabet.len() as u64)])
             })
             .collect()
     }
@@ -330,7 +338,7 @@ mod tests {
 
     #[test]
     fn short_lines_are_not_cut_and_long_ones_average_a_kilobyte() {
-        assert!(cuts_of(&varied(SPLIT_AT, 1)).is_empty());
+        assert_eq!(cuts_of(&varied(SPLIT_AT, 1)), Vec::<usize>::new());
         let c = cuts_of(&varied(1 << 20, 2));
         let average = (1 << 20) / (c.len() + 1);
         assert!((512..2048).contains(&average), "average piece {average}");
@@ -343,7 +351,7 @@ mod tests {
     #[test]
     fn a_run_of_one_byte_still_makes_bounded_pieces() {
         let c = cuts_of(&"x".repeat(100_000));
-        assert!(!c.is_empty());
+        assert_ne!(c, Vec::<usize>::new());
         assert!(c.windows(2).all(|w| w[1] - w[0] <= MAX_PIECE));
     }
 
@@ -362,8 +370,8 @@ mod tests {
     fn an_insertion_moves_at_most_two_cuts() {
         for seed in 1..40u64 {
             let base = varied(64 * 1024, seed);
-            let at = (seed as usize * 1543) % base.len();
-            let insert = varied(1 + (seed as usize % 40), seed + 1000);
+            let at = (small(seed) * 1543) % base.len();
+            let insert = varied(1 + small(seed % 40), seed + 1000);
             let mut edited = base.clone();
             edited.insert_str(at, &insert);
             let before: Vec<usize> = cuts_of(&base)

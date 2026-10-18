@@ -8,6 +8,7 @@ mod app;
 mod bmp;
 mod columns;
 mod compare;
+mod compare_panel;
 mod config;
 mod debug;
 mod docs;
@@ -15,7 +16,9 @@ mod document;
 mod editing;
 mod find;
 mod find_files;
+mod folder_compare;
 mod folding;
+mod git;
 mod groups;
 mod indexer;
 mod input;
@@ -96,7 +99,8 @@ pub struct Options {
     /// `--cursors 3,10,20`: with `--headless`, put a cursor at each byte
     /// offset (the last is the primary), to render several cursors.
     pub cursors: Vec<usize>,
-    /// `--diff A B`: compare `B` (opened as a tab) with `A`.
+    /// `--diff A B`: compare `B` (opened as a tab) with `A`; two folders
+    /// open a folder compare in the sidebar (M18).
     pub diff: Option<(PathBuf, PathBuf)>,
     /// `--merge BASE LOCAL REMOTE -o RESULT`: a three-way merge tab whose
     /// result saves to `RESULT`; the exit code says whether it was saved

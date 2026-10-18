@@ -345,6 +345,10 @@ pub struct RowPlan {
     pub background: Option<Color>,
     /// Bytes of the line drawn over a stronger colour: the changed words.
     pub mark: Option<Range<usize>>,
+    /// Only this piece of the line is drawn (M18: a compare cut a long
+    /// line into pieces, one row each), and whether it continues the
+    /// piece before it, which draws `⤶` in the gutter instead of a number.
+    pub piece: Option<(Range<usize>, bool)>,
 }
 
 /// What a remembered bracket pair was worked out for: the text's version,
@@ -353,6 +357,26 @@ type BracketKey = (u64, usize, u64);
 
 /// How far each way bracket matching counts when there is no syntax tree.
 const BRACKET_LIMIT: usize = 64 * 1024;
+
+/// The span to draw for a row showing `piece` of the line at `span` (M18:
+/// a compare cut the line): a line of its own that ends where the piece
+/// does, and whether it continues the piece before. The whole line when
+/// there is no piece.
+fn piece_span(
+    mut span: nimbus_core::LineSpan,
+    piece: Option<&(Range<usize>, bool)>,
+) -> (nimbus_core::LineSpan, bool) {
+    let Some((piece, continued)) = piece else {
+        return (span, false);
+    };
+    let end = piece.end.min(span.end);
+    if end < span.end {
+        span.next = Some(end);
+    }
+    span.start = piece.start.max(span.start).min(end);
+    span.end = end;
+    (span, *continued)
+}
 
 /// Whether a cursor is on the line `span` (its number then stands out).
 /// `next` walks forward through the sorted `selections` from line to line,
@@ -1114,6 +1138,7 @@ impl View {
                 span,
                 first_row: at.row,
                 number,
+                continued: false,
                 has_cursor,
                 mark: None,
             };
@@ -1229,13 +1254,15 @@ impl View {
             }
             match (plan.line, plan.fold) {
                 (Some(line), _) => {
-                    let span = t.line_span(t.line_to_byte(line));
+                    let (span, continued) =
+                        piece_span(t.line_span(t.line_to_byte(line)), plan.piece.as_ref());
                     shown = (shown.0.min(span.start), span.next.unwrap_or(t.len_bytes()));
                     let has_cursor = has_cursor(selections, &mut next_head, span);
                     let draw = LineDraw {
                         span,
                         first_row: 0,
                         number: Some(line),
+                        continued,
                         has_cursor,
                         mark: plan.mark.clone().map(|m| (m, mark_color)),
                     };
@@ -1373,6 +1400,8 @@ struct LineDraw {
     first_row: usize,
     /// Its line number, or `None` when not known yet.
     number: Option<usize>,
+    /// It continues a cut line (M18): `⤶` instead of the number.
+    continued: bool,
     /// A cursor is on it: the number stands out.
     has_cursor: bool,
     /// Bytes to draw over a stronger background (a compare view's changed
@@ -1442,7 +1471,7 @@ fn draw_line(
     if long_line::is_long(span) {
         let geom = (scroll_col, width_cols, scroll_x);
         let row = long_row(t, span, long_text, layout, geom, *top, tab_width);
-        painter.gutter(line.number, line.has_cursor, *top);
+        painter.line_gutter(line, *top);
         if let Some((m, color)) = &line.mark {
             painter.mark(&row, m, *color);
         }
@@ -1476,7 +1505,7 @@ fn draw_line(
                 left: layout.text_left - shift,
             };
             if r == 0 {
-                painter.gutter(line.number, line.has_cursor, *top);
+                painter.line_gutter(line, *top);
             }
             if let Some((m, color)) = &line.mark {
                 painter.mark(&row, m, *color);
@@ -1521,6 +1550,28 @@ struct Painter<'a, 'g> {
 }
 
 impl Painter<'_, '_> {
+    /// The gutter of a line's first row: its number, or `⤶` on a piece
+    /// that continues a cut line.
+    fn line_gutter(&mut self, line: &LineDraw, top: f32) {
+        if line.continued {
+            self.continuation(top);
+        } else {
+            self.gutter(line.number, line.has_cursor, top);
+        }
+    }
+
+    /// `⤶` in the gutter of a row that continues a cut line (M18), where
+    /// its number would go.
+    fn continuation(&mut self, top: f32) {
+        let cell = self.layout.metrics.cell_width;
+        let pad = self.layout.gutter_cols.saturating_sub(1);
+        self.gpu.push_text_line(
+            [self.layout.left + self.layout.margin + f(pad) * cell, top],
+            "⤶",
+            self.deco.ui.gutter,
+        );
+    }
+
     /// The line number, right-aligned in the gutter, on a line's first row;
     /// `~` where it is not known yet (a mapped file still indexing).
     fn gutter(&mut self, line: Option<usize>, current: bool, top: f32) {

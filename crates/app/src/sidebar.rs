@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use nimbus_render::Gpu;
 
+use crate::compare_panel;
 use crate::input::Motion;
 use crate::search_panel::{self, Panel};
 use crate::theme::Ui;
@@ -29,6 +30,8 @@ pub enum Mode {
     Files,
     /// Find in files.
     Search,
+    /// Folder compare (M18).
+    Compare,
 }
 
 /// The sidebar's state.
@@ -41,6 +44,8 @@ pub struct Sidebar {
     /// The Search panel; kept while the tree is shown, so its results
     /// survive switching.
     pub search: Panel,
+    /// The Compare panel (M18); kept like the Search panel.
+    pub compare: compare_panel::Panel,
     /// Width in logical pixels.
     pub width: f32,
     /// Has keyboard focus (arrows move in the tree, not the text).
@@ -64,6 +69,8 @@ pub struct Outcome {
     pub open: Option<PathBuf>,
     /// What the Search panel asks for.
     pub search: Option<search_panel::Reply>,
+    /// A row of the Compare panel to open in the compare view.
+    pub pair: Option<usize>,
 }
 
 impl Sidebar {
@@ -74,6 +81,7 @@ impl Sidebar {
             visible,
             mode: Mode::Files,
             search: Panel::default(),
+            compare: compare_panel::Panel::default(),
             width: width.max(MIN_WIDTH),
             focused: false,
             resizing: false,
@@ -136,6 +144,10 @@ impl Sidebar {
             self.search.scroll_by(rows, layout);
             return;
         }
+        if self.mode == Mode::Compare {
+            self.compare.scroll_by(rows, layout, Self::header_h(layout));
+            return;
+        }
         self.scroll = self.scroll.saturating_add_signed(rows);
         self.clamp_scroll(layout);
     }
@@ -145,6 +157,10 @@ impl Sidebar {
     pub fn wheel(&mut self, dy: f32, layout: &Layout) {
         if self.mode == Mode::Search {
             self.search.wheel(dy, layout);
+            return;
+        }
+        if self.mode == Mode::Compare {
+            self.compare.wheel(dy, layout, Self::header_h(layout));
             return;
         }
         self.wheel += dy / layout.metrics.line_height;
@@ -196,10 +212,13 @@ impl Sidebar {
         let cell = layout.metrics.cell_width;
         let files = layout.margin..layout.margin + 5.0 * cell;
         let search = files.end + cell..files.end + 7.0 * cell;
+        let compare = search.end + cell..search.end + 8.0 * cell;
         if files.contains(&x) {
             Some(Mode::Files)
         } else if search.contains(&x) {
             Some(Mode::Search)
+        } else if compare.contains(&x) {
+            Some(Mode::Compare)
         } else {
             None
         }
@@ -217,6 +236,12 @@ impl Sidebar {
         if self.mode == Mode::Search {
             return Outcome {
                 search: Some(self.search.click(layout, x, y)),
+                ..Outcome::default()
+            };
+        }
+        if self.mode == Mode::Compare {
+            return Outcome {
+                pair: self.compare.click(layout, Self::header_h(layout), y),
                 ..Outcome::default()
             };
         }
@@ -249,6 +274,18 @@ impl Sidebar {
     /// A key while the sidebar has focus. Returns `None` for keys it does
     /// not handle, which then go to the editor as usual.
     pub fn key(&mut self, motion: Option<Motion>, enter: bool, layout: &Layout) -> Option<Outcome> {
+        if self.mode == Mode::Compare {
+            let header = Self::header_h(layout);
+            let pair = match self.compare.key(motion, enter, layout, header) {
+                compare_panel::Key::Ignored => return None,
+                compare_panel::Key::Handled => None,
+                compare_panel::Key::Open(row) => Some(row),
+            };
+            return Some(Outcome {
+                pair,
+                ..Outcome::default()
+            });
+        }
         let rows = self.tree.rows().len();
         if rows == 0 {
             // Still loading, or an empty folder: the keys are still ours.
@@ -304,6 +341,12 @@ impl Sidebar {
         Some(out)
     }
 
+    /// The folder compare's next (or previous) file after the one opened
+    /// last, selected; `None` when there is none.
+    pub fn step_compare(&mut self, forward: bool, layout: &Layout) -> Option<usize> {
+        self.compare.step(forward, layout, Self::header_h(layout))
+    }
+
     /// Select and show `path` (the active tab's file, canonical), opening
     /// the folders down to it.
     pub fn reveal(&mut self, path: &Path, layout: Option<&Layout>) -> Vec<ListRequest> {
@@ -355,7 +398,11 @@ pub fn draw(
     let y = ((header - lh) / 2.0).round();
     let accent = (2.0 * layout.scale).round().max(1.0);
     let mut x = pad;
-    for (mode, label) in [(Mode::Files, "Files"), (Mode::Search, "Search")] {
+    for (mode, label) in [
+        (Mode::Files, "Files"),
+        (Mode::Search, "Search"),
+        (Mode::Compare, "Compare"),
+    ] {
         let on = sidebar.mode == mode;
         let color = if on { ui.text } else { ui.gutter };
         gpu.push_text_line([x, y], label, color);
@@ -378,6 +425,20 @@ pub fn draw(
         gpu.push_text_line([title_x, y], title, ui.gutter);
     }
 
+    if sidebar.mode == Mode::Compare {
+        compare_panel::draw(
+            gpu,
+            ui,
+            layout,
+            &sidebar.compare,
+            (header, w),
+            sidebar.focused,
+        );
+        let line = layout.scale.round().max(1.0);
+        gpu.push_rect([w - line, 0.0], [line, bottom], ui.picker_border);
+        gpu.begin_layer(None);
+        return;
+    }
     if sidebar.mode == Mode::Search {
         search_panel::draw(gpu, ui, layout, &sidebar.search, sidebar.focused, blink);
         let line = layout.scale.round().max(1.0);
