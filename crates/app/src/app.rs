@@ -2735,7 +2735,7 @@ impl App {
         let Some(layout) = self.layout() else { return };
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
         let changed = if self.sidebar.visible && self.sidebar.mode == Mode::Search {
-            self.sidebar.search.hover_at(&layout, x, y)
+            self.sidebar.search.hover_at(&layout, x, y, Instant::now())
         } else {
             self.sidebar.search.hover_gone()
         };
@@ -4458,6 +4458,9 @@ impl ApplicationHandler<AppEvent> for App {
             self.search_files();
             self.changed(false);
         }
+        if self.sidebar.search.tick(now) {
+            self.changed(false);
+        }
         if self.recheck_at.is_some_and(|t| now >= t) {
             self.recheck_at = None;
             let changes: Vec<Change> = std::mem::take(&mut self.recheck)
@@ -4520,6 +4523,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.message.as_ref().map(|m| m.until),
             self.research_at,
             self.search_files_at,
+            self.sidebar.search.wake_at(),
             self.recheck_at,
             self.saves.poll_at,
             self.tabs[self.active]

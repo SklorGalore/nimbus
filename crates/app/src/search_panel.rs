@@ -10,6 +10,7 @@
 
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use nimbus_core::Text;
 use nimbus_core::column;
@@ -132,6 +133,11 @@ pub struct Panel {
     wheel: f32,
     /// The toggle under the pointer, for its tooltip.
     pub hover: Option<Toggle>,
+    /// When the tooltip is due to appear, while the pointer rests on a
+    /// toggle and it is not showing yet.
+    tooltip_at: Option<Instant>,
+    /// The tooltip is showing.
+    pub tooltip: bool,
 }
 
 impl Default for Panel {
@@ -156,6 +162,8 @@ impl Default for Panel {
             generation: Arc::new(Generation::default()),
             wheel: 0.0,
             hover: None,
+            tooltip_at: None,
+            tooltip: false,
         }
     }
 }
@@ -231,6 +239,9 @@ impl Geometry {
         self.right - 5.0 * layout.metrics.cell_width
     }
 }
+
+/// How long the pointer rests on a toggle before its tooltip shows.
+pub const TOOLTIP_DELAY: Duration = Duration::from_secs(1);
 
 /// Columns a toggle's label takes, and the gap after it.
 const TOGGLE_COLS: f32 = 3.0;
@@ -613,22 +624,49 @@ impl Panel {
 
     /// What is at `(x, y)` of the panel.
     #[must_use]
-    /// Note the pointer's position for the toggle tooltips. Returns `true`
-    /// when the tooltip changed and the panel needs drawing again.
-    pub fn hover_at(&mut self, layout: &Layout, x: f32, y: f32) -> bool {
+    /// Note the pointer's position at `now` for the toggle tooltips: a
+    /// tooltip appears once the pointer has rested on a toggle for
+    /// [`TOOLTIP_DELAY`], and moving to another toggle starts the wait
+    /// again. Returns `true` when the panel needs drawing again.
+    pub fn hover_at(&mut self, layout: &Layout, x: f32, y: f32, now: Instant) -> bool {
         let hover = match self.hit(layout, x, y) {
             Target::Toggle(t) if x < layout.left => Some(t),
             _ => None,
         };
-        let changed = hover != self.hover;
+        if hover == self.hover {
+            return false;
+        }
+        let was_showing = self.tooltip;
         self.hover = hover;
-        changed
+        self.tooltip = false;
+        self.tooltip_at = hover.map(|_| now + TOOLTIP_DELAY);
+        was_showing
     }
 
     /// The pointer left the window: no tooltip. Returns `true` when one
     /// was showing.
     pub fn hover_gone(&mut self) -> bool {
-        self.hover.take().is_some()
+        self.hover = None;
+        self.tooltip_at = None;
+        std::mem::take(&mut self.tooltip)
+    }
+
+    /// Show the tooltip once its wait is over. Returns `true` when it
+    /// just appeared and the panel needs drawing again.
+    pub fn tick(&mut self, now: Instant) -> bool {
+        if self.tooltip_at.is_some_and(|at| now >= at) {
+            self.tooltip_at = None;
+            self.tooltip = true;
+            return true;
+        }
+        false
+    }
+
+    /// When the event loop should wake to show the tooltip, if a wait is
+    /// under way.
+    #[must_use]
+    pub fn wake_at(&self) -> Option<Instant> {
+        self.tooltip_at
     }
 
     pub fn hit(&self, layout: &Layout, x: f32, y: f32) -> Target {
@@ -724,7 +762,9 @@ pub fn draw(gpu: &mut Gpu, ui: &Ui, layout: &Layout, panel: &Panel, focused: boo
     if let Some(results) = &panel.results {
         draw_list(gpu, ui, layout, (panel, results), &geo, focused);
     }
-    if let Some(toggle) = panel.hover {
+    if let Some(toggle) = panel.hover
+        && panel.tooltip
+    {
         draw_tooltip(gpu, ui, layout, panel, &geo, toggle);
     }
 }
@@ -1067,18 +1107,36 @@ mod tests {
         let l = layout();
         let mut p = panel();
         let geo = Geometry::of(&l, false);
-        assert!(p.hover_at(&l, geo.left + 1.0, geo.toggles + 1.0));
+        let t0 = Instant::now();
+        // Resting on a toggle: nothing to draw until the wait is over.
+        assert!(!p.hover_at(&l, geo.left + 1.0, geo.toggles + 1.0, t0));
         assert_eq!(p.hover, Some(Toggle::Case));
+        assert_eq!(p.wake_at(), Some(t0 + TOOLTIP_DELAY));
+        assert!(!p.tick(t0 + TOOLTIP_DELAY / 2));
+        assert!(!p.tooltip);
+        assert!(p.tick(t0 + TOOLTIP_DELAY));
+        assert!(p.tooltip && p.wake_at().is_none());
         assert_eq!(describe(Toggle::Case), "Match case");
-        // Still there: nothing to redraw.
-        assert!(!p.hover_at(&l, geo.left + 2.0, geo.toggles + 1.0));
-        // The second toggle.
-        assert!(p.hover_at(&l, geo.left + (3.0 + 1.0) * 10.0 + 1.0, geo.toggles + 1.0));
+        // Still on it: nothing to redraw.
+        assert!(!p.hover_at(&l, geo.left + 2.0, geo.toggles + 1.0, t0));
+        assert!(p.tooltip);
+        // The second toggle: the showing tooltip goes, and the wait restarts.
+        let t1 = t0 + Duration::from_secs(5);
+        assert!(p.hover_at(
+            &l,
+            geo.left + (3.0 + 1.0) * 10.0 + 1.0,
+            geo.toggles + 1.0,
+            t1
+        ));
         assert_eq!(p.hover, Some(Toggle::Regex));
-        // Off the row, and past the sidebar's edge.
-        assert!(p.hover_at(&l, geo.left + 1.0, geo.query + 1.0));
+        assert!(!p.tooltip);
+        assert_eq!(p.wake_at(), Some(t1 + TOOLTIP_DELAY));
+        // Off the row before it shows: no wait left, nothing to redraw.
+        assert!(!p.hover_at(&l, geo.left + 1.0, geo.query + 1.0, t1));
         assert_eq!(p.hover, None);
-        assert!(!p.hover_at(&l, l.left + 5.0, geo.toggles + 1.0));
+        assert!(p.wake_at().is_none());
+        // Past the sidebar's edge counts as off too.
+        assert!(!p.hover_at(&l, l.left + 5.0, geo.toggles + 1.0, t1));
         assert!(!p.hover_gone());
     }
 
