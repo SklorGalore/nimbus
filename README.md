@@ -8,7 +8,7 @@
 
 [![CI](https://github.com/SklorGalore/nimbus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SklorGalore/nimbus/actions/workflows/ci.yml)
 [![Release](https://github.com/SklorGalore/nimbus/actions/workflows/release.yml/badge.svg)](https://github.com/SklorGalore/nimbus/actions/workflows/release.yml)
-[![Latest release](https://img.shields.io/badge/release-v0.2.0-blue)](https://github.com/SklorGalore/nimbus/releases)
+[![Latest release](https://img.shields.io/badge/latest%20release-v0.2.0-blue)](https://github.com/SklorGalore/nimbus/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 <br>
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
