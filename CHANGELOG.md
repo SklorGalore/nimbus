@@ -6,6 +6,17 @@ section before tagging.
 
 ## Unreleased
 
+## 1.0.1
+
+### Fixed
+
+- macOS: opening a file in Nimbus from Finder (Open With, a
+  double-click when Nimbus is the default app, or a drop on the Dock
+  icon) opened nothing and showed "Nimbus cannot open files in the …
+  format". The file now opens in a tab, and a folder joins the sidebar.
+  Nimbus also appears in Finder's Open With menu for text files and
+  folders.
+
 ## 1.0.0
 
 The first stable release: everything from milestones 9 to 21 since
