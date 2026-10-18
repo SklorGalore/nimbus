@@ -37,9 +37,13 @@ after a rebuild, in each milestone's Results.
 
 - Vim keybindings or any modal layer.
 - Plugins or a scripting language.
-- LSP, debugging, terminals, git integration.
+- LSP, debugging, terminals, git integration. One exception, chosen on
+  2026-10-18: M18's "Compare with HEAD" runs `git show` as a subprocess
+  to open a file's committed version in the compare view. Nothing else
+  runs git.
 - Collaborative editing.
-- Rich text, or proportional fonts in the editor area. UI chrome may use them later.
+- Rich text, or proportional fonts in the editor area. UI chrome gets a
+  proportional font setting in M20.
 - Bidirectional and right-to-left text. Decided at approval; the renderer
   assumes left-to-right runs.
 - Multiple windows. One window with tabs.
@@ -535,12 +539,19 @@ introduces and points at the code.
 | 13 | Split views and folding | Planned | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
 | 14 | Languages, second pass | In progress | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
 | 15 | Distribution | Planned | Signed, notarised, installable builds; an update check | [m15](docs/milestones/m15-distribution.md) |
+| 16 | Rendering, second pass | Planned | Colour emoji, ligatures, zoom, whitespace and indent guides | [m16](docs/milestones/m16-rendering-second-pass.md) |
+| 17 | Encodings and line endings | Planned | Open and save UTF-16 and Windows-1252; change encoding and line endings | [m17](docs/milestones/m17-encodings.md) |
+| 18 | Compare, second pass | Planned | Ignore whitespace, compare folders, diff one-line files, compare with HEAD | [m18](docs/milestones/m18-compare-second-pass.md) |
+| 19 | Workspace and search, second pass | Planned | Several roots, named workspaces, drag and drop, search history and multi-line patterns | [m19](docs/milestones/m19-workspace-and-search-second-pass.md) |
+| 20 | Reading aids | Planned | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
+| 21 | Foundations and 1.0 | Planned | Ropey 2, current winit and wgpu, fuzzing, a crash record, version 1.0 | [m21](docs/milestones/m21-foundations-and-1-0.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
 approved the six plans and their order on 2026-10-17 and answered their
-open questions (§9, §10). M10 landed the same day; M11 is Next, and
-M12–M15 follow in that order.
+open questions (§9, §10). M10 and M11 landed; M12 is Next, and M13–M15
+follow in that order. M16–M21 were drafted on 2026-10-18 from what
+M9–M15 deferred and approved the same day (§9, §10); they follow M15.
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -549,8 +560,27 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-None open. The questions the drafts of M10–M15 raised were answered on
-2026-10-17, when the owner approved the six plans and their order:
+None open. The questions the drafts of M16–M21 raised were answered on
+2026-10-18, when the owner approved the six plans and their order:
+
+- Order: M16 (rendering) to M21 (1.0) as drafted; encodings first was
+  declined.
+- M16: the zoom is remembered in `state.toml` across sessions unless
+  `remember_zoom = false`.
+- M17: the Western encodings only (UTF-8, UTF-16, Windows-1252,
+  ISO-8859-1); East Asian tables behind a cargo feature that is off.
+- M18: "Compare with HEAD" is in, running git as a subprocess; the git
+  non-goal in §2 carries that one exception.
+- M19: workspace files live in the config directory, and also as
+  `.nimbus/workspace.toml` inside a root on "Save Workspace Here".
+- M20: the minimap is in, windowed to the lines around the view, off by
+  default.
+- M21: screen-reader support (AccessKit) waits until after 1.0; a panic
+  writes a one-line `crash.log` with the version and message and no
+  user text.
+
+The questions the drafts of M10–M15 raised were answered on 2026-10-17,
+when the owner approved those six plans and their order:
 
 - Order: M10 (find in files), then M11 (everyday editing), then M12 to
   M15 as drafted. M10 is Next.
@@ -666,6 +696,10 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-17 | Grammars to add: C, Go, HTML, CSS, TSX, each measured against the 35 MB budget; Go to Symbol is `Primary+Shift+R` | §9, m14 |
 | 2026-10-17 | No signing accounts: builds stay unsigned and the README keeps its `xattr` step; update check off unless `check_updates = true`; checksums signed with `minisign` | §9, m15 |
 | 2026-10-17 | Update check over `ureq` with rustls and the platform verifier (+1.7 MB), the one JSON field scanned by hand; packages built by shell scripts and Inno Setup in the workflow, manifests generated from the tag | §7, m15 |
+| 2026-10-18 | M16–M21 drafted from what M9–M15 deferred and approved in order: rendering, encodings, compare, workspace and search, reading aids, foundations and 1.0 | §8, §9, backlog |
+| 2026-10-18 | Zoom remembered across sessions unless `remember_zoom = false`; Western encodings only, East Asian behind an off feature | §9, m16, m17 |
+| 2026-10-18 | "Compare with HEAD" through a git subprocess is the one exception to the git non-goal; workspace files may also live in a root as `.nimbus/workspace.toml` | §2, §9, m18, m19 |
+| 2026-10-18 | Minimap in, windowed and off by default; AccessKit after 1.0; a panic writes a one-line `crash.log` with no user text | §9, m20, m21 |
 | 2026-10-17 | M14 grammars all kept: C, Go, HTML, CSS and TSX add 2.3 MB on Linux (21.4 MB of 35); drop order is now TSX, Bash, TypeScript | §4.2, m14 |
 | 2026-10-17 | Injections: child trees keyed by host node id, kept one screen either side of the view, parsed within the frame's 2 ms budget at one child per frame at least; Rust's injection query not used | §4.2, m14 |
 | 2026-10-17 | Spans carry a capture table per grammar so the inner language's colours win inside injections; wide nodes are queried child by child | §4.2, m14 |

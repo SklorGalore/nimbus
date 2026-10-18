@@ -1,12 +1,12 @@
-# Backlog and the draft milestones after M9
+# Backlog and the milestones after M9
 
-Written on 2026-10-17, after M8 landed and M9 was planned. Every plan
-from M1 to M9 deferred something; this file collects those items in one
-place, says which milestone picks each one up, and lists what stays
-unscheduled. The owner approved M10–M15, their order and the answers to
-their open questions on 2026-10-17; the answers are in `DESIGN.md` §9 and
-its decision log (§10), and each plan carries them in place of the items
-it had marked **Proposed**.
+Written on 2026-10-17, after M8 landed and M9 was planned; extended on
+2026-10-18 with M16–M21. Every plan from M1 on deferred something; this
+file collects those items in one place, says which milestone picks each
+one up, and lists what stays unscheduled. The owner approved M10–M15,
+their order and the answers to their open questions on 2026-10-17, and
+M16–M21 the same way on 2026-10-18; the answers are in `DESIGN.md` §9
+and its decision log (§10).
 
 ## Order
 
@@ -22,6 +22,21 @@ it had marked **Proposed**.
 The owner chose this order over the alternative of M11 before M10. M13
 stays before M14 (the fold model comes first, the fold queries second),
 and M15 is last.
+
+## Order, M16–M21
+
+Drafted on 2026-10-18 from what M9–M15 deferred and the unscheduled list
+below as it stood then; approved the same day in this order, with the
+alternative of encodings first declined.
+
+| # | Plan | One line | Why here |
+|---|---|---|---|
+| 16 | [Rendering, second pass](m16-rendering-second-pass.md) | Colour emoji, ligatures, zoom, whitespace and indent guides, scrollbar fade, the linear-blending experiment | Every rendering item in one place, all inside `render`, so it can run while M12–M15 settle |
+| 17 | [Encodings and line endings](m17-encodings.md) | UTF-16 and Windows-1252 open and save, encoding and line ending in the status bar, conversion | Config and data files are a goal (§1) and non-UTF-8 ones open as `�` today; small and self-contained |
+| 18 | [Compare, second pass](m18-compare-second-pass.md) | Diff options, folder compare, long-line splitting, Compare with HEAD | The items M9 deferred, on the interner, M10's walker and the compare view |
+| 19 | [Workspace and search, second pass](m19-workspace-and-search-second-pass.md) | Multiple roots, named workspaces, drag and drop, search scope, history, multi-line patterns | What M10 and M12 deferred, once M12 has been used a while |
+| 20 | [Reading aids](m20-reading-aids.md) | Sticky scroll, a windowed minimap, a proportional UI font, Markdown preview | What M13 and M14 deferred; needs M13's splits and M14's fold regions |
+| 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | Ropey 2, winit and wgpu upgrades, fuzzing and soak in CI, a crash record, 1.0.0 | Last, so 1.0 packages everything above |
 
 ## Where each deferred item went
 
@@ -43,7 +58,15 @@ and M15 is last.
 | Linux run by hand (Wayland, X11) | M8 | M15 |
 | Bracket matching misled by strings | M8 known limitation | M14 |
 | Diff options (ignore whitespace), folder compare, git revisions | M9 | Unscheduled, below |
-| Long-line splitting for the diff (minified files) | M9 | Unscheduled, below |
+| Long-line splitting for the diff (minified files) | M9 | M18 |
+| Colour emoji, ligatures, scrollbar fade, linear blending | M8, DESIGN.md §4.3 | M16 |
+| Non-UTF-8 files shown as `�` | M7 (SUB substitution) | M17 |
+| Searching outside the root, saved searches, history, multi-line patterns | M10 | M19 |
+| Drag and drop in the tree, multiple roots, named workspaces | M12 | M19 |
+| Sticky scroll, minimap | M13 | M20 |
+| Markdown preview | M14 | M20 |
+| Proportional fonts in UI chrome | DESIGN.md §2 | M20 |
+| Ropey 2.0 | DESIGN.md §4.1 | M21 |
 
 ## Unscheduled
 
@@ -51,37 +74,21 @@ Small or speculative items, kept so they are not forgotten. Each could
 join a milestone above as a stretch task or make a short milestone of
 its own later.
 
-- **Colour emoji**: needs an RGBA atlas page beside the `R8Unorm` one
-  (M8 known limitation). A rendering milestone item, with ligatures and
-  the linear-blending experiment from DESIGN.md §4.3; none of the three
-  affects correctness.
-- **Ligatures** as a setting (M1 noted the one-glyph-per-cell grid
-  assumption; ligatures break it, so this is layout work, not a toggle).
-- **Scrollbar fade** when idle (needs a timed redraw; rendering is on
-  demand and should stay so, but one `WaitUntil` after the last scroll
-  is cheap).
-- **Ropey 2.0** when it is stable: byte indexing natively, which removes
-  the char-to-byte conversion layer in `rope.rs` (DESIGN.md §4.1).
-- **Diff options and folder compare** (M9 deferred): ignore whitespace
-  and case are flags on the interner; folder compare is M10's walker
-  feeding M9's view.
-- **Long-line splitting for the diff** (M9 deferred, the plan's layer 4):
-  cut a line over a few kilobytes at content-chosen points (a rolling
-  hash, so the cuts survive insertions) so minified JSON and similar
-  one-line files get real diffs; needs the compare view to show a split
-  line's pieces as rows of their own.
+Items scheduled on 2026-10-18 moved to the M16–M21 table above; what is
+left is small or still speculative.
+
+- **Screen-reader support** (AccessKit through winit): the owner chose
+  to ship 1.0 without it (2026-10-18). The first milestone after 1.0,
+  since a GPU-drawn editor is invisible to VoiceOver, NVDA and Orca
+  without it; the adapter can be created lazily so startup is unchanged.
 - **Autosave of unsaved work** for crash recovery: the owner decided
   against it when approving M12 (it would write the user's text
   somewhere they did not choose); it stays here in case that changes.
-- **Drag and drop in the tree**, multiple roots, named workspaces (M12
+- **East Asian encodings** (Shift_JIS, GBK, EUC-KR, Big5): behind a cargo
+  feature that is off, from M17; about 1 MB of tables.
+- **Images in the Markdown preview**, exporting it to HTML (M20
   deferred).
-- **Sticky scroll and minimap** (M13 deferred). The minimap in
-  particular is at odds with the on-demand, per-visible-line rendering
-  rules; it would need its own budget.
-- **Markdown preview** (M14 deferred): rendering prose with proportional
-  fonts in the editor area is a non-goal (§2); a preview would be UI
-  chrome, which §2 allows later.
-- **Proportional fonts in UI chrome** (§2, "may use them later").
+- **Subpixel (LCD) antialiasing** and variable fonts (M16 deferred).
 - **Hot keys the desktop grabs on Linux** (`Alt+Up` and friends):
   everything is rebindable; a note in `customizing.md` is the minimum.
 
@@ -90,8 +97,9 @@ its own later.
 Unchanged from DESIGN.md §2, and no draft reaches for them: Vim
 keybindings or any modal layer; plugins or a scripting language; LSP,
 debugging, terminals and git integration beyond M9's `--diff` and
-`--merge` (M14's per-file symbols come from the syntax tree, not a
-server; M6's git status colours stay out); collaborative editing; rich
+`--merge` and M18's Compare with HEAD, the one exception the owner
+chose on 2026-10-18 (M14's per-file symbols come from the syntax tree,
+not a server; M6's git status colours stay out); collaborative editing; rich
 text and proportional fonts in the editor area; bidirectional text;
 multiple windows (M13's groups are columns in one window); a native menu
 bar on Linux. If one of these is reconsidered, it is a DESIGN.md decision
