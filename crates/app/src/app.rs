@@ -130,6 +130,13 @@ pub enum AppEvent {
     FolderCompare(folder_compare::Batch),
     /// A Markdown preview's page, laid out on a worker (M20).
     Preview(crate::preview::Laid),
+    /// macOS asked the app to open these files or folders (Finder's Open
+    /// With, the Dock icon): see `open_with.rs`.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "only macOS sends it")
+    )]
+    OpenFiles(Vec<PathBuf>),
 }
 
 /// A file read at a git revision on a worker (M18).
@@ -2576,6 +2583,37 @@ impl App {
     }
 
     /// Open `path` in a tab, or switch to it if it is already open.
+    /// A sidebar folder listing finished on its worker.
+    fn listing_arrived(&mut self, req: &ListRequest, result: Result<Vec<Entry>, String>) {
+        let requests = match result {
+            Ok(entries) => self.sidebar.tree.loaded(req, entries),
+            Err(e) => {
+                log::debug!("cannot list {}: {e}", req.path.display());
+                self.sidebar.tree.failed(req);
+                Vec::new()
+            }
+        };
+        let layout = self.window_layout();
+        self.sidebar.after_change(layout.as_ref());
+        self.start_listings(requests);
+        self.sync_watch();
+        self.changed(false);
+    }
+
+    /// Open files and folders handed over by the system: dropped on the
+    /// window, or sent by Finder (`open_with.rs`). A folder joins the
+    /// sidebar's roots; a file opens in a tab.
+    fn open_from_system(&mut self, paths: &[PathBuf]) {
+        for path in paths {
+            if path.is_dir() {
+                self.add_root(path);
+            } else {
+                self.open_path(path);
+            }
+        }
+        self.changed(false);
+    }
+
     fn open_path(&mut self, path: &Path) {
         // Whatever asked (the sidebar, the picker, a dialog), the file
         // gets the keyboard.
@@ -6804,6 +6842,7 @@ impl ApplicationHandler<AppEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::PickerChanged => self.tick_picker(),
+            AppEvent::OpenFiles(paths) => self.open_from_system(&paths),
             AppEvent::Menu(id) => {
                 // A held menu shortcut delivers a menu event for every key
                 // repeat, with no repeat flag. Drop events for the same item
@@ -6851,21 +6890,7 @@ impl ApplicationHandler<AppEvent> for App {
                     self.changed(false);
                 }
             }
-            AppEvent::Listing(req, result) => {
-                let requests = match result {
-                    Ok(entries) => self.sidebar.tree.loaded(&req, entries),
-                    Err(e) => {
-                        log::debug!("cannot list {}: {e}", req.path.display());
-                        self.sidebar.tree.failed(&req);
-                        Vec::new()
-                    }
-                };
-                let layout = self.window_layout();
-                self.sidebar.after_change(layout.as_ref());
-                self.start_listings(requests);
-                self.sync_watch();
-                self.changed(false);
-            }
+            AppEvent::Listing(req, result) => self.listing_arrived(&req, result),
             AppEvent::Disk(paths) => self.disk_changed(&paths),
             AppEvent::Index(token, chunk, error) => self.index_arrived(token, chunk, error),
             AppEvent::Folded(result) => self.folded(result),
@@ -7217,14 +7242,7 @@ impl ApplicationHandler<AppEvent> for App {
 
             // A file dragged in from the desktop opens; a folder joins the
             // workspace (M19).
-            WindowEvent::DroppedFile(path) => {
-                if path.is_dir() {
-                    self.add_root(&path);
-                } else {
-                    self.open_path(&path);
-                }
-                self.changed(false);
-            }
+            WindowEvent::DroppedFile(path) => self.open_from_system(&[path]),
 
             WindowEvent::Focused(false) => {
                 // Show the cursor solid in the background; it may have been
