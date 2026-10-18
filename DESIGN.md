@@ -587,6 +587,7 @@ introduces and points at the code.
 | 22 | Screen readers | Next | Use Nimbus with VoiceOver, NVDA or Orca | [m22](docs/milestones/m22-screen-readers.md) |
 | 23 | Library upgrades | Planned, waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker | [m23](docs/milestones/m23-library-upgrades.md) |
 | 24 | International text | Planned | CJK and other scripts in the right fonts, variable fonts, editable huge files in single-byte encodings | [m24](docs/milestones/m24-international-text.md) |
+| 25 | Command line | Planned | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
@@ -596,7 +597,8 @@ M9–M15 deferred and approved the same day (§9, §10). Every milestone
 through M21 has landed; M21 made the 1.0 release.
 M22–M24 are the plans after 1.0, drafted on 2026-10-18 from what 1.0
 and the earlier plans deferred and approved the same day (§9, §10); M22
-is Next, and M23 goes whenever its releases are stable.
+is Next, and M23 goes whenever its releases are stable. M25 (command
+line) was added the same day at the owner's request.
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -779,3 +781,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | 1.0 ships on ropey 1.6 and winit 0.30: ropey 2 and winit 0.31 are still betas, so both upgrades move to the first point release after they are stable (wgpu 30 is already current) | m21, backlog |
 | 2026-10-18 | M22–M24 approved (after 1.0): screen readers first on winit 0.30; NVDA and Orca covered by tests only; Open With only if winit 0.31 passes the files on (no new `unsafe`); the Writing prose draft dropped (spell checking, word count, preview images, HTML export), International text moved up to M24; East Asian encodings stay behind their feature | §9, m22–m24 |
 | 2026-10-18 | Finder "Open With" moves from M23 to a 1.0.1 fix with a small `objc2` open-files listener in `app` (new `unsafe` outside `render` and the mmap buffer, owner's choice), since winit 0.31.0-beta.3 still does not pass the files on | §9, m23 |
+| 2026-10-18 | M25 Command line added at the owner's request: an "Install `nimbus` Command" palette action (macOS via the system administrator prompt, no `unsafe`), opening files in the running window, `--wait` | m25, backlog |
