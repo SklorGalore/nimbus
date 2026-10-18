@@ -583,10 +583,10 @@ introduces and points at the code.
 | 19 | Workspace and search, second pass | Planned | Several roots, named workspaces, drag and drop, search history and multi-line patterns | [m19](docs/milestones/m19-workspace-and-search-second-pass.md) |
 | 20 | Reading aids | Done | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
 | 21 | Foundations and 1.0 | Planned | Ropey 2, current winit and wgpu, fuzzing, a crash record, version 1.0 | [m21](docs/milestones/m21-foundations-and-1-0.md) |
-| 22 | Screen readers | Draft | Use Nimbus with VoiceOver, NVDA or Orca | [m22](docs/milestones/m22-screen-readers.md) |
-| 23 | Library upgrades | Draft, waiting | Ropey 2 and winit 0.31 once stable; Finder "Open With"; the macOS emoji picker | [m23](docs/milestones/m23-library-upgrades.md) |
-| 24 | Writing prose | Draft | Spell checking, a word count, images in the preview, export to HTML | [m24](docs/milestones/m24-writing-prose.md) |
-| 25 | International text | Draft | CJK and other scripts in the right fonts, East Asian encodings, editable huge files in legacy encodings | [m25](docs/milestones/m25-international-text.md) |
+| 22 | Screen readers | Next | Use Nimbus with VoiceOver, NVDA or Orca | [m22](docs/milestones/m22-screen-readers.md) |
+| 23 | Library upgrades | Planned, waiting on releases | Ropey 2 and winit 0.31 once stable; Finder "Open With"; the macOS emoji picker | [m23](docs/milestones/m23-library-upgrades.md) |
+| 24 | Writing prose | Planned | A word count, images in the preview, export to HTML | [m24](docs/milestones/m24-writing-prose.md) |
+| 25 | International text | Planned | CJK and other scripts in the right fonts, variable fonts, editable huge files in single-byte encodings | [m25](docs/milestones/m25-international-text.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
@@ -595,7 +595,8 @@ open questions (§9, §10). M10 and M11 landed; M12 is Next, and M13–M15
 follow in that order. M16–M21 were drafted on 2026-10-18 from what
 M9–M15 deferred and approved the same day (§9, §10); they follow M15.
 M22–M25 are the plans after 1.0, drafted on 2026-10-18 from what 1.0
-and the earlier plans deferred; they wait on the open questions in §9.
+and the earlier plans deferred and approved the same day (§9, §10); M22
+follows M21, and M23 goes whenever its releases are stable.
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -604,34 +605,23 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-Raised by the drafts of M22–M25 (2026-10-18), the plans after 1.0:
+None open. The questions the drafts of M22–M25, the plans after 1.0,
+raised were answered on 2026-10-18:
 
-1. **Order.** Drafted as M22 (screen readers), M23 (library upgrades,
-   whenever ropey 2 and winit 0.31 are stable), M24 (prose), M25
-   (international text). `accesskit_winit` 0.34 targets winit 0.30, so
-   screen readers need not wait for the upgrade; the cost is moving the
-   adapter to its winit 0.31 version later. The alternative is to wait
-   and do M23 first.
-2. **M22: platforms checked by hand.** VoiceOver is checked on the
-   owner's Mac. Are NVDA (Windows) and Orca (Linux) checked by hand
-   before the release too, in a VM if needed, or only covered by the
-   tree tests?
-3. **M23: Finder "Open With" if winit 0.31 does not pass the files
-   on.** A small `objc2` hook in `app` would be new `unsafe` outside
-   `render` and the mmap buffer. Allow it, or leave the item in the
-   backlog?
-4. **M24: where spell checking runs.** Drafted for Markdown, plain
-   text, and comments and strings in code. The alternative is prose
-   files only, which is quieter in code.
-5. **M24: dictionaries.** Drafted with US English bundled (about
-   0.5 MB) and others from the config folder. The alternative bundles
-   nothing and needs a dictionary dropped in first.
-6. **M24: `words.txt`.** Added words are written to the config folder,
-   the first file Nimbus writes there. The alternative keeps them in
-   the state directory beside `state.toml`.
-7. **M25: East Asian encodings.** M17 measured that offering them costs
-   about 1 KB. Drafted to offer them by default (still never guessed)
-   and retire the cargo feature; the alternative keeps them behind it.
+- Order: M22 (screen readers) first, on winit 0.30, since
+  `accesskit_winit` 0.34 targets it; M23 (library upgrades) whenever
+  ropey 2 and winit 0.31 are stable, then M24 and M25. Waiting for the
+  upgrade first was declined.
+- M22: VoiceOver is checked by hand on the owner's Mac; NVDA and Orca
+  are covered by the tree tests only, with no hand check.
+- M23: Finder "Open With" ships only if winit 0.31 passes the
+  open-files message on; no `objc2` hook, so no new `unsafe` outside
+  `render` and the mmap buffer.
+- M24: no spell checking. The plan keeps the word count, preview
+  images and HTML export; the two dictionary questions fell away with
+  it.
+- M25: the East Asian encodings stay behind the `east-asian` cargo
+  feature, off by default, though offering them would cost about 1 KB.
 
 The questions the drafts of M16–M21 raised were answered on
 2026-10-18, when the owner approved the six plans and their order:
@@ -785,3 +775,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | M16: a colour font over 64 MB (Apple Color Emoji, about 200 MB) is copied into memory, up to 512 MB, rather than mapped with new `unsafe` (owner's choice); `font` names an installed family or a file, looked up on a worker; indent guides default off; linear blending tried and declined (gamma space stays) | §4.3, m16 |
 | 2026-10-18 | M18 landed: diff options normalise lines before hashing; lines over 4 KB are cut by a 64-byte gear hash and diffed in pieces (layered path only, within 256 MB); git read with `cat-file --filters` on its own thread; folder compare merges two sorted walks by `Path` order | §4.4, m18 |
 | 2026-10-18 | M20 landed: sticky scroll on by default; the preview copies the document's own tree to its worker (no second parse), reads inline Markdown with a small scanner rather than the inline grammar, draws code blocks in the editor font and caches their colours between layouts; the preview is a tab with a flag, kept in the session; `ui_font` also draws the preview | §4.2, m20 |
+| 2026-10-18 | M22–M25 approved (after 1.0): screen readers first on winit 0.30; NVDA and Orca covered by tests only; Open With only if winit 0.31 passes the files on (no new `unsafe`); no spell checking; East Asian encodings stay behind their feature | §9, m22–m25 |

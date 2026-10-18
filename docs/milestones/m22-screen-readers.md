@@ -1,12 +1,13 @@
 # M22 — Screen readers
 
-**Status: draft (2026-10-18).** Written on 2026-10-18, after 1.0, from
+**Status: next (2026-10-18).** Written on 2026-10-18, after 1.0, from
 the first item the backlog kept for after the release: a GPU-drawn
 editor is invisible to VoiceOver, NVDA and Orca, because nothing on
 screen is a native control the operating system can describe. The
 owner chose to ship 1.0 without it (`DESIGN.md` §9); this plan is what
-"the first milestone after 1.0" means. Open questions are in
-`DESIGN.md` §9.
+"the first milestone after 1.0" means. Approved the same day: it goes
+before the library upgrades (M23), on winit 0.30, and NVDA and Orca are
+covered by the tree tests rather than checked by hand (`DESIGN.md` §9).
 
 ## Goal
 
@@ -19,9 +20,9 @@ running one.
 
 - [ ] **The editor reads**: with VoiceOver on (macOS), moving the cursor
       speaks the character, word or line it moved over; Shift-selecting
-      speaks the selected text; typing echoes characters. The same on
-      Windows with NVDA and on Linux with Orca, checked once each by
-      hand before release.
+      speaks the selected text; typing echoes characters. Windows
+      (NVDA) and Linux (Orca) get the same tree, covered by the tree
+      tests; the owner chose not to check them by hand.
 - [ ] **Chrome reads**: tabs are a tab list (name, modified state,
       position "2 of 5"); the sidebar is a tree with expand and collapse;
       the palette and pickers are a list whose highlighted item is
@@ -112,8 +113,7 @@ and `async-io`; measured for binary size before it stays.
 5. Sidebar tree, palette and pickers, find bar.
 6. Actions from the reader onto the registry.
 7. Keyboard reach audit and fixes; manual page; Linux shortcut note.
-8. VoiceOver pass on the Mac (owner); NVDA and Orca pass; measurements;
-   Results.
+8. VoiceOver pass on the Mac (owner); measurements; Results.
 
 ## Concepts
 
@@ -130,8 +130,8 @@ and `async-io`; measured for binary size before it stays.
 |---|---|
 | Creating the window invisible delays or flickers the first frame on some platform | Measure with `--smoke`; if it costs over 10 ms, create the adapter on the first frame's window event instead and document the limitation per platform |
 | `accesskit_unix` adds several MB to the Linux binary | Measure; if the 35 MB budget is at risk, put the Linux adapter behind a default-on cargo feature so packagers can drop it |
-| Screen readers behave differently with a custom text field | Test the three by hand; when one misbehaves, prefer AccessKit's documented patterns over workarounds, and list what remains in Results |
-| Only macOS is tested by the owner day to day | NVDA and Orca passes happen once before release, in a VM if needed; regressions there are caught by the tree tests, not by ear |
+| Screen readers behave differently with a custom text field | VoiceOver is tested by hand; when a reader misbehaves, prefer AccessKit's documented patterns over workarounds, and list what remains in Results |
+| NVDA and Orca are never checked by ear (owner's choice) | The tree tests pin what we describe; a problem a reader has with it is fixed when a user reports it, and the manual page says how to report one |
 
 ## Results
 

@@ -41,15 +41,15 @@ alternative of encodings first declined.
 ## Order, M22–M25 (after 1.0)
 
 Drafted on 2026-10-18, after 1.0, from what M21 and the earlier plans
-deferred and the unscheduled list below. Not yet approved: the open
-questions are in `DESIGN.md` §9.
+deferred and the unscheduled list below; approved the same day in this
+order, with spell checking dropped from M24 (`DESIGN.md` §9).
 
 | # | Plan | One line | Why here |
 |---|---|---|---|
 | 22 | [Screen readers](m22-screen-readers.md) | An AccessKit tree for the editor and chrome, built only when a screen reader asks | The owner named it the first milestone after 1.0; `accesskit_winit` 0.34 works on winit 0.30, so it need not wait |
 | 23 | [Library upgrades](m23-library-upgrades.md) | Ropey 2, winit 0.31, current wgpu; Finder "Open With" and the emoji picker | Waits on stable releases; goes whenever they arrive, ahead of whatever is next |
-| 24 | [Writing prose](m24-writing-prose.md) | Spell checking, word count, preview images, HTML export | Prose is the second kind of content in §1; finishes what M14 and M20 deferred |
-| 25 | [International text](m25-international-text.md) | Fallback fonts per script and language, variable fonts, East Asian encodings, editable mapped files in single-byte encodings | What M16 and M17 deferred; the riskiest piece (the piece table) last |
+| 24 | [Writing prose](m24-writing-prose.md) | Word count, preview images, HTML export | Prose is the second kind of content in §1; finishes what M14 and M20 deferred |
+| 25 | [International text](m25-international-text.md) | Fallback fonts per script and language, variable fonts, tested East Asian encodings behind their feature, editable mapped files in single-byte encodings | What M16 and M17 deferred; the riskiest piece (the piece table) last |
 
 ## Where each deferred item went
 
@@ -80,13 +80,13 @@ questions are in `DESIGN.md` §9.
 | Markdown preview | M14 | M20 |
 | Proportional fonts in UI chrome | DESIGN.md §2 | M20 |
 | Ropey 2.0 | DESIGN.md §4.1 | M21, then M23 (still beta at 1.0) |
-| winit 0.31, Finder "Open With", macOS emoji picker | M21 | M23 |
+| winit 0.31, Finder "Open With", macOS emoji picker | M21 | M23 (Open With only if winit passes the files on) |
 | Screen-reader support (AccessKit) | M21 | M22 |
 | Hot keys the desktop grabs on Linux (a manual note) | Unscheduled | M22 |
-| Spell checking in prose | M14 | M24 |
+| Spell checking in prose | M14 | Declined for M24 (owner, 2026-10-18); below |
 | Images in the Markdown preview, export to HTML | M20 | M24 (local PNG and JPEG; no web images) |
 | Font fallback per script, variable fonts | M16 | M25 |
-| East Asian encodings, transcoding mapped files | M17 | M25 (mapped files: single-byte encodings only) |
+| East Asian encodings, transcoding mapped files | M17 | M25 (encodings tested but still behind `east-asian`; mapped files: single-byte encodings only) |
 
 ## Unscheduled
 
@@ -103,8 +103,9 @@ left is small or still speculative.
 - **Subpixel (LCD) antialiasing** (M16 deferred): macOS no longer
   draws it and a composited surface cannot use it; kept here in case a
   Windows or Linux user asks.
-- **Grammar checking, auto-correct, web images in the preview, PDF
-  export** (M24 deferred).
+- **Spell checking**: the owner chose to leave it out of M24
+  (2026-10-18).
+- **Web images in the preview, PDF export** (M24 deferred).
 - **Vertical text, editable mapped files in multi-byte encodings** (M25
   deferred).
 

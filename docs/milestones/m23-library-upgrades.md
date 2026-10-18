@@ -1,11 +1,13 @@
 # M23 — Library upgrades
 
-**Status: draft (2026-10-18), waiting on stable releases.** Written on
+**Status: planned (2026-10-18), waiting on stable releases.** Written on
 2026-10-18 from what M21 deferred: 1.0 shipped on ropey 1.6 and winit
 0.30 because ropey 2 and winit 0.31 were still betas (ropey
 2.0.0-beta.1, winit 0.31.0-beta.3), and the owner chose to move both
 upgrades to the first point release after they are stable. Two macOS
-bugs waited on winit too. Open questions are in `DESIGN.md` §9.
+bugs waited on winit too. Approved the same day: it follows M22
+whenever the releases arrive, and Finder "Open With" ships only if
+winit passes the files on, with no new `unsafe` (`DESIGN.md` §9).
 
 ## Goal
 
@@ -22,7 +24,8 @@ upgrade measured against the numbers it replaces.
 - [ ] **winit 0.31**: the app moves to winit 0.31 and the matching
       `accesskit_winit`; the API drift is noted in `CLAUDE.md` beside
       the wgpu one; `--smoke` within 10 % of 1.x's number.
-- [ ] **Finder "Open With"**: Nimbus appears in Finder's "Open With"
+- [ ] **Finder "Open With"** (only if winit 0.31 passes the open-files
+      message on; otherwise it stays in the backlog): Nimbus appears in Finder's "Open With"
       for text files, and opening a file that way (or dropping it on the
       Dock icon) opens it in a tab, whether Nimbus is running or not.
 - [ ] **macOS emoji picker**: text inserted from the Character Viewer
@@ -61,9 +64,9 @@ This is M21's rule, kept.
 `Info.plist` that `scripts/bundle-macos.sh` writes declares no document
 types yet; adding them is easy, but Finder would then send files the
 app cannot receive. If winit 0.31 passes that message on, the
-handler is plain Rust; if it does not, it is a small `objc2` hook in
-`app`, which is new `unsafe` code and needs the owner's say first
-(`CLAUDE.md` keeps `unsafe` to `render` and the mmap buffer).
+handler is plain Rust. If it does not, the item goes back to the
+backlog: the owner chose not to add an `objc2` hook, which would be new
+`unsafe` outside `render` and the mmap buffer (2026-10-18).
 
 **The emoji picker is checked, not patched.** The bug is winit 0.30
 dropping text inserted without a preceding compose. If 0.31 fixes it,
@@ -76,8 +79,9 @@ item stays in the backlog. A patched copy of winit stays out.
    and benchmarks before and after.
 2. winit 0.31 and `accesskit_winit`: migrate, `CLAUDE.md` notes,
    `--smoke`.
-3. Finder Open With: document types in `Info.plist`, the open-files
-   handler, a cold-start and running-app check.
+3. Finder Open With, if winit passes the files on: document types in
+   `Info.plist`, the open-files handler, a cold-start and running-app
+   check.
 4. Emoji picker check on the Mac (owner).
 5. wgpu current, if newer than 30.
 6. Point release; Results.
@@ -95,7 +99,7 @@ item stays in the backlog. A patched copy of winit stays out.
 |---|---|
 | A stable release does not arrive for months | The plan waits; later milestones go ahead of it. Nothing else depends on it except M22's adapter version, which follows winit |
 | winit 0.31 changes the event loop enough to touch most of `app.rs` | One commit with no behaviour change, reviewed on its own; the screenshot test and `--smoke` show nothing moved |
-| Open With needs `unsafe` | Ask the owner; if declined, it stays in the backlog and the bundle keeps no document types |
+| winit 0.31 does not pass the open-files message on | It stays in the backlog and the bundle keeps no document types; no `unsafe` hook (owner's choice) |
 
 ## Results
 

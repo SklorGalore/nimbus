@@ -1,11 +1,12 @@
 # M25 — International text
 
-**Status: draft (2026-10-18).** Written on 2026-10-18 from what M16 and
+**Status: planned (2026-10-18).** Written on 2026-10-18 from what M16 and
 M17 deferred for text that is not Latin: font fallback per script
 (M16), variable fonts (M16), East Asian encodings (M17, behind a cargo
 feature that is off) and transcoding mapped files (M17). Bidirectional
-and right-to-left text stay a non-goal (`DESIGN.md` §2). Open questions
-are in `DESIGN.md` §9.
+and right-to-left text stay a non-goal (`DESIGN.md` §2). Approved the
+same day with the East Asian encodings kept behind their cargo feature
+(`DESIGN.md` §9).
 
 ## Goal
 
@@ -32,10 +33,12 @@ them is no longer read-only.
       `font_weight` the config names (default its regular instance);
       `font_weight` also applies to static font families that have that
       weight.
-- [ ] **East Asian encodings**: Shift_JIS, EUC-JP, GBK, GB18030, Big5
-      and EUC-KR are offered in "Reopen with Encoding", "Save with
-      Encoding", `--encoding` and the `[encodings]` table. They are
-      never guessed from content (M17's rule stands).
+- [ ] **East Asian encodings**: built with `--features east-asian`,
+      Shift_JIS, EUC-JP, GBK, GB18030, Big5 and EUC-KR round-trip
+      through "Reopen with Encoding", "Save with Encoding", `--encoding`
+      and the `[encodings]` table, with a fixture for each. The feature
+      stays off by default (owner's choice) and they are never guessed
+      from content (M17's rule stands).
 - [ ] **Huge files in other encodings**: a mapped file over 256 MB in a
       single-byte encoding (Windows-1252, ISO-8859-1) is editable, decoded
       piece by piece; multi-byte encodings stay read-only above the
@@ -48,8 +51,8 @@ them is no longer read-only.
 ## Scope
 
 **In**: per-script and per-language fallback, wide-glyph fitting,
-variable font weights, offering the East Asian encodings, editable
-mapped files in single-byte encodings.
+variable font weights, testing the East Asian encodings behind their
+feature, editable mapped files in single-byte encodings.
 
 **Deferred**: bidirectional text and right-to-left scripts (non-goal);
 vertical text; input method candidate windows beyond what winit and the
@@ -91,9 +94,11 @@ one to one. The piece table from M7 gains a decode step on read and an
 encode step on save; multi-byte encodings lack that property, which is
 why they stay read-only.
 
-**Offering the East Asian encodings costs about 1 KB**: M17 measured
-that `encoding_rs` links their tables whatever is offered. The cargo
-feature that hid them is removed if the owner agrees (`DESIGN.md` §9).
+**The East Asian encodings stay behind `east-asian`.** M17 measured
+that offering them costs about 1 KB, since `encoding_rs` links their
+tables whatever is offered; the owner kept the feature off anyway
+(2026-10-18), so this milestone only makes sure they work when it is
+on, with fixtures and a CI job that builds with the feature.
 
 ## Tasks
 
@@ -104,8 +109,8 @@ feature that hid them is removed if the owner agrees (`DESIGN.md` §9).
    `locl`.
 4. Wide-glyph fitting; screenshot test.
 5. Variable fonts and `font_weight`.
-6. East Asian encodings offered; the cargo feature retired; fixtures for
-   each.
+6. Fixtures for each East Asian encoding behind `east-asian`; a CI
+   job that tests with the feature on.
 7. Decode and encode steps for single-byte mapped files; the buffer
    oracle suite run on a mapped Windows-1252 file.
 8. Measurements; manual pages; Results.
