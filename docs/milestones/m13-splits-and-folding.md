@@ -178,6 +178,11 @@ against a `String` oracle (`crates/core/src/fold.rs`), and
 | Scroll a screen with 1000 folds (row walk and a click) | 10 µs | 28 µs |
 | Keystroke in one group, the other group on the same file following | 7 µs | 19 µs |
 
+`--smoke` on the owner's M5 Pro (release, the session follow-up's build):
+140–146 ms warm over three runs, against 116–132 ms at M1 and the 500 ms
+budget; the first run after the build was 628 ms cold (the binary and
+the Metal shader cache not yet in memory).
+
 Making the 1000 folds took 13 ms (`Folds::fold_many`); they take 16 KB,
 16 bytes a fold and nothing per line.
 
