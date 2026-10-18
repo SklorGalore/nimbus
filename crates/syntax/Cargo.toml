@@ -1,12 +1,12 @@
 [package]
 name = "nimbus-syntax"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license.workspace = true
 
 [dependencies]
 log = "0.4.34"
-nimbus-core = { version = "0.6.1", path = "../core" }
+nimbus-core = { version = "0.7.1", path = "../core" }
 streaming-iterator = "0.1.9"
 tree-sitter = "0.27"
 tree-sitter-bash = { version = "0.25.1", optional = true }

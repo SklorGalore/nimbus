@@ -8,6 +8,13 @@ section before tagging.
 
 ### Added
 
+- Compare, second pass: Ignore whitespace (at line ends, or all), Ignore
+  case and Ignore blank lines, as buttons in the sidebar's Compare tab
+  and as palette commands, remembered between runs. Lines over 4 KB,
+  such as minified files, are compared in pieces. Compare with HEAD and
+  Compare with Revision… read the file from git. Compare Folders… (or
+  `nimbus --diff DIR_A DIR_B`) lists the files that differ; Enter opens a
+  pair, and F7 past the last change steps to the next file.
 - Workspaces of several folders: Add Folder to Workspace… (or drop a
   folder on the window, or `nimbus DIR1 DIR2`); Go to File and Find in
   Files cover every folder. Save Workspace As… and Open Workspace…, with
@@ -88,6 +95,14 @@ section before tagging.
   lines, without becoming unsaved, and Follow Tail in the status bar keeps
   the view at the end. Works on the 4 GB mapped files too.
 - The window comes back at its size and place.
+- Colour emoji from the system emoji font, on a second atlas page.
+- Ligatures with `ligatures = true` and a font that has them; the new
+  `font` setting names an installed family or a font file.
+- Zoom In (`Primary+=`), Zoom Out (`Primary+-`) and Reset Zoom
+  (`Primary+0`), remembered between runs unless `remember_zoom = false`.
+- Visible whitespace (`render_whitespace`, default `selection`) and indent
+  guides (`indent_guides`), both toggles in the palette.
+- The scrollbar fades out a second after the last scroll.
 - Encodings: files in UTF-16 (by their byte order mark) and Windows-1252
   (guessed from the first 64 KB) open, edit and save back in their own
   encoding, with ISO-8859-1, the other Windows and ISO-8859 tables, KOI8

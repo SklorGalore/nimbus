@@ -35,6 +35,9 @@ diff_word = "#8fcf9a66"
 diff_filler = "#efece5"
 merge_conflict = "#f6c9c9"
 fold_chip = "#e6e1d6"
+whitespace = "#9aa0ad80"
+guide = "#e4e0d6"
+guide_active = "#bdb7aa"
 
 [syntax]
 attribute = "#0184bc"

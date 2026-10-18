@@ -618,8 +618,12 @@ impl MergeView {
             self.columns.plan_unaligned(layout, &lines);
         } else {
             // Merges mark no words: the inputs' lines differ as wholes.
-            self.columns
-                .plan(layout, background, |_: &Row<RegionTag>| [None, None, None]);
+            self.columns.plan(
+                layout,
+                &[],
+                background,
+                |_: &Row<RegionTag>, _: &crate::columns::Bytes| [None, None, None],
+            );
         }
     }
 

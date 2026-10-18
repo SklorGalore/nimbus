@@ -30,7 +30,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::diff::{DIFF_LIMIT, DiffError, Hunk, Interner, Lines};
+use crate::diff::{DIFF_LIMIT, DiffError, Hunk, Interner, Lines, Normalize};
 use crate::{Snapshot, Text};
 
 /// Which of the two texts an edit happened in.
@@ -150,10 +150,25 @@ impl LiveDiff {
     /// [`DiffError::TooManyLines`] from the interner, or
     /// [`DiffError::TooLarge`] past the limit.
     pub fn new(old: &Arc<dyn Snapshot>, new: &Arc<dyn Snapshot>) -> Result<Self, DiffError> {
+        Self::with_normalize(old, new, Normalize::default())
+    }
+
+    /// Like [`new`](LiveDiff::new), comparing lines by `normalize` (M18's
+    /// ignore-whitespace, ignore-case and ignore-blank-lines options).
+    /// Edits followed later are compared the same way.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](LiveDiff::new).
+    pub fn with_normalize(
+        old: &Arc<dyn Snapshot>,
+        new: &Arc<dyn Snapshot>,
+        normalize: Normalize,
+    ) -> Result<Self, DiffError> {
         if old.len_bytes() > DIFF_LIMIT || new.len_bytes() > DIFF_LIMIT {
             return Err(DiffError::TooLarge);
         }
-        let mut interner = Interner::new();
+        let mut interner = Interner::with_options(normalize, false);
         let a = interner.intern(old)?;
         let b = interner.intern(new)?;
         let hunks = interner.diff(&a, &b);

@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "nimbus"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "arboard",
  "dirs",
@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "nimbus-core"
-version = "0.6.1"
+version = "0.7.1"
 dependencies = [
  "imara-diff",
  "memchr",
@@ -1558,13 +1558,14 @@ dependencies = [
 
 [[package]]
 name = "nimbus-render"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "bytemuck",
  "fontdb",
  "log",
  "nimbus-core",
  "pollster 1.0.1",
+ "proptest",
  "swash",
  "unicode-segmentation",
  "wgpu",
@@ -1573,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "nimbus-syntax"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "log",
  "nimbus-core",

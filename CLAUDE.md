@@ -23,6 +23,9 @@ bench/gen.sh                                                # 10 MB / 100 MB tes
 bench/gen.sh diff && cargo run --release -- --diff bench/out/src-10mb.rs bench/out/src-10mb-edited.rs   # the compare view on the 10 MB bench pair
 NIMBUS_DIFF_FILES=$PWD/bench/out/src-10mb.rs:$PWD/bench/out/src-10mb-edited.rs cargo test --release -p nimbus-core -- --ignored --nocapture compare_bench   # time a comparison
 NIMBUS_DIFF_FILES=$PWD/bench/out/src-10mb.rs:$PWD/bench/out/src-10mb-edited.rs cargo test --release -p nimbus -- --ignored --nocapture typing_bench --test-threads 1   # keystroke cost in the compare and merge views (absolute paths: tests run in crates/app)
+cargo run -- --diff DIR_A DIR_B                               # folder compare in the sidebar's Compare mode (M18)
+cargo test --release -p nimbus-core -- --ignored --nocapture one_line_bench   # a 50 MB one-line file diffed in pieces
+cargo test --release -p nimbus -- --ignored --nocapture folder_compare        # walk and compare two trees of 100,000 files
 cargo run -- --merge BASE LOCAL REMOTE -o OUT --headless 1600x900 --screenshot /tmp/m.bmp   # render a three-way merge (exit code 0 only when OUT is saved with no conflicts)
 cargo run --release -- --merge examples/merge/{base,local,remote}.rs -o /tmp/merged.rs   # small sample inputs for the merge views by eye (examples/README.md)
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp   # render with no window (works with the screen locked)
@@ -35,6 +38,8 @@ cargo test --release -p nimbus-core -- --ignored --nocapture # opt-in benchmarks
 bench/gen.sh logs && ./target/release/nimbus bench/out/log-4gb.log --headless 1400x700 --screenshot /tmp/l.bmp --wait-index   # huge-file check (mapped buffer, all lines counted first)
 ./target/release/nimbus FILE --backend rope|mapped ...      # force a buffer backend (measurement)
 cargo run -- FILE --debug-overlay --headless 1400x500 --screenshot /tmp/d.bmp   # the F12 overlay, shown from the start
+cargo run -- FILE --linear-blend --headless 1400x500 --screenshot /tmp/lin.bmp  # M16 experiment: blend text in linear light (sRGB target)
+NIMBUS_BENCH_FILE=$PWD/bench/out/src-10mb.rs cargo test --release -p nimbus -- --ignored --nocapture m16_typing_bench   # keystroke cost with whitespace, guides and ligatures on vs off (needs a GPU)
 cargo run -- FILE --cursors 4,19,33 --headless 900x300 --screenshot /tmp/m.bmp  # several cursors (byte offsets; the last is primary)
 bench/gen.sh sizes && bench/threshold.sh                    # rope vs mapped open time and memory at 64-512 MB
 cargo test --release -p nimbus-syntax -- --ignored --nocapture --test-threads 1   # keystroke and first-parse cost, tree memory (needs bench/gen.sh)

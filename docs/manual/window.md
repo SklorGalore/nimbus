@@ -37,10 +37,12 @@ tabs are remembered as the project's session (see
 
 ## The sidebar
 
-The sidebar (`Cmd+B` / `Ctrl+B` to show or hide it) has two tabs in its
-header, **Files** and **Search**, followed by the project folder's name.
-Search is the Find in Files panel, described in
-[Find and replace](find-and-replace.md#find-in-files). Files is the
+The sidebar (`Cmd+B` / `Ctrl+B` to show or hide it) has three tabs in
+its header, **Files**, **Search** and **Compare**, followed by the
+project folder's name. Search is the Find in Files panel, described in
+[Find and replace](find-and-replace.md#find-in-files). Compare holds the
+compare options and a folder compare's results, described in
+[Compare and merge](compare-and-merge.md#compare-options). Files is the
 project tree:
 
 - Folders come first, then files, both sorted without regard to case.
@@ -214,6 +216,23 @@ otherwise do not pick up changes by themselves.
 If the file is rewritten or replaced instead (a rotated log, for
 example), Nimbus reloads it as described in
 [Updates and troubleshooting](troubleshooting.md#when-a-file-changes-on-disk).
+
+## Zoom, whitespace and indent guides
+
+Zoom In (`Cmd+=` / `Ctrl+=`), Zoom Out (`Cmd+-` / `Ctrl+-`) and Reset
+Zoom (`Cmd+0` / `Ctrl+0`) change the text size by one point at a time,
+between 6 and 72. The top line on screen stays put. The size is
+remembered for the next start unless `remember_zoom = false`; it is never
+written to `config.toml`.
+
+Spaces show as `·` and tabs as `→` inside a selection by default; Toggle
+Render Whitespace in the palette cycles between selection, everywhere and
+never. Toggle Indent Guides draws a thin line at each indentation level,
+brighter for the level around the cursor. Both start from
+`render_whitespace` and `indent_guides` in the [settings](settings.md).
+
+The scrollbar fades out a second after you stop scrolling, and comes back
+when you scroll or point at it.
 
 ## Menus
 

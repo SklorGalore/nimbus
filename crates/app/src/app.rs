@@ -28,8 +28,9 @@ use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
 use crate::columns::Click;
-use crate::compare::{Compare, DiffResult, Other};
-use crate::config::{self, Config};
+use crate::compare::{Compare, DiffResult, Other, Toggle};
+use crate::compare_panel;
+use crate::config::{self, Config, Whitespace};
 use crate::debug::Debug;
 use crate::docs::{DocId, Docs};
 use crate::document::{Carets, DiskChange, Document, Editor, MAX_COPY_BYTES, Occurrence, Solo};
@@ -37,7 +38,9 @@ use crate::editing::Outcome;
 use crate::encoding::{Choice, Encoding};
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::find_files::{self, Batch as FilesBatch};
+use crate::folder_compare;
 use crate::folding;
+use crate::git;
 use crate::groups::{self, Groups};
 use crate::input::{self, Command, Motion, Resolved};
 use crate::io;
@@ -76,6 +79,9 @@ pub enum AppEvent {
     /// A system font for a character the bundled font lacks has been
     /// loaded: draw again to use it.
     FontLoaded,
+    /// The worker looking up the config's `font` finished: the name it
+    /// looked for, and the font if found.
+    EditorFont(String, Option<nimbus_render::EditorFont>),
     /// The picker's matcher has new results.
     PickerChanged,
     /// A menu item was chosen; carries its action id.
@@ -114,6 +120,21 @@ pub enum AppEvent {
     Update(Result<update::Outcome, UpdateError>, bool),
     /// A Fold All or Fold Level N scan finished on a worker (M13).
     Folded(folding::FoldResult),
+    /// `git` read a file at a revision for Compare with HEAD (M18).
+    Revision(Revision),
+    /// Rows from a folder compare's workers (M18).
+    FolderCompare(folder_compare::Batch),
+}
+
+/// A file read at a git revision on a worker (M18).
+#[derive(Debug)]
+pub struct Revision {
+    /// The file (the tab's path) it was read for.
+    path: PathBuf,
+    /// The revision, as asked for.
+    rev: String,
+    /// Its contents, or why git could not give them.
+    outcome: Result<Vec<u8>, git::GitError>,
 }
 
 /// Ask GitHub for the latest release on its own thread.
@@ -210,6 +231,34 @@ const MENU_REPEAT_GAP: Duration = Duration::from_millis(250);
 
 /// How long a message stays on screen.
 const MESSAGE_TIME: Duration = Duration::from_secs(4);
+
+/// The smallest and largest editor font sizes the zoom reaches, in points:
+/// the same range the config's `font_size` accepts.
+const MIN_ZOOM: f64 = 6.0;
+const MAX_ZOOM: f64 = 72.0;
+
+/// The file watcher, reporting changes and warnings to the event loop.
+fn disk_watch(proxy: &EventLoopProxy<AppEvent>) -> Watch {
+    let disk_proxy = proxy.clone();
+    let warn_proxy = proxy.clone();
+    Watch::new(
+        move |changes| {
+            let _ = disk_proxy.send_event(AppEvent::Disk(changes));
+        },
+        move |warning| {
+            let _ = warn_proxy.send_event(AppEvent::WatchWarning(warning));
+        },
+    )
+}
+
+/// The font size a session starts at: the zoom the last one left in
+/// `state.toml`, unless `remember_zoom = false`, else the config's.
+fn starting_zoom(config: &Config, state: &State) -> f64 {
+    state
+        .font_size
+        .filter(|_| config.remember_zoom)
+        .map_or(config.font_size, |s| s.clamp(MIN_ZOOM, MAX_ZOOM))
+}
 
 /// How long the first chord of a two-chord binding waits for the second.
 const CHORD_TIMEOUT: Duration = Duration::from_secs(2);
@@ -422,6 +471,10 @@ impl Blink {
     }
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "unrelated flags of the running editor, not one state"
+)]
 pub struct App {
     options: Options,
     started: Instant,
@@ -474,6 +527,9 @@ pub struct App {
     /// without ever sending the matching "visible again" event, so waiting
     /// for that event alone could leave the window blank.
     hidden_retry: Option<(Instant, Duration)>,
+    /// When a scrollbar shown by a recent scroll hides (M16): the one
+    /// wakeup that draws the frame without it.
+    scrollbar_hide_at: Option<Instant>,
     /// Connected on first copy or paste, not at startup.
     clipboard: Option<arboard::Clipboard>,
     clicks: Clicks,
@@ -500,6 +556,19 @@ pub struct App {
     sidebar: Sidebar,
     /// Changes on disk to the sidebar's folders and open files.
     watch: Watch,
+    /// The editor font size in points for this session: the config's
+    /// `font_size`, changed by the zoom actions (M16) and remembered in
+    /// `state.toml` unless `remember_zoom = false`.
+    font_size: f64,
+    /// Where whitespace shows: the config's `render_whitespace`, cycled
+    /// from the palette.
+    whitespace: Whitespace,
+    /// Indent guides on: the config's `indent_guides`, toggled from the
+    /// palette.
+    indent_guides: bool,
+    /// When the last zoom step started, until its first frame is drawn:
+    /// that frame refills the atlas, and its time is logged.
+    zoom_started: Option<Instant>,
     /// What is remembered between runs, and the session's bookkeeping.
     ws: Workspace,
     /// The pointer shows the resize cursor.
@@ -584,8 +653,7 @@ impl App {
         let debug_overlay = options.debug_overlay;
         let (keymap, key_warnings) = Keymap::new(&config.keys);
         let (theme, theme_warnings) = Theme::load(&config.theme);
-        let disk_proxy = proxy.clone();
-        let warn_proxy = proxy.clone();
+        let watch = disk_watch(&proxy);
         let mut open = Docs::default();
         let (mut sidebar, (mut tabs, groups, active, note)) = workspaces::startup_tabs_and_roots(
             (&root, docs, restore),
@@ -611,6 +679,9 @@ impl App {
         Self {
             options,
             started,
+            font_size: starting_zoom(&config, &state),
+            whitespace: config.render_whitespace,
+            indent_guides: config.indent_guides,
             config,
             theme,
             languages,
@@ -636,6 +707,7 @@ impl App {
             ime_area: None,
             title_key: None,
             hidden_retry: None,
+            scrollbar_hide_at: None,
             clipboard: None,
             clicks: Clicks::default(),
             find: FindBar::default(),
@@ -649,14 +721,8 @@ impl App {
             pending_chord: None,
             last_menu: None,
             sidebar,
-            watch: Watch::new(
-                move |changes| {
-                    let _ = disk_proxy.send_event(AppEvent::Disk(changes));
-                },
-                move |warning| {
-                    let _ = warn_proxy.send_event(AppEvent::WatchWarning(warning));
-                },
-            ),
+            watch,
+            zoom_started: None,
             ws: Workspace::new(state, session_root),
             resize_cursor: false,
             watching: false,
@@ -737,7 +803,89 @@ impl App {
     }
 
     fn font_px(&self, scale: f64) -> f32 {
-        to_f32(self.config.font_size * scale)
+        to_f32(self.font_size * scale)
+    }
+
+    /// Settle a newly opened GPU: tab width, ligatures, and a redraw when
+    /// a fallback font arrives.
+    fn gpu_ready(&mut self, mut gpu: Gpu) {
+        gpu.set_tab_width(self.tab_width());
+        gpu.set_ligatures(self.config.ligatures);
+        let proxy = self.proxy.clone();
+        gpu.set_font_notify(Arc::new(move || {
+            let _ = proxy.send_event(AppEvent::FontLoaded);
+        }));
+        self.gpu = Some(gpu);
+    }
+
+    /// Look up the config's `font` on a worker (listing the system's fonts
+    /// takes too long for the main thread); [`App::editor_font_arrived`]
+    /// swaps it in. An empty setting goes back to the bundled font at once.
+    fn load_editor_font(&mut self) {
+        let name = self.config.font.clone();
+        if name.is_empty() {
+            if let (Some(gpu), Ok(regular)) = (self.gpu.as_mut(), Font::bundled()) {
+                gpu.set_font(nimbus_render::EditorFont {
+                    regular,
+                    bold: Font::bundled_bold().ok(),
+                });
+            }
+            return;
+        }
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name("nimbus-font".to_owned())
+            .spawn(move || {
+                let found = nimbus_render::find_editor_font(&name);
+                let _ = proxy.send_event(AppEvent::EditorFont(name, found));
+            });
+        if let Err(e) = spawned {
+            log::warn!("cannot look up the font: {e}");
+        }
+    }
+
+    /// The configured font was looked up: draw with it, unless the config
+    /// changed again meanwhile.
+    fn editor_font_arrived(&mut self, name: &str, found: Option<nimbus_render::EditorFont>) {
+        if name != self.config.font {
+            return;
+        }
+        match (found, self.gpu.as_mut()) {
+            (Some(font), Some(gpu)) => {
+                gpu.set_font(font);
+                self.changed(false);
+            }
+            (None, _) => self.say(format!("Font {name:?} not found; using Hack"), true),
+            (Some(_), None) => {}
+        }
+    }
+
+    /// Zoom the editor to `size` points (clamped to 6–72): the atlas is
+    /// refilled for the new size, and the view keeps its top line because
+    /// its anchor is a byte, not a pixel offset. Remembered in
+    /// `state.toml` unless `remember_zoom = false`.
+    fn zoom_to(&mut self, size: f64) {
+        let size = size.clamp(MIN_ZOOM, MAX_ZOOM);
+        if (size - self.font_size).abs() < f64::EPSILON {
+            return;
+        }
+        let ratio = size / self.font_size;
+        self.font_size = size;
+        if let (Some(gpu), Some(window)) = (self.gpu.as_mut(), self.window.as_ref()) {
+            let started = Instant::now();
+            gpu.set_font_size(to_f32(size * effective_scale(window.scale_factor())));
+            log::debug!("zoom to {size} pt: atlas reset in {:?}", started.elapsed());
+        }
+        // The anchor byte stays; the part-row offset and the sideways
+        // scroll are in pixels of the old size.
+        for tab in &mut self.tabs {
+            tab.view.scroll_px = 0.0;
+            tab.view.scroll_x *= ratio;
+        }
+        self.zoom_started = Some(Instant::now());
+        self.say(format!("Zoom: {size} pt"), false);
+        self.remember();
+        self.changed(false);
     }
 
     /// Geometry for the whole window, if it exists, sized for the focused
@@ -1113,13 +1261,21 @@ impl App {
             Command::CompareSaved => self.compare_with_saved(),
             Command::CompareFile => self.compare_with_file(),
             Command::CompareTab => self.compare_with_tab(),
-            Command::DiffNext => self.diff_step(true),
-            Command::DiffPrev => self.diff_step(false),
-            Command::DiffUnified => {
-                if let Some(c) = self.tabs[self.active].compare.as_mut() {
-                    c.toggle_unified();
+            Command::CompareHead => self.compare_with_revision("HEAD".to_owned()),
+            Command::CompareRevision => {
+                if self.doc().path.is_some() {
+                    self.open_picker(Kind::Revision);
+                } else {
+                    self.say("This tab has no file to compare with a revision", true);
                 }
             }
+            Command::CompareFolders => self.compare_folders(),
+            Command::DiffWhitespace => self.toggle_diff_option(Toggle::Whitespace),
+            Command::DiffCase => self.toggle_diff_option(Toggle::Case),
+            Command::DiffBlankLines => self.toggle_diff_option(Toggle::BlankLines),
+            Command::DiffNext => self.diff_step(true),
+            Command::DiffPrev => self.diff_step(false),
+            Command::DiffUnified => self.toggle_diff_option(Toggle::Unified),
             Command::DiffClose => {
                 let tab = &mut self.tabs[self.active];
                 if let Some(c) = tab.compare.take() {
@@ -1466,6 +1622,8 @@ impl App {
     /// Put the active tab side by side with `other`.
     fn start_compare(&mut self, mut other: Document, what: Other) {
         let send = self.diff_sender();
+        // The options live in the sidebar's Compare tab: bring it forward.
+        self.sidebar.mode = sidebar::Mode::Compare;
         other.detect_language(&self.languages);
         if let Some(job) = other.syntax.take_job(&other.buffer) {
             spawn_syntax(&self.proxy, job);
@@ -1479,9 +1637,197 @@ impl App {
             &mut self.docs[tab.doc],
             other,
             what,
+            self.ws.state.diff_options(),
             send,
         )));
         self.changed(true);
+    }
+
+    /// Flip one of the compare options (the sidebar's Compare tab). The diff options apply to
+    /// every compare and are remembered in `state.toml`; Unified is the
+    /// active compare's alone.
+    fn toggle_diff_option(&mut self, toggle: Toggle) {
+        use nimbus_core::Whitespace;
+        if toggle == Toggle::Unified {
+            if let Some(c) = self.tabs[self.active].compare.as_mut() {
+                c.toggle_unified();
+                self.changed(false);
+            } else {
+                self.say("Not comparing; run Compare with Saved first", false);
+            }
+            return;
+        }
+        let mut n = self.ws.state.diff_options();
+        let said = match toggle {
+            Toggle::Whitespace => {
+                n.whitespace = match n.whitespace {
+                    Whitespace::Exact => Whitespace::Ends,
+                    Whitespace::Ends => Whitespace::All,
+                    Whitespace::All => Whitespace::Exact,
+                };
+                match n.whitespace {
+                    Whitespace::Exact => "Compare: whitespace counts",
+                    Whitespace::Ends => "Compare: ignoring whitespace at line ends",
+                    Whitespace::All => "Compare: ignoring all whitespace",
+                }
+            }
+            Toggle::Case => {
+                n.case = !n.case;
+                if n.case {
+                    "Compare: ignoring case"
+                } else {
+                    "Compare: case counts"
+                }
+            }
+            Toggle::BlankLines | Toggle::Unified => {
+                n.blank_lines = !n.blank_lines;
+                if n.blank_lines {
+                    "Compare: ignoring blank-line changes"
+                } else {
+                    "Compare: blank-line changes count"
+                }
+            }
+        };
+        self.ws.state.set_diff_options(n);
+        self.save_state_soon();
+        for tab in &mut self.tabs {
+            if let Some(c) = tab.compare.as_mut() {
+                c.set_normalize(&self.docs[tab.doc], n);
+            }
+        }
+        self.say(said, false);
+        self.changed(false);
+    }
+
+    /// Compare the active tab's file with `rev` from git, read on a worker
+    /// ([`git::show`]); the result arrives as [`AppEvent::Revision`].
+    fn compare_with_revision(&mut self, rev: String) {
+        let Some(path) = self.doc().path.clone() else {
+            self.say("This tab has no file to compare with a revision", true);
+            return;
+        };
+        let proxy = self.proxy.clone();
+        self.say(format!("Reading {rev} from git…"), false);
+        let spawned = std::thread::Builder::new()
+            .name("nimbus-git".to_owned())
+            .spawn(move || {
+                let outcome = git::show(&path, &rev);
+                let _ = proxy.send_event(AppEvent::Revision(Revision { path, rev, outcome }));
+            });
+        if let Err(e) = spawned {
+            self.say(format!("Cannot start git: {e}"), true);
+        }
+    }
+
+    /// git finished reading a revision: open it beside its tab, or say
+    /// why not. A missing git or a file outside a repository is a message,
+    /// never a dialog.
+    fn revision_read(&mut self, r: Revision) {
+        let text = match r.outcome {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) => {
+                self.say(format!("Cannot compare with {}: {e}", r.rev), true);
+                return;
+            }
+        };
+        let found = self
+            .tabs
+            .iter()
+            .position(|t| self.docs[t.doc].path.as_deref() == Some(r.path.as_path()));
+        let Some(i) = found else {
+            return;
+        };
+        if i != self.active {
+            self.switch_to(i);
+        }
+        let other = Document::with_text(Some(r.path.clone()), &text);
+        let name = r.path.file_name().map_or_else(
+            || r.rev.clone(),
+            |n| format!("{} @ {}", n.to_string_lossy(), r.rev),
+        );
+        self.message = None;
+        self.start_compare(other, Other::Revision(name));
+    }
+
+    /// Ask for two folders and compare them in the sidebar.
+    fn compare_folders(&mut self) {
+        let pick = |title: &str| {
+            let mut dialog = FileDialog::new().set_directory(&self.root).set_title(title);
+            if let Some(window) = &self.window {
+                dialog = dialog.set_parent(window.as_ref());
+            }
+            dialog.pick_folder()
+        };
+        let Some(left) = pick("Left folder") else {
+            return;
+        };
+        let Some(right) = pick("Right folder") else {
+            return;
+        };
+        self.start_folder_compare(&left, &right);
+    }
+
+    /// A batch of folder-compare results from the workers.
+    fn folder_compare_arrived(&mut self, batch: folder_compare::Batch) {
+        if self.sidebar.compare.receive(batch) {
+            self.changed(false);
+        }
+    }
+
+    /// Compare `left` with `right` on workers, listing what differs in the
+    /// sidebar's Compare mode as it is found (M18).
+    fn start_folder_compare(&mut self, left: &Path, right: &Path) {
+        let (include, exclude) = self.sidebar.search.globs();
+        let params = folder_compare::Params {
+            left: io::canonical(left),
+            right: io::canonical(right),
+            include,
+            exclude,
+            show_ignored: self.sidebar.tree.show_ignored,
+        };
+        let proxy = self.proxy.clone();
+        let generation = Arc::clone(&self.sidebar.compare.generation);
+        match folder_compare::start(&params, &generation, move |b| {
+            proxy.send_event(AppEvent::FolderCompare(b)).is_ok()
+        }) {
+            Ok(g) => {
+                self.sidebar.compare.begin(g, &params.left, &params.right);
+                self.sidebar.visible = true;
+                self.sidebar.mode = Mode::Compare;
+                self.sidebar.focused = true;
+                self.changed(true);
+            }
+            Err(e) => self.say(format!("Cannot compare folders: {e}"), true),
+        }
+    }
+
+    /// Open row `row` of the folder compare: the right file in a tab beside
+    /// the left one. A file on one side only opens alone (left only) or
+    /// against nothing (right only).
+    fn open_folder_pair(&mut self, row: usize) {
+        let Some(results) = &self.sidebar.compare.results else {
+            return;
+        };
+        let (left, right) = results.pair(row);
+        self.sidebar.compare.opened = Some(row);
+        match (left, right) {
+            (Some(l), Some(r)) => {
+                self.open_path(&r);
+                match Document::open(&l) {
+                    Ok(other) => self.start_compare(other, Other::File(l)),
+                    Err(e) => self.say(format!("Cannot read {}: {e}", l.display()), true),
+                }
+            }
+            (None, Some(r)) => {
+                self.open_path(&r);
+                self.start_compare(Document::with_text(None, ""), Other::Missing);
+            }
+            (Some(l), None) => {
+                self.open_path(&l);
+                self.say("Only in the left folder", false);
+            }
+            (None, None) => {}
+        }
     }
 
     fn compare_with_saved(&mut self) {
@@ -1560,12 +1906,20 @@ impl App {
                 return;
             }
         };
-        match pos {
-            Some(p) => {
-                Editor::new(&mut self.docs[tab.doc], &mut tab.carets).click(p, false);
-                self.changed(true);
+        if let Some(p) = pos {
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets).click(p, false);
+            self.changed(true);
+        } else {
+            // At the end of a folder compare's file: on to the next.
+            let is_compare = tab.compare.is_some();
+            let next = self
+                .window_layout()
+                .filter(|_| is_compare)
+                .and_then(|l| self.sidebar.step_compare(forward, &l));
+            match next {
+                Some(row) => self.open_folder_pair(row),
+                None => self.say("No more changes", false),
             }
-            None => self.say("No more changes", false),
         }
     }
 
@@ -1945,12 +2299,23 @@ impl App {
         self.start_listings(requests);
     }
 
-    /// Remember the sidebar's visibility and width for the next run.
+    /// Remember the sidebar's visibility and width, and the zoom, for the
+    /// next run.
     fn remember(&mut self) {
         let (visible, width) = (self.sidebar.visible, self.sidebar.width);
-        if (visible, width) != (self.ws.state.sidebar_visible, self.ws.state.sidebar_width) {
+        let font_size = if self.config.remember_zoom {
+            ((self.font_size - self.config.font_size).abs() > f64::EPSILON)
+                .then_some(self.font_size)
+        } else {
+            self.ws.state.font_size
+        };
+        let state = &self.ws.state;
+        if (visible, width, font_size)
+            != (state.sidebar_visible, state.sidebar_width, state.font_size)
+        {
             self.ws.state.sidebar_visible = visible;
             self.ws.state.sidebar_width = width;
+            self.ws.state.font_size = font_size;
             self.save_state_soon();
         }
     }
@@ -2120,6 +2485,9 @@ impl App {
         if let Some(path) = outcome.open {
             self.sidebar.focused = false;
             self.open_path(&path);
+        }
+        if let Some(row) = outcome.pair {
+            self.open_folder_pair(row);
         }
         true
     }
@@ -2854,6 +3222,23 @@ impl App {
                 self.tabs[self.active].view.folds.clear();
                 self.changed(true);
             }
+            Command::ZoomIn => self.zoom_to(self.font_size.round() + 1.0),
+            Command::ZoomOut => self.zoom_to(self.font_size.round() - 1.0),
+            Command::ResetZoom => self.zoom_to(self.config.font_size),
+            Command::ToggleWhitespace => {
+                self.whitespace = self.whitespace.next();
+                self.say(
+                    format!("Render whitespace: {}", self.whitespace.name()),
+                    false,
+                );
+                self.changed(false);
+            }
+            Command::ToggleIndentGuides => {
+                self.indent_guides = !self.indent_guides;
+                let state = if self.indent_guides { "on" } else { "off" };
+                self.say(format!("Indent guides {state}"), false);
+                self.changed(false);
+            }
             _ => {}
         }
     }
@@ -3108,15 +3493,31 @@ impl App {
             doc.configure_indent(config.indent.for_language(doc.language_key()));
         }
         self.keymap = keymap;
-        self.config = config;
+        let old = std::mem::replace(&mut self.config, config);
+        // A setting changed in the file wins over what the session did to
+        // it; one left alone keeps the session's zoom and toggles.
+        if (old.font_size - self.config.font_size).abs() > f64::EPSILON {
+            self.font_size = self.config.font_size;
+            self.remember();
+        }
+        if old.render_whitespace != self.config.render_whitespace {
+            self.whitespace = self.config.render_whitespace;
+        }
+        if old.indent_guides != self.config.indent_guides {
+            self.indent_guides = self.config.indent_guides;
+        }
         if let Some(menu) = &self.menu_bar {
             menu.update(&self.keymap);
         }
         if let (Some(gpu), Some(window)) = (self.gpu.as_mut(), self.window.as_ref()) {
             gpu.set_font_size(to_f32(
-                self.config.font_size * effective_scale(window.scale_factor()),
+                self.font_size * effective_scale(window.scale_factor()),
             ));
             gpu.set_tab_width(self.config.tab_width);
+            gpu.set_ligatures(self.config.ligatures);
+        }
+        if old.font != self.config.font {
+            self.load_editor_font();
         }
         if warnings.is_empty() {
             self.say("Config reloaded", false);
@@ -3235,6 +3636,7 @@ impl App {
                 let t = &self.doc().buffer;
                 Picker::go_to_line(notify, t.is_fully_indexed().then(|| t.len_lines()))
             }
+            Kind::Revision => Picker::revision(notify),
             Kind::Symbols => {
                 let doc = self.doc();
                 let symbols = symbol_items(doc);
@@ -3310,6 +3712,7 @@ impl App {
                     Some(Item::Line(n)) => self.go_to_line(n),
                     Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
+                    Some(Item::Revision(rev)) => self.compare_with_revision(rev),
                     Some(Item::Encoding(purpose, choice, _)) => {
                         self.encoding_chosen(purpose, choice);
                     }
@@ -3469,7 +3872,9 @@ impl App {
             | Command::MergeWithDisk
             | Command::CheckUpdates
             | Command::OpenRelease => return false,
-            _ if cmd.is_find_in_files() || cmd.is_layout() => return false,
+            _ if cmd.is_find_in_files() || cmd.is_layout() || cmd.is_compare_extra() => {
+                return false;
+            }
             _ => {
                 let paste = (cmd == Command::Paste)
                     .then(|| self.clipboard_get())
@@ -3857,6 +4262,12 @@ impl App {
         if let Some(reply) = outcome.search {
             self.act_on_search_reply(&reply);
         }
+        if let Some(row) = outcome.pair {
+            self.open_folder_pair(row);
+        }
+        if let Some(toggle) = outcome.toggle {
+            self.toggle_diff_option(toggle);
+        }
         self.changed(false);
     }
 
@@ -4232,6 +4643,7 @@ impl App {
                     Some(Item::Line(n)) => self.go_to_line(n),
                     Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
+                    Some(Item::Revision(rev)) => self.compare_with_revision(rev),
                     Some(Item::Encoding(purpose, choice, _)) => {
                         self.encoding_chosen(purpose, choice);
                     }
@@ -4316,6 +4728,8 @@ impl App {
         view::begin_frame(gpu, &self.theme.ui);
         let focused = self.groups.focused;
         let many = self.groups.len() > 1;
+        let now = Instant::now();
+        let mut hide_at: Option<Instant> = None;
         for (g, pane) in panes.iter().enumerate() {
             let i = self.group_active(g);
             self.prepare_tab(i);
@@ -4346,8 +4760,14 @@ impl App {
                     None
                 },
                 tab_width,
+                whitespace: self.whitespace,
+                guides: self.indent_guides,
             };
             paint_pane(gpu, pane, &mut scene);
+            hide_at = hide_at
+                .into_iter()
+                .chain(scene.view.scrollbar_hide_at().filter(|&t| t > now))
+                .min();
             if is_focused {
                 paint_status(gpu, layout, &mut scene);
             }
@@ -4367,9 +4787,14 @@ impl App {
                 is_focused || !many,
             );
         }
+        self.scrollbar_hide_at = hide_at;
         if many {
             view::draw_dividers(gpu, &self.theme.ui, layout, panes);
         }
+        self.sidebar.compare.options = compare_panel::Options {
+            normalize: self.ws.state.diff_options(),
+            unified: self.tabs[self.active].compare.as_ref().map(|c| c.unified),
+        };
         let active = self.docs[self.tabs[self.active].doc].canonical.as_deref();
         sidebar::draw(
             gpu,
@@ -4489,6 +4914,15 @@ impl App {
         }
         self.debug.latency.presented();
         self.debug.frames.push(frame_started.elapsed());
+        if let Some(at) = self.zoom_started.take() {
+            // The first frame at a new size rasterizes every glyph again.
+            log::info!(
+                "zoom {} pt: refilled and drawn in {:?} (frame {:?})",
+                self.font_size,
+                at.elapsed(),
+                frame_started.elapsed()
+            );
+        }
 
         self.tell_ime(&window, &focused_pane);
 
@@ -5336,6 +5770,24 @@ pub struct Scene<'a> {
     cursor_visible: bool,
     preedit: Option<&'a Preedit>,
     tab_width: usize,
+    /// Where whitespace shows.
+    whitespace: Whitespace,
+    /// Indent guides on.
+    guides: bool,
+}
+
+/// The config's tab width, ligatures and font for a headless render. With
+/// no later frame to swap a font into, a configured font is looked up
+/// before drawing.
+fn headless_fonts(gpu: &mut Gpu, config: &Config) {
+    gpu.set_tab_width(config.tab_width);
+    gpu.set_ligatures(config.ligatures);
+    if !config.font.is_empty() {
+        match nimbus_render::find_editor_font(&config.font) {
+            Some(f) => gpu.set_font(f),
+            None => log::warn!("font {:?} not found; using the bundled font", config.font),
+        }
+    }
 }
 
 /// Queue a whole frame of one tab: editor text, then the find bar and
@@ -5406,6 +5858,15 @@ pub fn paint_pane(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
                 current,
                 ui: &ui,
                 looks,
+                whitespace: scene.whitespace,
+                guides: scene.guides.then(|| {
+                    let indent = scene.doc.indent;
+                    if indent.tabs {
+                        scene.tab_width
+                    } else {
+                        indent.width
+                    }
+                }),
             },
         );
         // A nested language that came into view loads its grammar or was
@@ -5466,10 +5927,10 @@ pub fn run_headless(
         context,
         font,
         to_f32(config.font_size * scale),
-        size.0,
-        size.1,
+        size,
+        options.linear_blend,
     );
-    gpu.set_tab_width(config.tab_width);
+    headless_fonts(&mut gpu, config);
     let mut view = View::default();
     view.set_wrap(options.wrap || wrap_for(config, &doc));
     if options.wait_index {
@@ -5486,6 +5947,7 @@ pub fn run_headless(
         layout_for(&gpu, to_f32(scale), &doc, &find),
         doc.canonical.as_deref(),
         options.search.as_deref(),
+        folder_diff(options),
     );
     view.ensure_cursor_visible(&doc, &carets, &layout, config.tab_width);
     // One frame only: parse here rather than on a worker.
@@ -5514,6 +5976,8 @@ pub fn run_headless(
                 cursor_visible: true,
                 preedit: None,
                 tab_width: config.tab_width,
+                whitespace: config.render_whitespace,
+                guides: config.indent_guides,
             },
         );
         let ui = &theme.ui;
@@ -5589,6 +6053,9 @@ fn headless_compare(
     doc: &mut Document,
 ) -> Option<Box<Compare>> {
     let (a, _) = options.diff.as_ref()?;
+    if folder_diff(options).is_some() {
+        return None;
+    }
     match Document::open(a) {
         Ok(mut other) => {
             other.detect_language(&Languages::load(&config.languages).0);
@@ -5597,6 +6064,7 @@ fn headless_compare(
                 doc,
                 other,
                 Other::File(a.clone()),
+                State::load().diff_options(),
             )))
         }
         Err(e) => {
@@ -5716,11 +6184,12 @@ fn headless_sidebar(
     layout: Layout,
     file: Option<&Path>,
     search: Option<&str>,
+    folders: Option<(&Path, &Path)>,
 ) -> (Sidebar, Layout) {
     let state = State::load();
     let mut sidebar = Sidebar::new(
         io::canonical(root),
-        state.sidebar_visible,
+        state.sidebar_visible || folders.is_some(),
         state.sidebar_width,
     );
     for r in more_roots {
@@ -5748,7 +6217,39 @@ fn headless_sidebar(
     if let Some(pattern) = search {
         headless_search(&mut sidebar, pattern, &layout);
     }
+    if let Some((left, right)) = folders {
+        headless_folder_compare(&mut sidebar, left, right);
+    }
     (sidebar, layout)
+}
+
+/// `--diff DIR_A DIR_B`: the two folders, when both are folders (M18).
+fn folder_diff(options: &Options) -> Option<(&Path, &Path)> {
+    let (a, b) = options.diff.as_ref()?;
+    (a.is_dir() && b.is_dir()).then_some((a.as_path(), b.as_path()))
+}
+
+/// The folder compare run to the end on this thread, for a headless frame.
+fn headless_folder_compare(sidebar: &mut Sidebar, left: &Path, right: &Path) {
+    let params = folder_compare::Params {
+        left: io::canonical(left),
+        right: io::canonical(right),
+        ..folder_compare::Params::default()
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let generation = Arc::clone(&sidebar.compare.generation);
+    match folder_compare::start(&params, &generation, move |b| tx.send(b).is_ok()) {
+        Ok(g) => sidebar.compare.begin(g, &params.left, &params.right),
+        Err(e) => {
+            print_err(&format!("nimbus: {e}"));
+            return;
+        }
+    }
+    sidebar.mode = Mode::Compare;
+    while sidebar.compare.results.as_ref().is_some_and(|r| !r.done) {
+        let Ok(batch) = rx.recv() else { break };
+        sidebar.compare.receive(batch);
+    }
 }
 
 /// Draw an open picker over everything else.
@@ -5770,7 +6271,7 @@ fn draw_picker_overlay(
         (Kind::Files, false) => "files",
         (Kind::Symbols, true) => "symbol",
         (Kind::Symbols, false) => "symbols",
-        (Kind::Line | Kind::Name(_), _) => "",
+        (Kind::Line | Kind::Name(_) | Kind::Revision, _) => "",
         (Kind::Workspaces, true) => "workspace",
         (Kind::Workspaces, false) => "workspaces",
         (Kind::Tabs, true) => "tab",
@@ -5781,7 +6282,7 @@ fn draw_picker_overlay(
         (Kind::Recent, false) => "recent files",
     };
     let more = if p.loading() { "…" } else { "" };
-    let status = if matches!(p.kind, Kind::Line | Kind::Name(_)) {
+    let status = if matches!(p.kind, Kind::Line | Kind::Name(_) | Kind::Revision) {
         String::new()
     } else {
         format!("{n} {noun}{more}")
@@ -5792,6 +6293,7 @@ fn draw_picker_overlay(
         Kind::Line => "Type a line number",
         Kind::Symbols => "Type a function, type or heading name",
         Kind::Tabs => "Type a tab name",
+        Kind::Revision => "Type a git revision: HEAD~1, a branch, a tag or a hash",
         Kind::Encoding(EncodingFor::Reopen) => "Reopen with encoding",
         Kind::Encoding(EncodingFor::Save) => "Save with encoding",
         Kind::Recent => "Type a file name or folder",
@@ -5987,11 +6489,14 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::Disk(paths) => self.disk_changed(&paths),
             AppEvent::Index(token, chunk, error) => self.index_arrived(token, chunk, error),
             AppEvent::Folded(result) => self.folded(result),
+            AppEvent::Revision(r) => self.revision_read(r),
+            AppEvent::FolderCompare(batch) => self.folder_compare_arrived(batch),
             AppEvent::Save(event) => {
                 self.save_event(event, event_loop);
                 self.changed(false);
             }
             AppEvent::FontLoaded => self.changed(false),
+            AppEvent::EditorFont(name, found) => self.editor_font_arrived(&name, found),
             AppEvent::FindFiles(batch) => {
                 if self.sidebar.search.receive(batch) {
                     self.changed(false);
@@ -6072,15 +6577,14 @@ impl ApplicationHandler<AppEvent> for App {
             }
         };
         let scale = effective_scale(window.scale_factor());
-        match Gpu::new(&window, context, font, self.font_px(scale)) {
-            Ok(mut gpu) => {
-                gpu.set_tab_width(self.tab_width());
-                let proxy = self.proxy.clone();
-                gpu.set_font_notify(Arc::new(move || {
-                    let _ = proxy.send_event(AppEvent::FontLoaded);
-                }));
-                self.gpu = Some(gpu);
-            }
+        match Gpu::new(
+            &window,
+            context,
+            font,
+            self.font_px(scale),
+            self.options.linear_blend,
+        ) {
+            Ok(gpu) => self.gpu_ready(gpu),
             Err(e) => {
                 log::error!("{e}");
                 event_loop.exit();
@@ -6117,7 +6621,10 @@ impl ApplicationHandler<AppEvent> for App {
                 Err(e) => self.say(e, true),
             }
         }
-        if let Some((a, b)) = self.options.diff.clone() {
+        if let Some((a, b)) = folder_diff(&self.options).map(|(a, b)| (a.to_owned(), b.to_owned()))
+        {
+            self.start_folder_compare(&a, &b);
+        } else if let Some((a, b)) = self.options.diff.clone() {
             let b = io::canonical(&b);
             let found = self
                 .tabs
@@ -6150,6 +6657,10 @@ impl ApplicationHandler<AppEvent> for App {
             self.changed(false);
         }
         let retry_due = self.hidden_retry.is_some_and(|(at, _)| now >= at);
+        let scrollbar_due = self.scrollbar_hide_at.is_some_and(|at| now >= at);
+        if scrollbar_due {
+            self.scrollbar_hide_at = None;
+        }
         if self.research_at.is_some_and(|t| now >= t) {
             self.research_at = None;
             if self.find.open {
@@ -6192,7 +6703,7 @@ impl ApplicationHandler<AppEvent> for App {
                 window.request_redraw();
             }
         }
-        if (blink_changed || retry_due)
+        if (blink_changed || retry_due || scrollbar_due)
             && let Some(window) = &self.window
         {
             window.request_redraw();
@@ -6213,6 +6724,10 @@ impl ApplicationHandler<AppEvent> for App {
             // event stream for each folder), so not before the first frame.
             self.watching = true;
             self.sync_watch();
+            // A configured font, looked up once the first frame is up.
+            if !self.config.font.is_empty() {
+                self.load_editor_font();
+            }
             // The startup update check, when the config asks for it: once,
             // after the first frame like the watches, and not in unattended
             // runs (--smoke, screenshots, benchmarks), which should not
@@ -6246,6 +6761,7 @@ impl ApplicationHandler<AppEvent> for App {
         let next = [
             self.blink.next,
             self.hidden_retry.map(|(at, _)| at),
+            self.scrollbar_hide_at,
             self.message.as_ref().map(|m| m.until),
             self.pending_chord.map(|(_, until)| until),
             self.research_at,
@@ -6365,6 +6881,25 @@ impl ApplicationHandler<AppEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_zoom_starts_where_the_last_session_left_it_unless_told_not_to() {
+        let state = State {
+            font_size: Some(20.0),
+            ..State::default()
+        };
+        let mut config = Config::default();
+        assert_eq!(starting_zoom(&config, &state), 20.0);
+        config.remember_zoom = false;
+        assert_eq!(starting_zoom(&config, &state), 14.0);
+        config.remember_zoom = true;
+        let wild = State {
+            font_size: Some(500.0),
+            ..State::default()
+        };
+        assert_eq!(starting_zoom(&config, &wild), MAX_ZOOM);
+        assert_eq!(starting_zoom(&config, &State::default()), 14.0);
+    }
 
     #[test]
     fn blink_toggles_then_stops_when_idle() {

@@ -5,11 +5,19 @@
 //! shape covers: 0 is empty, 255 is fully inside. That one-byte-per-pixel
 //! "coverage mask" is what the atlas stores and what the glyph shader later
 //! uses as the alpha of the text colour.
+//!
+//! An emoji font (M16) stores pictures instead of, or as well as, outlines:
+//! PNG bitmaps at a few fixed sizes (`CBDT`, `sbix`) or stacks of coloured
+//! outlines (`COLR`). For those fonts the colour sources are tried first, and
+//! the result is a four-byte-per-pixel colour image for the atlas's colour
+//! page. Swash resizes a bitmap strike to the size asked for, so an emoji
+//! fits its cells whichever strike the font has.
 
 use swash::scale::image::{Content, Image};
-use swash::scale::{Render, ScaleContext, Source};
+use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Angle, Format, Transform, Vector};
 
+use crate::atlas::AtlasPage;
 use crate::font::Font;
 
 /// Horizontal subpixel positions per pixel. A glyph whose pen position is
@@ -93,7 +101,8 @@ impl GlyphKey {
     }
 }
 
-/// A rasterized glyph: a coverage mask plus where to put it.
+/// A rasterized glyph: a coverage mask or a colour image, plus where to
+/// put it.
 #[derive(Debug, Clone, Copy)]
 pub struct GlyphBitmap<'a> {
     /// Pixels from the pen position to the bitmap's left edge.
@@ -104,14 +113,20 @@ pub struct GlyphBitmap<'a> {
     pub width: u32,
     /// Bitmap height in pixels.
     pub height: u32,
-    /// `width * height` coverage bytes, row by row from the top.
-    pub coverage: &'a [u8],
+    /// Which atlas page the bitmap is for: coverage masks have one byte
+    /// per pixel, colour images four (premultiplied RGBA).
+    pub page: AtlasPage,
+    /// The pixels, row by row from the top: `width * height` bytes for a
+    /// coverage mask, four times that for a colour image.
+    pub data: &'a [u8],
 }
 
 /// Reusable rasterizing state: swash's scaling cache and one image buffer.
 pub struct Rasterizer {
     ctx: ScaleContext,
     image: Image,
+    /// A colour image, premultiplied, reused between glyphs.
+    premultiplied: Vec<u8>,
 }
 
 impl std::fmt::Debug for Rasterizer {
@@ -133,6 +148,7 @@ impl Rasterizer {
         Self {
             ctx: ScaleContext::new(),
             image: Image::new(),
+            premultiplied: Vec::new(),
         }
     }
 
@@ -159,22 +175,56 @@ impl Rasterizer {
         let slant = key
             .slant
             .then(|| Transform::skew(Angle::from_degrees(SLANT_DEGREES), Angle::ZERO));
-        let ok = Render::new(&[Source::Outline])
+        // Colour first for an emoji font; outlines are the fallback, and the
+        // only source for every other font.
+        let sources: &[Source] = if font.has_color() {
+            &[
+                Source::ColorOutline(0),
+                Source::ColorBitmap(StrikeWith::BestFit),
+                Source::Outline,
+            ]
+        } else {
+            &[Source::Outline]
+        };
+        let ok = Render::new(sources)
             .format(Format::Alpha)
             .transform(slant)
             .offset(Vector::new(key.subpx_offset(), 0.0))
             .render_into(&mut scaler, key.glyph, &mut self.image);
         let p = self.image.placement;
-        if !ok || p.width == 0 || p.height == 0 || self.image.content != Content::Mask {
+        if !ok || p.width == 0 || p.height == 0 {
             return None;
         }
+        let (page, data) = match self.image.content {
+            Content::Mask => (AtlasPage::Coverage, &self.image.data[..]),
+            Content::Color => {
+                premultiply(&self.image.data, &mut self.premultiplied);
+                (AtlasPage::Color, &self.premultiplied[..])
+            }
+            Content::SubpixelMask => return None,
+        };
         Some(GlyphBitmap {
             left: p.left,
             top: p.top,
             width: p.width,
             height: p.height,
-            coverage: &self.image.data,
+            page,
+            data,
         })
+    }
+}
+
+/// Copy straight RGBA (as swash returns it) into `out` with red, green and
+/// blue multiplied by alpha. Premultiplied texels blend correctly with the
+/// pipeline's `out = src + dst × (1 − src.a)`, and their edges do not pick
+/// up the colour of fully transparent neighbours.
+fn premultiply(rgba: &[u8], out: &mut Vec<u8>) {
+    out.clear();
+    out.reserve(rgba.len());
+    for px in rgba.as_chunks::<4>().0 {
+        let a = u16::from(px[3]);
+        let mul = |c: u8| u8::try_from((u16::from(c) * a + 127) / 255).unwrap_or(u8::MAX);
+        out.extend_from_slice(&[mul(px[0]), mul(px[1]), mul(px[2]), px[3]]);
     }
 }
 
@@ -199,8 +249,9 @@ mod tests {
         let m = r
             .rasterize(&[font], GlyphKey::new(font.glyph_id('M'), 28.0, 0.0))
             .unwrap();
-        assert_eq!(m.coverage.len(), (m.width * m.height) as usize);
-        assert!(m.coverage.contains(&255), "an M has fully covered pixels");
+        assert_eq!(m.page, AtlasPage::Coverage);
+        assert_eq!(m.data.len(), (m.width * m.height) as usize);
+        assert!(m.data.contains(&255), "an M has fully covered pixels");
         assert!(m.top > 0, "M sits above the baseline");
 
         let space = r.rasterize(&[font], GlyphKey::new(font.glyph_id(' '), 28.0, 0.0));
@@ -215,12 +266,12 @@ mod tests {
         let a = r
             .rasterize(&[font], GlyphKey::new(id, 14.0, 0.0))
             .unwrap()
-            .coverage
+            .data
             .to_vec();
         let b = r
             .rasterize(&[font], GlyphKey::new(id, 14.0, 0.5))
             .unwrap()
-            .coverage
+            .data
             .to_vec();
         assert_ne!(a, b);
     }
@@ -231,7 +282,7 @@ mod tests {
         let bold = Font::bundled_bold().unwrap();
         let faces = [regular, bold];
         let mut r = Rasterizer::new();
-        let mut draw = |key: GlyphKey| r.rasterize(&faces, key).unwrap().coverage.to_vec();
+        let mut draw = |key: GlyphKey| r.rasterize(&faces, key).unwrap().data.to_vec();
         let upright = GlyphKey::new(regular.glyph_id('l'), 20.0, 0.0);
         let plain = draw(upright);
         assert_ne!(draw(upright.styled(REGULAR, true)), plain, "slanted");
@@ -245,5 +296,15 @@ mod tests {
         let font = Font::bundled().unwrap();
         let mut r = Rasterizer::new();
         assert!(r.rasterize(&[font], GlyphKey::new(0, 14.0, 0.0)).is_some());
+    }
+
+    #[test]
+    fn premultiplying_scales_colour_by_alpha() {
+        let mut out = Vec::new();
+        premultiply(
+            &[255, 128, 0, 255, 255, 255, 255, 0, 200, 100, 50, 128],
+            &mut out,
+        );
+        assert_eq!(out, [255, 128, 0, 255, 0, 0, 0, 0, 100, 50, 25, 128]);
     }
 }

@@ -398,6 +398,43 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::CompareTab,
         Keys::NONE,
     ),
+    // Compare, second pass (M18).
+    act(
+        "diff.compareHead",
+        "Compare with HEAD",
+        Command::CompareHead,
+        Keys::NONE,
+    ),
+    act(
+        "diff.compareRevision",
+        "Compare with Revision…",
+        Command::CompareRevision,
+        Keys::NONE,
+    ),
+    act(
+        "diff.compareFolders",
+        "Compare Folders…",
+        Command::CompareFolders,
+        Keys::NONE,
+    ),
+    act(
+        "diff.ignoreWhitespace",
+        "Ignore Whitespace (Off, Ends, All)",
+        Command::DiffWhitespace,
+        Keys::NONE,
+    ),
+    act(
+        "diff.ignoreCase",
+        "Ignore Case in Compare",
+        Command::DiffCase,
+        Keys::NONE,
+    ),
+    act(
+        "diff.ignoreBlankLines",
+        "Ignore Blank Lines in Compare",
+        Command::DiffBlankLines,
+        Keys::NONE,
+    ),
     act(
         "diff.next",
         "Next Change",
@@ -957,6 +994,36 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Toggle Debug Overlay",
         Command::ToggleDebugOverlay,
         Keys::all(&["F12"]),
+    ),
+    act(
+        "view.zoomIn",
+        "Zoom In",
+        Command::ZoomIn,
+        Keys::all(&["Primary+=", "Primary+Shift+="]),
+    ),
+    act(
+        "view.zoomOut",
+        "Zoom Out",
+        Command::ZoomOut,
+        Keys::all(&["Primary+-"]),
+    ),
+    act(
+        "view.resetZoom",
+        "Reset Zoom",
+        Command::ResetZoom,
+        Keys::all(&["Primary+0"]),
+    ),
+    act(
+        "view.toggleWhitespace",
+        "Toggle Render Whitespace (selection, all, none)",
+        Command::ToggleWhitespace,
+        Keys::NONE,
+    ),
+    act(
+        "view.toggleIndentGuides",
+        "Toggle Indent Guides",
+        Command::ToggleIndentGuides,
+        Keys::NONE,
     ),
     act(
         "view.toggleIgnored",

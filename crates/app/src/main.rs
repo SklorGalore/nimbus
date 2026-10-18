@@ -8,6 +8,7 @@ mod app;
 mod bmp;
 mod columns;
 mod compare;
+mod compare_panel;
 mod config;
 mod debug;
 mod docs;
@@ -16,7 +17,9 @@ mod editing;
 mod encoding;
 mod find;
 mod find_files;
+mod folder_compare;
 mod folding;
+mod git;
 mod groups;
 mod indexer;
 mod input;
@@ -101,10 +104,14 @@ pub struct Options {
     pub wait_index: bool,
     /// `--debug-overlay`: start with the debug overlay (F12) showing.
     pub debug_overlay: bool,
+    /// `--linear-blend`: the M16 experiment, blending text in linear light
+    /// on an sRGB surface instead of in gamma space.
+    pub linear_blend: bool,
     /// `--cursors 3,10,20`: with `--headless`, put a cursor at each byte
     /// offset (the last is the primary), to render several cursors.
     pub cursors: Vec<usize>,
-    /// `--diff A B`: compare `B` (opened as a tab) with `A`.
+    /// `--diff A B`: compare `B` (opened as a tab) with `A`; two folders
+    /// open a folder compare in the sidebar (M18).
     pub diff: Option<(PathBuf, PathBuf)>,
     /// `--merge BASE LOCAL REMOTE -o RESULT`: a three-way merge tab whose
     /// result saves to `RESULT`; the exit code says whether it was saved
@@ -180,7 +187,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index]] [--debug-overlay] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index]] [--debug-overlay] [--linear-blend] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -271,6 +278,7 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
         "--no-session" => o.no_session = true,
         "--wait-index" => o.wait_index = true,
         "--debug-overlay" => o.debug_overlay = true,
+        "--linear-blend" => o.linear_blend = true,
         "--cursors" => o.cursors = numbers(args.next()),
         "--picker" => o.picker = args.next().and_then(|p| p.into_string().ok()),
         "--theme" => o.theme = args.next().and_then(|t| t.into_string().ok()),
