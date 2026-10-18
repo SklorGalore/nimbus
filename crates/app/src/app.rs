@@ -55,6 +55,7 @@ use crate::view::{self, Decorations, Layout, PickerView, Preedit, TabLabel, View
 use crate::watch::{Change, Watch};
 use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
 
+mod geometry;
 mod tail;
 mod tree_ops;
 mod workspace;
@@ -4733,7 +4734,7 @@ impl ApplicationHandler<AppEvent> for App {
         let attrs = Window::default_attributes()
             .with_title(format!("{} — Nimbus", self.doc().display_name()))
             .with_inner_size(LogicalSize::new(960.0, 640.0));
-        let attrs = with_app_icon(attrs);
+        let attrs = self.restore_geometry(event_loop, with_app_icon(attrs));
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),

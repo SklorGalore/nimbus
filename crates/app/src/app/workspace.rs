@@ -113,6 +113,9 @@ impl App {
         if let Some(session) = self.capture_session() {
             self.ws.state.put_session(session);
         }
+        if let Some(window) = &self.window {
+            self.ws.state.window = Some(self.window_geometry(window));
+        }
         self.ws.state.save();
     }
 
