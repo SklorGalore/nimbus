@@ -53,6 +53,10 @@ repeated in each file:
 | 23 | [Library upgrades](m23-library-upgrades.md) | Planned, waiting on stable releases |
 | 24 | [International text](m24-international-text.md) | Planned |
 | 25 | [Command line](m25-command-line.md) | Planned |
+| 26 | [Git window: viewing](m26-git-viewer.md) | Draft |
+| 27 | [Git window: staging and committing](m27-git-staging.md) | Draft |
+| 28 | [Git window: branches and remotes](m28-git-branches-remotes.md) | Draft |
+| 29 | [Git window: history tools and merging](m29-git-history-merging.md) | Draft |
 
 **Next** is the milestone to start; **Planned** plans are approved and
 queued in table order. M10–M15 were drafted after M8 and approved, with
@@ -63,6 +67,9 @@ same day with their order and eight answers (`DESIGN.md` §9 and §10).
 M22–M24, the plans after 1.0, were drafted and approved on 2026-10-18
 with their order and answers; a fourth draft, Writing prose, was
 dropped (`DESIGN.md` §9 and §10).
+M26–M29, a git window opened with `nimbus --git`, were drafted on
+2026-10-18 at the owner's request; **Draft** plans wait for their open
+questions (`DESIGN.md` §9) and approval.
 [`backlog.md`](backlog.md) maps every deferred item to the plan that
 picks it up, and lists what stays unscheduled. A plan becomes **In progress** when its first task lands and
 **Done** when its checklist is ticked and its Results filled in.

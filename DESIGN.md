@@ -37,10 +37,14 @@ after a rebuild, in each milestone's Results.
 
 - Vim keybindings or any modal layer.
 - Plugins or a scripting language.
-- LSP, debugging, terminals, git integration. One exception, chosen on
-  2026-10-18: M18's "Compare with HEAD" runs `git show` as a subprocess
-  to open a file's committed version in the compare view. Nothing else
-  runs git.
+- LSP, debugging, terminals. Git in the *editor* stays limited to M18's
+  "Compare with HEAD", which runs git as a subprocess to open a file's
+  committed version in the compare view.
+- Git client: no longer a non-goal. On 2026-10-18 the owner reversed the
+  old "no git integration" rule for a separate *git window*: `nimbus
+  --git [DIR]` opens a window laid out for git, in its own process,
+  built from the same crates and views (M26–M29). Git is still driven
+  only as a subprocess from `app/git.rs`; no git library is linked.
 - Collaborative editing.
 - Rich text, or proportional fonts in the editor area. UI chrome gets a
   proportional font setting in M20.
@@ -588,6 +592,10 @@ introduces and points at the code.
 | 23 | Library upgrades | Planned, waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
 | 24 | International text | Planned | CJK and other scripts in the right fonts, variable fonts, editable huge files in single-byte encodings | [m24](docs/milestones/m24-international-text.md) |
 | 25 | Command line | Planned | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
+| 26 | Git window: viewing | Draft | `nimbus --git`: changes, history with a branch graph, any commit's diffs | [m26](docs/milestones/m26-git-viewer.md) |
+| 27 | Git window: staging and committing | Draft | Stage files, hunks or lines; discard safely; commit and amend | [m27](docs/milestones/m27-git-staging.md) |
+| 28 | Git window: branches and remotes | Draft | Branches, tags, stashes; fetch, pull and push with your own credentials | [m28](docs/milestones/m28-git-branches-remotes.md) |
+| 29 | Git window: history tools and merging | Draft | Blame, file history, search; merge, rebase, cherry-pick and revert with the merge view | [m29](docs/milestones/m29-git-history-merging.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
@@ -598,7 +606,9 @@ through M21 has landed; M21 made the 1.0 release.
 M22–M24 are the plans after 1.0, drafted on 2026-10-18 from what 1.0
 and the earlier plans deferred and approved the same day (§9, §10); M22
 is Next, and M23 goes whenever its releases are stable. M25 (command
-line) was added the same day at the owner's request.
+line) was added the same day at the owner's request. M26–M29, a git
+window built from the same parts (`nimbus --git`), were drafted the
+same day at the owner's request; their open questions are in §9.
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -607,7 +617,25 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-None open. The questions the drafts of M22–M25, the plans after 1.0,
+The drafts of M26–M29, the git window, raise these (2026-10-18):
+
+1. Order: after M25 (so "Open in Editor" goes to the running Nimbus), or
+   before M22–M25? Draft default: after M25.
+2. M26: draw the commit graph with the existing rects and the font's
+   box-drawing glyphs (straight lines and rounded corners, no new
+   pipeline), or add a line pipeline for smooth curves? Draft default:
+   rects and glyphs.
+3. M27: how long discarded changes stay recoverable. Only while the
+   window is open (objects written, no ref), or kept under a Nimbus ref
+   such as `refs/nimbus/discarded` with its reflog, which writes into
+   the user's repository? Draft default: while the window is open.
+4. M29: interactive rebase (reorder, squash, edit commits) in M29, a
+   later plan, or never? Draft default: unscheduled.
+5. Should the editor gain any git touches of its own later (change bars
+   in the gutter, "Stage Hunk" from the editor)? Draft default: no; the
+   editor keeps only "Compare with HEAD" and "Open Git Window".
+
+Earlier questions are all answered. The questions the drafts of M22–M25, the plans after 1.0,
 raised were answered on 2026-10-18:
 
 - Order: M22 (screen readers) first, on winit 0.30, since
@@ -788,3 +816,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | Finder "Open With" moves from M23 to a 1.0.1 fix with a small `objc2` open-files listener in `app` (new `unsafe` outside `render` and the mmap buffer, owner's choice), since winit 0.31.0-beta.3 still does not pass the files on | §9, m23 |
 | 2026-10-18 | M25 Command line added at the owner's request: an "Install `nimbus` Command" palette action (macOS via the system administrator prompt, no `unsafe`), opening files in the running window, `--wait` | m25, backlog |
 | 2026-10-18 | Compatibility mode (Cumulus) joins M23: an automatic CPU painter over `FrameBuilder`'s rects and glyphs, presented with `softbuffer`, with a one-time notice and `--compat`; no wgpu CPU-driver step, no separate app or terminal editor | §9, m23 |
+| 2026-10-18 | The "no git integration" non-goal is reversed for a git window: `nimbus --git [DIR]` (window mode, chosen over git inside the editor and over a separate app), git driven as a subprocess only, no git library; drafted as M26–M29 | §2, §9, m26–m29 |
