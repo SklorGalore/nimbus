@@ -56,6 +56,8 @@ has a syntax tree, brackets inside strings and comments are ignored.
 
 Most editing in Nimbus works with any number of cursors at once.
 
+<img src="../../assets/screenshots/multicursor.png" alt="Five cursors at the ends of struct field names, with "5 cursors" in the status bar" width="800">
+
 | To | macOS | Windows and Linux |
 |---|---|---|
 | Add a cursor at the next occurrence of the selection | `Cmd+D` | `Ctrl+D` |

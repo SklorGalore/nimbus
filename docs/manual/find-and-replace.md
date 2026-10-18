@@ -5,6 +5,8 @@ and **Find in Files**, for the whole project folder, in the sidebar.
 
 ## Find in the current file
 
+<img src="../../assets/screenshots/find.png" alt="The find bar searching for "edits", with matches highlighted and "1 of 67" beside the field" width="800">
+
 Find (`Cmd+F` / `Ctrl+F`) opens the find bar at the top of the text.
 Replace (`Cmd+Option+F` / `Ctrl+H`) opens it with a second row for the
 replacement. If you had a short selection on one line, it becomes the
@@ -48,6 +50,8 @@ matches`.
 searching.
 
 ## Find in files
+
+<img src="../../assets/screenshots/search.png" alt="Find in Files in the sidebar: matches grouped by file, with a count beside each file" width="800">
 
 Find in Files (`Cmd+Shift+F` / `Ctrl+Shift+F`) shows the sidebar's
 **Search** panel with the keyboard in its query field. A short one-line

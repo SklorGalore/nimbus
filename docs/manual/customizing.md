@@ -11,6 +11,8 @@ in the message line and cost only the setting or entry that has them.
 
 ## Themes
 
+<img src="../../assets/screenshots/light.png" alt="Nimbus with the built-in light theme" width="800">
+
 ```
 themes/
   mine.toml

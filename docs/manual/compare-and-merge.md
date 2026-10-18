@@ -5,6 +5,8 @@ and merge two or three versions of a file into one.
 
 ## Comparing
 
+<img src="../../assets/screenshots/diff.png" alt="Two versions of a file compared side by side, with removed, added and changed lines marked and unchanged runs folded away" width="800">
+
 A compare sits on an ordinary tab. The tab's own file stays on the
 **right**, where you can keep editing it; the text it is compared with is
 on the **left**, read-only. Start one from the palette:
@@ -115,6 +117,8 @@ whose result starts as a copy of the left. Every difference is a choice
 for you to make. The result is untitled; saving asks where to put it.
 
 ### Three-way merge
+
+<img src="../../assets/screenshots/merge.png" alt="A three-way merge: local on the left, the result with one conflict in the middle, remote on the right" width="900">
 
 A three-way merge also knows the **base**, the version both sides
 started from. A change made on only one side is applied for you; changes

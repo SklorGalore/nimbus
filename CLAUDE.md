@@ -29,6 +29,7 @@ cargo test --release -p nimbus -- --ignored --nocapture folder_compare        # 
 cargo run -- --merge BASE LOCAL REMOTE -o OUT --headless 1600x900 --screenshot /tmp/m.bmp   # render a three-way merge (exit code 0 only when OUT is saved with no conflicts)
 cargo run --release -- --merge examples/merge/{base,local,remote}.rs -o /tmp/merged.rs   # small sample inputs for the merge views by eye (examples/README.md)
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp   # render with no window (works with the screen locked)
+scripts/screenshots.sh [NAME...]                             # remake assets/screenshots/ for the README and manual (headless, own config); look before committing
 cargo run -- FILE --wrap --find PATTERN                     # start with soft wrap on and the find bar searching
 cargo run -- FILE --theme light --headless 1600x1000 --screenshot /tmp/l.bmp   # override the config's theme
 NIMBUS_CONFIG_DIR=/tmp/cfg cargo run -- FILE --headless 1600x1000 --screenshot /tmp/c.bmp   # use another config folder (themes/, languages/, queries/); never write to the owner's real one
