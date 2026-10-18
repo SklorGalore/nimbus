@@ -365,11 +365,18 @@ pub fn draw(
         }
         x += (cols + 1.0) * cell;
     }
+    // The project's name sits against the right edge, apart from the
+    // tabs, so it does not read as a third one; a name that would run
+    // into the tabs is left out rather than clipped.
     let title = sidebar
         .tree
         .node(crate::tree::ROOT)
         .map_or("", |n| n.name.as_str());
-    gpu.push_text_line([x + cell, y], title, ui.gutter);
+    let title_w = cols(title.chars().count()) * cell;
+    let title_x = w - pad - title_w;
+    if !title.is_empty() && title_x >= x + cell {
+        gpu.push_text_line([title_x, y], title, ui.gutter);
+    }
 
     if sidebar.mode == Mode::Search {
         search_panel::draw(gpu, ui, layout, &sidebar.search, sidebar.focused, blink);
