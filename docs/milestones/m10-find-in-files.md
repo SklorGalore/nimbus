@@ -161,15 +161,15 @@ test.
 ## Results
 
 Built on 2026-10-17 on a Linux container with four shared cores; the
-owner's machine is faster and steadier, and `--smoke` needs a screen, so
-the first-frame time is not recorded here (nothing in M10 runs at
-startup: the panel, the globs and the regex are built on the first
-search).
+owner's machine is faster and steadier. The first-frame time is the
+owner's `--smoke` run on 2026-10-18 (nothing in M10 runs at startup: the
+panel, the globs and the regex are built on the first search).
 
 | Metric | Value |
 |---|---|
 | Tests | 430 passing, plus 16 opt-in benchmarks or diagnostics |
 | Release binary | 20.25 MB on Linux (budget 35 MB) |
+| `--smoke` first frame | 150 ms warm on the M5 Pro (M9: 153 ms); window and GPU ready at 90 ms |
 | New dependencies | `globset` (already in the binary through `ignore`) and `memchr` (already there through `regex`); nothing new is linked |
 | First results, this repository | 3 to 8 ms after the search starts (budget 100 ms) |
 | Memory of a cap-sized result set | about 1.9 MB for 10,000 hits: previews (at most 200 bytes each) plus 56 bytes per hit and one path per file |
