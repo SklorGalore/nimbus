@@ -31,7 +31,8 @@ pub struct Startup {
     /// (which named none).
     pub restore: Option<Restore>,
     /// The project folder whose session this run saves; `None` when files
-    /// were named, with `--no-session`, and in unattended runs.
+    /// were named, with `--no-session` or `remember_workspace = false`, and
+    /// in unattended runs.
     pub session_root: Option<PathBuf>,
     /// Further folders named on the command line (`nimbus DIR1 DIR2`):
     /// roots of the workspace beside the first, in place of the session's.
@@ -527,7 +528,9 @@ impl App {
         let (visible, width) = (self.sidebar.visible, self.sidebar.width);
         self.sidebar = Sidebar::new(session.root.clone(), visible, width);
         self.sidebar.workspace = workspace;
-        if !self.options.unattended() {
+        // With `remember_workspace = false` the switch still happens (it
+        // was asked for), but the new session is not saved either.
+        if !self.options.unattended() && self.config.remember_workspace {
             self.ws.session_root = Some(session.root.clone());
         }
         let mut state = std::mem::take(&mut self.ws.state);
