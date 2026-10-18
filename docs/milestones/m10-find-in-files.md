@@ -1,10 +1,10 @@
 # M10 — Find in files
 
-**Status: next.** Written on 2026-10-17 from the items deferred by M3 and
-M8 ("find across files", "find in files"); approved the same day, with
-the sidebar placement, the 10,000-match cap and the 64 MB undo budget
-decided (`DESIGN.md` §9). First of M10–M15 in the approved order
-(`backlog.md`).
+**Status: done** (2026-10-17). Written on 2026-10-17 from the items
+deferred by M3 and M8 ("find across files", "find in files"); approved
+the same day, with the sidebar placement, the 10,000-match cap and the
+64 MB undo budget decided (`DESIGN.md` §9). First of M10–M15 in the
+approved order (`backlog.md`). Built the same day; see Results.
 
 ## Goal
 
@@ -13,39 +13,40 @@ streaming in while the search runs and the editor never waiting on it.
 
 ## Done when
 
-- [ ] "Find in Files" (`Primary+Shift+F`) opens a search panel with the
+- [x] "Find in Files" (`Primary+Shift+F`) opens a search panel with the
       query, the regex, case and whole-word toggles, and include and
       exclude glob fields. Results are grouped by file, each with its line
       number and the line's text with the match marked. Enter or a click
       opens the file at that match, in the existing tab when it has one.
-- [ ] Results appear while the search is still running; the first ones
+- [x] Results appear while the search is still running; the first ones
       within 100 ms on this repository; the panel scrolls and the editor
       types at one frame throughout.
-- [ ] "Next Result" and "Previous Result" (`F4`, `Shift+F4`) step through
+- [x] "Next Result" and "Previous Result" (`F4`, `Shift+F4`) step through
       the results across files; the count ("12 matches in 4 files, still
       searching…") sits above the list.
-- [ ] Open tabs with unsaved edits are searched in their buffer, not on
+- [x] Open tabs with unsaved edits are searched in their buffer, not on
       disk, and marked in the results.
-- [ ] `.gitignore` is respected, as the file opener and sidebar do; "Show
+- [x] `.gitignore` is respected, as the file opener and sidebar do; "Show
       Ignored Files" (M6) applies here too. Binary files and files over the
       size limit are skipped and counted ("3 files skipped").
-- [ ] "Replace in Files": a replacement field, a preview of each change in
+- [x] "Replace in Files": a replacement field, a preview of each change in
       the list (old and new text), a checkbox per file and per match, and
       "Replace All" that writes every ticked change. Open tabs get the
       change as one undoable edit; other files are written through the
       same atomic save path as `file.save`. A summary names the files
       changed and any that failed.
-- [ ] "Undo Replace in Files" restores the files just written, as long as
+- [x] "Undo Replace in Files" restores the files just written, as long as
       none has changed since (checked by size and modification time, as
       M6 does), and says which ones it could not restore.
-- [ ] Memory: results are capped at 10,000 matches (the panel says "more
+- [x] Memory: results are capped at 10,000 matches (the panel says "more
       than 10,000 matches, narrow the search"), and each result
       holds a file id, a line number, a byte range and at most 200 bytes
       of preview. Measured on a search for `e` over this repository and
       over a 1 GB tree from `bench/gen.sh`.
-- [ ] Speed: a search of a 100,000-file tree finishes within three times
+- [x] Speed: a search of a 100,000-file tree finishes within three times
       `rg`'s wall time on the same machine, recorded in Results. (We do
       not try to beat ripgrep; we try not to embarrass ourselves.)
+      Measured at 1.5 times.
 
 ## Scope
 
@@ -134,6 +135,13 @@ dependency of `ignore`, so it costs nothing.
 `search.clear`. Keys chosen when building, checked by the keymap conflict
 test.
 
+**Tooltips**: the toggles' labels ("Aa", ".*", "ab") are too terse to
+guess, so the pointer resting on one for a second shows a small box under
+it saying what it does and whether it is on (`draw_tooltip` in
+`search_panel.rs`); the app notes the pointer's position on every move,
+wakes once when the second is up, and redraws only when the tooltip
+changes.
+
 **Themes**: `[ui]` keys `search_match` (the marked text in a preview) and
 `search_file` (the file header row), in both built-in themes.
 
@@ -156,6 +164,62 @@ test.
 8. Undo Replace in Files with its memory budget.
 9. Measurements: this repository, a 100,000-file tree, the 1 GB tree;
    memory of a cap-sized result set; compare with `rg`. Results.
+
+## Results
+
+Built on 2026-10-17 on a Linux container with four shared cores; the
+owner's machine is faster and steadier. The first-frame time is the
+owner's `--smoke` run on 2026-10-18 (nothing in M10 runs at startup: the
+panel, the globs and the regex are built on the first search).
+
+| Metric | Value |
+|---|---|
+| Tests | 430 passing, plus 16 opt-in benchmarks or diagnostics |
+| Release binary | 20.25 MB on Linux (budget 35 MB) |
+| `--smoke` first frame | 150 ms warm on the M5 Pro (M9: 153 ms); window and GPU ready at 90 ms |
+| New dependencies | `globset` (already in the binary through `ignore`) and `memchr` (already there through `regex`); nothing new is linked |
+| First results, this repository | 3 to 8 ms after the search starts (budget 100 ms) |
+| Memory of a cap-sized result set | about 1.9 MB for 10,000 hits: previews (at most 200 bytes each) plus 56 bytes per hit and one path per file |
+
+**Speed against `rg`** (`rg -c` wall time against the ignored benchmark
+`search_tree_benchmark` in `find_files.rs`, both warm, same machine; the
+trees are `NIMBUS_BENCH_ROOT`, generated for the run: 100,000 files of
+1 KB in 1,000 folders, and 1,024 files of 1 MB):
+
+| Tree | Pattern | `rg` | Nimbus | Ratio |
+|---|---|---|---|---|
+| this repository (149 files) | `needle_zzz` (no hits) | 9 ms | 6 ms | 0.7 |
+| 100,000 files, 395 MB | `needle_zzz` | 176 ms | 365 ms | 2.1 |
+| 100,000 files, 395 MB | `fn needle` | 164 ms | 250 ms | 1.5 |
+| 1 GB tree | `needle_zzz` | 90 ms | 241 ms | 2.7 |
+| 1 GB tree | `fn needle` | 73 ms | 202 ms | 2.8 |
+
+Within the budget of three times. The gap on the 1 GB tree is the read
+path: `rg` maps each file while we read it in 4 MB blocks into a buffer
+the worker reuses, which keeps a worker's memory at one block however
+large the file. The 100,000-file gap is the walk and the per-file
+`open`, where `rg` has years of tuning; both are under half a second,
+and a search for a common pattern hits the 10,000 cap in a few
+milliseconds on any of the trees.
+
+**Surprises.**
+
+- Capping at exactly 10,000 needs the cap counted as hits are found, not
+  as batches arrive: with four workers each holding up to 64 hits, a
+  check on arrival let the count reach 10,064. The counter is a shared
+  atomic bumped per hit, and a worker that sees it past the cap stops
+  its walk.
+- `.gitignore` applies only inside a git repository, in the `ignore`
+  crate as in the sidebar; the engine's tests create a `.git` folder in
+  their temporary tree for that reason.
+- A pattern with regex syntax off still goes through `regex` (escaped),
+  because `regex` finds a literal with the same `memchr` fast path a
+  hand-written loop would; the only hand-rolled part is the line-tail
+  carry between blocks, which the property test in `core::search`
+  covers.
+- The in-editor find bar and the search panel share the `Query` type, so
+  the whole-word toggle written for M10 works in the find bar's query
+  as well.
 
 ## Concepts
 

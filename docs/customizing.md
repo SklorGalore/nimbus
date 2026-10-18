@@ -119,6 +119,67 @@ first (`"""` before `"`). They are coloured with the theme's `comment`,
 A file named after a built-in language (`rust.toml`) is ignored. To change
 how a built-in language is coloured, use a query.
 
+## Editing behaviour and indentation
+
+```toml
+[editor]
+auto_pairs = true                 # unset: on for code, off for Markdown and plain text
+trim_trailing_whitespace = false  # on save
+final_newline = false             # on save
+
+[editor.markdown]
+auto_pairs = false                # a language table overrides any of the three
+
+[indent]
+width = 4
+tabs = false
+detect = true                     # the file's own indentation wins
+
+[indent.python]
+width = 4
+tabs = false
+
+[indent.makefile]                 # a language of your own, by its file name
+tabs = true
+```
+
+Auto-pairs: typing `(`, `[`, `{`, `"`, `'` or a backtick inserts the
+closer when the next character is a space, a closer or the end of the
+line; typing the closer steps over it; Backspace inside an empty pair
+removes both; typing an opener with a selection wraps it. Quotes do not
+pair right after a letter, so `don't` stays `don't`.
+
+Both save settings are off by default so that a file you did not edit
+round-trips byte for byte. Neither applies to memory-mapped huge files.
+
+Indentation: with `detect = true` (the default) Nimbus looks at the first
+4,000 lines when a file opens and uses what it finds, tabs or the most
+common number of spaces; `width` and `tabs` apply only when the file does
+not say. The status bar shows the result ("Spaces: 4" or "Tabs"); clicking
+it, or the palette's "Indent Using Spaces", "Indent Using Tabs" and
+"Detect Indentation from File", changes it for that file. Tab, Shift+Tab,
+Enter after an opening bracket, and a closing bracket typed first on a
+line all follow it. `tab_width` (top level) is separate: how wide a tab
+character is drawn.
+
+## Two-chord key bindings
+
+A binding in `[keys]` may be two chords separated by a space:
+
+```toml
+[keys]
+"edit.toggleLineComment" = ["Ctrl+K Ctrl+C", "Primary+/"]
+```
+
+After the first chord the status bar shows it and waits two seconds for
+the second; Escape, or any key that does not complete a binding, cancels.
+A chord cannot be both a binding on its own and the start of a two-chord
+one; the config reload reports that in the message line. No default
+binding uses two chords.
+
+On Linux some window managers take `Alt+Up` and `Alt+Down` (Move Line Up
+and Down) for themselves; rebind them here, or use the palette.
+
 ## Changing a built-in language's highlighting
 
 ```
