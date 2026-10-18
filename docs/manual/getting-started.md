@@ -61,10 +61,10 @@ sidebar (see [Navigating](navigation.md)). New File (`Cmd+N` or `Cmd+T`
 name.
 
 On Windows, "Open with Nimbus" on a file opens that file. On macOS,
-opening files by dropping them on the app or with Finder's "Open With"
-is not supported yet: use the terminal, Open File…, Open Recent or the
-sidebar. Opening the app itself (from the Dock or Launchpad) reopens
-your last project.
+Finder's Open With, a double-click on a file type you have set to open
+with Nimbus, and dropping files on the Dock icon all open the file in a
+tab; a folder joins the sidebar. Opening the app itself (from the Dock
+or Launchpad) reopens your last project.
 
 ## Sessions: picking up where you left off
 
