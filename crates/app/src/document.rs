@@ -2377,7 +2377,7 @@ mod tests {
         assert_eq!(b.fit(&d).len(), 1);
         assert_eq!(b.cursor(&d.buffer), 12);
         // `a` made the edit and has nothing to follow.
-        assert!(a.fit(&d).is_empty());
+        assert_eq!(a.fit(&d), []);
         assert_eq!(a.cursor(&d.buffer), 8);
         // Undo from `b`: the document's last edit goes, `b` takes the
         // recorded selection and `a` moves back through the change.
