@@ -373,6 +373,8 @@ milestone lands on development, move its line up to "Available now". -->
 - Screen-reader support
 - Newer versions of the text and window libraries (ropey 2, winit 0.31)
   once they are stable
+- Compatibility mode: Nimbus keeps working on machines without a usable
+  GPU, drawing on the CPU instead
 
 Some things are out of scope for now, including a Vim mode, plugins,
 LSP, a built-in terminal, collaborative editing and right-to-left text.
