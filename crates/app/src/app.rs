@@ -55,6 +55,7 @@ use crate::view::{self, Decorations, Layout, PickerView, Preedit, TabLabel, View
 use crate::watch::{Change, Watch};
 use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
 
+mod tail;
 mod tree_ops;
 mod workspace;
 
@@ -701,6 +702,7 @@ impl App {
         if self.sidebar.edit.is_some() && !self.sidebar.focused {
             self.sidebar.edit = None;
         }
+        self.tabs[self.active].doc.check_following();
         if keep_cursor_visible && let Some(layout) = self.layout() {
             let tab_width = self.tab_width();
             let tab = &mut self.tabs[self.active];
@@ -1684,7 +1686,7 @@ impl App {
             }
             let name = tab.doc.display_name();
             let note = match tab.doc.disk_changed(&self.languages) {
-                DiskChange::None => continue,
+                DiskChange::None | DiskChange::Appended => continue,
                 DiskChange::Reloaded => format!("{name} changed on disk; reloaded"),
                 DiskChange::Conflict => {
                     is_error = true;
@@ -1722,7 +1724,8 @@ impl App {
         if !notes.is_empty() {
             self.say(notes.join("; "), is_error);
         }
-        self.changed(false);
+        let follow = self.follow_tails();
+        self.changed(follow);
     }
 
     /// A command while the sidebar has focus. Movement and Enter work in
@@ -2906,6 +2909,7 @@ impl App {
             }
         };
         self.clicks.scrollbar_grab = Some(grab);
+        tab.doc.stop_following();
         self.changed(false);
     }
 
@@ -3036,6 +3040,10 @@ impl App {
     /// A click on the status bar: the indentation item ("Spaces: 4")
     /// offers the choices for this file, through the palette.
     fn status_bar_click(&mut self, layout: &Layout, x: f32) {
+        if self.tabs[self.active].view.follow_item_hit(layout, x) {
+            self.toggle_follow();
+            return;
+        }
         if !self.tabs[self.active].view.indent_item_hit(layout, x) {
             return;
         }
@@ -3071,6 +3079,9 @@ impl App {
                 (Some(c), _) => c.scroll_by(-dy, &layout),
                 (None, Some(m)) => m.scroll_by(-dy, &layout),
                 (None, None) => tab.view.scroll_by(-dy, &tab.doc, &layout, tab_width),
+            }
+            if dy > 0.0 {
+                tab.doc.stop_following();
             }
             tab.view.scroll_x_by(-dx);
         }

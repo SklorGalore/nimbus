@@ -210,6 +210,8 @@ pub enum Command<'a> {
     ClearRecent,
     /// Switch to the most recent other project's session.
     ReopenLastSession,
+    /// Keep the view at the end of a growing file, or stop.
+    FollowTail,
     /// Open the command palette.
     Palette,
     /// Read the config file again.

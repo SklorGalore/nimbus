@@ -226,6 +226,7 @@ impl App {
                 self.say("Recent files cleared", false);
             }
             Command::ReopenLastSession => self.reopen_last_session(),
+            Command::FollowTail => self.toggle_follow(),
             _ => return self.run_tree_command(cmd) || self.run_compare_command(cmd),
         }
         self.changed(false);

@@ -27,6 +27,9 @@ use crate::saver::{self, ReplacePolicy, SaveJob, SaveStep, Written};
 use nimbus_core::line_index::{IndexChunk, LineIndex};
 use nimbus_core::mapped::Limits;
 
+mod tail;
+pub use tail::Tail;
+
 /// Copy and Cut refuse selections longer than this: 64 MiB. The text is
 /// copied into memory, then again by the system clipboard, and Select All
 /// in a 4 GB file must not try.
@@ -60,6 +63,9 @@ pub enum DiskChange {
     None,
     /// Reloaded: there were no unsaved edits.
     Reloaded,
+    /// The file grew at its end, and the new bytes were appended
+    /// ([`Document::append_external`]): no undo step, still clean.
+    Appended,
     /// Changed on disk, and there are unsaved edits here.
     Conflict,
     /// Changed on disk, but a mapped document does not reload by itself
@@ -223,6 +229,9 @@ pub struct Document {
     /// A stand-in for a restored tab whose file has not been read yet
     /// ([`Document::placeholder`]).
     placeholder: bool,
+    /// Whether the file grew on disk while open, and whether the view
+    /// follows its end (M12's Follow Tail).
+    pub tail: Tail,
 }
 
 /// A snapshot of the text as the file held it, or none; a wrapper only
@@ -575,6 +584,21 @@ impl Document {
             return DiskChange::None; // our own save, or no real change
         }
         self.deleted = false;
+        let grew = self.disk.is_some_and(|d| stamp.len > d.len);
+        if grew && self.tail == Tail::Fixed {
+            self.tail = Tail::Grew;
+        }
+        if grew
+            && !self.buffer.is_mapped()
+            && !self.is_dirty()
+            && let Some(old) = self.disk
+        {
+            match self.append_external(&path, old, stamp) {
+                Ok(true) => return DiskChange::Appended,
+                Ok(false) => {} // not a plain append: reload as before
+                Err(e) => return DiskChange::Failed(e.to_string()),
+            }
+        }
         if let Some(mapping) = &self.mapping {
             // A document still reading the temp file of a save that could
             // not replace this file is not reading this file: cutting it

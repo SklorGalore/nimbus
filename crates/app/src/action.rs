@@ -776,6 +776,12 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::all(&["Primary+G"]),
     ),
     act(
+        "view.followTail",
+        "Follow Tail",
+        Command::FollowTail,
+        Keys::NONE,
+    ),
+    act(
         "view.toggleSidebar",
         "Toggle Sidebar",
         Command::ToggleSidebar,
