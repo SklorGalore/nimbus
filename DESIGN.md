@@ -574,22 +574,22 @@ introduces and points at the code.
 | 10 | Find in files | **Done** | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
 | 11 | Everyday editing | **Done** | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
 | 12 | Workspace | **Done** | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
-| 13 | Split views and folding | Done | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
-| 14 | Languages, second pass | In progress | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
-| 15 | Distribution | Done | Installers and packages for every platform (unsigned), an update check, signed checksums | [m15](docs/milestones/m15-distribution.md) |
-| 16 | Rendering, second pass | Done | Colour emoji, ligatures, zoom, whitespace and indent guides | [m16](docs/milestones/m16-rendering-second-pass.md) |
-| 17 | Encodings and line endings | Done | Open and save UTF-16 and Windows-1252; change encoding and line endings | [m17](docs/milestones/m17-encodings.md) |
-| 18 | Compare, second pass | Done | Ignore whitespace, compare folders, diff one-line files, compare with HEAD | [m18](docs/milestones/m18-compare-second-pass.md) |
-| 19 | Workspace and search, second pass | Planned | Several roots, named workspaces, drag and drop, search history and multi-line patterns | [m19](docs/milestones/m19-workspace-and-search-second-pass.md) |
-| 20 | Reading aids | Done | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
-| 21 | Foundations and 1.0 | Planned | Ropey 2, current winit and wgpu, fuzzing, a crash record, version 1.0 | [m21](docs/milestones/m21-foundations-and-1-0.md) |
+| 13 | Split views and folding | **Done** | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
+| 14 | Languages, second pass | **Done** | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
+| 15 | Distribution | **Done** | Installers and packages for every platform (unsigned), an update check, signed checksums | [m15](docs/milestones/m15-distribution.md) |
+| 16 | Rendering, second pass | **Done** | Colour emoji, ligatures, zoom, whitespace and indent guides | [m16](docs/milestones/m16-rendering-second-pass.md) |
+| 17 | Encodings and line endings | **Done** | Open and save UTF-16 and Windows-1252; change encoding and line endings | [m17](docs/milestones/m17-encodings.md) |
+| 18 | Compare, second pass | **Done** | Ignore whitespace, compare folders, diff one-line files, compare with HEAD | [m18](docs/milestones/m18-compare-second-pass.md) |
+| 19 | Workspace and search, second pass | **Done** | Several roots, named workspaces, drag and drop, search history and multi-line patterns | [m19](docs/milestones/m19-workspace-and-search-second-pass.md) |
+| 20 | Reading aids | **Done** | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
+| 21 | Foundations and 1.0 | In review | Fuzzing, a soak run, a crash record, version 1.0 (ropey 2 and winit 0.31 wait for stable releases) | [m21](docs/milestones/m21-foundations-and-1-0.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
 approved the six plans and their order on 2026-10-17 and answered their
-open questions (§9, §10). M10 and M11 landed; M12 is Next, and M13–M15
-follow in that order. M16–M21 were drafted on 2026-10-18 from what
-M9–M15 deferred and approved the same day (§9, §10); they follow M15.
+open questions (§9, §10). M16–M21 were drafted on 2026-10-18 from what
+M9–M15 deferred and approved the same day (§9, §10). Every milestone
+through M20 has landed; M21 makes the 1.0 release.
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -750,3 +750,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | M16: a colour font over 64 MB (Apple Color Emoji, about 200 MB) is copied into memory, up to 512 MB, rather than mapped with new `unsafe` (owner's choice); `font` names an installed family or a file, looked up on a worker; indent guides default off; linear blending tried and declined (gamma space stays) | §4.3, m16 |
 | 2026-10-18 | M18 landed: diff options normalise lines before hashing; lines over 4 KB are cut by a 64-byte gear hash and diffed in pieces (layered path only, within 256 MB); git read with `cat-file --filters` on its own thread; folder compare merges two sorted walks by `Path` order | §4.4, m18 |
 | 2026-10-18 | M20 landed: sticky scroll on by default; the preview copies the document's own tree to its worker (no second parse), reads inline Markdown with a small scanner rather than the inline grammar, draws code blocks in the editor font and caches their colours between layouts; the preview is a tab with a flag, kept in the session; `ui_font` also draws the preview | §4.2, m20 |
+| 2026-10-18 | 1.0 ships on ropey 1.6 and winit 0.30: ropey 2 and winit 0.31 are still betas, so both upgrades move to the first point release after they are stable (wgpu 30 is already current) | m21, backlog |

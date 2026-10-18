@@ -1,6 +1,8 @@
 # M14 — Languages, second pass
 
-**Status: in progress.** Started on 2026-10-17 alongside M10, M11 and
+**Status: done.** Its last item, syntax folds, was finished by M13's
+fold model (`folding.rs` calls `structure::fold_regions`); recorded as
+done during M21's 1.0 check on 2026-10-18. Started on 2026-10-17 alongside M10, M11 and
 M15, for the parts that do not depend on them: the injection layer, Go to
 Symbol, the tree-side of structural selection and folds, syntax-aware
 brackets, the five grammars and the user query kinds. Once M11 merged
@@ -46,7 +48,7 @@ string is.
 - [x] **Syntax-aware brackets**: the M8 matcher skips brackets inside
       strings and comments when a tree exists, fixing the M8 known
       limitation.
-- [ ] **Syntax folds**: a `folds.scm` per built-in language gives M13's
+- [x] **Syntax folds**: a `folds.scm` per built-in language gives M13's
       fold regions for functions, blocks, imports and Markdown sections,
       over the visible range plus a margin, like highlighting. The
       queries and `structure::fold_regions` are done; M13's fold model
@@ -156,7 +158,7 @@ the total passes 30 MB on Linux, Bash goes first as DESIGN.md §4.2 says.
 
 ## Results
 
-_In progress; the fold-model hookup waits for M13._
+_Done. The fold-model hookup landed with M13 (`crates/app/src/folding.rs`)._
 
 Measured on 2026-10-17 in a Linux container with a shared, noisy CPU and
 no GPU (Mesa's software Vulkan for the rendering checks), so the owner's

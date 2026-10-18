@@ -6,7 +6,25 @@ section before tagging.
 
 ## Unreleased
 
+## 1.0.0
+
+The first stable release: everything from milestones 9 to 21 since
+0.2.1. Compare and merge (M9), find in files, everyday editing,
+sessions, split views and folding, fourteen languages, packages for
+every platform, rendering and encodings work, workspaces and reading
+aids all land here, along with the testing that a 1.0 promise needs.
+
 ### Added
+
+- A crash record: if Nimbus ever hits an internal error, it writes one
+  line (time, version, where, and the message, with no text from your
+  files) to `crash.log` beside `config.toml` before quitting, and the
+  next start says so.
+- Fuzz testing of the buffers, the diff and search against their
+  oracles, run for an hour per target every week in CI.
+- `--soak`, with `--bench-typing`: 100,000 keystrokes with undo, find
+  and saves on the 100 MB file, failing if memory grows over 10 MB
+  (`bench/soak.sh`).
 
 - Reading aids: sticky scroll pins the function, impl, class or Markdown
   section you are in at the top of the text (click a pinned row to jump
@@ -125,6 +143,10 @@ section before tagging.
 
 ### Changed
 
+- Go to File lists dotfiles such as `.github/` and `.env.example`; only
+  the `.git` folder and ignored files are left out.
+- `--no-session` remembers nothing from the run: no recent files or
+  window position either.
 - Go to Line is `Primary+G` on every platform (it was `Primary+L` on
   macOS, which is now Select Line).
 - A new file, or one whose indentation cannot be detected, indents with
@@ -132,6 +154,11 @@ section before tagging.
 
 ### Fixed
 
+- A window, GPU or font failure at startup now says why (on the
+  terminal, and in a dialog when there is none) and exits with code 1;
+  it used to quit silently with 0.
+- The config template lists all fourteen built-in languages, and
+  `--help` lists `--picker`.
 - Find in Files results, and anything else drawn in the sidebar after a
   text field, were no longer clipped to the sidebar: long result lines
   ran on across the editor.
@@ -148,4 +175,11 @@ section before tagging.
 ## 0.1.0
 
 - First tagged release, made to confirm the release workflow while
-  milestone 8 was in progress.
+  milestone 8 was in progress. It had what milestones 0 to 7 built: a
+  window drawn with our own GPU text pipeline (M0, M1); opening,
+  editing, scrolling and saving files safely (M2); selection, undo,
+  clipboard, find and replace, soft wrap and auto-indent (M3); tabs, the
+  file opener, the command palette, `config.toml` and menus (M4); syntax
+  highlighting for nine languages and two themes (M5); the file tree and
+  reloading files changed on disk (M6); and files of several gigabytes,
+  memory-mapped and indexed in the background (M7).

@@ -1,6 +1,8 @@
 # M21 — Foundations and 1.0
 
-**Status: planned, after M20.** Written on 2026-10-18. The last milestone
+**Status: in review (2026-10-18).** Started the day M20 landed. The
+owner chose to ship 1.0 on ropey 1.6 and winit 0.30, since both upgrades
+were still betas; they move to a point release (`backlog.md`). Written on 2026-10-18. The last milestone
 of the set: bring the pinned dependencies forward, add the testing that
 a 1.0 promise needs, and ship 1.0. Approved the same day: screen-reader
 support (AccessKit) waits until after 1.0, and a panic writes a one-line
@@ -14,10 +16,11 @@ owner would hand to someone else.
 
 ## Done when
 
-- [ ] **Ropey 2**: `RopeBuffer` moves to ropey 2 and the char-to-byte
+- [ ] ~~**Ropey 2**~~ *(deferred: ropey 2 is at 2.0.0-beta.1; after 1.0)*: `RopeBuffer` moves to ropey 2 and the char-to-byte
       layer in `rope.rs` is deleted; the buffer oracle suite and every
       benchmark pass with numbers recorded before and after.
-- [ ] **winit and wgpu current**: winit 0.31 (if stable by then) and the
+- [ ] ~~**winit and wgpu current**~~ *(deferred: winit 0.31 is at
+      0.31.0-beta.3, and wgpu 30.0.1 is already the newest release)*: winit 0.31 (if stable by then) and the
       current wgpu, with the API drift noted in `CLAUDE.md` updated;
       `--smoke` within 10 % of the previous release.
 - [ ] **Fuzzing**: `cargo fuzz` targets for the buffer (random edit
@@ -27,7 +30,7 @@ owner would hand to someone else.
 - [ ] **Soak**: `--bench-typing` extended to a 100,000-keystroke session
       with saves, undo and find on the 100 MB file, memory sampled every
       1,000 keystrokes; growth under 10 MB over the run.
-- [ ] **Crash record**: a panic (release builds abort) writes a one-line
+- [x] **Crash record**: a panic (release builds abort) writes a one-line
       record with the version and the panic message to `crash.log` in the
       state directory before aborting, and the next start says it is
       there. No text from the user's buffers is written (the M12 autosave
