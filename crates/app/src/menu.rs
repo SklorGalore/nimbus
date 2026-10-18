@@ -23,7 +23,11 @@ mod native {
             &[
                 "file.new",
                 "file.open",
+                "file.openRecent",
                 "file.quickOpen",
+                "-",
+                "file.reopenClosed",
+                "session.reopenLast",
                 "-",
                 "file.save",
                 "file.saveAs",

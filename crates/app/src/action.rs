@@ -147,6 +147,30 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::all(&["Primary+O"]),
     ),
     act(
+        "file.openRecent",
+        "Open Recent…",
+        Command::OpenRecent,
+        Keys::all(&["Primary+Shift+O"]),
+    ),
+    act(
+        "file.reopenClosed",
+        "Reopen Closed Tab",
+        Command::ReopenClosedTab,
+        Keys::all(&["Primary+Shift+T"]),
+    ),
+    act(
+        "file.clearRecent",
+        "Clear Recent Files",
+        Command::ClearRecent,
+        Keys::NONE,
+    ),
+    act(
+        "session.reopenLast",
+        "Reopen Last Session",
+        Command::ReopenLastSession,
+        Keys::NONE,
+    ),
+    act(
         "file.save",
         "Save",
         Command::Save,

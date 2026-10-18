@@ -44,14 +44,19 @@ use crate::picker::{self, Item, Kind, Picker};
 use crate::replace_files::{self, Replacement};
 use crate::saver::{self, ReplacePolicy, SaveEvent, SaveStep};
 use crate::search_panel::{Focus, Reply};
-use crate::session::{self, Restore};
+use crate::session;
 use crate::sidebar::{self, Mode, Sidebar};
-use crate::state::{Session, SessionTab, State};
+use crate::state::State;
 use crate::theme::{Theme, Ui};
 use crate::tree::{self, Entry, ListRequest};
 use crate::view::{self, Decorations, Layout, PickerView, Preedit, TabLabel, View};
 use crate::watch::{Change, Watch};
 use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
+
+mod workspace;
+
+pub use workspace::Startup;
+use workspace::{Pending, Workspace, startup_message, startup_tabs};
 
 /// Events sent to the event loop from other threads.
 #[derive(Debug)]
@@ -90,45 +95,8 @@ pub enum AppEvent {
     /// A restored tab's file was read on a worker: the document for the
     /// placeholder with this path, or why it could not be read.
     Restored(PathBuf, Result<Box<Document>, String>),
-}
-
-/// What `main` worked out about this run's session.
-#[derive(Debug)]
-pub struct Startup {
-    /// What was remembered from earlier runs.
-    pub state: State,
-    /// The session to restore, if any: its tabs replace the command line's
-    /// (which named none).
-    pub restore: Option<Restore>,
-    /// The project folder whose session this run saves; `None` when files
-    /// were named, with `--no-session`, and in unattended runs.
-    pub session_root: Option<PathBuf>,
-}
-
-/// How long after a tab opens or closes the state file is written: a burst
-/// of changes (closing five tabs) writes once.
-const STATE_SAVE_DELAY: Duration = Duration::from_secs(1);
-
-/// Read restored tabs' files on one worker, one after another, sending each
-/// document back as it is ready.
-fn spawn_restore(proxy: &EventLoopProxy<AppEvent>, paths: Vec<PathBuf>) {
-    let proxy = proxy.clone();
-    let spawned = std::thread::Builder::new()
-        .name("nimbus-restore".to_owned())
-        .spawn(move || {
-            for path in paths {
-                let doc = Document::open(&path)
-                    .map(Box::new)
-                    .map_err(|e| e.to_string());
-                if proxy.send_event(AppEvent::Restored(path, doc)).is_err() {
-                    return; // the app is gone
-                }
-            }
-        });
-    if let Err(e) = spawned {
-        // Each tab is still read when it is first shown.
-        log::warn!("could not start the restore thread: {e}");
-    }
+    /// Recent files found missing on a worker.
+    RecentMissing(Vec<PathBuf>),
 }
 
 /// List a folder for the sidebar on its own thread.
@@ -233,27 +201,6 @@ pub struct Tab {
     pub merge: Option<Box<MergeView>>,
     /// Where a restored tab's cursor and view go once its file is read.
     pending: Option<Pending>,
-}
-
-/// What is remembered between runs, and when it is next written.
-#[derive(Debug)]
-struct Workspace {
-    /// The sidebar, the window, recent files and sessions.
-    state: State,
-    /// The project folder whose session is saved ([`Startup::session_root`]).
-    session_root: Option<PathBuf>,
-    /// Write the state file at this time.
-    save_at: Option<Instant>,
-    /// The worker reading restored tabs has been started.
-    restore_started: bool,
-}
-
-/// A restored tab's cursor and top of view, as byte offsets, until its
-/// file is read and they can be clamped to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Pending {
-    cursor: usize,
-    scroll: usize,
 }
 
 impl Tab {
@@ -619,6 +566,7 @@ impl App {
                 session_root,
                 save_at: None,
                 restore_started: false,
+                closed: Vec::new(),
             },
             resize_cursor: false,
             watching: false,
@@ -849,7 +797,7 @@ impl App {
                 self.quit(event_loop);
                 return true;
             }
-            _ => return self.run_compare_command(cmd),
+            _ => return self.run_workspace_command(cmd) || self.run_compare_command(cmd),
         }
         self.changed(false);
         true
@@ -1528,169 +1476,6 @@ impl App {
         }
     }
 
-    /// Write the state file a moment from now, so a burst of changes
-    /// writes once. Never in an unattended run.
-    fn save_state_soon(&mut self) {
-        if !self.options.unattended() {
-            self.ws
-                .save_at
-                .get_or_insert_with(|| Instant::now() + STATE_SAVE_DELAY);
-        }
-    }
-
-    /// A tab opened, closed or came to the front: the session changed.
-    fn session_changed(&mut self) {
-        if self.ws.session_root.is_some() {
-            self.save_state_soon();
-        }
-    }
-
-    /// Write the state file now, with this run's session in it.
-    fn save_state(&mut self) {
-        self.ws.save_at = None;
-        if self.options.unattended() {
-            return;
-        }
-        if let Some(session) = self.capture_session() {
-            self.ws.state.put_session(session);
-        }
-        self.ws.state.save();
-    }
-
-    /// The session as it stands: the open files with their cursors and
-    /// views, the expanded folders and the sidebar's mode. Untitled tabs
-    /// are left out; there is no autosave to bring their text back.
-    fn capture_session(&self) -> Option<Session> {
-        let root = self.ws.session_root.clone()?;
-        let tabs = self
-            .tabs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, t)| {
-                let path = if t.doc.is_placeholder() {
-                    t.doc.path.clone()?
-                } else {
-                    t.doc.canonical.clone()?
-                };
-                let (cursor, scroll) = t.pending.map_or((t.doc.cursor(), t.view.scroll_top), |p| {
-                    (p.cursor, p.scroll)
-                });
-                Some(SessionTab {
-                    path,
-                    cursor,
-                    scroll,
-                    active: i == self.active,
-                })
-            })
-            .collect();
-        let tree_root = self.sidebar.tree.root();
-        let expanded = self
-            .sidebar
-            .tree
-            .expanded_dirs()
-            .into_iter()
-            .filter_map(|p| p.strip_prefix(tree_root).ok().map(Path::to_path_buf))
-            .collect();
-        Some(Session {
-            root,
-            mode: self.sidebar.mode.into(),
-            expanded,
-            tabs,
-        })
-    }
-
-    /// Read tab `i`'s file if it is still a restored placeholder, so it can
-    /// be shown. A file that cannot be read closes its tab with a message.
-    /// Returns whether tab `i` is still there.
-    fn ensure_loaded(&mut self, i: usize) -> bool {
-        let Some(tab) = self.tabs.get(i) else {
-            return false;
-        };
-        if !tab.doc.is_placeholder() {
-            return true;
-        }
-        let Some(path) = tab.doc.path.clone() else {
-            return true;
-        };
-        match Document::open(&path) {
-            Ok(doc) => {
-                self.adopt_restored(i, doc);
-                true
-            }
-            Err(e) => {
-                self.say(format!("Cannot open {}: {e}", path.display()), true);
-                self.drop_tab(i);
-                false
-            }
-        }
-    }
-
-    /// Put `doc`, just read, in place of tab `i`'s placeholder.
-    fn adopt_restored(&mut self, i: usize, mut doc: Document) {
-        doc.detect_language(&self.languages);
-        let tab = &mut self.tabs[i];
-        tab.doc = doc;
-        tab.apply_pending();
-        self.title_key = None;
-        self.sync_watch();
-    }
-
-    /// Remove tab `i` without asking: only for a tab with nothing to lose
-    /// (a placeholder whose file cannot be read). The last tab becomes an
-    /// untitled one rather than quitting.
-    fn drop_tab(&mut self, i: usize) {
-        if i >= self.tabs.len() {
-            return;
-        }
-        if self.tabs.len() == 1 {
-            self.tabs[0] = Tab::new(Document::untitled(), self.config.soft_wrap);
-        } else {
-            self.tabs.remove(i);
-            if self.active > i || self.active == self.tabs.len() {
-                self.active = self.active.saturating_sub(1);
-            }
-        }
-        self.title_key = None;
-        self.session_changed();
-    }
-
-    /// After the first frame, read the restored tabs' files on a worker.
-    fn start_restoring(&mut self) {
-        if self.ws.restore_started {
-            return;
-        }
-        self.ws.restore_started = true;
-        let paths: Vec<PathBuf> = self
-            .tabs
-            .iter()
-            .filter(|t| t.doc.is_placeholder())
-            .filter_map(|t| t.doc.path.clone())
-            .collect();
-        if !paths.is_empty() {
-            spawn_restore(&self.proxy, paths);
-        }
-    }
-
-    /// A restored tab's file arrived from the worker. It is dropped if the
-    /// tab was shown (and so read) meanwhile, or closed.
-    fn restored_arrived(&mut self, path: &Path, doc: Result<Box<Document>, String>) {
-        let Some(i) = self
-            .tabs
-            .iter()
-            .position(|t| t.doc.is_placeholder() && t.doc.path.as_deref() == Some(path))
-        else {
-            return;
-        };
-        match doc {
-            Ok(doc) => {
-                self.adopt_restored(i, *doc);
-                self.changed(false);
-            }
-            // Tried again, with a message, when the tab is shown.
-            Err(e) => log::debug!("restoring {}: {e}", path.display()),
-        }
-    }
-
     /// Watch the sidebar's listed folders and the folders of open files.
     /// Does nothing until the first frame is up.
     fn sync_watch(&mut self) {
@@ -2244,6 +2029,7 @@ impl App {
             event_loop.exit();
             return;
         }
+        self.remember_closed(i);
         self.tabs.remove(i);
         if self.active >= i && self.active > 0 {
             self.active -= 1;
@@ -2356,7 +2142,18 @@ impl App {
         });
         self.picker = Some(match kind {
             Kind::Palette => Picker::palette(notify),
-            Kind::Files => Picker::files(&self.root, notify),
+            Kind::Files => Picker::files(&self.root, self.recent_under_root(), notify),
+            Kind::Recent => {
+                let paths: Vec<PathBuf> = self
+                    .ws
+                    .state
+                    .recent
+                    .iter()
+                    .map(|r| r.path.clone())
+                    .collect();
+                self.check_recent(paths.clone());
+                Picker::recent(paths, &self.root, notify)
+            }
             Kind::Line => {
                 let t = &self.doc().buffer;
                 Picker::go_to_line(notify, t.is_fully_indexed().then(|| t.len_lines()))
@@ -2408,6 +2205,7 @@ impl App {
                 match chosen {
                     Some(Item::Action(a)) => self.run(a.command, event_loop),
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
+                    Some(Item::Recent(path)) => self.open_path(&path),
                     Some(Item::Line(n)) => self.go_to_line(n),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
                     None => {}
@@ -3098,6 +2896,7 @@ impl App {
                 self.picker = None;
                 match chosen {
                     Some(Item::File(rel)) => self.open_path(&root.join(rel)),
+                    Some(Item::Recent(path)) => self.open_path(&path),
                     Some(Item::Action(a)) => self.pending_action = Some(a.command),
                     Some(Item::Line(n)) => self.go_to_line(n),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
@@ -3896,67 +3695,6 @@ fn replace_in_tab(
     Some(n)
 }
 
-/// The first tabs: the files named on the command line (noted as recent),
-/// or else a restored session's (the front one read, the rest
-/// placeholders, with the sidebar's mode and expanded folders and a note
-/// for files that are gone), or else one untitled tab. Returns them and
-/// the front tab's index.
-fn startup_tabs(
-    docs: Vec<Document>,
-    restore: Option<Restore>,
-    state: &mut State,
-    sidebar: &mut Sidebar,
-    wrap: bool,
-) -> (Vec<Tab>, usize, Option<String>) {
-    for c in docs.iter().filter_map(|d| d.canonical.as_deref()) {
-        state.note_recent(c);
-    }
-    let mut tabs: Vec<Tab> = docs.into_iter().map(|d| Tab::new(d, wrap)).collect();
-    let mut active = 0;
-    let mut note = None;
-    if let Some(r) = restore.filter(|_| tabs.is_empty()) {
-        if let Some(mode) = r.mode {
-            sidebar.mode = mode;
-        }
-        sidebar.tree.expand_later(r.expanded);
-        note = session::dropped_note(&r.dropped);
-        for t in r.tabs {
-            let mut tab = Tab::new(t.doc, wrap);
-            tab.pending = Some(Pending {
-                cursor: t.cursor,
-                scroll: t.scroll,
-            });
-            tab.apply_pending();
-            tabs.push(tab);
-        }
-        active = r.active;
-    }
-    if tabs.is_empty() {
-        tabs.push(Tab::new(Document::untitled(), wrap));
-    }
-    let active = active.min(tabs.len() - 1);
-    (tabs, active, note)
-}
-
-/// The first message: startup warnings (as an error, shown for longer),
-/// then any note about the restored session.
-fn startup_message(warnings: Vec<String>, note: Option<String>) -> Option<Message> {
-    for w in &warnings {
-        log::warn!("{w}");
-    }
-    let is_error = !warnings.is_empty();
-    let text = warnings
-        .into_iter()
-        .chain(note)
-        .collect::<Vec<_>>()
-        .join("; ");
-    (!text.is_empty()).then(|| Message {
-        text,
-        is_error,
-        until: Instant::now() + MESSAGE_TIME * if is_error { 2 } else { 1 },
-    })
-}
-
 /// A path's file name, for messages.
 fn name_of(path: &Path) -> String {
     path.file_name().map_or_else(
@@ -3994,7 +3732,11 @@ fn draw_headless_picker(
     let (kind, query) = spec.split_once(':').unwrap_or((spec, ""));
     let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
     let mut p = match kind {
-        "files" => Picker::files(root, notify),
+        "files" => Picker::files(root, Vec::new(), notify),
+        "recent" => {
+            let paths = State::load().recent.into_iter().map(|r| r.path).collect();
+            Picker::recent(paths, root, notify)
+        }
         "line" => Picker::go_to_line(notify, Some(doc.buffer.len_lines())),
         _ => Picker::palette(notify),
     };
@@ -4478,6 +4220,8 @@ fn draw_picker_overlay(
         (Kind::Line, _) => "",
         (Kind::Tabs, true) => "tab",
         (Kind::Tabs, false) => "tabs",
+        (Kind::Recent, true) => "recent file",
+        (Kind::Recent, false) => "recent files",
     };
     let more = if p.loading() { "…" } else { "" };
     let status = if p.kind == Kind::Line {
@@ -4490,6 +4234,7 @@ fn draw_picker_overlay(
         Kind::Files => "Type a file name",
         Kind::Line => "Type a line number",
         Kind::Tabs => "Type a tab name",
+        Kind::Recent => "Type a file name or folder",
     };
     let pv = PickerView {
         input: &p.input,
@@ -4626,6 +4371,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
             AppEvent::Replaced(report) => self.replaced(report),
             AppEvent::Restored(path, doc) => self.restored_arrived(&path, doc),
+            AppEvent::RecentMissing(gone) => self.recent_missing(&gone),
             AppEvent::WatchWarning(warning) => {
                 self.say(warning, true);
                 self.changed(false);

@@ -152,6 +152,14 @@ pub enum Command<'a> {
     GoToTab(usize),
     /// Open the fuzzy file opener.
     QuickOpen,
+    /// Open the list of recently opened files.
+    OpenRecent,
+    /// Open the last closed tab again, with its cursor.
+    ReopenClosedTab,
+    /// Forget the recently opened files.
+    ClearRecent,
+    /// Switch to the most recent other project's session.
+    ReopenLastSession,
     /// Open the command palette.
     Palette,
     /// Read the config file again.
