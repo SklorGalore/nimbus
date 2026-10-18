@@ -185,8 +185,16 @@ Other `core` responsibilities:
 - **Search**: literal and regex (`regex` crate) over `BufferSnapshot` in
   chunks, so it works on mapped files and runs off the main thread. Results
   are byte ranges.
+- **Encodings** (M17): the buffer only holds UTF-8. A file in another
+  encoding is decoded on open (`io.rs`, 4 MiB blocks into the rope) and
+  encoded on save, with `encoding_rs`; the encoding comes from an explicit
+  choice, a byte order mark, or a bounded guess (first 64 KB, Windows-1252
+  only if it reads as text). Unedited files still round-trip byte for
+  byte. Files over the rope threshold are never transcoded: one known to
+  be in another encoding is read-only; a guessed one keeps M7's byte path.
 - **Line endings**: detected on open (the majority of LF or CRLF wins) and
-  used for new lines typed with Enter. Saving writes the buffer's bytes
+  used for new lines typed with Enter; "Change Line Endings" rewrites them
+  all as one edit. Saving writes the buffer's bytes
   exactly, so unedited files round-trip byte for byte, mixed endings
   included. Tabs are kept as tabs; display width
   is a setting.
@@ -547,11 +555,11 @@ introduces and points at the code.
 | 10 | Find in files | **Done** | Search and replace across the project, results streaming in | [m10](docs/milestones/m10-find-in-files.md) |
 | 11 | Everyday editing | **Done** | Toggle comments, line operations, expand selection, auto-pairs, per-language indentation | [m11](docs/milestones/m11-everyday-editing.md) |
 | 12 | Workspace | **Done** | Reopen the last session, recent files, create and rename in the tree, follow a growing log | [m12](docs/milestones/m12-workspace.md) |
-| 13 | Split views and folding | In progress | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
+| 13 | Split views and folding | Done | Two editor columns; fold regions at any file size | [m13](docs/milestones/m13-splits-and-folding.md) |
 | 14 | Languages, second pass | In progress | Markdown inline and injected languages, symbols, structural selection, more grammars | [m14](docs/milestones/m14-languages.md) |
 | 15 | Distribution | Done | Installers and packages for every platform (unsigned), an update check, signed checksums | [m15](docs/milestones/m15-distribution.md) |
 | 16 | Rendering, second pass | Planned | Colour emoji, ligatures, zoom, whitespace and indent guides | [m16](docs/milestones/m16-rendering-second-pass.md) |
-| 17 | Encodings and line endings | Planned | Open and save UTF-16 and Windows-1252; change encoding and line endings | [m17](docs/milestones/m17-encodings.md) |
+| 17 | Encodings and line endings | Done | Open and save UTF-16 and Windows-1252; change encoding and line endings | [m17](docs/milestones/m17-encodings.md) |
 | 18 | Compare, second pass | Planned | Ignore whitespace, compare folders, diff one-line files, compare with HEAD | [m18](docs/milestones/m18-compare-second-pass.md) |
 | 19 | Workspace and search, second pass | Planned | Several roots, named workspaces, drag and drop, search history and multi-line patterns | [m19](docs/milestones/m19-workspace-and-search-second-pass.md) |
 | 20 | Reading aids | Planned | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
@@ -717,3 +725,5 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | Per-language soft wrap is `[editor.NAME] wrap`, following M11's `[editor.NAME]` and `[indent.NAME]` tables rather than the planned `[languages.NAME]` (that table maps file patterns); Markdown wraps by default | §4.4, m14 |
 | 2026-10-18 | M12: `nimbus FILE` leaves sessions alone and `--no-session` neither restores nor saves; restored tabs other than the front one load after the first frame; on macOS the tree renames with Enter and opens with `Cmd+Down`; the trash crate asks `NSFileManager`, not Finder, so no automation prompt | §4.4, m12 |
 | 2026-10-18 | M12 Follow Tail: a grown file is appended to, not reloaded; a following mapped document maps the file again and swaps the mapping in, checked by its first and last 64 bytes; undo runs belong to a document by lineage number, not source pointer | §4.1, m12 |
+| 2026-10-18 | M17: a huge file whose start only *looks* like Windows-1252 keeps M7's editable byte path; read-only is for huge files whose encoding is known (UTF-16 byte order mark, explicit choice), since a guess should not take editing away | §4.1, m17 |
+| 2026-10-18 | M17: ISO-8859-1 is true Latin-1 (byte = code point), separate from Windows-1252, which `encoding_rs` substitutes for it per the web standard | §4.1, m17 |

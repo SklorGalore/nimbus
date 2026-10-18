@@ -113,7 +113,7 @@ impl From<SidebarMode> for Mode {
 }
 
 /// One project folder as it was left.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     /// The project folder (canonical).
     pub root: PathBuf,
@@ -126,10 +126,14 @@ pub struct Session {
     /// The tabs, in order.
     #[serde(default)]
     pub tabs: Vec<SessionTab>,
+    /// Each editor group's share of the editor area's width, left to
+    /// right (M13). Empty, as an older file has it, means one group.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<f32>,
 }
 
 /// One tab of a session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTab {
     /// The file.
     pub path: PathBuf,
@@ -144,9 +148,45 @@ pub struct SessionTab {
     /// The byte the view's top row starts in.
     #[serde(default)]
     pub scroll: usize,
-    /// The tab that was in front.
+    /// The tab that was in front: the focused group's active tab.
     #[serde(default)]
     pub active: bool,
+    /// The editor group it was in, counted from the left (M13).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub group: usize,
+    /// It was its group's active tab (M13); [`SessionTab::active`] says
+    /// which group had the focus.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub front: bool,
+    /// Its folds, as `[start, end]` byte ranges of the hidden text (M13).
+    /// Byte ranges only fit the file they were made on, so they are saved
+    /// only for a tab with no unsaved edits, along with [`SessionTab::disk`],
+    /// and dropped on restore when the file changed since.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folds: Vec<[usize; 2]>,
+    /// The file's size and modification time (nanoseconds since 1970) when
+    /// the folds were saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<[u64; 2]>,
+}
+
+/// For `skip_serializing_if`: older files have no group numbers, and a
+/// session in one group keeps the file as it was.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes the field by reference"
+)]
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// For `skip_serializing_if`, as [`is_zero`].
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes the field by reference"
+)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Where the state file lives: beside the config file.
@@ -282,6 +322,7 @@ mod tests {
             cursor,
             scroll: cursor / 2,
             active,
+            ..SessionTab::default()
         }
     }
 
@@ -290,7 +331,18 @@ mod tests {
             root: PathBuf::from(root),
             mode: SidebarMode::Search,
             expanded: vec![PathBuf::from("src"), PathBuf::from("src/view")],
-            tabs: vec![tab("/p/a.rs", 10, false), tab("/p/b.rs", 99, true)],
+            tabs: vec![
+                tab("/p/a.rs", 10, false),
+                tab("/p/b.rs", 99, true),
+                SessionTab {
+                    group: 1,
+                    front: true,
+                    folds: vec![[4, 20], [30, 41]],
+                    disk: Some([41, 1_760_000_000_123_456_789]),
+                    ..tab("/p/a.rs", 5, false)
+                },
+            ],
+            groups: vec![0.625, 0.375],
         }
     }
 
@@ -385,10 +437,11 @@ mod tests {
             cursor: 0,
             scroll: 0,
             active: false,
+            ..SessionTab::default()
         });
         s.put_session(sess);
         assert_eq!(s.recent, Vec::new());
-        assert_eq!(s.sessions[0].tabs.len(), 2);
+        assert_eq!(s.sessions[0].tabs.len(), 3, "the bad path left out");
         assert!(toml::to_string(&s).is_ok());
     }
 
