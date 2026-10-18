@@ -17,7 +17,7 @@ use nimbus_core::column;
 use nimbus_core::search::{Generation, Query};
 use nimbus_render::Gpu;
 
-use crate::document::Document;
+use crate::document::Solo;
 use crate::find_files::{self, Batch, Params, Results};
 use crate::input::Motion;
 use crate::theme::Ui;
@@ -96,13 +96,13 @@ pub struct Reply {
 )]
 pub struct Panel {
     /// The pattern.
-    pub query: Document,
+    pub query: Solo,
     /// The replacement.
-    pub replace: Document,
+    pub replace: Solo,
     /// Files to search, as globs.
-    pub include: Document,
+    pub include: Solo,
     /// Files to leave out, as globs.
-    pub exclude: Document,
+    pub exclude: Solo,
     /// Regular expression matching.
     pub regex: bool,
     /// Match case.
@@ -143,10 +143,10 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
-            query: Document::untitled(),
-            replace: Document::untitled(),
-            include: Document::untitled(),
-            exclude: Document::untitled(),
+            query: Solo::default(),
+            replace: Solo::default(),
+            include: Solo::default(),
+            exclude: Solo::default(),
             regex: false,
             case_sensitive: false,
             whole_word: false,
@@ -169,7 +169,8 @@ impl Default for Panel {
 }
 
 /// Text of a single-line field document.
-fn field_text(doc: &Document) -> String {
+fn field_text(field: &Solo) -> String {
+    let doc = &field.doc;
     doc.buffer.slice(0..doc.buffer.len_bytes()).into_owned()
 }
 
@@ -302,7 +303,7 @@ impl Panel {
     }
 
     /// The focused field, if a field has focus.
-    pub fn field_mut(&mut self) -> Option<&mut Document> {
+    pub fn field_mut(&mut self) -> Option<&mut Solo> {
         Some(match self.focus {
             Focus::Query => &mut self.query,
             Focus::Replace => &mut self.replace,
@@ -316,10 +317,10 @@ impl Panel {
     /// replaces it; with `text`, the query is that first.
     pub fn focus_query(&mut self, text: Option<String>) {
         if let Some(text) = text.filter(|t| !t.contains('\n') && t.len() <= 200) {
-            self.query = Document::untitled();
-            let _ = self.query.insert(&text);
+            self.query = Solo::default();
+            let _ = self.query.ed().insert(&text);
         }
-        self.query.select_all();
+        self.query.ed().select_all();
         self.focus = Focus::Query;
     }
 
@@ -344,7 +345,7 @@ impl Panel {
             (i + 1) % n
         }];
         if let Some(field) = self.field_mut() {
-            field.select_all();
+            field.ed().select_all();
         }
     }
 
@@ -419,7 +420,7 @@ impl Panel {
         self.rows.clear();
         self.selected = None;
         self.scroll = 0;
-        self.query = Document::untitled();
+        self.query = Solo::default();
         self.focus = Focus::Query;
     }
 
@@ -856,7 +857,7 @@ fn draw_fields(
             Focus::Exclude => &panel.exclude,
             Focus::List => continue,
         };
-        if doc.buffer.len_bytes() == 0 && !is_focused {
+        if doc.doc.buffer.len_bytes() == 0 && !is_focused {
             gpu.push_text_line([geo.left + cell / 2.0, top], placeholder, ui.gutter);
         } else {
             view::draw_field(
@@ -1037,7 +1038,7 @@ mod tests {
     /// A panel with results: two files, three hits.
     fn panel() -> Panel {
         let mut p = Panel::default();
-        let _ = p.query.insert("foo");
+        let _ = p.query.ed().insert("foo");
         p.results = Some(Results::new(1, PathBuf::from("/r")));
         p.receive(Batch {
             generation: 1,

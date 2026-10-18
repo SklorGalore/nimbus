@@ -31,7 +31,7 @@ use crate::columns::Click;
 use crate::compare::{Compare, DiffResult, Other};
 use crate::config::{self, Config};
 use crate::debug::Debug;
-use crate::document::{DiskChange, Document, MAX_COPY_BYTES, Occurrence};
+use crate::document::{Carets, DiskChange, Document, Editor, MAX_COPY_BYTES, Occurrence, Solo};
 use crate::editing::Outcome;
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::find_files::{self, Batch as FilesBatch};
@@ -195,6 +195,8 @@ const CHORD_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct Tab {
     /// The document.
     pub doc: Document,
+    /// This tab's cursors and selections in it.
+    pub carets: Carets,
     /// Its scroll position and wrap setting.
     pub view: View,
     /// The "too large to highlight" note has been shown.
@@ -213,6 +215,11 @@ pub struct Tab {
 }
 
 impl Tab {
+    /// This tab's document and cursors, to edit.
+    pub fn ed(&mut self) -> Editor<'_> {
+        Editor::new(&mut self.doc, &mut self.carets)
+    }
+
     /// A tab showing `doc`, wrapped if `wrap`.
     #[must_use]
     pub fn new(doc: Document, wrap: bool) -> Self {
@@ -220,6 +227,7 @@ impl Tab {
         view.set_wrap(wrap);
         Self {
             doc,
+            carets: Carets::default(),
             view,
             noted_size: false,
             after_save: AfterSave::default(),
@@ -615,6 +623,29 @@ impl App {
         &mut self.tabs[self.active].doc
     }
 
+    /// The active tab's document and cursors, to edit.
+    fn ed(&mut self) -> Editor<'_> {
+        let tab = &mut self.tabs[self.active];
+        Editor::new(&mut tab.doc, &mut tab.carets)
+    }
+
+    /// The active tab's cursors.
+    fn carets(&self) -> &Carets {
+        &self.tabs[self.active].carets
+    }
+
+    /// The active tab's cursor, snapped to its text.
+    fn cursor(&self) -> usize {
+        let tab = &self.tabs[self.active];
+        tab.carets.cursor(&tab.doc.buffer)
+    }
+
+    /// The active tab's primary selection, snapped to its text.
+    fn selection(&self) -> nimbus_core::Selection {
+        let tab = &self.tabs[self.active];
+        tab.carets.selection(&tab.doc.buffer)
+    }
+
     fn font_px(&self, scale: f64) -> f32 {
         to_f32(self.config.font_size * scale)
     }
@@ -669,9 +700,16 @@ impl App {
             let tab_width = self.tab_width();
             let tab = &mut self.tabs[self.active];
             match (tab.compare.as_mut(), tab.merge.as_mut()) {
-                (Some(c), _) => c.ensure_cursor_visible(&tab.doc, &layout),
-                (None, Some(m)) => m.ensure_cursor_visible(&tab.doc, &layout),
-                (None, None) => tab.view.ensure_cursor_visible(&tab.doc, &layout, tab_width),
+                (Some(c), _) => {
+                    c.ensure_cursor_visible(&tab.doc, tab.carets.cursor(&tab.doc.buffer), &layout);
+                }
+                (None, Some(m)) => {
+                    m.ensure_cursor_visible(&tab.doc, tab.carets.cursor(&tab.doc.buffer), &layout);
+                }
+                (None, None) => {
+                    tab.view
+                        .ensure_cursor_visible(&tab.doc, &tab.carets, &layout, tab_width);
+                }
             }
         }
         self.update_title();
@@ -803,7 +841,8 @@ impl App {
             Command::ReloadFromDisk if self.waits_for_save() => {}
             Command::ReloadFromDisk => {
                 let languages = &self.languages;
-                match self.tabs[self.active].doc.reload(languages) {
+                let tab = &mut self.tabs[self.active];
+                match tab.doc.reload(languages, &mut [&mut tab.carets]) {
                     Ok(()) => self.say("Reloaded from disk", false),
                     Err(e) => self.say(format!("Cannot reload: {e}"), true),
                 }
@@ -1107,7 +1146,7 @@ impl App {
             self.say("Not merging; run Merge Files… first", false);
             return;
         };
-        if let Err(e) = m.take(&mut tab.doc, take) {
+        if let Err(e) = m.take(&mut Editor::new(&mut tab.doc, &mut tab.carets), take) {
             self.say(e, false);
         }
         self.changed(true);
@@ -1121,9 +1160,14 @@ impl App {
             self.say("Not merging", false);
             return;
         };
-        match m.step_conflict(forward, &tab.doc, &layout) {
+        match m.step_conflict(
+            forward,
+            &tab.doc,
+            tab.carets.cursor(&tab.doc.buffer),
+            &layout,
+        ) {
             Some(p) => {
-                tab.doc.click(p, false);
+                tab.ed().click(p, false);
                 self.changed(true);
             }
             None => self.say("No more conflicts that way", false),
@@ -1246,10 +1290,11 @@ impl App {
     fn diff_step(&mut self, forward: bool) {
         let Some(layout) = self.layout() else { return };
         let tab = &mut self.tabs[self.active];
+        let cursor = tab.carets.cursor(&tab.doc.buffer);
         let pos = match (tab.compare.as_mut(), tab.merge.as_mut()) {
-            (Some(c), _) if forward => c.next_change(&tab.doc, &layout),
-            (Some(c), _) => c.prev_change(&tab.doc, &layout),
-            (None, Some(m)) => m.step_change(forward, &tab.doc, &layout),
+            (Some(c), _) if forward => c.next_change(&tab.doc, cursor, &layout),
+            (Some(c), _) => c.prev_change(&tab.doc, cursor, &layout),
+            (None, Some(m)) => m.step_change(forward, &tab.doc, cursor, &layout),
             (None, None) => {
                 self.say("Not comparing; run Compare with Saved first", false);
                 return;
@@ -1257,7 +1302,7 @@ impl App {
         };
         match pos {
             Some(p) => {
-                tab.doc.click(p, false);
+                tab.ed().click(p, false);
                 self.changed(true);
             }
             None => self.say("No more changes", false),
@@ -1278,19 +1323,19 @@ impl App {
             }
             Command::Insert(text) => {
                 let auto_pairs = self.editing().auto_pairs;
-                self.doc_mut().type_text(text, auto_pairs)
+                self.ed().type_text(text, auto_pairs)
             }
-            Command::Newline => self.doc_mut().insert_newline(),
-            Command::Tab => match self.doc_mut().indent_lines() {
+            Command::Newline => self.ed().insert_newline(),
+            Command::Tab => match self.ed().indent_lines() {
                 Ok(true) => Ok(()),
-                Ok(false) => self.doc_mut().insert_indent(),
+                Ok(false) => self.ed().insert_indent(),
                 Err(e) => Err(e),
             },
-            Command::Outdent => self.doc_mut().outdent_lines(),
-            Command::Undo => self.doc_mut().undo().map(drop),
-            Command::Redo => self.doc_mut().redo().map(drop),
+            Command::Outdent => self.ed().outdent_lines(),
+            Command::Undo => self.ed().undo().map(drop),
+            Command::Redo => self.ed().redo().map(drop),
             Command::SelectAll => {
-                self.doc_mut().select_all();
+                self.ed().select_all();
                 Ok(())
             }
             Command::AddNextOccurrence => {
@@ -1303,16 +1348,16 @@ impl App {
                 } else {
                     1
                 };
-                self.doc_mut().add_cursor_vertical(lines, tab_width);
+                self.ed().add_cursor_vertical(lines, tab_width);
                 Ok(())
             }
             Command::Copy | Command::Cut | Command::Paste => self.clipboard_command(cmd),
             Command::Escape => {
                 if self.find.open {
                     self.find.close();
-                } else if !self.doc_mut().collapse_cursors() {
-                    let head = self.doc().selection().head;
-                    self.doc_mut().click(head, false);
+                } else if !self.ed().collapse_cursors() {
+                    let head = self.selection().head;
+                    self.ed().click(head, false);
                 }
                 Ok(())
             }
@@ -1330,15 +1375,15 @@ impl App {
                 let tab = &mut self.tabs[self.active];
                 let on = !tab.view.wrap;
                 tab.view.set_wrap(on);
-                tab.doc.carets.preferred_column = None;
+                tab.carets.preferred_column = None;
                 self.say(if on { "Soft wrap on" } else { "Soft wrap off" }, false);
                 Ok(())
             }
-            Command::DeleteBack => self.doc_mut().backspace().map(drop),
-            Command::DeleteForward => self.doc_mut().delete_forward().map(drop),
-            Command::DeleteWordBack => self.doc_mut().delete_to(Motion::WordLeft).map(drop),
-            Command::DeleteWordForward => self.doc_mut().delete_to(Motion::WordRight).map(drop),
-            Command::DeleteToLineStart => self.doc_mut().delete_to(Motion::LineStart).map(drop),
+            Command::DeleteBack => self.ed().backspace().map(drop),
+            Command::DeleteForward => self.ed().delete_forward().map(drop),
+            Command::DeleteWordBack => self.ed().delete_to(Motion::WordLeft).map(drop),
+            Command::DeleteWordForward => self.ed().delete_to(Motion::WordRight).map(drop),
+            Command::DeleteToLineStart => self.ed().delete_to(Motion::LineStart).map(drop),
             _ => self.run_everyday_edit(cmd),
         }
     }
@@ -1347,36 +1392,36 @@ impl App {
     /// text, indentation), on the active tab.
     fn run_everyday_edit(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
         match cmd {
-            Command::ToggleLineComment => self.edit_op(Document::toggle_line_comment),
-            Command::ToggleBlockComment => self.edit_op(Document::toggle_block_comment),
-            Command::Duplicate => self.edit_op(Document::duplicate),
+            Command::ToggleLineComment => self.edit_op(|e| e.toggle_line_comment()),
+            Command::ToggleBlockComment => self.edit_op(|e| e.toggle_block_comment()),
+            Command::Duplicate => self.edit_op(|e| e.duplicate()),
             Command::MoveLineUp => self.edit_op(|d| d.move_lines(false)),
             Command::MoveLineDown => self.edit_op(|d| d.move_lines(true)),
-            Command::DeleteLine => self.edit_op(Document::delete_lines),
-            Command::JoinLines => self.edit_op(Document::join_lines),
+            Command::DeleteLine => self.edit_op(|e| e.delete_lines()),
+            Command::JoinLines => self.edit_op(|e| e.join_lines()),
             Command::InsertLineBelow => self.edit_op(|d| d.insert_line(false)),
             Command::InsertLineAbove => self.edit_op(|d| d.insert_line(true)),
             Command::SelectLine => {
-                self.doc_mut().select_line();
+                self.ed().select_line();
                 Ok(())
             }
             Command::ExpandSelection => {
-                self.doc_mut().expand_selection();
+                self.ed().expand_selection();
                 Ok(())
             }
             Command::ShrinkSelection => {
-                self.doc_mut().shrink_selection();
+                self.ed().shrink_selection();
                 Ok(())
             }
             Command::MatchingBracket(select) => {
-                if self.doc_mut().matching_bracket(select) == Outcome::Nothing {
+                if self.ed().matching_bracket(select) == Outcome::Nothing {
                     self.say("No bracket at the cursor", false);
                 }
                 Ok(())
             }
             Command::ChangeCase(case) => self.edit_op(|d| d.change_case(case)),
             Command::RewriteLines(op) => self.edit_op(|d| d.rewrite_lines(op)),
-            Command::TrimWhitespace => self.edit_op(Document::trim_whitespace),
+            Command::TrimWhitespace => self.edit_op(|e| e.trim_whitespace()),
             Command::IndentUsingSpaces | Command::IndentUsingTabs => {
                 let settings = self.config.indent.for_language(self.doc().language_key());
                 let indent = nimbus_core::indent::Indent {
@@ -1414,9 +1459,9 @@ impl App {
     /// Run an M11 operation on the active document and report a refusal.
     fn edit_op(
         &mut self,
-        op: impl FnOnce(&mut Document) -> Result<Outcome, nimbus_core::EditError>,
+        op: impl FnOnce(&mut Editor<'_>) -> Result<Outcome, nimbus_core::EditError>,
     ) -> Result<(), nimbus_core::EditError> {
-        let outcome = op(self.doc_mut())?;
+        let outcome = op(&mut self.ed())?;
         self.report(outcome);
         Ok(())
     }
@@ -1428,9 +1473,10 @@ impl App {
         match &layout {
             Some(layout) if tab.view.wrap => {
                 let mut w = tab.view.wrap_view(layout, tab_width);
-                tab.doc.move_cursor_wrapped(motion, extend, &mut w, page);
+                Editor::new(&mut tab.doc, &mut tab.carets)
+                    .move_cursor_wrapped(motion, extend, &mut w, page);
             }
-            _ => tab.doc.move_cursor(motion, extend, tab_width, page),
+            _ => tab.ed().move_cursor(motion, extend, tab_width, page),
         }
         if matches!(motion, Motion::PageUp | Motion::PageDown)
             && let Some(layout) = layout
@@ -1452,7 +1498,7 @@ impl App {
         self.preedit = None;
         self.sidebar.focused = false;
         if self.find.open {
-            self.find_origin = self.doc().cursor();
+            self.find_origin = self.cursor();
             self.search(false);
         }
         self.reveal_active();
@@ -1475,9 +1521,9 @@ impl App {
         }
         self.pending_line = None;
         let pos = t.line_to_byte(line.min(t.len_lines().saturating_sub(1)));
-        let doc = self.doc_mut();
-        doc.click(pos, false);
-        doc.carets.preferred_column = None;
+        let mut ed = self.ed();
+        ed.click(pos, false);
+        ed.carets.preferred_column = None;
         self.changed(true);
     }
 
@@ -1628,7 +1674,10 @@ impl App {
                 continue;
             }
             let name = tab.doc.display_name();
-            let note = match tab.doc.disk_changed(&self.languages) {
+            let note = match tab
+                .doc
+                .disk_changed(&self.languages, &mut [&mut tab.carets])
+            {
                 DiskChange::None => continue,
                 DiskChange::Reloaded => format!("{name} changed on disk; reloaded"),
                 DiskChange::Conflict => {
@@ -1784,7 +1833,7 @@ impl App {
             .editor
             .for_language(self.tabs[i].doc.language_key());
         if let Err(e) = self.tabs[i]
-            .doc
+            .ed()
             .tidy_for_save(editing.trim_trailing_whitespace, editing.final_newline)
         {
             log::error!("tidying before save refused: {e}");
@@ -2397,9 +2446,9 @@ impl App {
     }
     fn open_find(&mut self, replace_mode: bool) {
         self.sidebar.focused = false;
-        let selection = self.doc().selected_text();
+        let selection = self.carets().selected_text(&self.doc().buffer);
         self.find.open(replace_mode, selection);
-        self.find_origin = self.doc().selection().range().start;
+        self.find_origin = self.selection().range().start;
         self.search(true);
     }
 
@@ -2420,11 +2469,12 @@ impl App {
     /// Select the match at or after `from` (or before, `backwards`).
     fn jump_to_match(&mut self, from: usize, backwards: bool) {
         if let Some(range) = self.find.select_from(from, backwards) {
-            self.doc_mut().select(range);
+            self.ed().select(range);
             if let Some(layout) = self.layout() {
                 let tab_width = self.tab_width();
                 let tab = &mut self.tabs[self.active];
-                tab.view.ensure_cursor_visible(&tab.doc, &layout, tab_width);
+                tab.view
+                    .ensure_cursor_visible(&tab.doc, &tab.carets, &layout, tab_width);
             }
         }
     }
@@ -2445,12 +2495,12 @@ impl App {
                     Field::Find => Field::Replace,
                     Field::Replace => Field::Find,
                 };
-                self.find.field_mut().select_all();
+                self.find.field_mut().ed().select_all();
             }
             Command::Tab | Command::Outdent => {}
             Command::Newline if self.find.focus == Field::Replace => self.replace_one(),
             Command::Newline => {
-                let sel = self.doc().selection().range();
+                let sel = self.selection().range();
                 let from = if backwards {
                     sel.start
                 } else {
@@ -2515,9 +2565,9 @@ impl App {
                     .flatten();
                 let tab_width = self.tab_width();
                 let field = self.find.field_mut();
-                let before = field.version;
+                let before = field.doc.version;
                 let copied = edit_field(field, cmd, paste.as_deref(), tab_width);
-                let changed = field.version != before;
+                let changed = field.doc.version != before;
                 if let Some(text) = copied {
                     self.clipboard_set(text);
                 }
@@ -2535,22 +2585,22 @@ impl App {
         if self.waits_for_save() {
             return;
         }
-        let sel = self.doc().selection().range();
+        let sel = self.selection().range();
         let is_match = self.find.current.and_then(|i| self.find.matches.get(i)) == Some(&sel);
         if is_match && !sel.is_empty() {
             if let Some(replacement) = self.find.replacement_for(self.doc(), sel.clone())
-                && let Err(e) = self.doc_mut().replace(sel, &replacement)
+                && let Err(e) = self.ed().replace(sel, &replacement)
             {
                 log::error!("replace refused: {e}");
             }
             self.doc_mut().history.seal();
             // Search the changed text, then go to the next match after the
             // replacement; on large files that waits for the results.
-            self.find_origin = self.doc().cursor();
+            self.find_origin = self.cursor();
             self.search(true);
             return;
         }
-        let from = self.doc().cursor();
+        let from = self.cursor();
         self.jump_to_match(from, false);
     }
 
@@ -2596,7 +2646,7 @@ impl App {
                 Some((r.clone(), rep))
             })
             .collect();
-        match self.doc_mut().replace_many(&items) {
+        match self.ed().replace_many(&items) {
             Ok(n) => {
                 self.search(false);
                 self.say(
@@ -2613,7 +2663,7 @@ impl App {
 
     /// Primary+D, saying when there is nothing more to add.
     fn add_next_occurrence(&mut self) {
-        let note = match self.doc_mut().add_next_occurrence() {
+        let note = match self.ed().add_next_occurrence() {
             Occurrence::SelectedWord | Occurrence::Added | Occurrence::NoWord => return,
             Occurrence::AllSelected => "Every occurrence is selected",
             Occurrence::NotFound => "No other occurrence",
@@ -2628,11 +2678,11 @@ impl App {
     fn clipboard_command(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
         if cmd == Command::Paste {
             return match self.clipboard_get() {
-                Some(text) => self.doc_mut().paste(&text).map(drop),
+                Some(text) => self.ed().paste(&text).map(drop),
                 None => Ok(()),
             };
         }
-        let len = self.doc().selected_len();
+        let len = self.carets().selected_len();
         if len > MAX_COPY_BYTES {
             // Refused before reading anything, and Cut deletes nothing.
             self.say(
@@ -2645,17 +2695,17 @@ impl App {
             );
             return Ok(());
         }
-        let Some(text) = self.doc().selected_text() else {
+        let Some(text) = self.carets().selected_text(&self.doc().buffer) else {
             return Ok(());
         };
         self.clipboard_set(text);
         if cmd != Command::Cut {
             return Ok(());
         }
-        let doc = self.doc_mut();
-        doc.history.seal();
-        let result = doc.delete_selections().map(drop);
-        doc.history.seal();
+        let mut ed = self.ed();
+        ed.doc.history.seal();
+        let result = ed.delete_selections().map(drop);
+        ed.doc.history.seal();
         result
     }
 
@@ -2751,14 +2801,14 @@ impl App {
         self.clicks.column = (count == 1 && self.modifiers.alt_key() && self.modifiers.shift_key())
             .then(|| tab.view.hit_column(x, y, &tab.doc, &layout, tab_width));
         if let Some(at) = self.clicks.column {
-            tab.doc.column_select(at, at, tab_width);
+            tab.ed().column_select(at, at, tab_width);
             self.clicks.adding = false;
             self.clicks.dragging = true;
             self.blink.reset(now);
             self.changed(false);
             return;
         }
-        let doc = &mut tab.doc;
+        let mut doc = tab.ed();
         self.clicks.adding = count == 1 && self.modifiers.alt_key();
         match count {
             1 if self.clicks.adding => {
@@ -2775,12 +2825,12 @@ impl App {
                 self.clicks.anchor = anchor..anchor;
             }
             2 => {
-                let word = nimbus_core::movement::word_at(&doc.buffer, pos);
+                let word = nimbus_core::movement::word_at(&doc.doc.buffer, pos);
                 self.clicks.anchor = word.clone();
                 doc.select(word);
             }
             _ => {
-                let line = nimbus_core::movement::line_range(&doc.buffer, pos);
+                let line = nimbus_core::movement::line_range(&doc.doc.buffer, pos);
                 self.clicks.anchor = line.clone();
                 doc.select(line);
             }
@@ -2893,7 +2943,7 @@ impl App {
             (None, None) => return,
         };
         match click {
-            Click::Cursor(pos) => tab.doc.click(pos, shift),
+            Click::Cursor(pos) => tab.ed().click(pos, shift),
             Click::Toggled | Click::None => {}
         }
         self.clicks.dragging = false;
@@ -2955,7 +3005,7 @@ impl App {
         }
         self.open_picker(Kind::Palette);
         if let Some(p) = self.picker.as_mut()
-            && let Err(e) = p.input.insert("indent")
+            && let Err(e) = p.input.ed().insert("indent")
         {
             log::debug!("picker query: {e}");
         }
@@ -3051,7 +3101,7 @@ impl App {
         }
         if let Some(from) = self.clicks.column {
             let to = tab.view.hit_column(x, y, &tab.doc, &layout, tab_width);
-            tab.doc.column_select(from, to, tab_width);
+            tab.ed().column_select(from, to, tab_width);
             self.changed(true);
             return;
         }
@@ -3070,9 +3120,9 @@ impl App {
         };
         if self.clicks.adding {
             // Alt+drag: the added selection grows; the others stay.
-            tab.doc.drag_added(from, to);
+            tab.ed().drag_added(from, to);
         } else {
-            tab.doc.select_span(from, to);
+            tab.ed().select_span(from, to);
         }
         self.changed(true);
     }
@@ -3182,11 +3232,15 @@ impl App {
                 });
             }
         }
+        // A text swapped wholesale (a save, a merge result) leaves the
+        // cursors to be snapped to it before they are drawn.
+        tab.carets.fit(&tab.doc);
         paint_scene(
             gpu,
             layout,
             &mut Scene {
                 doc: &tab.doc,
+                carets: &tab.carets,
                 view: &mut tab.view,
                 compare: tab.compare.as_deref_mut(),
                 merge: tab.merge.as_deref_mut(),
@@ -3428,14 +3482,14 @@ impl App {
         self.sidebar.visible = true;
         self.sidebar.mode = Mode::Search;
         self.sidebar.focused = true;
-        let selection = self.doc().selected_text();
+        let selection = self.carets().selected_text(&self.doc().buffer);
         let panel = &mut self.sidebar.search;
-        let before = panel.query.version;
+        let before = panel.query.doc.version;
         panel.focus_query(selection);
         if replace {
             panel.replace_mode = true;
         }
-        if panel.query.version != before {
+        if panel.query.doc.version != before {
             self.search_files_at = Some(Instant::now());
         }
         self.show_sidebar();
@@ -3523,9 +3577,9 @@ impl App {
                 let Some(field) = panel.field_mut() else {
                     return true;
                 };
-                let before = field.version;
+                let before = field.doc.version;
                 let copied = edit_field(field, cmd, paste.as_deref(), tab_width);
-                let changed = field.version != before;
+                let changed = field.doc.version != before;
                 if let Some(text) = copied {
                     self.clipboard_set(text);
                 }
@@ -3637,7 +3691,7 @@ impl App {
             let at = nimbus_core::movement::clamp(t, range.start);
             at..at
         });
-        self.doc_mut().select(select);
+        self.ed().select(select);
         self.changed(true);
     }
 
@@ -3715,17 +3769,18 @@ impl App {
             };
             let ranges: Vec<std::ops::Range<usize>> =
                 hits.iter().map(|&j| file.hits[j].range.clone()).collect();
-            let doc = &mut self.tabs[ti].doc;
-            if doc.is_saving() {
+            let tab = &mut self.tabs[ti];
+            if tab.doc.is_saving() {
                 summary.busy += 1;
                 continue;
             }
-            match replace_in_tab(doc, &replacement, &ranges) {
+            let mut ed = tab.ed();
+            match replace_in_tab(&mut ed, &replacement, &ranges) {
                 Some(0) => summary.changed += 1,
                 Some(n) => {
                     summary.tab_replaced += n;
                     summary.tab_files += 1;
-                    undo.tabs.push((canonical, doc.history.top_id()));
+                    undo.tabs.push((canonical, ed.doc.history.top_id()));
                 }
                 None => log::error!("replace in {} refused", file.rel),
             }
@@ -3853,7 +3908,7 @@ impl App {
                 problems.push(format!("{} (edited since)", name_of(path)));
                 continue;
             }
-            match tab.doc.undo() {
+            match tab.ed().undo() {
                 Ok(true) => restored += 1,
                 Ok(false) => problems.push(name_of(path)),
                 Err(e) => {
@@ -3884,11 +3939,11 @@ impl App {
 /// where the text still matches. Returns how many were replaced, or `None`
 /// if the buffer refused the edit (nothing is changed then).
 fn replace_in_tab(
-    doc: &mut Document,
+    ed: &mut Editor<'_>,
     replacement: &Replacement,
     ranges: &[std::ops::Range<usize>],
 ) -> Option<usize> {
-    let t = &doc.buffer;
+    let t = &ed.doc.buffer;
     let items: Vec<(std::ops::Range<usize>, String)> = ranges
         .iter()
         .filter_map(|range| {
@@ -3905,10 +3960,10 @@ fn replace_in_tab(
     if items.is_empty() {
         return Some(0);
     }
-    let n = doc.replace_many(&items).ok()?;
+    let n = ed.replace_many(&items).ok()?;
     // Typing after must start a new undo step, so undoing the replace
     // later puts back exactly the replace.
-    doc.history.seal();
+    ed.doc.history.seal();
     Some(n)
 }
 
@@ -3953,7 +4008,7 @@ fn draw_headless_picker(
         "line" => Picker::go_to_line(notify, Some(doc.buffer.len_lines())),
         _ => Picker::palette(notify),
     };
-    let _ = p.input.insert(query);
+    let _ = p.input.ed().insert(query);
     // Let the walk and matcher finish, up to two seconds.
     let deadline = Instant::now() + Duration::from_secs(2);
     while p.tick() && Instant::now() < deadline {
@@ -4031,6 +4086,8 @@ pub fn layout_for_lines(gpu: &Gpu, scale: f32, lines: usize, find: &FindBar) -> 
 /// Everything one frame shows.
 pub struct Scene<'a> {
     doc: &'a Document,
+    /// The cursors drawn in it.
+    carets: &'a Carets,
     view: &'a mut View,
     /// A compare on the tab: two columns instead of the view alone.
     compare: Option<&'a mut Compare>,
@@ -4064,6 +4121,7 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
             gpu,
             layout,
             scene.doc,
+            scene.carets,
             scene.view,
             scene.theme,
             scene.tab_width,
@@ -4077,6 +4135,7 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
             gpu,
             layout,
             scene.doc,
+            scene.carets,
             scene.view,
             scene.theme,
             scene.tab_width,
@@ -4092,6 +4151,7 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
         scene.view.draw(
             gpu,
             scene.doc,
+            scene.carets,
             layout,
             scene.tab_width,
             &Decorations {
@@ -4109,10 +4169,12 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
         view::draw_find_bar(gpu, &ui, find, layout, scene.cursor_visible);
     }
     let message = scene.message.map(|m| (m.text.as_str(), m.is_error));
-    let info = scene.view.status_info(scene.doc, scene.tab_width);
+    let info = scene
+        .view
+        .status_info(scene.doc, scene.carets, scene.tab_width);
     let info = match (scene.compare.as_deref_mut(), scene.merge.as_deref_mut()) {
         (Some(c), _) => c.status(info),
-        (None, Some(m)) => m.status(scene.doc, info),
+        (None, Some(m)) => m.status(scene.doc, scene.carets.cursor(&scene.doc.buffer), info),
         (None, None) => info,
     };
     view::draw_status(gpu, &ui, layout, message, info);
@@ -4158,15 +4220,19 @@ pub fn run_headless(
     if options.wait_index {
         index_now(&mut doc);
     }
-    let find = headless_find(options.find.as_deref(), &mut doc);
-    headless_cursors(options, &mut doc);
+    let mut carets = Carets::default();
+    let find = headless_find(
+        options.find.as_deref(),
+        &mut Editor::new(&mut doc, &mut carets),
+    );
+    headless_cursors(options, &doc, &mut carets);
     let (sidebar, layout) = headless_sidebar(
         &root,
         layout_for(&gpu, to_f32(scale), &doc, &find),
         doc.canonical.as_deref(),
         options.search.as_deref(),
     );
-    view.ensure_cursor_visible(&doc, &layout, config.tab_width);
+    view.ensure_cursor_visible(&doc, &carets, &layout, config.tab_width);
     // One frame only: parse here rather than on a worker.
     doc.syntax.parse_now(&doc.buffer);
     print_warnings(nimbus_syntax::registry::take_warnings());
@@ -4181,6 +4247,7 @@ pub fn run_headless(
             &layout,
             &mut Scene {
                 doc: &doc,
+                carets: &carets,
                 view: &mut view,
                 compare: compare.as_deref_mut(),
                 merge: merge.as_deref_mut(),
@@ -4239,7 +4306,7 @@ fn headless_labels(docs: &[Document]) -> Vec<TabLabel> {
 
 /// `--cursors a,b,c`: several cursors at those byte offsets, the last
 /// primary.
-fn headless_cursors(options: &Options, doc: &mut Document) {
+fn headless_cursors(options: &Options, doc: &Document, carets: &mut Carets) {
     if options.cursors.is_empty() {
         return;
     }
@@ -4249,7 +4316,7 @@ fn headless_cursors(options: &Options, doc: &mut Document) {
         .iter()
         .map(|&p| nimbus_core::Selection::cursor(nimbus_core::movement::clamp(t, p)))
         .collect();
-    doc.carets.selections = nimbus_core::Selections::from_vec(sels, options.cursors.len() - 1);
+    carets.selections = nimbus_core::Selections::from_vec(sels, options.cursors.len() - 1);
 }
 
 /// `--diff A B` headless: the compare, diffed on this thread.
@@ -4345,14 +4412,14 @@ fn index_now(doc: &mut Document) {
 }
 
 /// `--find PATTERN`: the find bar searching, with the first match selected.
-fn headless_find(pattern: Option<&str>, doc: &mut Document) -> FindBar {
+fn headless_find(pattern: Option<&str>, ed: &mut Editor<'_>) -> FindBar {
     let mut find = FindBar::default();
     if let Some(pattern) = pattern {
         find.open(false, None);
-        let _ = find.find.insert(pattern);
-        find.search_now(doc);
+        let _ = find.find.ed().insert(pattern);
+        find.search_now(ed.doc);
         if let Some(range) = find.select_from(0, false) {
-            doc.select(range);
+            ed.select(range);
         }
     }
     find
@@ -4460,11 +4527,12 @@ fn draw_picker_overlay(
 /// text to put on the clipboard for Copy and Cut. Line breaks are not typed
 /// into fields; pasted ones are kept, so a multi-line literal can be found.
 fn edit_field(
-    field: &mut Document,
+    field: &mut Solo,
     cmd: Command<'_>,
     paste: Option<&str>,
     tab_width: usize,
 ) -> Option<String> {
+    let mut field = field.ed();
     let result = match cmd {
         Command::Move(motion, extend) => {
             field.move_cursor(motion, extend, tab_width, 1);
@@ -4682,7 +4750,7 @@ impl ApplicationHandler<AppEvent> for App {
         self.update_title();
         if let Some(pattern) = self.options.find.clone() {
             self.open_find(false);
-            let _ = self.find.find.insert(&pattern);
+            let _ = self.find.find.ed().insert(&pattern);
             self.search(true);
         }
         if self.options.find.is_none() && self.options.diff.is_none() {

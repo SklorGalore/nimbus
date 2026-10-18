@@ -16,7 +16,7 @@ use nimbus_core::{LineEnding, Selection, Selections, Text, column, long_line};
 use nimbus_render::{ColorRun, Gpu, Metrics, Style};
 use nimbus_syntax::highlight::{Highlighter, Span};
 
-use crate::document::Document;
+use crate::document::{Carets, Document, Solo};
 use crate::find::{Field, FindBar};
 use crate::theme::{Color, Look, Ui};
 
@@ -694,8 +694,8 @@ impl View {
     /// [`BRACKET_LIMIT`] bytes. Only for a bare cursor. Remembered until
     /// the text, the cursor or the tree changes, so most frames only
     /// compare three numbers.
-    fn bracket_pair(&mut self, doc: &Document) -> Option<(usize, usize)> {
-        let sel = doc.selection();
+    fn bracket_pair(&mut self, doc: &Document, carets: &Carets) -> Option<(usize, usize)> {
+        let sel = carets.selection(&doc.buffer);
         if !sel.is_empty() {
             return None;
         }
@@ -720,21 +720,20 @@ impl View {
 
     /// How many characters the selections hold, counted again only when
     /// the text or the selections change.
-    fn selected_chars(&mut self, doc: &Document) -> usize {
+    fn selected_chars(&mut self, doc: &Document, carets: &Carets) -> usize {
         if let Some((v, sels, n)) = &self.selected_chars
             && *v == doc.version
-            && *sels == doc.carets.selections
+            && *sels == carets.selections
         {
             return *n;
         }
         let t = &doc.buffer;
-        let n = doc
-            .carets
+        let n = carets
             .selections
             .iter()
             .map(|s| t.slice(s.range()).chars().count())
             .sum();
-        self.selected_chars = Some((doc.version, doc.carets.selections.clone(), n));
+        self.selected_chars = Some((doc.version, carets.selections.clone(), n));
         n
     }
 
@@ -743,17 +742,17 @@ impl View {
     /// selected, the line ending, the encoding, the language and, while a
     /// huge file's lines are being counted, how far that has got. Built in
     /// a reused string, so drawing it each frame allocates nothing.
-    pub fn status_info(&mut self, doc: &Document, tab_width: usize) -> &str {
+    pub fn status_info(&mut self, doc: &Document, carets: &Carets, tab_width: usize) -> &str {
         // Counting characters reads the selections; past a size where that
         // costs, bytes say as much.
-        let selected = doc.selected_len();
-        let chars =
-            (selected > 0 && selected <= STATUS_COUNT_LIMIT).then(|| self.selected_chars(doc));
+        let selected = carets.selected_len();
+        let chars = (selected > 0 && selected <= STATUS_COUNT_LIMIT)
+            .then(|| self.selected_chars(doc, carets));
         let out = &mut self.status;
         out.clear();
         let t = &doc.buffer;
-        let sel = doc.selection();
-        let count = doc.carets.selections.count();
+        let sel = carets.selection(t);
+        let count = carets.selections.count();
         if count > 1 {
             let _ = write!(out, "{count} cursors   ");
         }
@@ -819,9 +818,15 @@ impl View {
     }
 
     /// Scroll as little as possible to bring the cursor into view.
-    pub fn ensure_cursor_visible(&mut self, doc: &Document, layout: &Layout, tab_width: usize) {
+    pub fn ensure_cursor_visible(
+        &mut self,
+        doc: &Document,
+        carets: &Carets,
+        layout: &Layout,
+        tab_width: usize,
+    ) {
         let t = &doc.buffer;
-        let cursor = doc.cursor();
+        let cursor = carets.cursor(t);
         let full = layout.full_lines();
         let mut w = wrapper(&mut self.cache, self.wrap, layout, tab_width);
         let cursor_row = wrap::row_pos_of(t, &mut w, cursor);
@@ -989,14 +994,15 @@ impl View {
         &mut self,
         gpu: &mut Gpu,
         doc: &Document,
+        carets: &Carets,
         layout: &Layout,
         tab_width: usize,
         deco: &Decorations<'_>,
     ) {
         let t = &doc.buffer;
-        let cursor = doc.cursor();
-        let selections = doc.carets.selections.as_slice();
-        let brackets = self.bracket_pair(doc);
+        let cursor = carets.cursor(t);
+        let selections = carets.selections.as_slice();
+        let brackets = self.bracket_pair(doc, carets);
         self.cache.next_frame();
         self.cursor_at = None;
 
@@ -1091,6 +1097,7 @@ impl View {
         &mut self,
         gpu: &mut Gpu,
         doc: &Document,
+        carets: &Carets,
         layout: &Layout,
         tab_width: usize,
         deco: &Decorations<'_>,
@@ -1100,9 +1107,9 @@ impl View {
     ) {
         let t = &doc.buffer;
         let lh = layout.metrics.line_height;
-        let cursor = doc.cursor();
-        let selections = doc.carets.selections.as_slice();
-        let brackets = self.bracket_pair(doc);
+        let cursor = carets.cursor(t);
+        let selections = carets.selections.as_slice();
+        let brackets = self.bracket_pair(doc, carets);
         self.cache.next_frame();
         self.cursor_at = None;
         self.wrap = false;
@@ -1794,7 +1801,7 @@ pub fn find_bar_row(layout: &Layout, y: f32, rows: usize) -> Option<usize> {
 pub(crate) fn draw_field(
     gpu: &mut Gpu,
     ui: &Ui,
-    doc: &Document,
+    field: &Solo,
     origin: [f32; 2],
     width: f32,
     layout: &Layout,
@@ -1802,9 +1809,10 @@ pub(crate) fn draw_field(
 ) {
     let m = layout.metrics;
     let cell = m.cell_width;
+    let doc = &field.doc;
     let text = doc.buffer.line(0);
     let line_end = text.len();
-    let cursor_col = column::col_at(&text, doc.cursor().min(line_end), 4);
+    let cursor_col = column::col_at(&text, field.carets.cursor(&doc.buffer).min(line_end), 4);
     // Scroll the field so the cursor stays inside it.
     #[expect(
         clippy::cast_possible_truncation,
@@ -1815,7 +1823,7 @@ pub(crate) fn draw_field(
     let first = cursor_col.saturating_sub(visible);
     let x0 = origin[0] - f(first) * cell;
     gpu.begin_layer(Some([origin[0], origin[1], width, m.line_height]));
-    if let Some((a, b)) = field_selection(doc, &text) {
+    if let Some((a, b)) = field_selection(field, &text) {
         gpu.push_rect(
             [x0 + f(a) * cell, origin[1]],
             [f(b - a) * cell, m.line_height],
@@ -1925,7 +1933,7 @@ pub fn draw_tabs(gpu: &mut Gpu, ui: &Ui, layout: &Layout, tabs: &[TabLabel], act
 #[derive(Debug)]
 pub struct PickerView<'a> {
     /// The query field.
-    pub input: &'a Document,
+    pub input: &'a Solo,
     /// Hint shown while the query is empty.
     pub placeholder: &'a str,
     /// Visible rows: main text and detail.
@@ -2005,7 +2013,7 @@ pub fn draw_picker(
         [field_w + 2.0 * pad, lh + pad],
         ui.field,
     );
-    if view.input.buffer.len_bytes() == 0 {
+    if view.input.doc.buffer.len_bytes() == 0 {
         gpu.push_text_line([left + cell, field_y], view.placeholder, ui.gutter);
     }
     draw_field(
@@ -2080,8 +2088,8 @@ pub fn draw_status(
 }
 
 /// The selected columns of the first line of a one-line field.
-fn field_selection(doc: &Document, text: &str) -> Option<(usize, usize)> {
-    let sel = doc.selection().range();
+fn field_selection(field: &Solo, text: &str) -> Option<(usize, usize)> {
+    let sel = field.carets.selection(&field.doc.buffer).range();
     if sel.is_empty() || sel.start > text.len() {
         return None;
     }
@@ -2093,6 +2101,7 @@ fn field_selection(doc: &Document, text: &str) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::Solo;
 
     fn layout(len_lines: usize) -> Layout {
         let metrics = Metrics {
@@ -2115,8 +2124,8 @@ mod tests {
         Layout::new(metrics, 168, 208, 1.0, len_lines)
     }
 
-    fn doc(text: &str) -> Document {
-        Document::from_text(text)
+    fn doc(text: &str) -> Solo {
+        Solo::from_text(text)
     }
 
     #[test]
@@ -2194,7 +2203,7 @@ mod tests {
     }
 
     /// The top row as (line, byte within the line).
-    fn top(v: &View, d: &Document) -> (usize, usize) {
+    fn top(v: &View, d: &Solo) -> (usize, usize) {
         let line = d.buffer.byte_to_line(v.scroll_top);
         (line, v.scroll_top - d.buffer.line_to_byte(line))
     }
@@ -2205,14 +2214,17 @@ mod tests {
         d.line_ending = LineEnding::CrLf;
         let mut v = View::default();
         assert_eq!(
-            v.status_info(&d, 4),
+            v.status_info(&d, &d.carets, 4),
             "Ln 1, Col 1   Spaces: 4   CRLF   UTF-8"
         );
         d.indent = nimbus_core::indent::Indent {
             width: 4,
             tabs: true,
         };
-        assert_eq!(v.status_info(&d, 4), "Ln 1, Col 1   Tabs   CRLF   UTF-8");
+        assert_eq!(
+            v.status_info(&d, &d.carets, 4),
+            "Ln 1, Col 1   Tabs   CRLF   UTF-8"
+        );
         // "Tabs" sits at columns 14..18 of the right-aligned info.
         let l = layout(3);
         let cell = l.metrics.cell_width;
@@ -2222,18 +2234,21 @@ mod tests {
         assert!(!v.indent_item_hit(&l, info_x + 2.0 * cell));
         assert!(!v.indent_item_hit(&l, info_x + 18.5 * cell));
         // Line 2, after the tab (4 columns) and "let ": column 9.
-        d.click(12 + 1 + 4, false);
-        assert_eq!(v.status_info(&d, 4), "Ln 2, Col 9   Tabs   CRLF   UTF-8");
-        // Selecting "é = 1" counts characters, not bytes.
-        d.select(17..23);
+        d.ed().click(12 + 1 + 4, false);
         assert_eq!(
-            v.status_info(&d, 4),
+            v.status_info(&d, &d.carets, 4),
+            "Ln 2, Col 9   Tabs   CRLF   UTF-8"
+        );
+        // Selecting "é = 1" counts characters, not bytes.
+        d.ed().select(17..23);
+        assert_eq!(
+            v.status_info(&d, &d.carets, 4),
             "5 selected   Ln 2, Col 14   Tabs   CRLF   UTF-8"
         );
         d.carets.selections =
             nimbus_core::Selections::from_vec(vec![Selection::cursor(0), Selection::cursor(12)], 0);
         assert_eq!(
-            v.status_info(&d, 4),
+            v.status_info(&d, &d.carets, 4),
             "2 cursors   Ln 1, Col 1   Tabs   CRLF   UTF-8"
         );
         let size = |n| {
@@ -2289,7 +2304,7 @@ mod tests {
         let mut index = LineIndex::new();
         index.merge(scanner.take_chunk()).unwrap();
         let buffer = MappedBuffer::with_index(source, index, Limits::default()).unwrap();
-        let mut d = Document::default();
+        let mut d = Solo::of(Document::default());
         d.buffer = buffer.into();
         assert!(!d.buffer.is_fully_indexed());
         let l = layout(10);
@@ -2297,8 +2312,8 @@ mod tests {
 
         // Primary+End: the cursor goes to the end and the view follows,
         // without waiting for line numbers.
-        d.click(text.len(), false);
-        v.ensure_cursor_visible(&d, &l, 4);
+        d.ed().click(text.len(), false);
+        v.ensure_cursor_visible(&d, &d.carets, &l, 4);
         let shown = l.full_lines() * 11;
         assert!(v.scroll_top + shown >= text.len(), "{}", v.scroll_top);
         assert_eq!(d.buffer.line_number(v.scroll_top), None, "shown as ~");
@@ -2405,11 +2420,13 @@ mod tests {
         let mut d = doc(&text);
         let l = layout(51);
         let mut v = View::default();
-        d.click(d.buffer.line_to_byte(30), false);
-        v.ensure_cursor_visible(&d, &l, 4);
+        let at = d.buffer.line_to_byte(30);
+        d.ed().click(at, false);
+        v.ensure_cursor_visible(&d, &d.carets, &l, 4);
         assert_eq!(top(&v, &d).0, 21, "line 30 is the last full line");
-        d.click(d.buffer.line_to_byte(5), false);
-        v.ensure_cursor_visible(&d, &l, 4);
+        let at = d.buffer.line_to_byte(5);
+        d.ed().click(at, false);
+        v.ensure_cursor_visible(&d, &d.carets, &l, 4);
         assert_eq!(top(&v, &d).0, 5);
     }
 
@@ -2420,11 +2437,11 @@ mod tests {
         let l = narrow(13);
         let mut v = View::default();
         v.set_wrap(true);
-        d.click(6 * 18 + 9, false); // line 6, row 1
-        v.ensure_cursor_visible(&d, &l, 4);
+        d.ed().click(6 * 18 + 9, false); // line 6, row 1
+        v.ensure_cursor_visible(&d, &d.carets, &l, 4);
         assert_eq!(top(&v, &d), (2, 0));
-        d.click(18 + 9, false); // line 1, row 1
-        v.ensure_cursor_visible(&d, &l, 4);
+        d.ed().click(18 + 9, false); // line 1, row 1
+        v.ensure_cursor_visible(&d, &d.carets, &l, 4);
         assert_eq!(top(&v, &d), (1, 9));
     }
 
@@ -2532,9 +2549,9 @@ mod tests {
     #[test]
     fn field_selection_columns() {
         let mut d = doc("abc");
-        d.select(1..3);
+        d.ed().select(1..3);
         assert_eq!(field_selection(&d, "abc"), Some((1, 3)));
-        d.select(2..2);
+        d.ed().select(2..2);
         assert_eq!(field_selection(&d, "abc"), None);
     }
 }

@@ -16,7 +16,7 @@ use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Nucleo};
 
 use crate::action::{self, ActionInfo};
-use crate::document::Document;
+use crate::document::Solo;
 use crate::keymap::Keymap;
 
 /// Walking stops after this many files, so a huge folder (a home directory
@@ -66,7 +66,7 @@ pub struct Picker {
     /// Which picker.
     pub kind: Kind,
     /// The query field.
-    pub input: Document,
+    pub input: Solo,
     matcher: Nucleo<Item>,
     /// The query last given to the matcher, to tell appending from editing.
     last_query: String,
@@ -176,7 +176,7 @@ impl Picker {
     fn new(kind: Kind, config: Config, notify: Arc<dyn Fn() + Send + Sync>, root: PathBuf) -> Self {
         Self {
             kind,
-            input: Document::untitled(),
+            input: Solo::default(),
             matcher: Nucleo::new(config, notify, None, 1),
             last_query: String::new(),
             selected: 0,
@@ -216,7 +216,7 @@ impl Picker {
     /// The line number typed, counting from 1; a leading `:` is allowed, as
     /// some editors write it.
     fn line_target(&self) -> Option<usize> {
-        let query = self.input.buffer.line(0);
+        let query = self.input.doc.buffer.line(0);
         let digits = query.trim().trim_start_matches(':').trim();
         digits.parse::<usize>().ok().filter(|n| *n > 0)
     }
@@ -227,7 +227,7 @@ impl Picker {
         if self.kind == Kind::Line {
             return false;
         }
-        let query = self.input.buffer.line(0).into_owned();
+        let query = self.input.doc.buffer.line(0).into_owned();
         if query != self.last_query {
             // Appending lets nucleo narrow the previous results instead of
             // starting over.
@@ -366,7 +366,7 @@ mod tests {
         let mut p = Picker::palette(no_notify());
         settle(&mut p);
         assert!(p.match_count() > 10);
-        let _ = p.input.insert("sav as");
+        let _ = p.input.ed().insert("sav as");
         settle(&mut p);
         match p.chosen() {
             Some(Item::Action(a)) => assert_eq!(a.id, "file.saveAs"),
@@ -387,7 +387,7 @@ mod tests {
         let mut p = Picker::files(&dir, no_notify());
         settle(&mut p);
         assert_eq!(p.match_count(), 2, "target/ is ignored");
-        let _ = p.input.insert("mainrs");
+        let _ = p.input.ed().insert("mainrs");
         settle(&mut p);
         match p.chosen() {
             Some(Item::File(path)) => assert_eq!(path, PathBuf::from("src/main.rs")),
@@ -413,7 +413,7 @@ mod tests {
         };
         let start = std::time::Instant::now();
         let mut p = Picker::files(Path::new(&dir), no_notify());
-        let _ = p.input.insert("lib.rs");
+        let _ = p.input.ed().insert("lib.rs");
         let mut first = None;
         while p.tick() {
             if first.is_none() && p.match_count() > 0 {
@@ -444,7 +444,7 @@ mod tests {
     fn go_to_line_reads_a_number() {
         let mut p = Picker::go_to_line(no_notify(), Some(40));
         assert_eq!(p.match_count(), 0);
-        let _ = p.input.insert(":12");
+        let _ = p.input.ed().insert(":12");
         assert!(!p.tick());
         assert_eq!(p.match_count(), 1);
         assert!(matches!(p.chosen(), Some(Item::Line(12))));
@@ -453,7 +453,7 @@ mod tests {
             (rows[0].text.as_str(), rows[0].detail.as_str(), sel),
             ("Go to line 12", "of 40", Some(0))
         );
-        let _ = p.input.insert("x");
+        let _ = p.input.ed().insert("x");
         assert!(p.chosen().is_none());
     }
 }

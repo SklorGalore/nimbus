@@ -20,7 +20,7 @@ use nimbus_core::transform::{self, Case, Lines};
 use nimbus_core::{Bias, EditError, Selection, Selections, Text, brackets, movement};
 
 use crate::config::Indenting;
-use crate::document::{Document, MAX_COPY_BYTES};
+use crate::document::{Document, Editor, MAX_COPY_BYTES};
 
 /// Line operations refuse selections whose lines hold more than this:
 /// the same 64 MiB as Copy, for the same reason.
@@ -62,6 +62,22 @@ impl From<LineError> for Outcome {
 }
 
 impl Document {
+    /// Set the indentation from the config (`settings`) or, when it says
+    /// to detect, from the file itself: at open, and again on request.
+    /// Returns whether the file decided.
+    pub fn configure_indent(&mut self, settings: Indenting) -> bool {
+        if settings.detect
+            && let Some(found) = Indent::detect(&self.buffer)
+        {
+            self.indent = found;
+            return true;
+        }
+        self.indent = settings.indent;
+        false
+    }
+}
+
+impl Editor<'_> {
     /// Apply a [`Batch`] from `nimbus_core` as one undo step: its items in
     /// one pass, then its selections, or the current ones moved through
     /// the edits with `bias` when it gives none. Sealed on both sides so
@@ -85,12 +101,12 @@ impl Document {
                 _ => Outcome::Nothing,
             });
         }
-        self.history.seal();
+        self.doc.history.seal();
         let changed = self.apply_each(items, bias)?;
         if let Some(after) = after {
             self.set_selections(after);
         }
-        self.history.seal();
+        self.doc.history.seal();
         Ok(if changed {
             Outcome::Done
         } else {
@@ -101,7 +117,7 @@ impl Document {
     /// Replace the selections, snapped to the text, as an operation leaves
     /// them.
     fn set_selections(&mut self, after: Selections) {
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         let mut after = after;
         after.transform(|_, s| Selection {
             anchor: movement::clamp(t, s.anchor),
@@ -115,7 +131,7 @@ impl Document {
 
     /// Whether the selected lines are small enough for a line operation.
     fn within_limit(&self) -> Result<(), Outcome> {
-        Batch::check_size(&self.buffer, &self.carets.selections, LINE_OP_LIMIT)
+        Batch::check_size(&self.doc.buffer, &self.carets.selections, LINE_OP_LIMIT)
             .map_err(Outcome::from)
     }
 
@@ -129,9 +145,9 @@ impl Document {
             return Ok(o);
         }
         let batch = lines::duplicate(
-            &self.buffer,
+            &self.doc.buffer,
             &self.carets.selections,
-            self.line_ending.as_str(),
+            self.doc.line_ending.as_str(),
         )
         .into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
@@ -146,7 +162,7 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let batch = lines::move_lines(&self.buffer, &self.carets.selections, down).into_owned();
+        let batch = lines::move_lines(&self.doc.buffer, &self.carets.selections, down).into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -159,7 +175,7 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let batch = lines::delete_lines(&self.buffer, &self.carets.selections).into_owned();
+        let batch = lines::delete_lines(&self.doc.buffer, &self.carets.selections).into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -172,7 +188,7 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let batch = lines::join_lines(&self.buffer, &self.carets.selections).into_owned();
+        let batch = lines::join_lines(&self.doc.buffer, &self.carets.selections).into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
@@ -183,9 +199,9 @@ impl Document {
     /// See [`Document::replace`].
     pub fn insert_line(&mut self, above: bool) -> Result<Outcome, EditError> {
         let batch = lines::insert_line(
-            &self.buffer,
+            &self.doc.buffer,
             &self.carets.selections,
-            self.line_ending.as_str(),
+            self.doc.line_ending.as_str(),
             above,
         )
         .into_owned();
@@ -194,9 +210,9 @@ impl Document {
 
     /// Select the cursor's line; pressed again, the next line too.
     pub fn select_line(&mut self) {
-        let after = lines::select_lines(&self.buffer, &self.carets.selections);
+        let after = lines::select_lines(&self.doc.buffer, &self.carets.selections);
         self.set_selections(after);
-        self.history.seal();
+        self.doc.history.seal();
     }
 
     /// Comment or uncomment the selected lines with the language's line
@@ -209,10 +225,11 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let Some(token) = self.comment_tokens.line else {
+        let Some(token) = self.doc.comment_tokens.line else {
             return self.toggle_block_comment();
         };
-        let batch = comment::toggle_line(&self.buffer, &self.carets.selections, token).into_owned();
+        let batch =
+            comment::toggle_line(&self.doc.buffer, &self.carets.selections, token).into_owned();
         self.apply_batch(batch, (Bias::Before, Bias::After))
     }
 
@@ -225,17 +242,17 @@ impl Document {
         if let Err(o) = self.within_limit() {
             return Ok(o);
         }
-        let Some(tokens) = self.comment_tokens.block else {
+        let Some(tokens) = self.doc.comment_tokens.block else {
             return Ok(Outcome::NoComment);
         };
         let batch =
-            comment::toggle_block(&self.buffer, &self.carets.selections, tokens).into_owned();
+            comment::toggle_block(&self.doc.buffer, &self.carets.selections, tokens).into_owned();
         self.apply_batch(batch, (Bias::After, Bias::After))
     }
 
     /// Grow every selection one step: word, pair, line, everything.
     pub fn expand_selection(&mut self) -> Outcome {
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         let before = self.carets.selections.clone();
         let mut after = before.clone();
         after.transform(|_, s| expand(t, s, BRACKET_LIMIT).unwrap_or(s));
@@ -244,7 +261,7 @@ impl Document {
         }
         self.carets.expand_stack.push((before, after.clone()));
         self.set_selections(after);
-        self.history.seal();
+        self.doc.history.seal();
         Outcome::Done
     }
 
@@ -253,7 +270,7 @@ impl Document {
         match self.carets.expand_stack.pop() {
             Some((before, after)) if after == self.carets.selections => {
                 self.set_selections(before);
-                self.history.seal();
+                self.doc.history.seal();
                 Outcome::Done
             }
             _ => {
@@ -266,8 +283,9 @@ impl Document {
     /// The bracket next to `pos` and its partner: from the syntax tree
     /// when it is up to date, else by counting.
     fn bracket_pair(&self, pos: usize) -> Option<(usize, usize)> {
-        let t = &self.buffer;
-        self.syntax
+        let t = &self.doc.buffer;
+        self.doc
+            .syntax
             .matching_bracket(t, pos)
             .unwrap_or_else(|| brackets::matching(t, pos, BRACKET_LIMIT))
     }
@@ -304,7 +322,7 @@ impl Document {
             return Outcome::Nothing;
         }
         self.set_selections(after);
-        self.history.seal();
+        self.doc.history.seal();
         Outcome::Done
     }
 
@@ -318,7 +336,7 @@ impl Document {
             return Ok(Outcome::TooLarge);
         }
         let batch =
-            transform::change_case(&self.buffer, &self.carets.selections, case).into_owned();
+            transform::change_case(&self.doc.buffer, &self.carets.selections, case).into_owned();
         self.apply_batch(batch, (Bias::Before, Bias::After))
     }
 
@@ -333,10 +351,10 @@ impl Document {
             return Ok(o);
         }
         let batch = transform::rewrite_lines(
-            &self.buffer,
+            &self.doc.buffer,
             &self.carets.selections,
             op,
-            self.line_ending.as_str(),
+            self.doc.line_ending.as_str(),
         )
         .into_owned();
         self.apply_batch(batch, (Bias::Before, Bias::After))
@@ -352,7 +370,8 @@ impl Document {
         if let Err(o) = self.whole_or_selected_within_limit() {
             return Ok(o);
         }
-        let batch = transform::trim_trailing(&self.buffer, &self.carets.selections).into_owned();
+        let batch =
+            transform::trim_trailing(&self.doc.buffer, &self.carets.selections).into_owned();
         self.apply_batch(batch, (Bias::Before, Bias::Before))
     }
 
@@ -362,27 +381,13 @@ impl Document {
         let whole =
             self.carets.selections.count() == 1 && self.carets.selections.primary().is_empty();
         if whole {
-            if self.buffer.len_bytes() > LINE_OP_LIMIT {
+            if self.doc.buffer.len_bytes() > LINE_OP_LIMIT {
                 return Err(Outcome::TooLarge);
             }
             Ok(())
         } else {
             self.within_limit()
         }
-    }
-
-    /// Set the indentation from the config (`settings`) or, when it says
-    /// to detect, from the file itself: at open, and again on request.
-    /// Returns whether the file decided.
-    pub fn configure_indent(&mut self, settings: Indenting) -> bool {
-        if settings.detect
-            && let Some(found) = Indent::detect(&self.buffer)
-        {
-            self.indent = found;
-            return true;
-        }
-        self.indent = settings.indent;
-        false
     }
 
     /// Tab with no selection spanning lines: insert one level of
@@ -393,7 +398,7 @@ impl Document {
     ///
     /// See [`Document::replace`].
     pub fn insert_indent(&mut self) -> Result<(), EditError> {
-        let indent = self.indent;
+        let indent = self.doc.indent;
         let items = self.each(|t, s| {
             let r = s.range();
             let col = movement::column_of(t, r.start, indent.width);
@@ -412,13 +417,13 @@ impl Document {
     ///
     /// See [`Document::replace`].
     pub fn insert_newline(&mut self) -> Result<(), EditError> {
-        let ending = self.line_ending.as_str();
-        let unit = self.indent.unit();
+        let ending = self.doc.line_ending.as_str();
+        let unit = self.doc.indent.unit();
         let mut after = Vec::new();
         let mut grown = 0usize;
         let mut items: Vec<(Range<usize>, Cow<'_, str>)> = Vec::new();
         for s in self.carets.selections.iter() {
-            let t: &dyn Text = &self.buffer;
+            let t: &dyn Text = &self.doc.buffer;
             let r = s.range();
             let line_start = movement::line_start(t, r.start);
             // Only the indentation before the cursor carries over, so only
@@ -489,7 +494,7 @@ impl Document {
             }
             return Ok(());
         };
-        let t: &dyn Text = &self.buffer;
+        let t: &dyn Text = &self.doc.buffer;
         let all_selected = self.carets.selections.iter().all(|s| !s.is_empty());
         if all_selected {
             return self.wrap_selections(open, close);
@@ -534,7 +539,7 @@ impl Document {
         if *depth == 0 || *recorded != self.carets.selections {
             return None;
         }
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         let closers = self.carets.selections.iter().all(|s| {
             s.is_empty()
                 && t.byte_at(s.head)
@@ -549,7 +554,7 @@ impl Document {
         let Some(depth) = self.pairs_valid() else {
             return false;
         };
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         if !self
             .carets
             .selections
@@ -562,7 +567,7 @@ impl Document {
         after.transform(|_, s| Selection::cursor(s.head + 1));
         self.carets.selections = after;
         self.carets.pairs = (depth > 1).then(|| (self.carets.selections.clone(), depth - 1));
-        self.history.seal();
+        self.doc.history.seal();
         true
     }
 
@@ -593,10 +598,10 @@ impl Document {
             });
         }
         let after = Selections::from_vec(after, self.carets.selections.primary_index());
-        self.history.seal();
+        self.doc.history.seal();
         self.apply_each(items, (Bias::After, Bias::After))?;
         self.set_selections(after);
-        self.history.seal();
+        self.doc.history.seal();
         Ok(())
     }
 
@@ -604,7 +609,7 @@ impl Document {
     /// at its opener's indentation, when the line is deeper than that.
     /// Returns whether the closer was typed this way.
     fn dedent_closer(&mut self, c: u8) -> Result<bool, EditError> {
-        let t: &dyn Text = &self.buffer;
+        let t: &dyn Text = &self.doc.buffer;
         let closer = std::str::from_utf8(std::slice::from_ref(&c)).unwrap_or("");
         let mut items: Vec<(Range<usize>, Cow<'_, str>)> = Vec::new();
         for s in self.carets.selections.iter() {
@@ -646,7 +651,7 @@ impl Document {
     /// See [`Document::replace`].
     pub fn backspace(&mut self) -> Result<bool, EditError> {
         if let Some(depth) = self.pairs_valid() {
-            let t = &self.buffer;
+            let t = &self.doc.buffer;
             let empty_pair = self.carets.selections.iter().all(|s| {
                 let prev = s.head.checked_sub(1).and_then(|p| t.byte_at(p));
                 let next = t.byte_at(s.head);
@@ -674,10 +679,10 @@ impl Document {
     ///
     /// See [`Document::replace`].
     pub fn tidy_for_save(&mut self, trim: bool, final_newline: bool) -> Result<(), EditError> {
-        if (!trim && !final_newline) || self.buffer.is_mapped() {
+        if (!trim && !final_newline) || self.doc.buffer.is_mapped() {
             return Ok(());
         }
-        let t: &dyn Text = &self.buffer;
+        let t: &dyn Text = &self.doc.buffer;
         let all = Selections::single(Selection::cursor(0));
         let mut batch = if trim {
             transform::trim_trailing(t, &all).into_owned()
@@ -688,7 +693,7 @@ impl Document {
         if final_newline && len > 0 && t.byte_at(len - 1) != Some(b'\n') {
             batch
                 .items
-                .push((len..len, Cow::Borrowed(self.line_ending.as_str())));
+                .push((len..len, Cow::Borrowed(self.doc.line_ending.as_str())));
         }
         self.apply_batch(batch, (Bias::Before, Bias::Before))
             .map(drop)
@@ -698,27 +703,28 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::Solo;
 
-    fn doc(text: &str) -> Document {
-        Document::from_text(text)
+    fn doc(text: &str) -> Solo {
+        Solo::from_text(text)
     }
 
-    fn text(d: &Document) -> String {
+    fn text(d: &Solo) -> String {
         d.buffer.slice(0..d.buffer.len_bytes()).into_owned()
     }
 
-    fn cursors(d: &mut Document, at: &[usize]) {
+    fn cursors(d: &mut Solo, at: &[usize]) {
         d.carets.selections = Selections::from_vec(
             at.iter().map(|&p| Selection::cursor(p)).collect(),
             at.len() - 1,
         );
     }
 
-    fn heads(d: &Document) -> Vec<usize> {
+    fn heads(d: &Solo) -> Vec<usize> {
         d.carets.selections.iter().map(|s| s.head).collect()
     }
 
-    fn rust(d: &mut Document) {
+    fn rust(d: &mut Solo) {
         d.comment_tokens = nimbus_core::comment::Tokens {
             line: Some("//"),
             block: Some(("/*", "*/")),
@@ -729,22 +735,22 @@ mod tests {
     fn line_operations_are_one_undo_step_each_with_one_and_three_cursors() {
         let mut d = doc("a\nb\nc\nd");
         cursors(&mut d, &[2]);
-        assert_eq!(d.duplicate().unwrap(), Outcome::Done);
+        assert_eq!(d.ed().duplicate().unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a\nb\nb\nc\nd");
-        assert_eq!(d.move_lines(true).unwrap(), Outcome::Done);
+        assert_eq!(d.ed().move_lines(true).unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a\nb\nc\nb\nd");
-        assert_eq!(d.delete_lines().unwrap(), Outcome::Done);
+        assert_eq!(d.ed().delete_lines().unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a\nb\nc\nd");
         assert_eq!(
-            d.cursor(),
+            d.ed().cursor(),
             6,
             "on the line that took the deleted one's place"
         );
-        assert_eq!(d.join_lines().unwrap(), Outcome::Nothing, "last line");
-        d.click(4, false);
-        assert_eq!(d.join_lines().unwrap(), Outcome::Done);
+        assert_eq!(d.ed().join_lines().unwrap(), Outcome::Nothing, "last line");
+        d.ed().click(4, false);
+        assert_eq!(d.ed().join_lines().unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a\nb\nc d");
-        assert_eq!(d.insert_line(false).unwrap(), Outcome::Done);
+        assert_eq!(d.ed().insert_line(false).unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a\nb\nc d\n");
         for expected in [
             "a\nb\nc d",
@@ -753,44 +759,44 @@ mod tests {
             "a\nb\nb\nc\nd",
             "a\nb\nc\nd",
         ] {
-            assert!(d.undo().unwrap());
+            assert!(d.ed().undo().unwrap());
             assert_eq!(text(&d), expected);
         }
         cursors(&mut d, &[0, 2, 4]);
-        assert_eq!(d.duplicate().unwrap(), Outcome::Done);
+        assert_eq!(d.ed().duplicate().unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a\na\nb\nb\nc\nc\nd");
         assert_eq!(heads(&d), [2, 6, 10]);
-        assert!(d.undo().unwrap());
+        assert!(d.ed().undo().unwrap());
         assert_eq!(text(&d), "a\nb\nc\nd");
         cursors(&mut d, &[0]);
         assert_eq!(
-            d.move_lines(false).unwrap(),
+            d.ed().move_lines(false).unwrap(),
             Outcome::Nothing,
             "top line stays"
         );
-        d.select_line();
-        assert_eq!(d.selection(), Selection { anchor: 0, head: 2 });
-        d.select_line();
-        assert_eq!(d.selection(), Selection { anchor: 0, head: 4 });
+        d.ed().select_line();
+        assert_eq!(d.ed().selection(), Selection { anchor: 0, head: 2 });
+        d.ed().select_line();
+        assert_eq!(d.ed().selection(), Selection { anchor: 0, head: 4 });
     }
 
     #[test]
     fn comments_use_the_language_tokens() {
         let mut d = doc("a\nb");
         assert_eq!(
-            d.toggle_line_comment().unwrap(),
+            d.ed().toggle_line_comment().unwrap(),
             Outcome::NoComment,
             "plain text has none"
         );
         rust(&mut d);
         cursors(&mut d, &[0, 2]);
-        assert_eq!(d.toggle_line_comment().unwrap(), Outcome::Done);
+        assert_eq!(d.ed().toggle_line_comment().unwrap(), Outcome::Done);
         assert_eq!(text(&d), "// a\n// b");
         assert_eq!(heads(&d), [3, 8]);
-        assert_eq!(d.toggle_line_comment().unwrap(), Outcome::Done);
+        assert_eq!(d.ed().toggle_line_comment().unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a\nb");
-        d.select(0..1);
-        assert_eq!(d.toggle_block_comment().unwrap(), Outcome::Done);
+        d.ed().select(0..1);
+        assert_eq!(d.ed().toggle_block_comment().unwrap(), Outcome::Done);
         assert_eq!(text(&d), "/* a */\nb");
         // Markdown: no line comment, so the block form is used.
         let mut m = doc("x");
@@ -798,36 +804,36 @@ mod tests {
             line: None,
             block: Some(("<!--", "-->")),
         };
-        m.select(0..1);
-        assert_eq!(m.toggle_line_comment().unwrap(), Outcome::Done);
+        m.ed().select(0..1);
+        assert_eq!(m.ed().toggle_line_comment().unwrap(), Outcome::Done);
         assert_eq!(text(&m), "<!-- x -->");
     }
 
     #[test]
     fn expand_and_shrink_retrace_each_other_and_brackets_match() {
         let mut d = doc("f(a, b)");
-        d.click(2, false);
-        assert_eq!(d.expand_selection(), Outcome::Done);
-        assert_eq!(d.selection().range(), 2..3);
-        assert_eq!(d.expand_selection(), Outcome::Done);
-        assert_eq!(d.selection().range(), 2..6);
-        assert_eq!(d.shrink_selection(), Outcome::Done);
-        assert_eq!(d.selection().range(), 2..3);
-        d.click(0, false);
+        d.ed().click(2, false);
+        assert_eq!(d.ed().expand_selection(), Outcome::Done);
+        assert_eq!(d.ed().selection().range(), 2..3);
+        assert_eq!(d.ed().expand_selection(), Outcome::Done);
+        assert_eq!(d.ed().selection().range(), 2..6);
+        assert_eq!(d.ed().shrink_selection(), Outcome::Done);
+        assert_eq!(d.ed().selection().range(), 2..3);
+        d.ed().click(0, false);
         assert_eq!(
-            d.shrink_selection(),
+            d.ed().shrink_selection(),
             Outcome::Nothing,
             "moved: the stack is gone"
         );
-        d.click(1, false);
-        assert_eq!(d.matching_bracket(false), Outcome::Done);
-        assert_eq!(d.cursor(), 6);
-        assert_eq!(d.matching_bracket(false), Outcome::Done);
-        assert_eq!(d.cursor(), 1);
-        assert_eq!(d.matching_bracket(true), Outcome::Done);
-        assert_eq!(d.selection().range(), 1..7);
-        d.click(3, false);
-        assert_eq!(d.matching_bracket(false), Outcome::Nothing);
+        d.ed().click(1, false);
+        assert_eq!(d.ed().matching_bracket(false), Outcome::Done);
+        assert_eq!(d.ed().cursor(), 6);
+        assert_eq!(d.ed().matching_bracket(false), Outcome::Done);
+        assert_eq!(d.ed().cursor(), 1);
+        assert_eq!(d.ed().matching_bracket(true), Outcome::Done);
+        assert_eq!(d.ed().selection().range(), 1..7);
+        d.ed().click(3, false);
+        assert_eq!(d.ed().matching_bracket(false), Outcome::Nothing);
     }
 
     #[test]
@@ -835,21 +841,21 @@ mod tests {
         let mut d = doc("c\na \nb\nb");
         cursors(&mut d, &[0]);
         // No selection: the whole text.
-        assert_eq!(d.rewrite_lines(Lines::Sort).unwrap(), Outcome::Done);
+        assert_eq!(d.ed().rewrite_lines(Lines::Sort).unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a \nb\nb\nc");
-        assert_eq!(d.rewrite_lines(Lines::Dedupe).unwrap(), Outcome::Done);
+        assert_eq!(d.ed().rewrite_lines(Lines::Dedupe).unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a \nb\nc");
-        assert_eq!(d.trim_whitespace().unwrap(), Outcome::Done);
+        assert_eq!(d.ed().trim_whitespace().unwrap(), Outcome::Done);
         assert_eq!(text(&d), "a\nb\nc");
-        assert_eq!(d.trim_whitespace().unwrap(), Outcome::Nothing);
+        assert_eq!(d.ed().trim_whitespace().unwrap(), Outcome::Nothing);
         cursors(&mut d, &[0]);
-        assert_eq!(d.change_case(Case::Upper).unwrap(), Outcome::Done);
+        assert_eq!(d.ed().change_case(Case::Upper).unwrap(), Outcome::Done);
         assert_eq!(text(&d), "A\nb\nc");
         cursors(&mut d, &[0, 2, 4]);
-        assert_eq!(d.change_case(Case::Upper).unwrap(), Outcome::Done);
+        assert_eq!(d.ed().change_case(Case::Upper).unwrap(), Outcome::Done);
         assert_eq!(text(&d), "A\nB\nC");
         assert_eq!(heads(&d), [0, 2, 4]);
-        assert!(d.undo().unwrap());
+        assert!(d.ed().undo().unwrap());
         assert_eq!(text(&d), "A\nb\nc", "one step for three cursors");
     }
 
@@ -860,16 +866,16 @@ mod tests {
             width: 2,
             tabs: false,
         };
-        d.click(8, false);
-        d.insert_newline().unwrap();
+        d.ed().click(8, false);
+        d.ed().insert_newline().unwrap();
         assert_eq!(text(&d), "fn f() {\n  \n}");
-        assert_eq!(d.cursor(), 11, "on the indented middle line");
-        d.insert_indent().unwrap();
+        assert_eq!(d.ed().cursor(), 11, "on the indented middle line");
+        d.ed().insert_indent().unwrap();
         assert_eq!(text(&d), "fn f() {\n    \n}");
-        d.type_text("x", true).unwrap();
-        d.insert_newline().unwrap();
+        d.ed().type_text("x", true).unwrap();
+        d.ed().insert_newline().unwrap();
         assert_eq!(text(&d), "fn f() {\n    x\n    \n}");
-        d.type_text("}", true).unwrap();
+        d.ed().type_text("}", true).unwrap();
         assert_eq!(
             text(&d),
             "fn f() {\n    x\n}\n}",
@@ -881,18 +887,18 @@ mod tests {
             width: 4,
             tabs: false,
         };
-        d.click(3, false);
-        d.insert_indent().unwrap();
+        d.ed().click(3, false);
+        d.ed().insert_indent().unwrap();
         assert_eq!(text(&d), "abc ");
         let mut d = doc("a\n  b");
         d.indent = Indent {
             width: 2,
             tabs: false,
         };
-        d.select(0..5);
-        d.indent_lines().unwrap();
+        d.ed().select(0..5);
+        d.ed().indent_lines().unwrap();
         assert_eq!(text(&d), "  a\n    b");
-        d.outdent_lines().unwrap();
+        d.ed().outdent_lines().unwrap();
         assert_eq!(text(&d), "a\n  b");
         assert!(d.configure_indent(Indenting {
             indent: Indent::default(),
@@ -904,63 +910,63 @@ mod tests {
     #[test]
     fn auto_pairs_insert_step_over_wrap_and_delete_together() {
         let mut d = doc("");
-        d.type_text("(", true).unwrap();
+        d.ed().type_text("(", true).unwrap();
         assert_eq!(text(&d), "()");
-        assert_eq!(d.cursor(), 1);
-        d.type_text("a", true).unwrap();
-        d.type_text("[", true).unwrap();
+        assert_eq!(d.ed().cursor(), 1);
+        d.ed().type_text("a", true).unwrap();
+        d.ed().type_text("[", true).unwrap();
         assert_eq!(text(&d), "(a[])");
-        d.type_text("]", true).unwrap();
-        d.type_text(")", true).unwrap();
+        d.ed().type_text("]", true).unwrap();
+        d.ed().type_text(")", true).unwrap();
         assert_eq!(text(&d), "(a[])", "closers are stepped over");
-        assert_eq!(d.cursor(), 5);
-        d.type_text(")", true).unwrap();
+        assert_eq!(d.ed().cursor(), 5);
+        d.ed().type_text(")", true).unwrap();
         assert_eq!(text(&d), "(a[]))", "a closer typed on purpose stays");
         // Backspace inside an empty pair removes both.
-        d.type_text("{", true).unwrap();
+        d.ed().type_text("{", true).unwrap();
         assert_eq!(text(&d), "(a[])){}");
-        assert!(d.backspace().unwrap());
+        assert!(d.ed().backspace().unwrap());
         assert_eq!(text(&d), "(a[]))");
         // Off: nothing of the sort.
-        d.type_text("(", false).unwrap();
+        d.ed().type_text("(", false).unwrap();
         assert_eq!(text(&d), "(a[]))(");
         // Quotes do not pair after a letter (don't), and a selection is
         // wrapped.
         let mut d = doc("don");
-        d.click(3, false);
-        d.type_text("'", true).unwrap();
+        d.ed().click(3, false);
+        d.ed().type_text("'", true).unwrap();
         assert_eq!(text(&d), "don'");
-        d.select(0..4);
-        d.type_text("\"", true).unwrap();
+        d.ed().select(0..4);
+        d.ed().type_text("\"", true).unwrap();
         assert_eq!(text(&d), "\"don'\"");
-        assert_eq!(d.selection().range(), 1..5);
+        assert_eq!(d.ed().selection().range(), 1..5);
         // Before a word nothing pairs: the opener is typed alone.
         let mut d = doc("x");
-        d.type_text("(", true).unwrap();
+        d.ed().type_text("(", true).unwrap();
         assert_eq!(text(&d), "(x");
         // Three cursors.
         let mut d = doc("\n\n");
         cursors(&mut d, &[0, 1, 2]);
-        d.type_text("\"", true).unwrap();
+        d.ed().type_text("\"", true).unwrap();
         assert_eq!(text(&d), "\"\"\n\"\"\n\"\"");
         assert_eq!(heads(&d), [1, 4, 7]);
-        d.type_text("\"", true).unwrap();
+        d.ed().type_text("\"", true).unwrap();
         assert_eq!(heads(&d), [2, 5, 8]);
     }
 
     #[test]
     fn saving_can_trim_and_add_a_final_newline_as_one_step() {
         let mut d = doc("a  \nb\t\n\nc");
-        d.click(1, false);
-        d.tidy_for_save(false, false).unwrap();
+        d.ed().click(1, false);
+        d.ed().tidy_for_save(false, false).unwrap();
         assert_eq!(text(&d), "a  \nb\t\n\nc", "both off: untouched");
-        d.tidy_for_save(true, true).unwrap();
+        d.ed().tidy_for_save(true, true).unwrap();
         assert_eq!(text(&d), "a\nb\n\nc\n");
-        assert_eq!(d.cursor(), 1);
-        assert!(d.undo().unwrap());
+        assert_eq!(d.ed().cursor(), 1);
+        assert!(d.ed().undo().unwrap());
         assert_eq!(text(&d), "a  \nb\t\n\nc");
         let mut e = doc("a\n");
-        e.tidy_for_save(true, true).unwrap();
+        e.ed().tidy_for_save(true, true).unwrap();
         assert_eq!(text(&e), "a\n", "nothing to do");
     }
 }

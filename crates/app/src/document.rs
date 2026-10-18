@@ -151,6 +151,150 @@ pub struct Carets {
     /// (a closer sits right after each cursor) and how many pairs deep.
     /// Any other change of the selections makes it stale.
     pub(crate) pairs: Option<(Selections, usize)>,
+    /// [`Document::epoch`] when these were last fitted to the text.
+    epoch: u64,
+}
+
+impl Carets {
+    /// The cursor's byte offset in `t`, snapped to a valid position.
+    #[must_use]
+    pub fn cursor(&self, t: &dyn Text) -> usize {
+        movement::clamp(t, self.selections.primary().head)
+    }
+
+    /// The primary selection, snapped to valid positions in `t`.
+    #[must_use]
+    pub fn selection(&self, t: &dyn Text) -> Selection {
+        let s = self.selections.primary();
+        Selection {
+            anchor: movement::clamp(t, s.anchor),
+            head: movement::clamp(t, s.head),
+        }
+    }
+
+    /// How many bytes the selections hold together.
+    #[must_use]
+    pub fn selected_len(&self) -> usize {
+        self.selections.iter().map(|s| s.range().len()).sum()
+    }
+
+    /// The selected text, or `None` if nothing is selected or it is longer
+    /// than [`MAX_COPY_BYTES`]. Several selections are joined with line
+    /// breaks, one line per cursor (an empty one for a bare cursor), so
+    /// pasting at the same number of cursors gives each its own back.
+    #[must_use]
+    pub fn selected_text(&self, t: &dyn Text) -> Option<String> {
+        let len = self.selected_len();
+        if len == 0 || len > MAX_COPY_BYTES {
+            return None;
+        }
+        // The raw bytes, not the display string: bytes that are not UTF-8
+        // become `�` here rather than the display stand-in.
+        let mut bytes = Vec::with_capacity(len + self.selections.count());
+        for (i, s) in self.selections.iter().enumerate() {
+            if i > 0 {
+                bytes.push(b'\n');
+            }
+            t.read_into(s.range(), &mut bytes).ok()?;
+        }
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Snap every selection to a valid position in `doc`'s text if the
+    /// text was swapped since they last looked (a save switching files,
+    /// a merge result arriving), merging any that now coincide.
+    pub fn fit(&mut self, doc: &Document) {
+        if self.epoch == doc.epoch {
+            return;
+        }
+        self.epoch = doc.epoch;
+        let t = &doc.buffer;
+        self.selections.transform(|_, s| Selection {
+            anchor: movement::clamp(t, s.anchor),
+            head: movement::clamp(t, s.head),
+        });
+    }
+
+    /// Forget the column memory and the other state the next move builds
+    /// on, as any change from elsewhere must.
+    pub fn forget_goals(&mut self) {
+        self.preferred_column = None;
+        self.goals.clear();
+        self.expand_stack.clear();
+        self.pairs = None;
+        self.next_resume = None;
+    }
+}
+
+/// A document together with the carets of the pane editing it: what the
+/// editing methods work on. The text, history and syntax state belong to
+/// the document and are shared by every pane showing it; the cursors are
+/// the pane's own (M13).
+pub struct Editor<'a> {
+    /// The text and its history.
+    pub doc: &'a mut Document,
+    /// This pane's cursors.
+    pub carets: &'a mut Carets,
+}
+
+impl<'a> Editor<'a> {
+    /// Edit `doc` through `carets`, first fitting them to the text.
+    pub fn new(doc: &'a mut Document, carets: &'a mut Carets) -> Self {
+        carets.fit(doc);
+        Self { doc, carets }
+    }
+}
+
+/// A document with a single view of it, for the one-line text fields (the
+/// find bar, the picker's input, the Search panel) and for tests.
+#[derive(Debug, Default)]
+pub struct Solo {
+    /// The text.
+    pub doc: Document,
+    /// Its cursors.
+    pub carets: Carets,
+}
+
+#[cfg(test)]
+impl std::ops::Deref for Solo {
+    type Target = Document;
+    fn deref(&self) -> &Document {
+        &self.doc
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for Solo {
+    fn deref_mut(&mut self) -> &mut Document {
+        &mut self.doc
+    }
+}
+
+impl Solo {
+    /// A field holding `doc`.
+    #[cfg(test)]
+    #[must_use]
+    pub fn of(doc: Document) -> Self {
+        Self {
+            doc,
+            carets: Carets::default(),
+        }
+    }
+
+    /// A field holding `text`.
+    #[cfg(test)]
+    #[must_use]
+    pub fn from_text(text: &str) -> Self {
+        Self {
+            doc: Document::from_text(text),
+            carets: Carets::default(),
+        }
+    }
+
+    /// Edit it.
+    pub fn ed(&mut self) -> Editor<'_> {
+        Editor::new(&mut self.doc, &mut self.carets)
+    }
 }
 
 /// An open document.
@@ -171,9 +315,10 @@ pub struct Document {
     pub path: Option<PathBuf>,
     /// Inserted by Enter, detected when the file was opened.
     pub line_ending: LineEnding,
-    /// Cursors, selections and the rest of what one view of the text
-    /// keeps (M13 moves it out of the document, into the pane).
-    pub carets: Carets,
+    /// Increments when the text is swapped wholesale (a save switching
+    /// to the new file, a merge result); panes' carets compare it with
+    /// theirs and snap to the new text ([`Carets::fit`]).
+    pub(crate) epoch: u64,
     /// The file had a UTF-8 byte order mark, written back on save.
     pub bom: bool,
     /// Increments on every change to the text. Background work (search,
@@ -490,9 +635,7 @@ impl Document {
     pub fn set_text(&mut self, text: &str) {
         self.buffer = nimbus_core::RopeBuffer::from_text(text).into();
         self.history = History::default();
-        self.carets.selections = Selections::default();
-        self.carets.preferred_column = None;
-        self.carets.goals.clear();
+        self.epoch += 1;
         self.language = None;
         self.saved_at = if self.path.is_some() {
             NOT_SAVED
@@ -523,7 +666,11 @@ impl Document {
     ///
     /// While a save is under way nothing happens: the save replaces the
     /// file and records it, and the app looks again once it ends.
-    pub fn disk_changed(&mut self, languages: &Languages) -> DiskChange {
+    pub fn disk_changed(
+        &mut self,
+        languages: &Languages,
+        carets: &mut [&mut Carets],
+    ) -> DiskChange {
         let Some(path) = self.path.clone() else {
             return DiskChange::None;
         };
@@ -548,13 +695,13 @@ impl Document {
             // not replace this file is not reading this file: cutting it
             // short takes nothing from under the document.
             let truncated = mapping.temp_path().is_none() && stamp.len < mapping.file_len();
-            return self.mapped_disk_changed(truncated, languages);
+            return self.mapped_disk_changed(truncated, languages, carets);
         }
         if self.is_dirty() {
             self.conflict = true;
             return DiskChange::Conflict;
         }
-        match self.reload(languages) {
+        match self.reload(languages, carets) {
             Ok(()) => DiskChange::Reloaded,
             Err(e) => DiskChange::Failed(e.to_string()),
         }
@@ -562,12 +709,17 @@ impl Document {
 
     /// [`Document::disk_changed`] for a mapped document, whose file is
     /// `truncated` if it is now shorter than its mapping.
-    fn mapped_disk_changed(&mut self, truncated: bool, languages: &Languages) -> DiskChange {
+    fn mapped_disk_changed(
+        &mut self,
+        truncated: bool,
+        languages: &Languages,
+        carets: &mut [&mut Carets],
+    ) -> DiskChange {
         if truncated {
             // Part of the mapping is gone. Re-mapping is the safe response,
             // and loses nothing when there are no unsaved edits.
             if !self.is_dirty() {
-                match self.reload(languages) {
+                match self.reload(languages, carets) {
                     Ok(()) => return DiskChange::Truncated { reloaded: true },
                     Err(e) => log::warn!("could not reload a truncated file: {e}"),
                 }
@@ -596,7 +748,11 @@ impl Document {
     ///
     /// Returns the [`OpenError`] if the file cannot be read, or while the
     /// document is being saved; nothing changes then.
-    pub fn reload(&mut self, languages: &Languages) -> Result<(), OpenError> {
+    pub fn reload(
+        &mut self,
+        languages: &Languages,
+        carets: &mut [&mut Carets],
+    ) -> Result<(), OpenError> {
         let Some(path) = self.path.clone() else {
             return Ok(());
         };
@@ -610,16 +766,22 @@ impl Document {
         let opened = self.opener.unwrap_or(io::open)(&path)?;
         #[cfg(not(test))]
         let opened = io::open(&path)?;
-        // Where the cursor was, to put it back. A rope keeps its line and
+        // Where each pane's cursor was, to put it back. A rope keeps its line and
         // column. A mapped document keeps the byte offset instead: its file
         // may have been cut short, and working out the line could read the
         // old mapping where the bytes are gone, which crashes.
-        let head = self.carets.selections.primary().head;
-        let place = (!self.buffer.is_mapped()).then(|| {
-            let head = self.cursor();
-            let line = self.buffer.byte_to_line(head);
-            (line, head - self.buffer.line_to_byte(line))
-        });
+        let places: Vec<(usize, Option<(usize, usize)>)> = carets
+            .iter()
+            .map(|c| {
+                let head = c.selections.primary().head;
+                let place = (!self.buffer.is_mapped()).then(|| {
+                    let head = c.cursor(&self.buffer);
+                    let line = self.buffer.byte_to_line(head);
+                    (line, head - self.buffer.line_to_byte(line))
+                });
+                (head, place)
+            })
+            .collect();
         self.adopt_indexing(opened.indexing);
         self.buffer = opened.buffer;
         self.mapping = opened.mapping;
@@ -634,17 +796,22 @@ impl Document {
         self.edits.reset = true;
         self.version += 1;
         self.remember_disk_text();
-        let pos = match place {
-            Some((line, col)) => {
-                let line = line.min(self.buffer.len_lines().saturating_sub(1));
-                let start = self.buffer.line_to_byte(line);
-                let len = self.buffer.line_span(start).end - start;
-                start + col.min(len)
-            }
-            None => head.min(self.buffer.len_bytes()),
-        };
-        self.set_selection(Selection::cursor(movement::clamp(&self.buffer, pos)));
-        self.carets.preferred_column = None;
+        self.epoch += 1;
+        for (c, (head, place)) in carets.iter_mut().zip(places) {
+            let pos = match place {
+                Some((line, col)) => {
+                    let line = line.min(self.buffer.len_lines().saturating_sub(1));
+                    let start = self.buffer.line_to_byte(line);
+                    let len = self.buffer.line_span(start).end - start;
+                    start + col.min(len)
+                }
+                None => head.min(self.buffer.len_bytes()),
+            };
+            c.selections
+                .set_single(Selection::cursor(movement::clamp(&self.buffer, pos)));
+            c.forget_goals();
+            c.epoch = self.epoch;
+        }
         // The text is new, so the tree is too, even in the same language.
         self.language = None;
         self.detect_language(languages);
@@ -1009,7 +1176,7 @@ impl Document {
         // Every line is counted now: the highlighter's line-based state
         // may change.
         self.syntax.touch();
-        self.clamp_selections();
+        self.epoch += 1;
         Ok(old)
     }
 
@@ -1180,7 +1347,7 @@ impl Document {
             MappedBuffer::with_index(source, index, limits).map_err(std::io::Error::other)?;
         self.buffer = buffer.into();
         self.mapping = Some(mapped);
-        self.clamp_selections();
+        self.epoch += 1;
         self.syntax.touch();
         Ok(changed)
     }
@@ -1196,18 +1363,20 @@ impl Document {
         self.canonical = None;
         self.disk = None;
         self.stop_indexing();
-        self.carets.selections = Selections::default();
+        self.epoch += 1;
         self.saved_at = self.history.top_id();
         SaveStep::NotReplaced(format!(
             "Saved to {} but could not read it back ({e}); open that file to go on",
             at.display()
         ))
     }
+}
 
+impl Editor<'_> {
     /// The cursor's byte offset, always a valid position in the text.
     #[must_use]
     pub fn cursor(&self) -> usize {
-        movement::clamp(&self.buffer, self.carets.selections.primary().head)
+        movement::clamp(&self.doc.buffer, self.carets.selections.primary().head)
     }
 
     /// The primary selection, snapped to valid positions.
@@ -1215,14 +1384,14 @@ impl Document {
     pub fn selection(&self) -> Selection {
         let s = self.carets.selections.primary();
         Selection {
-            anchor: movement::clamp(&self.buffer, s.anchor),
-            head: movement::clamp(&self.buffer, s.head),
+            anchor: movement::clamp(&self.doc.buffer, s.anchor),
+            head: movement::clamp(&self.doc.buffer, s.head),
         }
     }
 
     fn set_selection(&mut self, sel: Selection) {
         debug_assert!(
-            self.buffer.is_char_boundary(sel.head),
+            self.doc.buffer.is_char_boundary(sel.head),
             "cursor off a char boundary"
         );
         self.carets.selections.set_single(sel);
@@ -1237,18 +1406,18 @@ impl Document {
     /// changes in that case.
     pub fn replace(&mut self, range: Range<usize>, text: &str) -> Result<Edit, EditError> {
         let before = self.carets.selections.clone();
-        let edit = self.buffer.replace(range, text)?;
-        self.edits.note(&self.buffer, &edit);
-        self.syntax.edit(&self.buffer, &edit);
+        let edit = self.doc.buffer.replace(range, text)?;
+        self.doc.edits.note(&self.doc.buffer, &edit);
+        self.doc.syntax.edit(&self.doc.buffer, &edit);
         self.set_selection(Selection::cursor(edit.new_range().end));
-        self.history.record(
+        self.doc.history.record(
             edit.clone(),
             &before,
             &self.carets.selections,
             Instant::now(),
         );
         self.carets.preferred_column = None;
-        self.version += 1;
+        self.doc.version += 1;
         Ok(edit)
     }
 
@@ -1265,17 +1434,18 @@ impl Document {
         let before = self.carets.selections.clone();
         let mut edits = Vec::with_capacity(items.len());
         let mut result = Ok(());
-        if self.buffer.is_mapped() {
+        if self.doc.buffer.is_mapped() {
             // A mapped buffer rebuilds its pieces once for all items; one at
             // a time would cost a rebuild per item (100,000 matches took
             // over a minute). All or nothing.
             let refs: Vec<(Range<usize>, &str)> =
                 items.iter().map(|(r, t)| (r.clone(), t.as_str())).collect();
-            match self.buffer.replace_sorted(&refs) {
+            match self.doc.buffer.replace_sorted(&refs) {
                 Ok(done) => edits = done,
                 Err(e) => result = Err(e),
             }
-            let (syntax, log, buffer) = (&mut self.syntax, &mut self.edits, &self.buffer);
+            let (syntax, log, buffer) =
+                (&mut self.doc.syntax, &mut self.doc.edits, &self.doc.buffer);
             nimbus_core::report_sorted(&mut edits, |edit| {
                 log.note(buffer, edit);
                 syntax.edit(buffer, edit);
@@ -1285,10 +1455,10 @@ impl Document {
             // application order, which is what undo reverses. Each edit is
             // shown to the syntax tree against the text it applies to.
             for (range, text) in items.iter().rev() {
-                match self.buffer.replace(range.clone(), text) {
+                match self.doc.buffer.replace(range.clone(), text) {
                     Ok(edit) => {
-                        self.edits.note(&self.buffer, &edit);
-                        self.syntax.edit(&self.buffer, &edit);
+                        self.doc.edits.note(&self.doc.buffer, &edit);
+                        self.doc.syntax.edit(&self.doc.buffer, &edit);
                         edits.push(edit);
                     }
                     Err(e) => {
@@ -1313,10 +1483,11 @@ impl Document {
                 .map(|(r, _)| r.len())
                 .sum();
             let end = (last_range.start + last_text.len() + grown).saturating_sub(shrunk);
-            self.set_selection(Selection::cursor(movement::clamp(&self.buffer, end)));
-            self.history
+            self.set_selection(Selection::cursor(movement::clamp(&self.doc.buffer, end)));
+            self.doc
+                .history
                 .record_group(edits, &before, &self.carets.selections);
-            self.version += 1;
+            self.doc.version += 1;
         }
         result.map(|()| count)
     }
@@ -1350,8 +1521,8 @@ impl Document {
         if lines.len() == count + 1 && lines.last() == Some(&"") {
             lines.pop();
         }
-        let ending = self.line_ending.as_str();
-        let convert = |s: &str| match self.line_ending {
+        let ending = self.doc.line_ending.as_str();
+        let convert = |s: &str| match self.doc.line_ending {
             LineEnding::Lf => s.to_owned(),
             LineEnding::CrLf => s.replace('\n', ending),
         };
@@ -1367,66 +1538,50 @@ impl Document {
             self.each(|_, s| Some((s.range(), Cow::Owned(whole.clone()))))
         };
         // A paste is one undo step even when it is a single character.
-        self.history.seal();
+        self.doc.history.seal();
         let result = self.apply_each(items, (Bias::After, Bias::After));
-        self.history.seal();
+        self.doc.history.seal();
         result.map(drop)
     }
 
-    /// How many bytes the selections hold together.
+    /// The total length of the selections.
     #[must_use]
     pub fn selected_len(&self) -> usize {
-        self.carets.selections.iter().map(|s| s.range().len()).sum()
+        self.carets.selected_len()
     }
 
-    /// The selected text, or `None` if nothing is selected or it is longer
-    /// than [`MAX_COPY_BYTES`]. Several selections are joined with line
-    /// breaks, one line per cursor (an empty one for a bare cursor), so
-    /// pasting at the same number of cursors gives each its own back.
+    /// See [`Carets::selected_text`].
     #[must_use]
     pub fn selected_text(&self) -> Option<String> {
-        let len = self.selected_len();
-        if len == 0 || len > MAX_COPY_BYTES {
-            return None;
-        }
-        // The raw bytes, not the display string: bytes that are not UTF-8
-        // become `�` here rather than the display stand-in.
-        let mut bytes = Vec::with_capacity(len + self.carets.selections.count());
-        for (i, s) in self.carets.selections.iter().enumerate() {
-            if i > 0 {
-                bytes.push(b'\n');
-            }
-            self.buffer.read_into(s.range(), &mut bytes).ok()?;
-        }
-        Some(String::from_utf8_lossy(&bytes).into_owned())
+        self.carets.selected_text(&self.doc.buffer)
     }
 
     /// Put the cursor at `pos` (snapped to a valid position), as a click
     /// does; with `extend`, move only the head, as a Shift+click does.
     pub fn click(&mut self, pos: usize, extend: bool) {
-        let pos = movement::clamp(&self.buffer, pos);
+        let pos = movement::clamp(&self.doc.buffer, pos);
         let sel = self.selection().moved_to(pos, extend);
         self.set_selection(sel);
         self.carets.preferred_column = None;
-        self.history.seal();
+        self.doc.history.seal();
     }
 
     /// Select `range` with the cursor at its end (double- and triple-click).
     pub fn select(&mut self, range: Range<usize>) {
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         let sel = Selection {
             anchor: movement::clamp(t, range.start),
             head: movement::clamp(t, range.end),
         };
         self.set_selection(sel);
         self.carets.preferred_column = None;
-        self.history.seal();
+        self.doc.history.seal();
     }
 
     /// Select from `anchor` to `head`, keeping the direction: the cursor is
     /// at `head`. Used when dragging with the mouse.
     pub fn select_span(&mut self, anchor: usize, head: usize) {
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         let sel = Selection {
             anchor: movement::clamp(t, anchor),
             head: movement::clamp(t, head),
@@ -1442,7 +1597,7 @@ impl Document {
     /// bytes, so it never stalls; a later press goes on from there.
     pub fn add_next_occurrence(&mut self) -> Occurrence {
         let p = self.selection();
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         if p.is_empty() {
             let word = movement::word_at(t, p.head);
             let is_word = !word.is_empty()
@@ -1456,7 +1611,7 @@ impl Document {
                 anchor: word.start,
                 head: word.end,
             });
-            self.history.seal();
+            self.doc.history.seal();
             return Occurrence::SelectedWord;
         }
         let r = p.range();
@@ -1474,7 +1629,7 @@ impl Document {
             .carets
             .next_resume
             .take()
-            .filter(|&(v, sel, _)| v == self.version && sel == p)
+            .filter(|&(v, sel, _)| v == self.doc.version && sel == p)
             .map(|(_, _, at)| at);
         let ranges = match resume {
             Some(at) if at >= r.end => [at..len, 0..r.end],
@@ -1509,7 +1664,7 @@ impl Document {
                         };
                         self.carets.selections.push_primary(sel);
                         self.carets.goals.clear();
-                        self.history.seal();
+                        self.doc.history.seal();
                         return Occurrence::Added;
                     }
                     Literal::NotFound => {
@@ -1517,7 +1672,7 @@ impl Document {
                         break;
                     }
                     Literal::GaveUp(at) => {
-                        self.carets.next_resume = Some((self.version, p, at));
+                        self.carets.next_resume = Some((self.doc.version, p, at));
                         return Occurrence::GaveUp;
                     }
                 }
@@ -1536,7 +1691,7 @@ impl Document {
     /// selection; not after a removal, nor a click inside a selection,
     /// which the new cursor merges into.
     pub fn click_add(&mut self, pos: usize) -> bool {
-        let pos = movement::clamp(&self.buffer, pos);
+        let pos = movement::clamp(&self.doc.buffer, pos);
         let existing = self.carets.selections.iter().position(|s| s.head == pos);
         let added = if let Some(i) = existing {
             if self.carets.selections.count() > 1 {
@@ -1550,14 +1705,14 @@ impl Document {
         };
         self.carets.goals.clear();
         self.carets.preferred_column = None;
-        self.history.seal();
+        self.doc.history.seal();
         added
     }
 
     /// Alt+drag: the selection being dragged out (the primary, added by
     /// [`Document::click_add`]) runs from `anchor` to `head`; the others stay.
     pub fn drag_added(&mut self, anchor: usize, head: usize) {
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         self.carets.selections.replace_primary(Selection {
             anchor: movement::clamp(t, anchor),
             head: movement::clamp(t, head),
@@ -1576,7 +1731,7 @@ impl Document {
     /// across a huge file stays quick. The selection on the pointer's line
     /// is the primary.
     pub fn column_select(&mut self, from: (usize, usize), to: (usize, usize), tab_width: usize) {
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         // Any byte of a line names it.
         let (from_line, to_line) = (t.line_span(from.0).start, t.line_span(to.0).start);
         let (top, bottom) = (from_line.min(to_line), from_line.max(to_line));
@@ -1611,7 +1766,7 @@ impl Document {
         self.carets.selections = Selections::from_vec(rows, primary);
         self.carets.goals.clear();
         self.carets.preferred_column = None;
-        self.history.seal();
+        self.doc.history.seal();
     }
 
     /// Primary+Alt+Up or Down: add a cursor on the line above the topmost
@@ -1622,7 +1777,7 @@ impl Document {
         let all = self.carets.selections.as_slice();
         let edge = if lines < 0 { all.first() } else { all.last() };
         let Some(&from) = edge else { return };
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         let goal = self.carets.preferred_column.unwrap_or_else(|| {
             movement::column_of(t, self.carets.selections.primary().head, tab_width)
         });
@@ -1635,7 +1790,7 @@ impl Document {
             .push_primary(Selection::cursor(v.pos));
         self.carets.goals.clear();
         self.carets.preferred_column = Some(v.preferred_col);
-        self.history.seal();
+        self.doc.history.seal();
     }
 
     /// Escape with several cursors: keep only the primary. Returns whether
@@ -1651,7 +1806,7 @@ impl Document {
 
     /// Select the whole document.
     pub fn select_all(&mut self) {
-        self.select(0..self.buffer.len_bytes());
+        self.select(0..self.doc.buffer.len_bytes());
     }
 
     /// Move every cursor. With `extend` each selection grows or shrinks;
@@ -1728,7 +1883,7 @@ impl Document {
         extend: bool,
         mut step: impl FnMut(&dyn Text, usize, Option<usize>) -> (usize, Option<usize>),
     ) {
-        self.history.seal();
+        self.doc.history.seal();
         let count = self.carets.selections.count();
         let primary = self.carets.selections.primary_index();
         if self.carets.goals.len() != count {
@@ -1736,7 +1891,7 @@ impl Document {
             self.carets.goals.resize(count, None);
         }
         let (goals, preferred) = (&mut self.carets.goals, &mut self.carets.preferred_column);
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         if let Some(g) = goals.get_mut(primary) {
             *g = *preferred;
         }
@@ -1848,7 +2003,7 @@ impl Document {
     fn touched_lines(&self) -> Vec<usize> {
         let mut lines: Vec<usize> = Vec::new();
         for s in self.carets.selections.iter() {
-            for l in lines_of(&self.buffer, s.range()) {
+            for l in lines_of(&self.doc.buffer, s.range()) {
                 if lines.last().is_none_or(|&last| l > last) {
                     lines.push(l);
                 }
@@ -1866,7 +2021,7 @@ impl Document {
     ///
     /// See [`Document::replace`].
     pub fn indent_lines(&mut self) -> Result<bool, EditError> {
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         if !self
             .carets
             .selections
@@ -1875,18 +2030,18 @@ impl Document {
         {
             return Ok(false);
         }
-        let unit = self.indent.unit();
+        let unit = self.doc.indent.unit();
         let items = self
             .touched_lines()
             .into_iter()
             .map(|l| {
-                let s = self.buffer.line_to_byte(l);
+                let s = self.doc.buffer.line_to_byte(l);
                 (s..s, Cow::Owned(unit.to_string()))
             })
             .collect();
-        self.history.seal();
+        self.doc.history.seal();
         self.apply_each(items, (Bias::Before, Bias::After))?;
-        self.history.seal();
+        self.doc.history.seal();
         self.select_whole_lines();
         Ok(true)
     }
@@ -1901,12 +2056,12 @@ impl Document {
     ///
     /// See [`Document::replace`].
     pub fn outdent_lines(&mut self) -> Result<(), EditError> {
-        let indent = self.indent;
+        let indent = self.doc.indent;
         let items: Vec<_> = self
             .touched_lines()
             .into_iter()
             .filter_map(|l| {
-                let t = &self.buffer;
+                let t = &self.doc.buffer;
                 let s = t.line_to_byte(l);
                 // Only the start of the line matters.
                 let end = t.line_span(s).end.min(s + indent.width + 1);
@@ -1915,9 +2070,9 @@ impl Document {
                 (n > 0).then(|| (s..s + n, Cow::Borrowed("")))
             })
             .collect();
-        self.history.seal();
+        self.doc.history.seal();
         self.apply_each(items, (Bias::Before, Bias::After))?;
-        self.history.seal();
+        self.doc.history.seal();
         self.select_whole_lines();
         Ok(())
     }
@@ -1925,7 +2080,7 @@ impl Document {
     /// Make every selection that spans lines cover those lines whole, from
     /// the start of the first to the end of the last, as after indenting.
     fn select_whole_lines(&mut self) {
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         self.carets.selections.transform(|_, s| {
             let lines = lines_of(t, s.range());
             if lines.len() < 2 {
@@ -1945,11 +2100,14 @@ impl Document {
     /// Returns an [`EditError`] if the history no longer matches the text,
     /// which would be a bug.
     pub fn undo(&mut self) -> Result<bool, EditError> {
-        let (syntax, log) = (&mut self.syntax, &mut self.edits);
-        let Some(restored) = self.history.undo(&mut self.buffer, &mut |text, edit| {
-            log.note(text, edit);
-            syntax.edit(text, edit);
-        })?
+        let (syntax, log) = (&mut self.doc.syntax, &mut self.doc.edits);
+        let Some(restored) = self
+            .doc
+            .history
+            .undo(&mut self.doc.buffer, &mut |text, edit| {
+                log.note(text, edit);
+                syntax.edit(text, edit);
+            })?
         else {
             return Ok(false);
         };
@@ -1963,11 +2121,14 @@ impl Document {
     ///
     /// As for [`Document::undo`].
     pub fn redo(&mut self) -> Result<bool, EditError> {
-        let (syntax, log) = (&mut self.syntax, &mut self.edits);
-        let Some(restored) = self.history.redo(&mut self.buffer, &mut |text, edit| {
-            log.note(text, edit);
-            syntax.edit(text, edit);
-        })?
+        let (syntax, log) = (&mut self.doc.syntax, &mut self.doc.edits);
+        let Some(restored) = self
+            .doc
+            .history
+            .redo(&mut self.doc.buffer, &mut |text, edit| {
+                log.note(text, edit);
+                syntax.edit(text, edit);
+            })?
         else {
             return Ok(false);
         };
@@ -1980,14 +2141,14 @@ impl Document {
         self.clamp_selections();
         self.carets.preferred_column = None;
         self.carets.goals.clear();
-        self.version += 1;
+        self.doc.version += 1;
     }
 
     /// Snap every selection to a valid position in the text as it is now
     /// (after undo, or after switching to a saved file), merging any that
     /// now coincide.
     fn clamp_selections(&mut self) {
-        let t = &self.buffer;
+        let t = &self.doc.buffer;
         self.carets.selections.transform(|_, s| Selection {
             anchor: movement::clamp(t, s.anchor),
             head: movement::clamp(t, s.head),
@@ -2005,21 +2166,22 @@ impl Document {
         bias: (Bias, Bias),
     ) -> Result<bool, EditError> {
         let before = self.carets.selections.clone();
-        let mut edits = multi::apply_each(&mut self.buffer, &mut items)?;
+        let mut edits = multi::apply_each(&mut self.doc.buffer, &mut items)?;
         if edits.is_empty() {
             return Ok(false);
         }
-        let (syntax, log, buffer) = (&mut self.syntax, &mut self.edits, &self.buffer);
+        let (syntax, log, buffer) = (&mut self.doc.syntax, &mut self.doc.edits, &self.doc.buffer);
         report_sorted(&mut edits, |edit| {
             log.note(buffer, edit);
             syntax.edit(buffer, edit);
         });
         self.carets.selections.map_through(&edits, bias.0, bias.1);
-        self.history
+        self.doc
+            .history
             .record_batch(edits, &before, &self.carets.selections, Instant::now());
         self.carets.preferred_column = None;
         self.carets.goals.clear();
-        self.version += 1;
+        self.doc.version += 1;
         Ok(true)
     }
 
@@ -2031,7 +2193,7 @@ impl Document {
         self.carets
             .selections
             .iter()
-            .filter_map(|&s| f(&self.buffer, s))
+            .filter_map(|&s| f(&self.doc.buffer, s))
             .collect()
     }
 }
@@ -2040,22 +2202,22 @@ impl Document {
 mod tests {
     use super::*;
 
-    fn doc(text: &str) -> Document {
-        Document::from_text(text)
+    fn doc(text: &str) -> Solo {
+        Solo::from_text(text)
     }
 
-    fn text(d: &Document) -> String {
+    fn text(d: &Solo) -> String {
         d.buffer.slice(0..d.buffer.len_bytes()).into_owned()
     }
 
     #[test]
     fn typing_moves_the_cursor_and_marks_dirty() {
-        let mut d = Document::untitled();
+        let mut d = Solo::of(Document::untitled());
         assert!(!d.is_dirty());
-        d.insert("hé").unwrap();
-        d.insert("llo").unwrap();
+        d.ed().insert("hé").unwrap();
+        d.ed().insert("llo").unwrap();
         assert_eq!(d.buffer.line(0), "héllo");
-        assert_eq!(d.cursor(), 6);
+        assert_eq!(d.ed().cursor(), 6);
         assert!(d.is_dirty());
         assert_eq!(d.version, 2);
     }
@@ -2063,23 +2225,23 @@ mod tests {
     #[test]
     fn undoing_back_to_the_start_is_clean_again() {
         let mut d = doc("abc");
-        d.click(3, false);
-        d.insert("d").unwrap();
+        d.ed().click(3, false);
+        d.ed().insert("d").unwrap();
         assert!(d.is_dirty());
-        d.undo().unwrap();
+        d.ed().undo().unwrap();
         assert!(!d.is_dirty());
-        assert_eq!(d.cursor(), 3, "undo restores the cursor");
+        assert_eq!(d.ed().cursor(), 3, "undo restores the cursor");
     }
 
     #[test]
     fn enter_uses_the_line_ending_and_keeps_indentation() {
         let mut d = doc("\t  foo");
         d.line_ending = LineEnding::CrLf;
-        d.click(6, false);
-        d.insert_newline().unwrap();
+        d.ed().click(6, false);
+        d.ed().insert_newline().unwrap();
         assert_eq!(text(&d), "\t  foo\r\n\t  ");
-        d.click(1, false);
-        d.insert_newline().unwrap();
+        d.ed().click(1, false);
+        d.ed().insert_newline().unwrap();
         assert_eq!(
             text(&d),
             "\t\r\n\t  foo\r\n\t  ",
@@ -2090,22 +2252,22 @@ mod tests {
     #[test]
     fn typing_replaces_a_selection() {
         let mut d = doc("hello world");
-        d.select(6..11);
-        d.insert("there").unwrap();
+        d.ed().select(6..11);
+        d.ed().insert("there").unwrap();
         assert_eq!(d.buffer.line(0), "hello there");
     }
 
     #[test]
     fn shift_movement_extends_and_plain_left_right_collapse() {
         let mut d = doc("abcdef");
-        d.click(1, false);
-        d.move_cursor(Motion::Right, true, 4, 10);
-        d.move_cursor(Motion::Right, true, 4, 10);
-        assert_eq!(d.selection().range(), 1..3);
-        assert_eq!(d.selected_text().as_deref(), Some("bc"));
-        d.move_cursor(Motion::Left, false, 4, 10);
+        d.ed().click(1, false);
+        d.ed().move_cursor(Motion::Right, true, 4, 10);
+        d.ed().move_cursor(Motion::Right, true, 4, 10);
+        assert_eq!(d.ed().selection().range(), 1..3);
+        assert_eq!(d.ed().selected_text().as_deref(), Some("bc"));
+        d.ed().move_cursor(Motion::Left, false, 4, 10);
         assert_eq!(
-            d.selection(),
+            d.ed().selection(),
             Selection::cursor(1),
             "collapses to the start"
         );
@@ -2115,10 +2277,10 @@ mod tests {
     fn paste_converts_line_endings_and_is_one_step() {
         let mut d = doc("");
         d.line_ending = LineEnding::CrLf;
-        d.insert("x").unwrap();
-        d.paste("a\nb\r\nc").unwrap();
+        d.ed().insert("x").unwrap();
+        d.ed().paste("a\nb\r\nc").unwrap();
         assert_eq!(text(&d), "xa\r\nb\r\nc");
-        d.undo().unwrap();
+        d.ed().undo().unwrap();
         assert_eq!(text(&d), "x");
     }
 
@@ -2129,18 +2291,18 @@ mod tests {
             width: 4,
             tabs: true,
         };
-        d.select(0..7);
-        assert!(d.indent_lines().unwrap());
+        d.ed().select(0..7);
+        assert!(d.ed().indent_lines().unwrap());
         assert_eq!(text(&d), "\ta\n\t    b\nc");
-        d.outdent_lines().unwrap();
+        d.ed().outdent_lines().unwrap();
         assert_eq!(text(&d), "a\n    b\nc");
-        d.outdent_lines().unwrap();
+        d.ed().outdent_lines().unwrap();
         assert_eq!(text(&d), "a\nb\nc");
-        d.undo().unwrap();
+        d.ed().undo().unwrap();
         assert_eq!(text(&d), "a\n    b\nc");
-        d.click(0, false);
+        d.ed().click(0, false);
         assert!(
-            !d.indent_lines().unwrap(),
+            !d.ed().indent_lines().unwrap(),
             "single line: caller types a tab"
         );
     }
@@ -2149,50 +2311,50 @@ mod tests {
     fn replace_many_is_one_step_with_cursor_after_the_last() {
         let mut d = doc("a-b-c");
         let items = [(1..2, "--".to_owned()), (3..4, "--".to_owned())];
-        assert_eq!(d.replace_many(&items).unwrap(), 2);
+        assert_eq!(d.ed().replace_many(&items).unwrap(), 2);
         assert_eq!(text(&d), "a--b--c");
-        assert_eq!(d.cursor(), 6);
-        d.undo().unwrap();
+        assert_eq!(d.ed().cursor(), 6);
+        d.ed().undo().unwrap();
         assert_eq!(text(&d), "a-b-c");
     }
 
     #[test]
     fn backspace_removes_whole_graphemes_and_crlf() {
         let mut d = doc("ab\r\ne\u{301}");
-        d.move_cursor(Motion::DocEnd, false, 4, 10);
-        d.delete_back().unwrap();
+        d.ed().move_cursor(Motion::DocEnd, false, 4, 10);
+        d.ed().delete_back().unwrap();
         assert_eq!(text(&d), "ab\r\n");
-        d.delete_back().unwrap();
+        d.ed().delete_back().unwrap();
         assert_eq!(text(&d), "ab");
-        d.move_cursor(Motion::DocStart, false, 4, 10);
-        assert!(!d.delete_back().unwrap());
+        d.ed().move_cursor(Motion::DocStart, false, 4, 10);
+        assert!(!d.ed().delete_back().unwrap());
     }
 
     #[test]
     fn vertical_moves_keep_the_column_and_others_reset_it() {
         let mut d = doc("abcdef\nab\nabcdef");
-        d.click(5, false);
-        d.move_cursor(Motion::Down, false, 4, 10);
-        assert_eq!(d.cursor(), 9);
-        d.move_cursor(Motion::Down, false, 4, 10);
-        assert_eq!(d.cursor(), 15);
-        d.move_cursor(Motion::Left, false, 4, 10);
+        d.ed().click(5, false);
+        d.ed().move_cursor(Motion::Down, false, 4, 10);
+        assert_eq!(d.ed().cursor(), 9);
+        d.ed().move_cursor(Motion::Down, false, 4, 10);
+        assert_eq!(d.ed().cursor(), 15);
+        d.ed().move_cursor(Motion::Left, false, 4, 10);
         assert_eq!(d.carets.preferred_column, None);
     }
 
     #[test]
     fn click_snaps_inside_characters() {
         let mut d = doc("é\r\nx");
-        d.click(1, false);
-        assert_eq!(d.cursor(), 0);
-        d.click(3, false);
-        assert_eq!(d.cursor(), 2);
+        d.ed().click(1, false);
+        assert_eq!(d.ed().cursor(), 0);
+        d.ed().click(3, false);
+        assert_eq!(d.ed().cursor(), 2);
     }
 
     #[test]
     fn untitled_save_fails_and_stays_dirty() {
-        let mut d = Document::untitled();
-        d.insert("x").unwrap();
+        let mut d = Solo::of(Document::untitled());
+        d.ed().insert("x").unwrap();
         assert!(d.save().is_err());
         assert!(d.is_dirty());
         assert_eq!(d.display_name(), "untitled");
@@ -2201,17 +2363,17 @@ mod tests {
     #[test]
     fn delete_word_and_to_line_start() {
         let mut d = doc("let foo_bar = 1;");
-        d.move_cursor(Motion::DocEnd, false, 4, 10);
-        d.delete_to(Motion::WordLeft).unwrap();
+        d.ed().move_cursor(Motion::DocEnd, false, 4, 10);
+        d.ed().delete_to(Motion::WordLeft).unwrap();
         assert_eq!(text(&d), "let foo_bar = 1");
-        d.click(11, false);
-        d.delete_to(Motion::WordLeft).unwrap();
+        d.ed().click(11, false);
+        d.ed().delete_to(Motion::WordLeft).unwrap();
         assert_eq!(text(&d), "let  = 1");
-        d.click(4, false);
-        d.delete_to(Motion::LineStart).unwrap();
+        d.ed().click(4, false);
+        d.ed().delete_to(Motion::LineStart).unwrap();
         assert_eq!(text(&d), " = 1");
-        d.click(0, false);
-        d.delete_to(Motion::WordRight).unwrap();
+        d.ed().click(0, false);
+        d.ed().delete_to(Motion::WordRight).unwrap();
         assert_eq!(text(&d), " 1");
     }
 
@@ -2223,34 +2385,54 @@ mod tests {
         let path = dir.join("a.txt");
         std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
         let langs = Languages::default();
-        let mut d = Document::open(&path).unwrap();
-        d.set_selection(Selection::cursor(6)); // line 1, column 2
-        assert_eq!(d.disk_changed(&langs), DiskChange::None, "nothing changed");
+        let mut d = Solo::of(Document::open(&path).unwrap());
+        d.ed().set_selection(Selection::cursor(6)); // line 1, column 2
+        assert_eq!(
+            d.doc.disk_changed(&langs, &mut [&mut d.carets]),
+            DiskChange::None,
+            "nothing changed"
+        );
 
         // Changed outside, nothing unsaved: reloads, cursor on its line.
         std::fs::write(&path, "ONE\nTWO!\nTHREE\nFOUR\n").unwrap();
-        assert_eq!(d.disk_changed(&langs), DiskChange::Reloaded);
+        assert_eq!(
+            d.doc.disk_changed(&langs, &mut [&mut d.carets]),
+            DiskChange::Reloaded
+        );
         assert_eq!(d.buffer.line(1), "TWO!");
-        assert_eq!(d.cursor(), 4 + 2);
+        assert_eq!(d.ed().cursor(), 4 + 2);
         assert!(!d.is_dirty() && !d.history.can_undo());
 
         // Our own save is not a change.
-        d.insert("x").unwrap();
+        d.ed().insert("x").unwrap();
         d.save().unwrap();
-        assert_eq!(d.disk_changed(&langs), DiskChange::None);
+        assert_eq!(
+            d.doc.disk_changed(&langs, &mut [&mut d.carets]),
+            DiskChange::None
+        );
 
         // Unsaved edits here: a conflict, until kept.
-        d.insert("y").unwrap();
+        d.ed().insert("y").unwrap();
         std::fs::write(&path, "theirs, a longer text\n").unwrap();
-        assert_eq!(d.disk_changed(&langs), DiskChange::Conflict);
+        assert_eq!(
+            d.doc.disk_changed(&langs, &mut [&mut d.carets]),
+            DiskChange::Conflict
+        );
         assert!(d.conflict && d.is_dirty());
         d.keep_mine();
         assert!(!d.conflict);
-        assert_eq!(d.disk_changed(&langs), DiskChange::None, "asked once");
+        assert_eq!(
+            d.doc.disk_changed(&langs, &mut [&mut d.carets]),
+            DiskChange::None,
+            "asked once"
+        );
 
         // Deleted, then recreated by saving.
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(d.disk_changed(&langs), DiskChange::Deleted);
+        assert_eq!(
+            d.doc.disk_changed(&langs, &mut [&mut d.carets]),
+            DiskChange::Deleted
+        );
         assert!(d.deleted);
         d.save().unwrap();
         assert!(!d.deleted && path.exists());
@@ -2277,7 +2459,7 @@ mod tests {
         }
     }
 
-    fn raw(d: &Document) -> Vec<u8> {
+    fn raw(d: &Solo) -> Vec<u8> {
         let mut out = Vec::new();
         d.buffer
             .read_into(0..d.buffer.len_bytes(), &mut out)
@@ -2298,15 +2480,15 @@ mod tests {
         // Not UTF-8, so it opens mapped although it is tiny.
         let original = b"fn main() {}\n// \xff\n";
         std::fs::write(&path, original).unwrap();
-        let mut d = Document::open_mapped(&path).unwrap();
+        let mut d = Solo::of(Document::open_mapped(&path).unwrap());
         assert!(d.buffer.is_mapped());
         assert_eq!(raw(&d), original);
         d.detect_language(&Languages::default());
         assert!(d.syntax.lexical().is_some(), "small, but never parsed");
-        assert!(d.syntax.take_job(&d.buffer).is_none());
+        assert!(d.doc.syntax.take_job(&d.doc.buffer).is_none());
 
         // Saving on this thread is refused (crate::saver tests the rest).
-        d.insert("x").unwrap();
+        d.ed().insert("x").unwrap();
         let err = d.save().unwrap_err();
         assert!(err.to_string().contains("worker"), "{err}");
         assert!(d.is_dirty());
@@ -2316,25 +2498,37 @@ mod tests {
         // refused.
         let job = d.begin_save(ReplacePolicy::default()).unwrap();
         append(&path, b"more\n");
-        assert_eq!(d.disk_changed(&Languages::default()), DiskChange::None);
-        assert!(d.reload(&Languages::default()).is_err());
+        assert_eq!(
+            d.doc
+                .disk_changed(&Languages::default(), &mut [&mut d.carets]),
+            DiskChange::None
+        );
+        assert!(
+            d.doc
+                .reload(&Languages::default(), &mut [&mut d.carets])
+                .is_err()
+        );
         let token = job.token;
         let step = d.save_written(token, job.run(|_, _| {}), Instant::now());
         assert!(matches!(step, SaveStep::Saved), "{step:?}");
         assert_eq!(std::fs::read(&path).unwrap(), b"xfn main() {}\n// \xff\n");
-        assert_eq!(d.disk_changed(&Languages::default()), DiskChange::None);
+        assert_eq!(
+            d.doc
+                .disk_changed(&Languages::default(), &mut [&mut d.carets]),
+            DiskChange::None
+        );
     }
 
     #[test]
     fn copy_refuses_huge_selections() {
-        let mut d = Document {
+        let mut d = Solo::of(Document {
             buffer: nimbus_core::MappedBuffer::from_bytes(vec![b'x'; MAX_COPY_BYTES + 1]).into(),
             ..Document::default()
-        };
-        d.select_all();
-        assert_eq!(d.selected_text(), None);
-        d.select(0..3);
-        assert_eq!(d.selected_text().as_deref(), Some("xxx"));
+        });
+        d.ed().select_all();
+        assert_eq!(d.ed().selected_text(), None);
+        d.ed().select(0..3);
+        assert_eq!(d.ed().selected_text().as_deref(), Some("xxx"));
     }
 
     #[test]
@@ -2343,49 +2537,62 @@ mod tests {
         let path = dir.0.join("app.log");
         std::fs::write(&path, b"one \xff\ntwo\n").unwrap();
         let langs = Languages::default();
-        let mut d = Document::open_mapped(&path).unwrap();
+        let mut d = Solo::of(Document::open_mapped(&path).unwrap());
         assert!(d.buffer.is_mapped());
 
         // A growing log: marked as changed, never reloaded, said once.
         append(&path, b"three\n");
-        assert_eq!(d.disk_changed(&langs), DiskChange::NotReloaded);
+        assert_eq!(
+            d.doc.disk_changed(&langs, &mut [&mut d.carets]),
+            DiskChange::NotReloaded
+        );
         assert!(d.conflict && !d.is_dirty());
         assert_eq!(raw(&d), b"one \xff\ntwo\n");
         append(&path, b"four\n");
-        assert_eq!(d.disk_changed(&langs), DiskChange::None);
-        d.insert("x").unwrap();
+        assert_eq!(
+            d.doc.disk_changed(&langs, &mut [&mut d.carets]),
+            DiskChange::None
+        );
+        d.ed().insert("x").unwrap();
         append(&path, b"five\n");
-        assert_eq!(d.disk_changed(&langs), DiskChange::None, "still said once");
+        assert_eq!(
+            d.doc.disk_changed(&langs, &mut [&mut d.carets]),
+            DiskChange::None,
+            "still said once"
+        );
 
         // Reloading by hand maps the longer file.
-        d.reload(&langs).unwrap();
+        d.doc.reload(&langs, &mut [&mut d.carets]).unwrap();
         assert!(!d.conflict && !d.is_dirty());
         assert_eq!(raw(&d), b"one \xff\ntwo\nthree\nfour\nfive\n");
         append(&path, b"six\n");
-        d.insert("y").unwrap();
-        assert_eq!(d.disk_changed(&langs), DiskChange::Conflict);
+        d.ed().insert("y").unwrap();
+        assert_eq!(
+            d.doc.disk_changed(&langs, &mut [&mut d.carets]),
+            DiskChange::Conflict
+        );
 
         // Windows refuses to truncate a mapped file, so the rest is Unix.
         #[cfg(unix)]
         {
             // Cut short with nothing unsaved: re-mapped at once, the cursor
             // kept at its byte offset where it still exists.
-            d.reload(&langs).unwrap();
-            d.click(5, false);
+            d.doc.reload(&langs, &mut [&mut d.carets]).unwrap();
+            d.ed().click(5, false);
             std::fs::write(&path, b"on\xff").unwrap();
             assert_eq!(
-                d.disk_changed(&langs),
+                d.doc.disk_changed(&langs, &mut [&mut d.carets]),
                 DiskChange::Truncated { reloaded: true }
             );
             assert_eq!(raw(&d), b"on\xff");
-            assert_eq!(d.cursor(), 3);
+            assert_eq!(d.ed().cursor(), 3);
             assert!(!d.conflict);
 
             // With unsaved edits it must wait for the user.
-            d.insert("z").unwrap();
+            d.ed().insert("z").unwrap();
             std::fs::write(&path, b"o").unwrap();
             assert_eq!(
-                d.disk_changed(&langs),
+                d.doc.disk_changed(&langs, &mut [&mut d.carets]),
                 DiskChange::Truncated { reloaded: false }
             );
             assert!(d.conflict && d.is_dirty());
@@ -2397,21 +2604,21 @@ mod tests {
         let dir = TempDir::new("bytes-save");
         let path = dir.0.join("latin1.txt");
         std::fs::write(&path, b"caf\xe9\n").unwrap();
-        let mut d = Document::open(&path).unwrap();
+        let mut d = Solo::of(Document::open(&path).unwrap());
         assert!(d.buffer.is_mapped() && !d.saves_on_worker());
-        d.click(0, false);
-        d.insert("le ").unwrap();
+        d.ed().click(0, false);
+        d.ed().insert("le ").unwrap();
         d.save().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"le caf\xe9\n");
         assert!(!d.is_dirty());
     }
 
-    fn cursors(d: &mut Document, at: &[usize]) {
+    fn cursors(d: &mut Solo, at: &[usize]) {
         let sels = at.iter().map(|&p| Selection::cursor(p)).collect();
         d.carets.selections = Selections::from_vec(sels, 0);
     }
 
-    fn heads(d: &Document) -> Vec<usize> {
+    fn heads(d: &Solo) -> Vec<usize> {
         d.carets.selections.iter().map(|s| s.head).collect()
     }
 
@@ -2420,19 +2627,19 @@ mod tests {
         let mut d = doc("ab\ncd\nef");
         cursors(&mut d, &[2, 5, 8]);
         let start = d.carets.selections.clone();
-        d.insert("x").unwrap();
-        d.insert("y").unwrap();
+        d.ed().insert("x").unwrap();
+        d.ed().insert("y").unwrap();
         assert_eq!(text(&d), "abxy\ncdxy\nefxy");
         assert_eq!(heads(&d), [4, 9, 14]);
-        d.delete_back().unwrap();
+        d.ed().delete_back().unwrap();
         assert_eq!(text(&d), "abx\ncdx\nefx");
         // Typing then deleting: two steps. Undo restores every cursor.
-        d.undo().unwrap();
+        d.ed().undo().unwrap();
         assert_eq!(text(&d), "abxy\ncdxy\nefxy");
-        d.undo().unwrap();
+        d.ed().undo().unwrap();
         assert_eq!(text(&d), "ab\ncd\nef");
         assert_eq!(d.carets.selections, start);
-        d.redo().unwrap();
+        d.ed().redo().unwrap();
         assert_eq!(heads(&d), [4, 9, 14]);
     }
 
@@ -2440,7 +2647,7 @@ mod tests {
     fn enter_indents_each_line_from_its_own_indentation() {
         let mut d = doc("a\n\tb\n    c");
         cursors(&mut d, &[1, 4, 10]);
-        d.insert_newline().unwrap();
+        d.ed().insert_newline().unwrap();
         assert_eq!(text(&d), "a\n\n\tb\n\t\n    c\n    ");
     }
 
@@ -2448,12 +2655,12 @@ mod tests {
     fn paste_gives_each_cursor_its_line_when_the_counts_match() {
         let mut d = doc("a\nb\nc");
         cursors(&mut d, &[1, 3, 5]);
-        d.paste("1\n2\n3\n").unwrap();
+        d.ed().paste("1\n2\n3\n").unwrap();
         assert_eq!(text(&d), "a1\nb2\nc3");
         // Otherwise the whole text at each.
         let mut d = doc("a\nb");
         cursors(&mut d, &[1, 3]);
-        d.paste("x\ny\nz").unwrap();
+        d.ed().paste("x\ny\nz").unwrap();
         assert_eq!(text(&d), "ax\ny\nz\nbx\ny\nz");
     }
 
@@ -2474,12 +2681,12 @@ mod tests {
             ],
             0,
         );
-        assert!(d.indent_lines().unwrap());
+        assert!(d.ed().indent_lines().unwrap());
         assert_eq!(text(&d), "\tone\n\ttwo\n\tthree\n");
-        d.outdent_lines().unwrap();
+        d.ed().outdent_lines().unwrap();
         assert_eq!(text(&d), "one\ntwo\nthree\n");
-        d.undo().unwrap();
-        d.undo().unwrap();
+        d.ed().undo().unwrap();
+        d.ed().undo().unwrap();
         assert_eq!(text(&d), "one\ntwo\nthree\n");
     }
 
@@ -2489,15 +2696,15 @@ mod tests {
         // short, line 3 long again.
         let mut d = doc("abcdef\nxyz\nq\nlonglong\nlonglong");
         cursors(&mut d, &[4, 8]);
-        d.move_cursor(Motion::Down, false, 4, 10);
+        d.ed().move_cursor(Motion::Down, false, 4, 10);
         // Line 1 has 3 columns: the first cursor stops at its end (col 3).
         assert_eq!(heads(&d), [10, 12]);
-        d.move_cursor(Motion::Down, false, 4, 10);
-        d.move_cursor(Motion::Down, false, 4, 10);
+        d.ed().move_cursor(Motion::Down, false, 4, 10);
+        d.ed().move_cursor(Motion::Down, false, 4, 10);
         // Back at their own columns on the long lines: 4 and 1.
         assert_eq!(heads(&d), [17, 23]);
         // Moving to the line start merges cursors that meet.
-        d.move_cursor(Motion::DocStart, false, 4, 10);
+        d.ed().move_cursor(Motion::DocStart, false, 4, 10);
         assert_eq!(heads(&d), [0]);
     }
 
@@ -2507,11 +2714,11 @@ mod tests {
         // then undo: the next Down aims from where undo put them.
         let mut d = doc("abcdef\nabcdef\nabcdef\nabcdef");
         cursors(&mut d, &[4, 8]);
-        d.insert("x").unwrap();
-        d.move_cursor(Motion::Down, false, 4, 10);
-        d.undo().unwrap();
+        d.ed().insert("x").unwrap();
+        d.ed().move_cursor(Motion::Down, false, 4, 10);
+        d.ed().undo().unwrap();
         assert_eq!(heads(&d), [4, 8]);
-        d.move_cursor(Motion::Down, false, 4, 10);
+        d.ed().move_cursor(Motion::Down, false, 4, 10);
         assert_eq!(heads(&d), [11, 15], "columns 4 and 1 of the next lines");
     }
 
@@ -2521,13 +2728,13 @@ mod tests {
         let mut d = doc("abcdef\nab\nabcdef\n\tx yz\nabcdef");
         // Cursors in column 1 down four lines; column 1 on the tab line is
         // nearer the tab's start, so that cursor is before it.
-        d.column_select((0, 1), (17, 1), 4);
+        d.ed().column_select((0, 1), (17, 1), 4);
         assert_eq!(heads(&d), [1, 8, 11, 17]);
-        assert_eq!(d.selection().head, 17, "the pointer's line is primary");
+        assert_eq!(d.ed().selection().head, 17, "the pointer's line is primary");
         // Columns 3 to 5: "ab" is too short and gets nothing. A column
         // inside a tab goes to the tab's nearer edge: column 3 is nearer
         // its end (column 4), so that line's selection is just "x".
-        d.column_select((0, 3), (17, 5), 4);
+        d.ed().column_select((0, 3), (17, 5), 4);
         assert_eq!(
             d.carets
                 .selections
@@ -2537,17 +2744,17 @@ mod tests {
             [3..5, 13..15, 18..19]
         );
         // Dragged upwards: the same lines, the pointer's line primary.
-        d.column_select((23, 2), (7, 2), 4);
+        d.ed().column_select((23, 2), (7, 2), 4);
         assert_eq!(heads(&d), [9, 12, 17, 25]);
-        assert_eq!(d.selection().head, 9);
+        assert_eq!(d.ed().selection().head, 9);
         // Any byte of a line names it.
-        d.column_select((3, 0), (8, 0), 4);
+        d.ed().column_select((3, 0), (8, 0), 4);
         assert_eq!(heads(&d), [0, 7]);
         // Typing then goes to every line.
-        d.insert("> ").unwrap();
+        d.ed().insert("> ").unwrap();
         assert_eq!(text(&d), "> abcdef\n> ab\nabcdef\n\tx yz\nabcdef");
         // Past every line's end: a cursor at the end of the pointer's line.
-        d.column_select((0, 40), (11, 40), 4);
+        d.ed().column_select((0, 40), (11, 40), 4);
         assert_eq!(d.carets.selections.count(), 1);
     }
 
@@ -2565,16 +2772,16 @@ mod tests {
             ],
             0,
         );
-        assert_eq!(d.selected_text().as_deref(), Some("one\n\nthree"));
-        assert_eq!(d.selected_len(), 8);
+        assert_eq!(d.ed().selected_text().as_deref(), Some("one\n\nthree"));
+        assert_eq!(d.ed().selected_len(), 8);
         // Shift+Right extends each; Right collapses each to its end.
-        d.move_cursor(Motion::Right, true, 4, 10);
+        d.ed().move_cursor(Motion::Right, true, 4, 10);
         assert_eq!(heads(&d), [4, 6, 13]);
-        d.move_cursor(Motion::Right, false, 4, 10);
+        d.ed().move_cursor(Motion::Right, false, 4, 10);
         assert_eq!(heads(&d), [4, 6, 13]);
     }
 
-    fn ranges(d: &Document) -> Vec<Range<usize>> {
+    fn ranges(d: &Solo) -> Vec<Range<usize>> {
         d.carets.selections.iter().map(Selection::range).collect()
     }
 
@@ -2582,60 +2789,63 @@ mod tests {
     fn primary_d_selects_the_word_then_adds_each_next_occurrence() {
         // Cursor inside the second "foo"; occurrences at 0, 8 and 16.
         let mut d = doc("foo bar foo baz foo");
-        d.click(9, false);
-        assert_eq!(d.add_next_occurrence(), Occurrence::SelectedWord);
+        d.ed().click(9, false);
+        assert_eq!(d.ed().add_next_occurrence(), Occurrence::SelectedWord);
         assert_eq!(
-            (d.carets.selections.count(), d.selection().range()),
+            (d.carets.selections.count(), d.ed().selection().range()),
             (1, 8..11)
         );
         // The next one after it, then wrapping round to the first.
-        assert_eq!(d.add_next_occurrence(), Occurrence::Added);
+        assert_eq!(d.ed().add_next_occurrence(), Occurrence::Added);
         assert_eq!(ranges(&d), [8..11, 16..19]);
-        assert_eq!(d.selection().range(), 16..19, "the newest is primary");
-        assert_eq!(d.add_next_occurrence(), Occurrence::Added);
+        assert_eq!(d.ed().selection().range(), 16..19, "the newest is primary");
+        assert_eq!(d.ed().add_next_occurrence(), Occurrence::Added);
         assert_eq!(ranges(&d), [0..3, 8..11, 16..19]);
-        assert_eq!(d.add_next_occurrence(), Occurrence::AllSelected);
+        assert_eq!(d.ed().add_next_occurrence(), Occurrence::AllSelected);
         // Typing replaces all three.
-        d.insert("x").unwrap();
+        d.ed().insert("x").unwrap();
         assert_eq!(text(&d), "x bar x baz x");
         // Escape keeps the primary.
-        assert!(d.collapse_cursors());
+        assert!(d.ed().collapse_cursors());
         assert_eq!(heads(&d), [1]);
-        assert!(!d.collapse_cursors());
+        assert!(!d.ed().collapse_cursors());
 
         let mut d = doc("a  b");
-        d.click(2, false);
-        assert_eq!(d.add_next_occurrence(), Occurrence::NoWord);
-        d.select(0..1);
-        assert_eq!(d.add_next_occurrence(), Occurrence::NotFound);
+        d.ed().click(2, false);
+        assert_eq!(d.ed().add_next_occurrence(), Occurrence::NoWord);
+        d.ed().select(0..1);
+        assert_eq!(d.ed().add_next_occurrence(), Occurrence::NotFound);
     }
 
     #[test]
     fn alt_click_adds_and_removes_cursors_and_cursors_go_above_and_below() {
         let mut d = doc("one\ntwo\nthree");
-        d.click(1, false);
-        assert!(d.click_add(5));
+        d.ed().click(1, false);
+        assert!(d.ed().click_add(5));
         assert_eq!(heads(&d), [1, 5]);
-        assert!(!d.click_add(1), "a removal is not dragged");
+        assert!(!d.ed().click_add(1), "a removal is not dragged");
         assert_eq!(heads(&d), [5], "clicking a cursor removes it");
-        assert!(!d.click_add(5));
+        assert!(!d.ed().click_add(5));
         assert_eq!(heads(&d), [5], "but never the last one");
-        d.select(0..4);
-        assert!(!d.click_add(2), "inside a selection: merged, not dragged");
-        d.click(5, false);
-        d.drag_added(5, 7);
+        d.ed().select(0..4);
+        assert!(
+            !d.ed().click_add(2),
+            "inside a selection: merged, not dragged"
+        );
+        d.ed().click(5, false);
+        d.ed().drag_added(5, 7);
         assert_eq!(
-            (d.carets.selections.count(), d.selection().range()),
+            (d.carets.selections.count(), d.ed().selection().range()),
             (1, 5..7)
         );
 
-        d.click(5, false);
-        d.add_cursor_vertical(1, 4);
-        d.add_cursor_vertical(-1, 4);
+        d.ed().click(5, false);
+        d.ed().add_cursor_vertical(1, 4);
+        d.ed().add_cursor_vertical(-1, 4);
         assert_eq!(heads(&d), [1, 5, 9]);
-        d.add_cursor_vertical(-1, 4);
+        d.ed().add_cursor_vertical(-1, 4);
         assert_eq!(heads(&d), [1, 5, 9], "nothing above the first line");
-        d.add_cursor_vertical(1, 4);
+        d.ed().add_cursor_vertical(1, 4);
         assert_eq!(heads(&d), [1, 5, 9], "nor below the last");
     }
 
@@ -2646,15 +2856,15 @@ mod tests {
             vec![Selection { anchor: 0, head: 1 }, Selection::cursor(6)],
             0,
         );
-        let copied = d.selected_text().unwrap();
+        let copied = d.ed().selected_text().unwrap();
         assert_eq!(copied, "a\n");
-        d.paste(&copied).unwrap();
+        d.ed().paste(&copied).unwrap();
         // The first cursor's "a" replaces "a"; the second gets "".
         assert_eq!(text(&d), "abc\nxyz");
         // From elsewhere, with a trailing line break: still one each.
         d.carets.selections =
             Selections::from_vec(vec![Selection::cursor(0), Selection::cursor(4)], 0);
-        d.paste("1\n2\n").unwrap();
+        d.ed().paste("1\n2\n").unwrap();
         assert_eq!(text(&d), "1abc\n2xyz");
     }
 
@@ -2665,27 +2875,27 @@ mod tests {
             vec![Selection { anchor: 0, head: 3 }, Selection::cursor(5)],
             0,
         );
-        assert!(d.delete_selections().unwrap());
+        assert!(d.ed().delete_selections().unwrap());
         assert_eq!(text(&d), " def");
     }
 
     #[test]
     fn replace_many_on_a_mapped_document_is_one_pass_and_undoes() {
         let text = "ab\n".repeat(100_000);
-        let mut d = Document {
+        let mut d = Solo::of(Document {
             buffer: nimbus_core::MappedBuffer::from_bytes(text.clone().into_bytes()).into(),
             ..Document::default()
-        };
+        });
         let items: Vec<(Range<usize>, String)> = (0..100_000)
             .map(|i| (3 * i..3 * i + 1, "X".to_owned()))
             .collect();
         let started = Instant::now();
-        assert_eq!(d.replace_many(&items).unwrap(), 100_000);
+        assert_eq!(d.ed().replace_many(&items).unwrap(), 100_000);
         assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
         assert_eq!(d.buffer.slice(0..6), "Xb\nXb\n");
-        d.undo().unwrap();
+        d.ed().undo().unwrap();
         assert_eq!(d.buffer.slice(0..d.buffer.len_bytes()), text);
-        d.redo().unwrap();
+        d.ed().redo().unwrap();
         assert_eq!(d.buffer.slice(0..6), "Xb\nXb\n");
         assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
     }

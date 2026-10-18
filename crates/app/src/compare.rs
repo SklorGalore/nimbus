@@ -37,7 +37,7 @@ use nimbus_core::{Buffer, Snapshot, Text};
 use nimbus_render::Gpu;
 
 use crate::columns::{Click, Columns, Live};
-use crate::document::Document;
+use crate::document::{Carets, Document};
 use crate::theme::Theme;
 use crate::view::{Layout, Preedit, View};
 
@@ -115,6 +115,8 @@ pub struct Compare {
     pub other: Document,
     /// Its view: the highlight cache and horizontal scroll.
     pub other_view: View,
+    /// The other side's cursors, which stay at the start.
+    still: Carets,
     /// What the left side is.
     pub what: Other,
     state: State,
@@ -150,6 +152,7 @@ impl Compare {
         let mut c = Self {
             other,
             other_view: View::default(),
+            still: Carets::default(),
             what,
             state: State::Pending,
             generation: 0,
@@ -344,24 +347,30 @@ impl Compare {
     }
 
     /// Keep the right side's cursor on screen, opening a fold it is in.
-    pub fn ensure_cursor_visible(&mut self, doc: &Document, layout: &Layout) {
-        let line = doc.buffer.byte_to_line(doc.cursor());
+    pub fn ensure_cursor_visible(&mut self, doc: &Document, cursor: usize, layout: &Layout) {
+        let line = doc.buffer.byte_to_line(cursor);
         self.columns.ensure_line_visible(line, layout);
     }
 
     /// Go to the next change after the cursor (or the current one).
     /// Returns the byte to put the cursor at.
-    pub fn next_change(&mut self, doc: &Document, layout: &Layout) -> Option<usize> {
-        self.step(true, doc, layout)
+    pub fn next_change(&mut self, doc: &Document, cursor: usize, layout: &Layout) -> Option<usize> {
+        self.step(true, doc, cursor, layout)
     }
 
     /// Go to the change before the cursor.
-    pub fn prev_change(&mut self, doc: &Document, layout: &Layout) -> Option<usize> {
-        self.step(false, doc, layout)
+    pub fn prev_change(&mut self, doc: &Document, cursor: usize, layout: &Layout) -> Option<usize> {
+        self.step(false, doc, cursor, layout)
     }
 
-    fn step(&mut self, forward: bool, doc: &Document, layout: &Layout) -> Option<usize> {
-        let line = doc.buffer.byte_to_line(doc.cursor());
+    fn step(
+        &mut self,
+        forward: bool,
+        doc: &Document,
+        cursor: usize,
+        layout: &Layout,
+    ) -> Option<usize> {
+        let line = doc.buffer.byte_to_line(cursor);
         let start = self.columns.step_change(forward, line, layout)?;
         // The cursor goes to the change's first line on the right, or to
         // the line after a pure removal; at the very end, the last line.
@@ -481,6 +490,7 @@ impl Compare {
         gpu: &mut Gpu,
         layout: &Layout,
         doc: &Document,
+        carets: &Carets,
         view: &mut View,
         theme: &mut Theme,
         tab_width: usize,
@@ -498,7 +508,7 @@ impl Compare {
         self.columns.draw(
             gpu,
             layout,
-            &[&self.other, doc],
+            &[(&self.other, &self.still), (doc, carets)],
             &mut [&mut self.other_view, view],
             &live,
             theme,
@@ -566,16 +576,17 @@ fn word_marks(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::document::Solo;
 
     #[test]
     fn word_marks_trim_common_ends() {
-        let a = Document::from_text("let x = compute(1, 2);\n");
-        let b = Document::from_text("let x = compute(1, 3);\n");
+        let a = Solo::from_text("let x = compute(1, 2);\n");
+        let b = Solo::from_text("let x = compute(1, 3);\n");
         let (ma, mb) = word_marks(&a.buffer, 0, &b.buffer, 0);
         assert_eq!(ma, Some(19..20));
         assert_eq!(mb, Some(19..20));
-        let a = Document::from_text("é\n");
-        let b = Document::from_text("ê\n");
+        let a = Solo::from_text("é\n");
+        let b = Solo::from_text("ê\n");
         let (ma, _) = word_marks(&a.buffer, 0, &b.buffer, 0);
         assert_eq!(ma, Some(0..2), "widened to the character");
     }
@@ -631,7 +642,7 @@ pub(crate) mod tests {
         let Some((old, new)) = bench_pair() else {
             return;
         };
-        let mut doc = Document::open(&new).unwrap();
+        let mut doc = Solo::of(Document::open(&new).unwrap());
         let other = Document::open(&old).unwrap();
         let t = std::time::Instant::now();
         let mut c = Compare::start_sync(&mut doc, other, Other::File(old));
@@ -647,9 +658,9 @@ pub(crate) mod tests {
         let mut samples = Vec::new();
         for (i, at) in type_at(len).enumerate() {
             let ch = if i % 7 == 6 { "\n" } else { "x" };
-            doc.click(at, false);
+            doc.ed().click(at, false);
             let t = std::time::Instant::now();
-            doc.insert(ch).unwrap();
+            doc.ed().insert(ch).unwrap();
             c.sync(&mut doc);
             c.plan(&doc, &layout, &theme);
             samples.push(t.elapsed());
@@ -670,25 +681,28 @@ pub(crate) mod tests {
 
     #[test]
     fn a_compare_follows_edits_and_counts_changes() {
-        let mut doc = Document::from_text("a\nb\nc\nd\n");
+        let mut doc = Solo::from_text("a\nb\nc\nd\n");
         let other = Document::from_text("a\nB\nc\nd\n");
         let mut c = Compare::start_sync(&mut doc, other, Other::Saved);
         assert_eq!(c.columns.rows.changes(), 1);
         assert!(c.status("").starts_with("Compare with saved · 1 change"));
         // Type on the last line: a second change appears after a sync.
-        doc.click(6, false);
-        doc.insert("X").unwrap();
+        doc.ed().click(6, false);
+        doc.ed().insert("X").unwrap();
         c.sync(&mut doc);
         assert_eq!(c.columns.rows.changes(), 2, "{:?}", c.hunks());
         assert!(c.status("Ln 1").contains("2 changes · Ln 1"));
         // Undo brings it back to one.
-        doc.undo().unwrap();
+        doc.ed().undo().unwrap();
         c.sync(&mut doc);
         assert_eq!(c.columns.rows.changes(), 1);
         // Next change from the top lands on line 1 of the right side.
-        doc.click(0, false);
+        doc.ed().click(0, false);
         let layout = layout();
-        assert_eq!(c.next_change(&doc, &layout), Some(2));
+        assert_eq!(
+            c.next_change(&doc, doc.carets.cursor(&doc.buffer), &layout),
+            Some(2)
+        );
         assert_eq!(c.columns.current, Some(0));
         assert!(c.status("").contains("change 1 of 1"));
         // Unified rows stack the old line over the new one.
@@ -709,24 +723,25 @@ pub(crate) mod tests {
             let _ = writeln!(s, "line {i}");
             s
         });
-        let mut doc = Document::from_text(&base);
+        let mut doc = Solo::from_text(&base);
         let other = Document::from_text(&base);
         let mut c = Compare::start_sync(&mut doc, other, Other::Saved);
         assert_eq!(c.columns.rows.changes(), 0);
-        doc.click(doc.buffer.line_to_byte(10), false);
+        let at = doc.buffer.line_to_byte(10);
+        doc.ed().click(at, false);
         for i in 0..10 {
-            doc.insert(&format!("typed {i}\n")).unwrap();
+            doc.ed().insert(&format!("typed {i}\n")).unwrap();
         }
         c.sync(&mut doc);
         assert_eq!(c.columns.rows.changes(), 1);
-        while doc.undo().unwrap() && doc.is_dirty() {}
+        while doc.ed().undo().unwrap() && doc.is_dirty() {}
         assert_eq!(doc.buffer.slice(0..doc.buffer.len_bytes()), base);
         c.sync(&mut doc);
         let (hunks, old_lines, new_lines) = c.hunks().unwrap();
         assert_eq!((hunks, old_lines, new_lines), (&[][..], 40, 40));
         assert_eq!(c.columns.rows.changes(), 0);
         // And the same the other way: redo everything in one frame.
-        while doc.redo().unwrap() {}
+        while doc.ed().redo().unwrap() {}
         c.sync(&mut doc);
         assert_eq!(c.columns.rows.changes(), 1);
         assert_eq!(c.hunks().unwrap().2, 50);
@@ -734,7 +749,7 @@ pub(crate) mod tests {
 
     #[test]
     fn plans_cover_the_screen_with_fillers_and_backgrounds() {
-        let mut doc = Document::from_text("a\nx\ny\nb\n");
+        let mut doc = Solo::from_text("a\nx\ny\nb\n");
         let other = Document::from_text("a\nb\n");
         let mut c = Compare::start_sync(&mut doc, other, Other::Saved);
         let layout = layout();
@@ -755,13 +770,10 @@ pub(crate) mod tests {
     #[test]
     fn line_counts_follow_the_diff_convention() {
         assert_eq!(
-            nimbus_core::diff_lines(&Document::from_text("a\nb\n").buffer),
+            nimbus_core::diff_lines(&Solo::from_text("a\nb\n").buffer),
             2
         );
-        assert_eq!(
-            nimbus_core::diff_lines(&Document::from_text("a\nb").buffer),
-            2
-        );
-        assert_eq!(nimbus_core::diff_lines(&Document::from_text("").buffer), 0);
+        assert_eq!(nimbus_core::diff_lines(&Solo::from_text("a\nb").buffer), 2);
+        assert_eq!(nimbus_core::diff_lines(&Solo::from_text("").buffer), 0);
     }
 }
