@@ -1452,10 +1452,13 @@ mod tests {
     fn folders_in_the_include_field_set_the_scope() {
         let home = Path::new("/no-such-nimbus-home");
         let (folders, globs) = scope("*.rs, ~/notes ,src/**", Some(home));
-        assert_eq!(folders, vec![PathBuf::from("/no-such-nimbus-home/notes")]);
+        // Folders come back canonical, which differs by system (`/home` is
+        // a firmlink on macOS; Windows adds a drive), so compare with that.
+        let canonical = crate::io::canonical;
+        assert_eq!(folders, vec![canonical(&home.join("notes"))]);
         assert_eq!(globs, "*.rs,src/**");
         let (folders, globs) = scope("~", Some(home));
-        assert_eq!((folders, globs.as_str()), (vec![home.to_path_buf()], ""));
+        assert_eq!((folders, globs.as_str()), (vec![canonical(home)], ""));
         assert_eq!(
             scope_text(Path::new("/no-such-nimbus-home/a/b"), Some(home)),
             "~/a/b"
