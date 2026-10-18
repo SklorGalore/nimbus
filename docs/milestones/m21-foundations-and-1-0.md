@@ -155,8 +155,12 @@ dotfiles. Finder "Open With" and the emoji-picker input bug wait for
 winit 0.31 (`backlog.md`).
 
 **Startup and size.** Nothing was added to the startup path except
-reading one possibly missing file (`crash.log`). Owner's `--smoke`:
-_pending_. Binary size: the `release-size` CI job.
+reading one possibly missing file (`crash.log`). Owner's
+`bench/smoke.sh` on the M5 Pro, 2026-10-18: cold 764.9 ms (first run
+after a fresh build); warm 140.1, 147.9, 133.8 and 133.5 ms, median
+136.9 ms, within the 500 ms budget. M20 recorded 119 ms warm; the
+difference is within the 115–150 ms spread seen on this machine across
+milestones, and M21 adds nothing to startup but one file check. Binary size: the `release-size` CI job.
 
 **Surprises.** M14 and M19 had landed but their status was never
 updated in the milestone tables; corrected here.
