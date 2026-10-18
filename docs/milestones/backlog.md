@@ -38,7 +38,7 @@ alternative of encodings first declined.
 | 20 | [Reading aids](m20-reading-aids.md) | Sticky scroll, a windowed minimap, a proportional UI font, Markdown preview | What M13 and M14 deferred; needs M13's splits and M14's fold regions |
 | 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | Ropey 2, winit and wgpu upgrades, fuzzing and soak in CI, a crash record, 1.0.0 | Last, so 1.0 packages everything above |
 
-## Order, M22–M24 (after 1.0)
+## Order, M22–M25 (after 1.0)
 
 Drafted on 2026-10-18, after 1.0, from what M21 and the earlier plans
 deferred and the unscheduled list below; approved the same day in this
@@ -50,6 +50,7 @@ preview images, HTML export), was dropped whole (`DESIGN.md` §9).
 | 22 | [Screen readers](m22-screen-readers.md) | An AccessKit tree for the editor and chrome, built only when a screen reader asks | The owner named it the first milestone after 1.0; `accesskit_winit` 0.34 works on winit 0.30, so it need not wait |
 | 23 | [Library upgrades](m23-library-upgrades.md) | Ropey 2, winit 0.31, current wgpu; the emoji picker | Waits on stable releases; goes whenever they arrive, ahead of whatever is next |
 | 24 | [International text](m24-international-text.md) | Fallback fonts per script and language, variable fonts, tested East Asian encodings behind their feature, editable mapped files in single-byte encodings | What M16 and M17 deferred; the riskiest piece (the piece table) last |
+| 25 | [Command line](m25-command-line.md) | Install the `nimbus` command from the palette, open files in the running window, `--wait` | Added at the owner's request on 2026-10-18; groups the palette action with the two command-line items that were unscheduled |
 
 ## Where each deferred item went
 
@@ -81,6 +82,7 @@ preview images, HTML export), was dropped whole (`DESIGN.md` §9).
 | Proportional fonts in UI chrome | DESIGN.md §2 | M20 |
 | Ropey 2.0 | DESIGN.md §4.1 | M21, then M23 (still beta at 1.0) |
 | winit 0.31, macOS emoji picker | M21 | M23 |
+| Opening files in the running window, `--wait` | Unscheduled (owner, 2026-10-18) | M25 |
 | Finder "Open With" | M21 | 1.0.1, with an `objc2` open-files listener (owner, 2026-10-18) |
 | Screen-reader support (AccessKit) | M21 | M22 |
 | Hot keys the desktop grabs on Linux (a manual note) | Unscheduled | M22 |
@@ -102,15 +104,6 @@ left is small or still speculative.
   100,000 keystrokes keep about 10 MB. Merging a contiguous typing run
   into one edit would cut that to the text itself; `undo_oracle.rs`
   covers coalescing.
-- **Open in the running window** (owner, 2026-10-18): `nimbus FILE`
-  starts a second window today, since nothing hands files to a Nimbus
-  that is already open. Passing them to the running one as new tabs
-  fits the one-window non-goal (`DESIGN.md` §2) better; it needs a small local
-  socket or pipe per user, checked before the window is created.
-- **`--wait`** (owner, 2026-10-18): stay running until the files given
-  on the command line are closed, so git can use `nimbus --wait` as its
-  commit editor. Pairs with the item above, where the waiting process
-  is the one that handed its files to the running window.
 - **Autosave of unsaved work** for crash recovery: the owner decided
   against it when approving M12 (it would write the user's text
   somewhere they did not choose); it stays here in case that changes.
