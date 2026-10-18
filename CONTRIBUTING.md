@@ -36,6 +36,12 @@ merge it into `main`, tag that merge `vX.Y.Z`, and merge `main` back into
 `development` so the version bump and any last fixes are not lost. A
 hotfix is the same, except that it starts from `main`.
 
+The merge back is automatic to start: after every push to `main`, the
+[back-merge workflow](.github/workflows/back-merge.yml) opens a pull
+request from `main` into `development`. Merge it with a merge commit,
+not squash. If it conflicts, branch from `development`, merge `main`
+into that branch, resolve, and open that branch's pull request instead.
+
 ### Versions
 
 `development` carries the version of the next planned release (a new
