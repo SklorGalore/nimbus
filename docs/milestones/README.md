@@ -49,6 +49,9 @@ repeated in each file:
 | 19 | [Workspace and search, second pass](m19-workspace-and-search-second-pass.md) | Done |
 | 20 | [Reading aids](m20-reading-aids.md) | Done |
 | 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | Done |
+| 22 | [Screen readers](m22-screen-readers.md) | Next |
+| 23 | [Library upgrades](m23-library-upgrades.md) | Planned, waiting on stable releases |
+| 24 | [International text](m24-international-text.md) | Planned |
 
 **Next** is the milestone to start; **Planned** plans are approved and
 queued in table order. M10–M15 were drafted after M8 and approved, with
@@ -56,6 +59,9 @@ their order and the answers to their open questions, on 2026-10-17
 (`DESIGN.md` §9 and §10). M16–M21 were drafted on 2026-10-18 from what
 M9–M15 deferred and the backlog's unscheduled list, and approved the
 same day with their order and eight answers (`DESIGN.md` §9 and §10).
+M22–M24, the plans after 1.0, were drafted and approved on 2026-10-18
+with their order and answers; a fourth draft, Writing prose, was
+dropped (`DESIGN.md` §9 and §10).
 [`backlog.md`](backlog.md) maps every deferred item to the plan that
 picks it up, and lists what stays unscheduled. A plan becomes **In progress** when its first task lands and
 **Done** when its checklist is ticked and its Results filled in.

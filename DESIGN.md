@@ -583,6 +583,9 @@ introduces and points at the code.
 | 19 | Workspace and search, second pass | **Done** | Several roots, named workspaces, drag and drop, search history and multi-line patterns | [m19](docs/milestones/m19-workspace-and-search-second-pass.md) |
 | 20 | Reading aids | **Done** | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
 | 21 | Foundations and 1.0 | **Done** | Fuzzing, a soak run, a crash record, version 1.0 (ropey 2 and winit 0.31 wait for stable releases) | [m21](docs/milestones/m21-foundations-and-1-0.md) |
+| 22 | Screen readers | Next | Use Nimbus with VoiceOver, NVDA or Orca | [m22](docs/milestones/m22-screen-readers.md) |
+| 23 | Library upgrades | Planned, waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker | [m23](docs/milestones/m23-library-upgrades.md) |
+| 24 | International text | Planned | CJK and other scripts in the right fonts, variable fonts, editable huge files in single-byte encodings | [m24](docs/milestones/m24-international-text.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
@@ -590,6 +593,9 @@ approved the six plans and their order on 2026-10-17 and answered their
 open questions (§9, §10). M16–M21 were drafted on 2026-10-18 from what
 M9–M15 deferred and approved the same day (§9, §10). Every milestone
 through M21 has landed; M21 made the 1.0 release.
+M22–M24 are the plans after 1.0, drafted on 2026-10-18 from what 1.0
+and the earlier plans deferred and approved the same day (§9, §10); M22
+is Next, and M23 goes whenever its releases are stable.
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -598,7 +604,26 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-None open. The questions the drafts of M16–M21 raised were answered on
+None open. The questions the drafts of M22–M25, the plans after 1.0,
+raised were answered on 2026-10-18:
+
+- Order: M22 (screen readers) first, on winit 0.30, since
+  `accesskit_winit` 0.34 targets it; M23 (library upgrades) whenever
+  ropey 2 and winit 0.31 are stable, then M24. Waiting for the
+  upgrade first was declined.
+- M22: VoiceOver is checked by hand on the owner's Mac; NVDA and Orca
+  are covered by the tree tests only, with no hand check.
+- M23: Finder "Open With" was first left to winit 0.31, with no new
+  `unsafe`. The owner reversed that the same day: winit 0.31.0-beta.3
+  still does not pass Finder's files on, so 1.0.1 adds a small `objc2`
+  open-files listener in `app`, and Open With leaves M23.
+- Writing prose (drafted as M24: spell checking, a word count, preview
+  images, HTML export) was dropped whole; International text moved up
+  from M25 to M24. The two dictionary questions fell away with it.
+- M24: the East Asian encodings stay behind the `east-asian` cargo
+  feature, off by default, though offering them would cost about 1 KB.
+
+The questions the drafts of M16–M21 raised were answered on
 2026-10-18, when the owner approved the six plans and their order:
 
 - Order: M16 (rendering) to M21 (1.0) as drafted; encodings first was
@@ -751,3 +776,5 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | M18 landed: diff options normalise lines before hashing; lines over 4 KB are cut by a 64-byte gear hash and diffed in pieces (layered path only, within 256 MB); git read with `cat-file --filters` on its own thread; folder compare merges two sorted walks by `Path` order | §4.4, m18 |
 | 2026-10-18 | M20 landed: sticky scroll on by default; the preview copies the document's own tree to its worker (no second parse), reads inline Markdown with a small scanner rather than the inline grammar, draws code blocks in the editor font and caches their colours between layouts; the preview is a tab with a flag, kept in the session; `ui_font` also draws the preview | §4.2, m20 |
 | 2026-10-18 | 1.0 ships on ropey 1.6 and winit 0.30: ropey 2 and winit 0.31 are still betas, so both upgrades move to the first point release after they are stable (wgpu 30 is already current) | m21, backlog |
+| 2026-10-18 | M22–M24 approved (after 1.0): screen readers first on winit 0.30; NVDA and Orca covered by tests only; Open With only if winit 0.31 passes the files on (no new `unsafe`); the Writing prose draft dropped (spell checking, word count, preview images, HTML export), International text moved up to M24; East Asian encodings stay behind their feature | §9, m22–m24 |
+| 2026-10-18 | Finder "Open With" moves from M23 to a 1.0.1 fix with a small `objc2` open-files listener in `app` (new `unsafe` outside `render` and the mmap buffer, owner's choice), since winit 0.31.0-beta.3 still does not pass the files on | §9, m23 |
