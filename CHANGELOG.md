@@ -20,8 +20,9 @@ aids all land here, along with the testing that a 1.0 promise needs.
   line (time, version, where, and the message, with no text from your
   files) to `crash.log` beside `config.toml` before quitting, and the
   next start says so.
-- Fuzz testing of the buffers, the diff and search against their
-  oracles, run for an hour per target every week in CI.
+- Fuzz testing (`fuzz/`): the buffers, the diff, the merge, search and
+  the config and theme parsers against their oracles, an hour per
+  target every week in CI.
 - `--soak`, with `--bench-typing`: 100,000 keystrokes with undo, find
   and saves on the 100 MB file, failing if memory grows over 10 MB
   (`bench/soak.sh`).
@@ -154,6 +155,10 @@ aids all land here, along with the testing that a 1.0 promise needs.
 
 ### Fixed
 
+- Find and Replace All could miss an occurrence in a run of repeated
+  text (such as `vvv` in a row of `v`s) at a 1 MB boundary of a large
+  file, and a `\b` next to a character split across a search window
+  could be judged wrong. Both found by the new fuzz tests.
 - A window, GPU or font failure at startup now says why (on the
   terminal, and in a dialog when there is none) and exits with code 1;
   it used to quit silently with 0.
