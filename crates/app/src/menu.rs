@@ -27,6 +27,8 @@ mod native {
                 "-",
                 "file.save",
                 "file.saveAs",
+                "file.saveWithEncoding",
+                "file.reopenWithEncoding",
                 "-",
                 "file.close",
             ],

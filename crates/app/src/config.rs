@@ -26,6 +26,10 @@ pub struct Config {
     pub keys: HashMap<String, Vec<String>>,
     /// File name or `*.ext` pattern to language name.
     pub languages: HashMap<String, String>,
+    /// File name or `*.ext` pattern to the encoding such files are read
+    /// and saved in, skipping detection (M17): `"*.csv" = "windows-1252"`.
+    /// Checked by `io::set_encoding_rules`.
+    pub encodings: HashMap<String, String>,
     /// Ask GitHub for the latest release once at startup. Off unless set:
     /// a personal tool should not phone home without being asked.
     pub check_updates: bool,
@@ -156,6 +160,7 @@ impl Default for Config {
             theme: "dark".to_owned(),
             keys: HashMap::new(),
             languages: HashMap::new(),
+            encodings: HashMap::new(),
             check_updates: false,
             editor: EditorSettings::default(),
             indent: IndentSettings::default(),
@@ -186,6 +191,7 @@ const KNOWN: &[&str] = &[
     "theme",
     "keys",
     "languages",
+    "encodings",
     "check_updates",
     "editor",
     "indent",
@@ -279,6 +285,7 @@ impl Config {
         take(&table, "theme", &mut config.theme, &mut warnings);
         take(&table, "keys", &mut config.keys, &mut warnings);
         take(&table, "languages", &mut config.languages, &mut warnings);
+        take(&table, "encodings", &mut config.encodings, &mut warnings);
         take(
             &table,
             "check_updates",

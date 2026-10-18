@@ -121,7 +121,9 @@ pub fn set_encoding_rules(table: &HashMap<String, String>) -> Vec<String> {
 
 /// The encoding the config's `[encodings]` table gives `path`, if any.
 fn configured_encoding(path: &Path) -> Option<Encoding> {
-    let rules = ENCODING_RULES.read().unwrap_or_else(PoisonError::into_inner);
+    let rules = ENCODING_RULES
+        .read()
+        .unwrap_or_else(PoisonError::into_inner);
     let name = path.file_name()?;
     rules
         .iter()
@@ -219,7 +221,12 @@ pub fn open(path: &Path) -> Result<Opened, OpenError> {
 /// Returns an [`OpenError`] describing why the file cannot be edited.
 pub fn open_as(path: &Path, encoding: Option<Encoding>) -> Result<Opened, OpenError> {
     let encoding = encoding.or_else(|| configured_encoding(path));
-    open_full(path, MAX_ROPE_BYTES, FORCED_BACKEND.get().copied(), encoding)
+    open_full(
+        path,
+        MAX_ROPE_BYTES,
+        FORCED_BACKEND.get().copied(),
+        encoding,
+    )
 }
 
 /// [`open`], with the size from which files are mapped and the forced
@@ -279,18 +286,13 @@ pub(crate) fn open_full(
             "open: {} in {} ({})",
             path.display(),
             e.name(),
-            if chosen.is_some() { "chosen" } else { "byte order mark" }
+            if chosen.is_some() {
+                "chosen"
+            } else {
+                "byte order mark"
+            }
         );
-        if backend == Backend::Mapped {
-            return open_read_only(path, file, e);
-        }
-        let opened = decode_rope(&file, e, skip).map_err(OpenError::Io)?;
-        log::debug!(
-            "open: {} decoded into a rope in {:?}",
-            path.display(),
-            started.elapsed()
-        );
-        return Ok(opened);
+        return open_decoded(path, file, (e, skip), backend);
     }
     if backend == Backend::Rope {
         // A forced rope has no limit: measuring big ropes is its purpose.
@@ -340,27 +342,52 @@ pub(crate) fn open_full(
             Err(e) => return Err(OpenError::Io(e)),
         }
     }
-    if chosen.is_none() && encoding::sniff(&sample, complete) == Sniffed::Windows1252 {
+    // A guess does not take editing away: a huge file whose start reads
+    // as Windows-1252 stays on M7's byte path, editable, its bytes kept.
+    if encoding::sniff(&sample, complete) == Sniffed::Windows1252 {
         log::debug!(
-            "open: {}'s first {} bytes are not UTF-8 but read as Windows-1252",
+            "open: {}'s first {} bytes are not UTF-8 but read as Windows-1252; \
+             too large to convert, so bytes",
             path.display(),
             sample.len()
         );
-        return open_read_only(path, file, encoding::WINDOWS_1252);
     }
     let opened = open_mapped(file)?;
     log::debug!("open: {} mapped in {:?}", path.display(), started.elapsed());
     Ok(opened)
 }
 
-/// Map a huge `file` in `encoding` as bytes, read-only: converting it would
-/// mean holding all of it in memory (DESIGN.md §9, M17), and editing its
-/// bytes as UTF-8 would mix two encodings in one file.
+/// Open `file`, known to be in `encoding` after `skip` bytes of byte order
+/// mark: decoded into a rope, or read-only as bytes if it is to be mapped.
+fn open_decoded(
+    path: &Path,
+    file: fs::File,
+    (encoding, skip): (Encoding, usize),
+    backend: Backend,
+) -> Result<Opened, OpenError> {
+    if backend == Backend::Mapped {
+        return open_read_only(path, file, encoding);
+    }
+    let started = Instant::now();
+    let opened = decode_rope(&file, encoding, skip).map_err(OpenError::Io)?;
+    log::debug!(
+        "open: {} decoded into a rope in {:?}",
+        path.display(),
+        started.elapsed()
+    );
+    Ok(opened)
+}
+
+/// Map a huge `file` known to be in `encoding` (by its byte order mark or
+/// an explicit choice) as bytes, read-only: converting it would mean
+/// holding all of it in memory (DESIGN.md §9, M17), and editing its bytes
+/// as UTF-8 would mix two encodings in one file.
 fn open_read_only(path: &Path, file: fs::File, encoding: Encoding) -> Result<Opened, OpenError> {
     let mut opened = open_mapped(file)?;
-    let name = path
-        .file_name()
-        .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
     opened.encoding = encoding;
     opened.read_only = Some(format!(
         "{name} is {}, too large to convert (over {} MB): read-only, shown as bytes",
@@ -388,7 +415,10 @@ fn decode_rope(file: &fs::File, encoding: Encoding, skip: usize) -> std::io::Res
         pos: 0,
         done: false,
     };
-    std::io::copy(&mut (&mut reader.file).take(skip as u64), &mut std::io::sink())?;
+    std::io::copy(
+        &mut (&mut reader.file).take(skip as u64),
+        &mut std::io::sink(),
+    )?;
     let buffer = RopeBuffer::from_reader(&mut reader)?;
     let line_ending = LineEnding::detect(buffer.chunks());
     Ok(Opened {
@@ -1172,23 +1202,17 @@ mod tests {
     #[test]
     fn other_encodings_decode_and_save_back_byte_for_byte() {
         let dir = TempDir::new("encodings");
-        let utf16le: Vec<u8> = [0xFF, 0xFE]
+        let little: Vec<u8> = [0xFF, 0xFE]
             .into_iter()
             .chain("naïve 日本\r\nb".encode_utf16().flat_map(u16::to_le_bytes))
             .collect();
-        let utf16be: Vec<u8> = [0xFE, 0xFF]
+        let big: Vec<u8> = [0xFE, 0xFF]
             .into_iter()
             .chain("x 👩‍💻\n".encode_utf16().flat_map(u16::to_be_bytes))
             .collect();
         for (name, bytes, text, encoding, bom) in [
-            (
-                "le.txt",
-                utf16le,
-                "naïve 日本\r\nb",
-                Encoding::Utf16Le,
-                true,
-            ),
-            ("be.txt", utf16be, "x 👩‍💻\n", Encoding::Utf16Be, true),
+            ("le.txt", little, "naïve 日本\r\nb", Encoding::Utf16Le, true),
+            ("be.txt", big, "x 👩‍💻\n", Encoding::Utf16Be, true),
             (
                 "w.csv",
                 b"id,name\r\n1,caf\xe9 \x80 \x93ok\x94\r\n".to_vec(),
@@ -1226,10 +1250,11 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         let opened = open(&path).unwrap();
         assert_eq!(opened.buffer.len_bytes(), text.len());
-        assert!(opened.buffer.slice(0..opened.buffer.len_bytes()) == text);
+        // Not assert_eq: a failure would print 20 MB.
+        assert!(opened.buffer.slice(0..opened.buffer.len_bytes()).eq(&text));
         let copy = dir.0.join("copy");
         save_encoded(&copy, &opened.buffer, opened.encoding, opened.bom).unwrap();
-        assert!(fs::read(&copy).unwrap() == bytes);
+        assert!(fs::read(&copy).unwrap().eq(&bytes));
     }
 
     #[test]
@@ -1279,24 +1304,29 @@ mod tests {
         fs::write(&path, b"\xFF\xFEa\x00\x00\xD8b\x00").unwrap();
         let opened = open(&path).unwrap();
         assert!(opened.lossy);
-        assert_eq!(opened.buffer.slice(0..opened.buffer.len_bytes()), "a\u{fffd}b");
+        assert_eq!(
+            opened.buffer.slice(0..opened.buffer.len_bytes()),
+            "a\u{fffd}b"
+        );
     }
 
     #[test]
-    fn huge_files_in_other_encodings_open_read_only_as_bytes() {
+    fn huge_files_in_known_encodings_open_read_only_as_bytes() {
         let dir = TempDir::new("huge-enc");
-        let path = dir.0.join("w.log");
-        fs::write(&path, b"caf\xe9 au lait\n").unwrap();
-        let opened = open_with(&path, 0, None).unwrap();
-        assert!(opened.buffer.is_mapped());
-        assert_eq!(opened.encoding, encoding::WINDOWS_1252);
-        assert!(opened.read_only.as_deref().unwrap().contains("read-only"));
         let utf16 = dir.0.join("u16.log");
         fs::write(&utf16, b"\xFF\xFEa\x00").unwrap();
         let opened = open_with(&utf16, 0, None).unwrap();
+        assert!(opened.buffer.is_mapped());
         assert_eq!(opened.encoding, Encoding::Utf16Le);
+        assert!(opened.read_only.as_deref().unwrap().contains("read-only"));
+        let chosen = dir.0.join("w.log");
+        fs::write(&chosen, b"caf\xe9 au lait\n").unwrap();
+        let opened = open_full(&chosen, 0, None, Some(encoding::WINDOWS_1252)).unwrap();
+        assert_eq!(opened.encoding, encoding::WINDOWS_1252);
         assert!(opened.read_only.is_some());
-        // UTF-8 stays editable, as do bytes that are not text.
+        // A guess keeps M7's editable byte path; UTF-8 stays editable too.
+        let guessed = open_with(&chosen, 0, None).unwrap();
+        assert!(guessed.read_only.is_none() && guessed.encoding.is_utf8());
         let fine = dir.0.join("fine.log");
         fs::write(&fine, "café\n").unwrap();
         assert!(open_with(&fine, 0, None).unwrap().read_only.is_none());

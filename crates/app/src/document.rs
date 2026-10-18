@@ -412,6 +412,10 @@ impl Solo {
 
 /// An open document.
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about one open file, not a state machine"
+)]
 pub struct Document {
     /// The text: a rope, or a piece table over a mapped file (see
     /// [`io::Backend`]).
@@ -931,7 +935,10 @@ impl Document {
         }
         let disk = Stamp::of(&path);
         #[cfg(test)]
-        let opened = self.opener.unwrap_or(io::open)(&path)?;
+        let opened = match self.opener {
+            Some(open) => open(&path)?,
+            None => io::open_as(&path, self.chosen_encoding)?,
+        };
         #[cfg(not(test))]
         let opened = io::open_as(&path, self.chosen_encoding)?;
         // Where each pane's cursor was, to put it back. A rope keeps its line and
@@ -2875,17 +2882,51 @@ mod tests {
     }
 
     #[test]
-    fn small_files_that_are_not_utf8_stay_in_memory_and_save_at_once() {
+    fn small_files_that_are_not_text_stay_in_memory_and_save_at_once() {
         let dir = TempDir::new("bytes-save");
-        let path = dir.0.join("latin1.txt");
-        std::fs::write(&path, b"caf\xe9\n").unwrap();
+        let path = dir.0.join("data.bin");
+        // A NUL byte: not Western text, so bytes (M7's path).
+        std::fs::write(&path, b"caf\xe9\x00\n").unwrap();
         let mut d = Solo::of(Document::open(&path).unwrap());
         assert!(d.buffer.is_mapped() && !d.saves_on_worker());
+        assert_eq!(d.encoding_label(), Some("Not UTF-8"));
         d.ed().click(0, false);
         d.ed().insert("le ").unwrap();
         d.save().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"le caf\xe9\n");
+        assert_eq!(std::fs::read(&path).unwrap(), b"le caf\xe9\x00\n");
         assert!(!d.is_dirty());
+    }
+
+    #[test]
+    fn western_files_are_decoded_edited_and_saved_back_in_their_encoding() {
+        let dir = TempDir::new("w1252-save");
+        let path = dir.0.join("latin1.txt");
+        std::fs::write(&path, b"caf\xe9\n").unwrap();
+        let mut d = Solo::of(Document::open(&path).unwrap());
+        assert!(!d.buffer.is_mapped());
+        assert_eq!(d.encoding_label(), Some("Windows-1252"));
+        assert_eq!(d.buffer.line(0), "café");
+        d.ed().click(0, false);
+        d.ed().insert("€ ").unwrap();
+        d.save().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"\x80 caf\xe9\n");
+        assert!(!d.is_dirty());
+
+        // Reopened as Latin-1, the same bytes read differently, and the
+        // choice survives a reload.
+        let mut d = Solo::of(Document::open_as(&path, Encoding::Latin1).unwrap());
+        assert_eq!(d.buffer.line(0), "\u{80} café");
+        assert_eq!(d.encoding_label(), Some("ISO-8859-1"));
+        let langs = Languages::default();
+        d.doc.reload(&langs, &mut [&mut d.carets]).unwrap();
+        assert_eq!(d.encoding_label(), Some("ISO-8859-1"));
+        // "€" has no byte in Latin-1: the save stops, naming the place.
+        d.ed().click(0, false);
+        d.ed().insert("€").unwrap();
+        let err = d.save().unwrap_err();
+        assert_eq!(err.unencodable().map(|u| u.offset), Some(0));
+        assert!(d.is_dirty());
+        assert_eq!(std::fs::read(&path).unwrap(), b"\x80 caf\xe9\n");
     }
 
     fn cursors(d: &mut Solo, at: &[usize]) {

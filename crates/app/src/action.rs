@@ -7,6 +7,7 @@
 //! the config overrides on top of it, so nothing is reachable by a
 //! hard-coded key alone (DESIGN.md §4.4).
 
+use nimbus_core::LineEnding;
 use nimbus_core::transform::{Case, Lines};
 
 use crate::input::{Command, Motion};
@@ -159,6 +160,18 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Save As…",
         Command::SaveAs,
         Keys::all(&["Primary+Shift+S"]),
+    ),
+    act(
+        "file.reopenWithEncoding",
+        "Reopen with Encoding…",
+        Command::ReopenWithEncoding,
+        Keys::NONE,
+    ),
+    act(
+        "file.saveWithEncoding",
+        "Save with Encoding…",
+        Command::SaveWithEncoding,
+        Keys::NONE,
     ),
     act(
         "file.close",
@@ -606,6 +619,18 @@ pub const ACTIONS: &[ActionInfo] = &[
         "edit.detectIndent",
         "Detect Indentation from File",
         Command::DetectIndent,
+        Keys::NONE,
+    ),
+    act(
+        "edit.lineEndingsLf",
+        "Change Line Endings to LF",
+        Command::ChangeLineEndings(LineEnding::Lf),
+        Keys::NONE,
+    ),
+    act(
+        "edit.lineEndingsCrlf",
+        "Change Line Endings to CRLF",
+        Command::ChangeLineEndings(LineEnding::CrLf),
         Keys::NONE,
     ),
     // Find.

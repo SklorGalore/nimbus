@@ -61,6 +61,18 @@ pub struct Choice {
     pub bom: bool,
 }
 
+impl Choice {
+    /// The name shown in the pickers: the encoding's, with "BOM" for UTF-8
+    /// with a byte order mark (UTF-16 has one as a rule).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match (self.encoding, self.bom) {
+            (Encoding::Utf8, true) => "UTF-8 BOM",
+            (e, _) => e.name(),
+        }
+    }
+}
+
 impl Encoding {
     /// The name shown in the status bar and the pickers.
     #[must_use]
@@ -494,10 +506,7 @@ mod tests {
             (Encoding::Utf16Be, "naïve 日本 👩‍💻\n"),
             (WINDOWS_1252, western),
             (Encoding::Latin1, "café, naïve, «quoted» ÿ\u{80}\n"),
-            (
-                Encoding::Other(encoding_rs::WINDOWS_1251),
-                "Привет, мир\n",
-            ),
+            (Encoding::Other(encoding_rs::WINDOWS_1251), "Привет, мир\n"),
         ] {
             let bytes = encode(e, text).unwrap();
             for block in [1, 2, 3, 7, 1024] {

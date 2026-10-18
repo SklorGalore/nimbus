@@ -103,6 +103,12 @@ pub enum Command<'a> {
     IndentUsingTabs,
     /// Work the indentation out from the file again.
     DetectIndent,
+    /// Pick an encoding and read the file again in it (M17).
+    ReopenWithEncoding,
+    /// Pick an encoding and save the file in it.
+    SaveWithEncoding,
+    /// Change every line ending in the file, as one undoable edit.
+    ChangeLineEndings(nimbus_core::LineEnding),
     /// Undo the last change.
     Undo,
     /// Redo the last undone change.
@@ -349,6 +355,7 @@ impl Command<'_> {
                 | Command::ChangeCase(_)
                 | Command::RewriteLines(_)
                 | Command::TrimWhitespace
+                | Command::ChangeLineEndings(_)
         )
     }
 }

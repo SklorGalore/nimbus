@@ -89,6 +89,9 @@ pub struct Options {
     /// Open every file in this backend, whatever its size (`--backend
     /// rope|mapped`), for measuring one against the other.
     pub backend: Option<io::Backend>,
+    /// `--encoding NAME`: read the files named on the command line in this
+    /// encoding, skipping detection (M17).
+    pub encoding: Option<encoding::Encoding>,
     /// With `--headless`: count all of a huge file's lines before drawing,
     /// instead of drawing with only the first part counted.
     pub wait_index: bool,
@@ -159,7 +162,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--headless WxH [--wait-index]] [--debug-overlay] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index]] [--debug-overlay] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -262,6 +265,19 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
             };
             o.backend = Some(b);
         }
+        "--encoding" => {
+            let Some(e) = args
+                .next()
+                .and_then(|e| e.to_str().and_then(encoding::Encoding::from_label))
+            else {
+                print_err(
+                    "nimbus: --encoding needs an encoding name, such as utf-8, utf-16le, \
+                     windows-1252 or latin1",
+                );
+                std::process::exit(2);
+            };
+            o.encoding = Some(e);
+        }
         "--headless" => o.headless = Some(parse_size(args.next())),
         _ => return false,
     }
@@ -361,7 +377,11 @@ fn open_files(options: &Options, languages: &Languages) -> (Vec<Document>, PathB
             root.get_or_insert_with(|| path.clone());
             continue;
         }
-        match Document::open(path) {
+        let opened = match options.encoding {
+            Some(e) => Document::open_as(path, e),
+            None => Document::open(path),
+        };
+        match opened {
             Ok(mut doc) => {
                 doc.detect_language(languages);
                 if root.is_none() {
@@ -425,6 +445,7 @@ fn main() {
     }
     let (languages, language_warnings) = Languages::load(&config.languages);
     warnings.extend(language_warnings);
+    warnings.extend(io::set_encoding_rules(&config.encodings));
     let (docs, root) = open_files(&options, &languages);
     log::debug!(
         "startup: config and {} file(s) loaded at {:?}",
