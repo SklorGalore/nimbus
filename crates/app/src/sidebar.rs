@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use nimbus_render::Gpu;
 
 use crate::input::Motion;
+use crate::search_panel::{self, Panel};
 use crate::theme::Ui;
 use crate::tree::{ListRequest, NodeId, Tree};
 use crate::view::Layout;
@@ -21,11 +22,25 @@ pub const MIN_WIDTH: f32 = 120.0;
 /// pixels.
 const GRAB: f32 = 4.0;
 
+/// What the sidebar column shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// The project tree.
+    Files,
+    /// Find in files.
+    Search,
+}
+
 /// The sidebar's state.
 #[derive(Debug)]
 pub struct Sidebar {
     /// Shown.
     pub visible: bool,
+    /// The tree, or the Search panel.
+    pub mode: Mode,
+    /// The Search panel; kept while the tree is shown, so its results
+    /// survive switching.
+    pub search: Panel,
     /// Width in logical pixels.
     pub width: f32,
     /// Has keyboard focus (arrows move in the tree, not the text).
@@ -47,6 +62,8 @@ pub struct Outcome {
     pub requests: Vec<ListRequest>,
     /// A file to open in a tab.
     pub open: Option<PathBuf>,
+    /// What the Search panel asks for.
+    pub search: Option<search_panel::Reply>,
 }
 
 impl Sidebar {
@@ -55,6 +72,8 @@ impl Sidebar {
     pub fn new(root: PathBuf, visible: bool, width: f32) -> Self {
         Self {
             visible,
+            mode: Mode::Files,
+            search: Panel::default(),
             width: width.max(MIN_WIDTH),
             focused: false,
             resizing: false,
@@ -113,6 +132,10 @@ impl Sidebar {
 
     /// Scroll by `rows` (negative is up).
     pub fn scroll_by(&mut self, rows: isize, layout: &Layout) {
+        if self.mode == Mode::Search {
+            self.search.scroll_by(rows, layout);
+            return;
+        }
         self.scroll = self.scroll.saturating_add_signed(rows);
         self.clamp_scroll(layout);
     }
@@ -120,6 +143,10 @@ impl Sidebar {
     /// Scroll by a wheel or trackpad movement of `dy` physical pixels
     /// (positive is down the list).
     pub fn wheel(&mut self, dy: f32, layout: &Layout) {
+        if self.mode == Mode::Search {
+            self.search.wheel(dy, layout);
+            return;
+        }
         self.wheel += dy / layout.metrics.line_height;
         let whole = self.wheel.trunc();
         self.wheel -= whole;
@@ -161,10 +188,38 @@ impl Sidebar {
         (row < self.tree.rows().len()).then_some(row)
     }
 
-    /// A click at physical `(x, y)`: select the row; a folder opens or
-    /// closes, a file opens in a tab.
-    pub fn click(&mut self, layout: &Layout, y: f32) -> Outcome {
+    /// Which mode's tab in the header is at `x`, if any.
+    fn header_tab_at(layout: &Layout, x: f32, y: f32) -> Option<Mode> {
+        if y >= Self::header_h(layout) {
+            return None;
+        }
+        let cell = layout.metrics.cell_width;
+        let files = layout.margin..layout.margin + 5.0 * cell;
+        let search = files.end + cell..files.end + 7.0 * cell;
+        if files.contains(&x) {
+            Some(Mode::Files)
+        } else if search.contains(&x) {
+            Some(Mode::Search)
+        } else {
+            None
+        }
+    }
+
+    /// A click at physical `(x, y)`: in the header, switch mode; in the
+    /// tree, select the row (a folder opens or closes, a file opens in a
+    /// tab); in the Search panel, whatever the panel says.
+    pub fn click(&mut self, layout: &Layout, x: f32, y: f32) -> Outcome {
         self.focused = true;
+        if let Some(mode) = Self::header_tab_at(layout, x, y) {
+            self.mode = mode;
+            return Outcome::default();
+        }
+        if self.mode == Mode::Search {
+            return Outcome {
+                search: Some(self.search.click(layout, x, y)),
+                ..Outcome::default()
+            };
+        }
         let Some(row) = self.row_at(layout, y) else {
             return Outcome::default();
         };
@@ -181,12 +236,12 @@ impl Sidebar {
         if node.is_dir {
             Outcome {
                 requests: self.tree.toggle(id),
-                open: None,
+                ..Outcome::default()
             }
         } else {
             Outcome {
-                requests: Vec::new(),
                 open: Some(node.path.clone()),
+                ..Outcome::default()
             }
         }
     }
@@ -274,8 +329,16 @@ fn cols(n: usize) -> f32 {
 }
 
 /// Draw the sidebar left of the editor column. `active` is the active
-/// tab's file (canonical path), marked in the tree.
-pub fn draw(gpu: &mut Gpu, ui: &Ui, layout: &Layout, sidebar: &Sidebar, active: Option<&Path>) {
+/// tab's file (canonical path), marked in the tree. `blink` is whether the
+/// text cursor is in its visible phase, for the Search panel's fields.
+pub fn draw(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    sidebar: &Sidebar,
+    active: Option<&Path>,
+    blink: bool,
+) {
     if !sidebar.visible || layout.left <= 0.0 {
         return;
     }
@@ -288,14 +351,42 @@ pub fn draw(gpu: &mut Gpu, ui: &Ui, layout: &Layout, sidebar: &Sidebar, active: 
     gpu.begin_layer(Some([0.0, 0.0, w, bottom]));
     gpu.push_rect([0.0, 0.0], [w, bottom], ui.tab_bar);
     let pad = layout.margin;
+    // The header: the two modes as tabs, then the project's name.
+    let y = ((header - lh) / 2.0).round();
+    let accent = (2.0 * layout.scale).round().max(1.0);
+    let mut x = pad;
+    for (mode, label) in [(Mode::Files, "Files"), (Mode::Search, "Search")] {
+        let on = sidebar.mode == mode;
+        let color = if on { ui.text } else { ui.gutter };
+        gpu.push_text_line([x, y], label, color);
+        let cols = cols(label.len());
+        if on {
+            gpu.push_rect([x, header - accent], [cols * cell, accent], ui.tab_accent);
+        }
+        x += (cols + 1.0) * cell;
+    }
+    // The project's name sits against the right edge, apart from the
+    // tabs, so it does not read as a third one; a name that would run
+    // into the tabs is left out rather than clipped.
     let title = sidebar
         .tree
         .node(crate::tree::ROOT)
         .map_or("", |n| n.name.as_str());
-    gpu.push_text_line([pad, ((header - lh) / 2.0).round()], title, ui.gutter);
+    let title_w = cols(title.chars().count()) * cell;
+    let title_x = w - pad - title_w;
+    if !title.is_empty() && title_x >= x + cell {
+        gpu.push_text_line([title_x, y], title, ui.gutter);
+    }
+
+    if sidebar.mode == Mode::Search {
+        search_panel::draw(gpu, ui, layout, &sidebar.search, sidebar.focused, blink);
+        let line = layout.scale.round().max(1.0);
+        gpu.push_rect([w - line, 0.0], [line, bottom], ui.picker_border);
+        gpu.begin_layer(None);
+        return;
+    }
 
     let rows = sidebar.tree.rows();
-    let accent = (2.0 * layout.scale).round().max(1.0);
     let mut y = header;
     for row in rows.iter().skip(sidebar.scroll) {
         if y >= bottom {
@@ -398,12 +489,21 @@ mod tests {
         let l = layout();
         let mut s = sidebar();
         let row_y = |row: f32| Sidebar::header_h(&l) + row * l.metrics.line_height + 1.0;
-        let out = s.click(&l, row_y(1.0));
+        let out = s.click(&l, 50.0, row_y(1.0));
         assert_eq!(out.open, Some(PathBuf::from("/p/README")));
         assert!(s.focused);
-        let out = s.click(&l, row_y(0.0));
+        let out = s.click(&l, 50.0, row_y(0.0));
         assert_eq!(out.requests.len(), 1, "a folder opens");
-        assert!(s.click(&l, row_y(9.0)).open.is_none(), "below the rows");
+        assert!(
+            s.click(&l, 50.0, row_y(9.0)).open.is_none(),
+            "below the rows"
+        );
+        // The header's tabs switch modes.
+        s.click(&l, l.margin + 70.0, 1.0);
+        assert_eq!(s.mode, Mode::Search);
+        assert!(s.click(&l, 50.0, row_y(1.0)).search.is_some());
+        s.click(&l, l.margin + 10.0, 1.0);
+        assert_eq!(s.mode, Mode::Files);
         assert!(s.on_divider(&l, 201.0) && !s.on_divider(&l, 150.0));
         s.drag_to(&l, 10.0);
         assert_eq!(s.width, MIN_WIDTH);

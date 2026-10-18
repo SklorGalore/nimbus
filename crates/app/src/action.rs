@@ -627,6 +627,67 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::ReplaceAll,
         Keys::all(&["Primary+Enter"]),
     ),
+    // Find in files (the sidebar's Search panel).
+    act(
+        "search.inFiles",
+        "Find in Files",
+        Command::FindInFiles,
+        Keys::all(&["Primary+Shift+F"]),
+    ),
+    act(
+        "search.replaceInFiles",
+        "Replace in Files",
+        Command::ReplaceInFiles,
+        Keys::all(&["Primary+Shift+H"]),
+    ),
+    act(
+        "search.next",
+        "Next Search Result",
+        Command::NextResult,
+        Keys::all(&["F4"]),
+    ),
+    act(
+        "search.previous",
+        "Previous Search Result",
+        Command::PrevResult,
+        Keys::all(&["Shift+F4"]),
+    ),
+    act(
+        "search.toggleCase",
+        "Find in Files: Toggle Match Case",
+        Command::SearchToggleCase,
+        Keys::NONE,
+    ),
+    act(
+        "search.toggleRegex",
+        "Find in Files: Toggle Regular Expression",
+        Command::SearchToggleRegex,
+        Keys::NONE,
+    ),
+    act(
+        "search.toggleWord",
+        "Find in Files: Toggle Whole Word",
+        Command::SearchToggleWord,
+        Keys::NONE,
+    ),
+    act(
+        "search.replaceAll",
+        "Replace in Files: Replace All",
+        Command::ReplaceInFilesAll,
+        Keys::all(&["Primary+Alt+Enter"]),
+    ),
+    act(
+        "search.undoReplace",
+        "Undo Replace in Files",
+        Command::UndoReplaceInFiles,
+        Keys::NONE,
+    ),
+    act(
+        "search.clear",
+        "Clear Search Results",
+        Command::ClearSearch,
+        Keys::NONE,
+    ),
     // View.
     act(
         "view.toggleWrap",

@@ -151,6 +151,7 @@ impl FindBar {
             pattern: field_text(&self.find),
             regex: self.regex,
             case_sensitive: self.case_sensitive,
+            whole_word: false,
         }
     }
 

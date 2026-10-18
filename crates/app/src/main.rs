@@ -13,6 +13,7 @@ mod debug;
 mod document;
 mod editing;
 mod find;
+mod find_files;
 mod indexer;
 mod input;
 mod io;
@@ -22,7 +23,9 @@ mod mapping;
 mod menu;
 mod merge_view;
 mod picker;
+mod replace_files;
 mod saver;
+mod search_panel;
 mod sidebar;
 mod state;
 mod theme;
@@ -65,6 +68,9 @@ pub struct Options {
     pub bench_typing: usize,
     /// Open with the find bar searching for this pattern.
     pub find: Option<String>,
+    /// Open with the sidebar's Search panel searching the project for this
+    /// pattern; with `--headless`, the search runs to the end first.
+    pub search: Option<String>,
     /// Start with soft wrap on, whatever the config says.
     pub wrap: bool,
     /// Render without a window at this size in physical pixels (with
@@ -148,7 +154,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--headless WxH [--wait-index]] [--debug-overlay] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--headless WxH [--wait-index]] [--debug-overlay] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -285,12 +291,16 @@ fn file_flag(
             o.files.push(b.clone());
             o.diff = Some((a, b));
         }
-        "--find" => {
+        "--find" | "--search" => {
             let Ok(pattern) = value(args, flag, "a pattern").into_string() else {
-                print_err("nimbus: --find needs a UTF-8 pattern");
+                print_err(&format!("nimbus: {flag} needs a UTF-8 pattern"));
                 std::process::exit(2);
             };
-            o.find = Some(pattern);
+            if flag == "--find" {
+                o.find = Some(pattern);
+            } else {
+                o.search = Some(pattern);
+            }
         }
         "--version" | "-V" => {
             print_out(&format!("nimbus {}", env!("CARGO_PKG_VERSION")));

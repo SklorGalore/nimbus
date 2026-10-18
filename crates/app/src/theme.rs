@@ -109,6 +109,10 @@ ui_colors! {
     picker_border,
     /// The picker's selected row.
     picker_selected,
+    /// The matched text in a find-in-files preview.
+    search_match,
+    /// A file's row in the find-in-files results.
+    search_file,
     /// Compare view: lines only in the new text.
     diff_added,
     /// Compare view: lines only in the old text.

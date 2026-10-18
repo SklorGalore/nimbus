@@ -7,6 +7,7 @@
 //! short retries), so an idle editor uses no CPU.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -33,6 +34,7 @@ use crate::debug::Debug;
 use crate::document::{DiskChange, Document, MAX_COPY_BYTES, Occurrence};
 use crate::editing::Outcome;
 use crate::find::{self, Field, FindBar, SearchBatch};
+use crate::find_files::{self, Batch as FilesBatch};
 use crate::input::{self, Command, Motion, Resolved};
 use crate::io;
 use crate::keymap::{Chord, Keymap, chord_label};
@@ -40,8 +42,10 @@ use crate::languages::Languages;
 use crate::menu::{self, MenuBar};
 use crate::merge_view::{Inputs, MergeView, Merged, Shape, Take};
 use crate::picker::{self, Item, Kind, Picker};
+use crate::replace_files::{self, Replacement};
 use crate::saver::{self, ReplacePolicy, SaveEvent, SaveStep};
-use crate::sidebar::{self, Sidebar};
+use crate::search_panel::{Focus, Reply};
+use crate::sidebar::{self, Mode, Sidebar};
 use crate::state::State;
 use crate::theme::{Theme, Ui};
 use crate::tree::{self, Entry, ListRequest};
@@ -75,6 +79,10 @@ pub enum AppEvent {
     Index(u64, IndexChunk, Option<String>),
     /// Progress or the end of saving a huge file ([`crate::saver`]).
     Save(SaveEvent),
+    /// Hits from a find-in-files worker.
+    FindFiles(FilesBatch),
+    /// A Replace in Files finished writing the files on disk.
+    Replaced(replace_files::Report),
     /// A compare's diff finished on a worker (M9).
     Diff(DiffResult),
     /// A merge's chunks (and result text) finished on a worker (M9).
@@ -137,6 +145,19 @@ pub struct Message {
 
 /// Pause in typing after which the find bar searches the edited text again.
 const RESEARCH_DELAY: Duration = Duration::from_millis(150);
+
+/// Pause in typing in the Search panel before the project is searched.
+const SEARCH_FILES_DELAY: Duration = Duration::from_millis(300);
+
+/// What the last Replace in Files can put back.
+#[derive(Debug, Default)]
+struct ReplaceUndo {
+    /// Files on disk, with their old contents.
+    saved: Vec<replace_files::Saved>,
+    /// Open tabs, by canonical path, with the history id their replace
+    /// left on top: undone only while it is still there.
+    tabs: Vec<(PathBuf, u64)>,
+}
 
 /// How long `--smoke` and `--screenshot` wait for a first frame.
 const UNATTENDED_TIMEOUT: Duration = Duration::from_secs(10);
@@ -381,6 +402,13 @@ pub struct App {
     recheck_at: Option<Instant>,
     /// Saves of huge files under way, and what waits for them.
     saves: Saves,
+    /// Search the project at this time: the Search panel's query changed.
+    search_files_at: Option<Instant>,
+    /// What "Undo Replace in Files" would put back.
+    replace_undo: Option<ReplaceUndo>,
+    /// The open-tab part of a Replace in Files, until its files on disk
+    /// are written and the summary can be shown.
+    replace_summary: ReplaceSummary,
 }
 
 /// Multi-click detection and drag state. winit reports presses, not
@@ -438,11 +466,19 @@ impl App {
         let ui_state = State::load();
         let disk_proxy = proxy.clone();
         let warn_proxy = proxy.clone();
-        let sidebar = Sidebar::new(
+        let mut sidebar = Sidebar::new(
             io::canonical(&root),
             ui_state.sidebar_visible,
             ui_state.sidebar_width,
         );
+        // `--search`: the Search panel open, searching once the window is
+        // up (the first frame schedules it like a typed query).
+        let search_files_at = options.search.as_ref().map(|pattern| {
+            sidebar.visible = true;
+            sidebar.mode = Mode::Search;
+            sidebar.search.focus_query(Some(pattern.clone()));
+            started
+        });
         let wrap = options.wrap || config.soft_wrap;
         let mut tabs: Vec<Tab> = docs
             .into_iter()
@@ -522,6 +558,9 @@ impl App {
             recheck: Vec::new(),
             recheck_at: None,
             saves: Saves::default(),
+            search_files_at,
+            replace_undo: None,
+            replace_summary: ReplaceSummary::default(),
         }
     }
 
@@ -633,6 +672,14 @@ impl App {
             self.changed(false);
             return;
         }
+        if self.sidebar.focused
+            && self.picker.is_none()
+            && self.sidebar.mode == Mode::Search
+            && self.run_search_panel(cmd)
+        {
+            self.changed(false);
+            return;
+        }
         if self.sidebar.focused && self.picker.is_none() && self.run_sidebar(cmd) {
             self.changed(false);
             return;
@@ -703,10 +750,21 @@ impl App {
             Command::FocusSidebar => {
                 self.sidebar.visible = true;
                 self.sidebar.focused = true;
+                self.sidebar.mode = Mode::Files;
                 self.find.focused = false;
                 self.show_sidebar();
                 self.remember();
             }
+            Command::FindInFiles
+            | Command::ReplaceInFiles
+            | Command::NextResult
+            | Command::PrevResult
+            | Command::SearchToggleCase
+            | Command::SearchToggleRegex
+            | Command::SearchToggleWord
+            | Command::ReplaceInFilesAll
+            | Command::UndoReplaceInFiles
+            | Command::ClearSearch => self.run_search_command(cmd),
             Command::ToggleDebugOverlay => {
                 self.debug.visible = !self.debug.visible;
                 self.changed(false);
@@ -2370,6 +2428,7 @@ impl App {
             | Command::PrevConflict
             | Command::ResolveMarkers
             | Command::MergeWithDisk => return false,
+            _ if cmd.is_find_in_files() => return false,
             _ => {
                 let paste = (cmd == Command::Paste)
                     .then(|| self.clipboard_get())
@@ -2563,14 +2622,7 @@ impl App {
             return;
         }
         if self.sidebar.contains(&layout, x) {
-            self.find.focused = false;
-            let outcome = self.sidebar.click(&layout, y);
-            self.start_listings(outcome.requests);
-            if let Some(path) = outcome.open {
-                self.sidebar.focused = false;
-                self.open_path(&path);
-            }
-            self.changed(false);
+            self.sidebar_click(&layout, x, y);
             return;
         }
         self.sidebar.focused = false;
@@ -2655,6 +2707,21 @@ impl App {
         }
         self.clicks.dragging = !(count == 1 && self.modifiers.alt_key() && !self.clicks.adding);
         self.blink.reset(now);
+        self.changed(false);
+    }
+
+    /// A press in the sidebar: the tree, or the Search panel.
+    fn sidebar_click(&mut self, layout: &Layout, x: f32, y: f32) {
+        self.find.focused = false;
+        let outcome = self.sidebar.click(layout, x, y);
+        self.start_listings(outcome.requests);
+        if let Some(path) = outcome.open {
+            self.sidebar.focused = false;
+            self.open_path(&path);
+        }
+        if let Some(reply) = outcome.search {
+            self.act_on_search_reply(&reply);
+        }
         self.changed(false);
     }
 
@@ -2860,6 +2927,20 @@ impl App {
         }
     }
 
+    /// Show or hide the search toggles' tooltip as the pointer moves.
+    fn update_search_hover(&mut self) {
+        let Some(layout) = self.layout() else { return };
+        let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        let changed = if self.sidebar.visible && self.sidebar.mode == Mode::Search {
+            self.sidebar.search.hover_at(&layout, x, y, Instant::now())
+        } else {
+            self.sidebar.search.hover_gone()
+        };
+        if changed {
+            self.changed(false);
+        }
+    }
+
     /// Show the resize cursor over the sidebar's divider, the usual one
     /// elsewhere. Only tells the window when it changes.
     fn update_cursor_icon(&mut self) {
@@ -3041,7 +3122,14 @@ impl App {
         );
         view::draw_tabs(gpu, &self.theme.ui, layout, &labels, self.active);
         let active = self.tabs[self.active].doc.canonical.as_deref();
-        sidebar::draw(gpu, &self.theme.ui, layout, &self.sidebar, active);
+        sidebar::draw(
+            gpu,
+            &self.theme.ui,
+            layout,
+            &self.sidebar,
+            active,
+            self.blink.visible,
+        );
         let facts = self.debug_facts();
         self.debug.draw(gpu, &self.theme.ui, layout, facts);
         if let Some(p) = &self.picker {
@@ -3209,6 +3297,547 @@ impl App {
             }
         }
     }
+}
+
+/// What a Replace in Files did so far, for the summary once the files on
+/// disk are written too.
+#[derive(Debug, Default)]
+struct ReplaceSummary {
+    /// Replacements made in open tabs, and the tabs changed.
+    tab_replaced: usize,
+    tab_files: usize,
+    /// Files whose ticked text had changed since the search.
+    changed: usize,
+    /// Tabs busy saving, left alone.
+    busy: usize,
+}
+
+impl App {
+    /// The find-in-files commands, from wherever they come.
+    fn run_search_command(&mut self, cmd: Command<'_>) {
+        match cmd {
+            Command::FindInFiles | Command::ReplaceInFiles => {
+                self.open_search_panel(cmd == Command::ReplaceInFiles);
+            }
+            Command::NextResult => self.step_result(false),
+            Command::PrevResult => self.step_result(true),
+            Command::SearchToggleCase | Command::SearchToggleRegex | Command::SearchToggleWord => {
+                let which = match cmd {
+                    Command::SearchToggleCase => crate::search_panel::Toggle::Case,
+                    Command::SearchToggleRegex => crate::search_panel::Toggle::Regex,
+                    _ => crate::search_panel::Toggle::Word,
+                };
+                if self.sidebar.search.toggle(which) {
+                    self.search_files();
+                }
+            }
+            Command::ReplaceInFilesAll => self.replace_in_files(),
+            Command::UndoReplaceInFiles => self.undo_replace_in_files(),
+            Command::ClearSearch => {
+                self.sidebar.search.clear();
+                self.search_files_at = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Show the Search panel with the keyboard in its query, which starts
+    /// as the editor's selection when that is one short line.
+    fn open_search_panel(&mut self, replace: bool) {
+        self.find.focused = false;
+        self.sidebar.visible = true;
+        self.sidebar.mode = Mode::Search;
+        self.sidebar.focused = true;
+        let selection = self.doc().selected_text();
+        let panel = &mut self.sidebar.search;
+        let before = panel.query.version;
+        panel.focus_query(selection);
+        if replace {
+            panel.replace_mode = true;
+        }
+        if panel.query.version != before {
+            self.search_files_at = Some(Instant::now());
+        }
+        self.show_sidebar();
+        self.remember();
+    }
+
+    /// A command while the Search panel has the keyboard. Fields take
+    /// typing and movement; the list takes movement, Enter and Space;
+    /// Tab moves between them; Escape gives the editor the keyboard.
+    /// Returns `false` for commands that run as usual.
+    fn run_search_panel(&mut self, cmd: Command<'_>) -> bool {
+        let Some(layout) = self.layout() else {
+            return false;
+        };
+        let in_list = self.sidebar.search.focus == Focus::List;
+        match cmd {
+            Command::Escape => self.sidebar.focused = false,
+            Command::Tab | Command::Outdent => {
+                self.sidebar.search.cycle_focus(cmd == Command::Outdent);
+            }
+            Command::Newline if in_list => {
+                if let Some(hit) = self.sidebar.search.selected_hit() {
+                    self.open_result(hit, true);
+                }
+            }
+            Command::Newline => self.search_files(),
+            Command::Move(motion, _) if in_list => {
+                self.sidebar.search.move_selection(motion, &layout);
+            }
+            Command::Insert(" ") if in_list => {
+                if let Some(row) = self.sidebar.search.selected {
+                    self.sidebar.search.toggle_tick(row);
+                }
+            }
+            Command::Find
+            | Command::Replace
+            | Command::Save
+            | Command::SaveAs
+            | Command::Close
+            | Command::CloseTab
+            | Command::ToggleWrap
+            | Command::ToggleTheme
+            | Command::ToggleSidebar
+            | Command::GoToLine
+            | Command::FocusSidebar
+            | Command::ToggleIgnored
+            | Command::ToggleDebugOverlay
+            | Command::ReloadFromDisk
+            | Command::KeepMine
+            | Command::OpenFile
+            | Command::NewFile
+            | Command::NextTab
+            | Command::PrevTab
+            | Command::GoToTab(_)
+            | Command::QuickOpen
+            | Command::Palette
+            | Command::ReloadConfig
+            | Command::OpenConfig
+            | Command::CompareSaved
+            | Command::CompareFile
+            | Command::CompareTab
+            | Command::DiffNext
+            | Command::DiffPrev
+            | Command::DiffUnified
+            | Command::DiffClose
+            | Command::MergeFiles
+            | Command::MergeWithBase
+            | Command::TakeLeft
+            | Command::TakeRight
+            | Command::TakeBoth
+            | Command::TakeBothReversed
+            | Command::NextConflict
+            | Command::PrevConflict
+            | Command::ResolveMarkers
+            | Command::MergeWithDisk => return false,
+            _ if cmd.is_find_in_files() => return false,
+            _ if in_list => {}
+            _ => {
+                let paste = (cmd == Command::Paste)
+                    .then(|| self.clipboard_get())
+                    .flatten();
+                let tab_width = self.tab_width();
+                let panel = &mut self.sidebar.search;
+                let searches = panel.focus != Focus::Replace;
+                let Some(field) = panel.field_mut() else {
+                    return true;
+                };
+                let before = field.version;
+                let copied = edit_field(field, cmd, paste.as_deref(), tab_width);
+                let changed = field.version != before;
+                if let Some(text) = copied {
+                    self.clipboard_set(text);
+                }
+                if changed && searches {
+                    self.search_files_at = Some(Instant::now() + SEARCH_FILES_DELAY);
+                }
+            }
+        }
+        true
+    }
+
+    /// Do what a click in the Search panel asked for.
+    fn act_on_search_reply(&mut self, reply: &Reply) {
+        if reply.search {
+            self.search_files();
+        }
+        if reply.replace_all {
+            self.replace_in_files();
+        }
+        if let Some(hit) = reply.open {
+            self.open_result(hit, false);
+        }
+    }
+
+    /// Snapshots of the open tabs with unsaved edits, for the search to
+    /// read instead of their files.
+    fn snapshots(&self) -> find_files::Snapshots {
+        let mut map = find_files::Snapshots::new();
+        for tab in &self.tabs {
+            if let Some(path) = &tab.doc.canonical
+                && tab.doc.is_dirty()
+            {
+                map.insert(path.clone(), Arc::from(tab.doc.buffer.snapshot()));
+            }
+        }
+        map
+    }
+
+    /// Search the project for the Search panel's query, cancelling any
+    /// search under way.
+    fn search_files(&mut self) {
+        self.search_files_at = None;
+        let root = self.sidebar.tree.root().to_path_buf();
+        let params = self
+            .sidebar
+            .search
+            .params(&root, self.sidebar.tree.show_ignored);
+        let snapshots = self.snapshots();
+        let proxy = self.proxy.clone();
+        self.sidebar.search.start(params, snapshots, move |b| {
+            proxy.send_event(AppEvent::FindFiles(b)).is_ok()
+        });
+    }
+
+    /// Open the file of hit `(file, hit)` and select the match. The byte
+    /// range is from the file as searched; if the text there no longer
+    /// matches (the tab was edited since), the line is searched again and
+    /// its first match selected, or its start when none is left. With
+    /// `focus_editor`, the keyboard goes to the text.
+    fn open_result(&mut self, (file, hit): (usize, usize), focus_editor: bool) {
+        let Some(results) = &self.sidebar.search.results else {
+            return;
+        };
+        let Some((path, hit)) = results
+            .files
+            .get(file)
+            .and_then(|f| Some((f.path.clone(), f.hits.get(hit)?)))
+        else {
+            return;
+        };
+        let (line, range) = (hit.line, hit.range.clone());
+        let re = self
+            .sidebar
+            .search
+            .params
+            .as_ref()
+            .and_then(|p| p.query.compile().ok().flatten());
+        let keep_focus = self.sidebar.focused && !focus_editor;
+        self.open_path(&path);
+        self.sidebar.focused = keep_focus;
+        if self.doc().canonical.as_deref() != Some(io::canonical(&path).as_path()) {
+            return; // it could not be opened; the message says so
+        }
+        let doc = self.doc();
+        let t = &doc.buffer;
+        let select = re.as_ref().and_then(|re| {
+            // Still a match at the same place?
+            if range.end <= t.len_bytes() && t.is_char_boundary(range.start) {
+                let span = t.line_span(range.start);
+                let text = t.slice(span.start..span.end);
+                if let Some(m) = re
+                    .find_iter(text.as_bytes())
+                    .find(|m| span.start + m.start() == range.start)
+                {
+                    return Some(span.start + m.start()..span.start + m.end());
+                }
+            }
+            // The line, then: its first match, or its start.
+            (line < t.len_lines()).then(|| {
+                let span = t.line_span(t.line_to_byte(line));
+                let text = t.slice(span.start..span.end);
+                re.find(text.as_bytes())
+                    .map_or(span.start..span.start, |m| {
+                        span.start + m.start()..span.start + m.end()
+                    })
+            })
+        });
+        let select = select.unwrap_or_else(|| {
+            let at = nimbus_core::movement::clamp(t, range.start);
+            at..at
+        });
+        self.doc_mut().select(select);
+        self.changed(true);
+    }
+
+    /// F4 and Shift+F4: open the next or previous hit across files.
+    fn step_result(&mut self, backwards: bool) {
+        let Some(layout) = self.layout() else { return };
+        self.sidebar.visible = true;
+        self.sidebar.mode = Mode::Search;
+        match self.sidebar.search.step(backwards, &layout) {
+            Some(hit) => self.open_result(hit, true),
+            None => self.say("No search results", false),
+        }
+    }
+
+    /// Replace every ticked hit: open tabs as one undoable edit each, the
+    /// rest on a worker through the save path. The summary follows once
+    /// the worker is done.
+    fn replace_in_files(&mut self) {
+        let panel = &mut self.sidebar.search;
+        if panel.replacing {
+            self.say("Still replacing; wait for it to finish", true);
+            return;
+        }
+        let Some(results) = &panel.results else {
+            self.say("Nothing to replace: search first", true);
+            return;
+        };
+        if !results.done {
+            self.say(
+                "Still searching; Replace All once the search is complete",
+                true,
+            );
+            return;
+        }
+        if results.capped {
+            self.say(
+                "Too many matches to replace in files; narrow the search",
+                true,
+            );
+            return;
+        }
+        let ticked = results.ticked();
+        if ticked.is_empty() {
+            self.say("Nothing ticked to replace", true);
+            return;
+        }
+        let Some(re) = panel
+            .params
+            .as_ref()
+            .and_then(|p| p.query.compile().ok().flatten())
+        else {
+            return;
+        };
+        let replacement = Replacement {
+            re,
+            expand: panel.regex,
+            template: panel.replacement(),
+        };
+        let mut summary = ReplaceSummary::default();
+        let mut undo = ReplaceUndo::default();
+        let mut jobs = Vec::new();
+        for (fi, hits) in ticked {
+            let file = &results.files[fi];
+            let canonical = io::canonical(&file.path);
+            let tab = self
+                .tabs
+                .iter()
+                .position(|t| t.doc.canonical.as_deref() == Some(canonical.as_path()));
+            let Some(ti) = tab else {
+                jobs.push(replace_files::Job {
+                    path: file.path.clone(),
+                    ranges: hits.iter().map(|&j| file.hits[j].range.clone()).collect(),
+                });
+                continue;
+            };
+            let ranges: Vec<std::ops::Range<usize>> =
+                hits.iter().map(|&j| file.hits[j].range.clone()).collect();
+            let doc = &mut self.tabs[ti].doc;
+            if doc.is_saving() {
+                summary.busy += 1;
+                continue;
+            }
+            match replace_in_tab(doc, &replacement, &ranges) {
+                Some(0) => summary.changed += 1,
+                Some(n) => {
+                    summary.tab_replaced += n;
+                    summary.tab_files += 1;
+                    undo.tabs.push((canonical, doc.history.top_id()));
+                }
+                None => log::error!("replace in {} refused", file.rel),
+            }
+        }
+        self.replace_undo = Some(undo);
+        self.replace_summary = summary;
+        if jobs.is_empty() {
+            self.replaced(replace_files::Report::default());
+            return;
+        }
+        let proxy = self.proxy.clone();
+        let spawned = replace_files::spawn(replacement, jobs, move |report| {
+            let _ = proxy.send_event(AppEvent::Replaced(report));
+        });
+        match spawned {
+            Ok(()) => self.sidebar.search.replacing = true,
+            Err(e) => {
+                log::error!("could not start the replace thread: {e}");
+                self.say(
+                    "Replace in Files failed to start; files on disk are unchanged",
+                    true,
+                );
+            }
+        }
+    }
+
+    /// The files on disk are written: finish the summary and search again
+    /// so the results show the text as it is now.
+    fn replaced(&mut self, report: replace_files::Report) {
+        self.sidebar.search.replacing = false;
+        let summary = std::mem::take(&mut self.replace_summary);
+        let (disk_replaced, disk_files) = report.totals();
+        let plural =
+            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let names = |paths: &[PathBuf]| {
+            paths
+                .iter()
+                .map(|p| {
+                    p.file_name().map_or_else(
+                        || p.display().to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let replaced = summary.tab_replaced + disk_replaced;
+        let files = summary.tab_files + disk_files;
+        let mut text = format!(
+            "Replaced {} in {}",
+            plural(replaced, "match", "matches"),
+            plural(files, "file", "files")
+        );
+        if summary.tab_files > 0 {
+            let _ = write!(text, " ({} open)", plural(summary.tab_files, "tab", "tabs"));
+        }
+        let changed = summary.changed
+            + report
+                .files
+                .iter()
+                .filter(|(_, o)| *o == replace_files::Outcome::Changed)
+                .count();
+        if changed > 0 {
+            let _ = write!(
+                text,
+                "; {} changed since the search, left alone",
+                plural(changed, "file", "files")
+            );
+        }
+        if summary.busy > 0 {
+            let _ = write!(
+                text,
+                "; {} still saving, left alone",
+                plural(summary.busy, "tab", "tabs")
+            );
+        }
+        let failed: Vec<PathBuf> = report
+            .files
+            .iter()
+            .filter(|(_, o)| matches!(o, replace_files::Outcome::Failed(_)))
+            .map(|(p, _)| p.clone())
+            .collect();
+        for (path, outcome) in &report.files {
+            if let replace_files::Outcome::Failed(why) = outcome {
+                log::error!("replace in files: {}: {why}", path.display());
+            }
+        }
+        if !failed.is_empty() {
+            let _ = write!(text, "; failed: {}", names(&failed));
+        }
+        if !report.unkept.is_empty() {
+            let _ = write!(text, "; undo not available for {}", names(&report.unkept));
+        }
+        let is_error = !failed.is_empty();
+        if let Some(undo) = &mut self.replace_undo {
+            undo.saved = report.saved;
+            if undo.saved.is_empty() && undo.tabs.is_empty() {
+                self.replace_undo = None;
+            }
+        }
+        self.say(text, is_error);
+        self.search_files();
+    }
+
+    /// Put back what the last Replace in Files wrote: tabs whose replace
+    /// is still their last edit undo it; files on disk get their old
+    /// contents if they have not changed since.
+    fn undo_replace_in_files(&mut self) {
+        let Some(undo) = self.replace_undo.take() else {
+            self.say("Nothing to undo: no Replace in Files since the start", true);
+            return;
+        };
+        let mut restored = 0;
+        let mut problems = Vec::new();
+        for (path, top) in &undo.tabs {
+            let Some(tab) = self
+                .tabs
+                .iter_mut()
+                .find(|t| t.doc.canonical.as_deref() == Some(path.as_path()))
+            else {
+                problems.push(format!("{} (tab closed)", name_of(path)));
+                continue;
+            };
+            if tab.doc.history.top_id() != *top || tab.doc.is_saving() {
+                problems.push(format!("{} (edited since)", name_of(path)));
+                continue;
+            }
+            match tab.doc.undo() {
+                Ok(true) => restored += 1,
+                Ok(false) => problems.push(name_of(path)),
+                Err(e) => {
+                    log::error!("undo refused: {e}");
+                    problems.push(name_of(path));
+                }
+            }
+        }
+        let (files, failed) = replace_files::undo(&undo.saved);
+        restored += files.len();
+        for (path, why) in failed {
+            problems.push(format!("{} ({why})", name_of(&path)));
+        }
+        let mut text = format!(
+            "Restored {} file{}",
+            restored,
+            if restored == 1 { "" } else { "s" }
+        );
+        if !problems.is_empty() {
+            let _ = write!(text, "; could not restore {}", problems.join(", "));
+        }
+        self.say(text, !problems.is_empty());
+        self.search_files();
+    }
+}
+
+/// Replace `ranges` in an open tab's text as one undo step, each only
+/// where the text still matches. Returns how many were replaced, or `None`
+/// if the buffer refused the edit (nothing is changed then).
+fn replace_in_tab(
+    doc: &mut Document,
+    replacement: &Replacement,
+    ranges: &[std::ops::Range<usize>],
+) -> Option<usize> {
+    let t = &doc.buffer;
+    let items: Vec<(std::ops::Range<usize>, String)> = ranges
+        .iter()
+        .filter_map(|range| {
+            if !t.is_char_boundary(range.start) || !t.is_char_boundary(range.end) {
+                return None;
+            }
+            let text = replacement.at_in(t.len_bytes(), range.clone(), |r| {
+                let mut v = Vec::new();
+                t.read_into(r, &mut v).ok().map(|()| v)
+            })?;
+            Some((range.clone(), String::from_utf8_lossy(&text).into_owned()))
+        })
+        .collect();
+    if items.is_empty() {
+        return Some(0);
+    }
+    let n = doc.replace_many(&items).ok()?;
+    // Typing after must start a new undo step, so undoing the replace
+    // later puts back exactly the replace.
+    doc.history.seal();
+    Some(n)
+}
+
+/// A path's file name, for messages.
+fn name_of(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// The number of lines, or while a huge file is still being counted, an
@@ -3455,26 +4084,14 @@ pub fn run_headless(
         &root,
         layout_for(&gpu, to_f32(scale), &doc, &find),
         doc.canonical.as_deref(),
+        options.search.as_deref(),
     );
     view.ensure_cursor_visible(&doc, &layout, config.tab_width);
     // One frame only: parse here rather than on a worker.
     doc.syntax.parse_now(&doc.buffer);
-    for w in nimbus_syntax::registry::take_warnings() {
-        print_err(&format!("nimbus: {w}"));
-    }
+    print_warnings(nimbus_syntax::registry::take_warnings());
     let (mut theme, warnings) = Theme::load(&config.theme);
-    for w in warnings {
-        print_err(&format!("nimbus: {w}"));
-    }
-    let label = TabLabel {
-        name: doc.display_name(),
-        dirty: false,
-    };
-    let labels = if labels.is_empty() {
-        vec![label]
-    } else {
-        labels
-    };
+    print_warnings(warnings);
     // Characters the bundled font lacks are looked for in system fonts on
     // a worker; with no later frame to show them in, wait for them once
     // everything has been painted, and paint again if any arrived.
@@ -3497,7 +4114,14 @@ pub fn run_headless(
         );
         let ui = &theme.ui;
         view::draw_tabs(&mut gpu, ui, &layout, &labels, 0);
-        sidebar::draw(&mut gpu, ui, &layout, &sidebar, doc.canonical.as_deref());
+        sidebar::draw(
+            &mut gpu,
+            ui,
+            &layout,
+            &sidebar,
+            doc.canonical.as_deref(),
+            true,
+        );
         if options.debug_overlay {
             Debug::new(true).draw(&mut gpu, ui, &layout, debug_facts(&doc, &find));
         }
@@ -3514,6 +4138,13 @@ pub fn run_headless(
         return 1;
     }
     i32::from(!save_screenshot(path, gpu.take_capture().as_ref()))
+}
+
+/// Warnings on stderr, for headless runs with no message line to show them.
+fn print_warnings(warnings: impl IntoIterator<Item = String>) {
+    for w in warnings {
+        print_err(&format!("nimbus: {w}"));
+    }
 }
 
 /// Tab labels for the headless frame: one per document opened.
@@ -3647,9 +4278,35 @@ fn headless_find(pattern: Option<&str>, doc: &mut Document) -> FindBar {
     find
 }
 
+/// `--search PATTERN`: the Search panel showing the project searched to
+/// the end, its first hit selected.
+fn headless_search(sidebar: &mut Sidebar, pattern: &str, layout: &Layout) {
+    sidebar.visible = true;
+    sidebar.mode = Mode::Search;
+    sidebar.focused = true;
+    let panel = &mut sidebar.search;
+    panel.focus_query(Some(pattern.to_owned()));
+    let params = panel.params(sidebar.tree.root(), sidebar.tree.show_ignored);
+    let (tx, rx) = std::sync::mpsc::channel();
+    panel.start(params, find_files::Snapshots::new(), move |b| {
+        tx.send(b).is_ok()
+    });
+    while panel.results.as_ref().is_some_and(|r| !r.done) {
+        let Ok(batch) = rx.recv() else { break };
+        panel.receive(batch);
+    }
+    panel.focus = Focus::List;
+    panel.step(false, layout);
+}
+
 /// The sidebar as the window would show it, listed here in place, and the
-/// layout with room for it.
-fn headless_sidebar(root: &Path, layout: Layout, file: Option<&Path>) -> (Sidebar, Layout) {
+/// layout with room for it; with `search`, showing the Search panel.
+fn headless_sidebar(
+    root: &Path,
+    layout: Layout,
+    file: Option<&Path>,
+    search: Option<&str>,
+) -> (Sidebar, Layout) {
     let state = State::load();
     let mut sidebar = Sidebar::new(
         io::canonical(root),
@@ -3669,6 +4326,9 @@ fn headless_sidebar(root: &Path, layout: Layout, file: Option<&Path>) -> (Sideba
             }
         }
         sidebar.after_change(Some(&layout));
+    }
+    if let Some(pattern) = search {
+        headless_search(&mut sidebar, pattern, &layout);
     }
     (sidebar, layout)
 }
@@ -3834,6 +4494,12 @@ impl ApplicationHandler<AppEvent> for App {
                 self.changed(false);
             }
             AppEvent::FontLoaded => self.changed(false),
+            AppEvent::FindFiles(batch) => {
+                if self.sidebar.search.receive(batch) {
+                    self.changed(false);
+                }
+            }
+            AppEvent::Replaced(report) => self.replaced(report),
             AppEvent::WatchWarning(warning) => {
                 self.say(warning, true);
                 self.changed(false);
@@ -3989,6 +4655,14 @@ impl ApplicationHandler<AppEvent> for App {
                 self.changed(false);
             }
         }
+        if self.search_files_at.is_some_and(|t| now >= t) {
+            self.search_files_at = None;
+            self.search_files();
+            self.changed(false);
+        }
+        if self.sidebar.search.tick(now) {
+            self.changed(false);
+        }
         if self.recheck_at.is_some_and(|t| now >= t) {
             self.recheck_at = None;
             let changes: Vec<Change> = std::mem::take(&mut self.recheck)
@@ -4057,6 +4731,8 @@ impl ApplicationHandler<AppEvent> for App {
             self.message.as_ref().map(|m| m.until),
             self.pending_chord.map(|(_, until)| until),
             self.research_at,
+            self.search_files_at,
+            self.sidebar.search.wake_at(),
             self.recheck_at,
             self.saves.poll_at,
             self.tabs[self.active]
@@ -4102,6 +4778,13 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 self.update_scrollbar_hover();
                 self.update_cursor_icon();
+                self.update_search_hover();
+            }
+
+            WindowEvent::CursorLeft { .. } => {
+                if self.sidebar.search.hover_gone() {
+                    self.changed(false);
+                }
             }
 
             WindowEvent::MouseInput {

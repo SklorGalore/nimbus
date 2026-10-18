@@ -152,6 +152,26 @@ pub enum Command<'a> {
     ToggleRegex(&'a str),
     /// Find bar: replace every match.
     ReplaceAll,
+    /// Show the sidebar's Search panel and put the keyboard in its query.
+    FindInFiles,
+    /// The same, with the replacement field shown.
+    ReplaceInFiles,
+    /// Open the next find-in-files result.
+    NextResult,
+    /// Open the previous find-in-files result.
+    PrevResult,
+    /// Search panel: toggle case-sensitive matching.
+    SearchToggleCase,
+    /// Search panel: toggle regular-expression matching.
+    SearchToggleRegex,
+    /// Search panel: toggle whole-word matching.
+    SearchToggleWord,
+    /// Search panel: replace every ticked result.
+    ReplaceInFilesAll,
+    /// Put back the files the last Replace in Files wrote.
+    UndoReplaceInFiles,
+    /// Forget the search panel's results.
+    ClearSearch,
     /// Close the find bar, or collapse the selection.
     Escape,
     /// Save the document.
@@ -217,6 +237,25 @@ pub enum Command<'a> {
 }
 
 impl Command<'_> {
+    /// Whether the command belongs to find in files (the sidebar's Search
+    /// panel), which runs the same wherever the keyboard is.
+    #[must_use]
+    pub fn is_find_in_files(self) -> bool {
+        matches!(
+            self,
+            Command::FindInFiles
+                | Command::ReplaceInFiles
+                | Command::NextResult
+                | Command::PrevResult
+                | Command::SearchToggleCase
+                | Command::SearchToggleRegex
+                | Command::SearchToggleWord
+                | Command::ReplaceInFilesAll
+                | Command::UndoReplaceInFiles
+                | Command::ClearSearch
+        )
+    }
+
     /// Whether the command changes the document's text when the editor
     /// has focus. Such commands wait while the document is being saved.
     /// (Replace and Replace All change it too; they run from the find bar,
