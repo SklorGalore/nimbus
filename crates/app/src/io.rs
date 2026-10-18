@@ -1332,6 +1332,54 @@ mod tests {
         assert!(open_with(&fine, 0, None).unwrap().read_only.is_none());
     }
 
+    /// `cargo test --release -p nimbus -- --ignored --nocapture encoding_open_bench`
+    ///
+    /// M17's budget: opening a 10 MB Windows-1252 file costs no more than
+    /// twice opening the same text as UTF-8. Best of five each.
+    #[test]
+    #[ignore = "benchmark: run with --release"]
+    fn encoding_open_bench() {
+        let dir = TempDir::new("enc-bench");
+        let line =
+            "id,name,city,note\r\n42,Ren\u{e9}e,Z\u{fc}rich,caf\u{e9} cr\u{e8}me 5 \u{20ac}\r\n";
+        let text = line.repeat(10 * 1024 * 1024 / line.len());
+        let utf8 = dir.0.join("utf8.csv");
+        fs::write(&utf8, &text).unwrap();
+        let mut w1252 = Vec::new();
+        encoding::WINDOWS_1252
+            .encoder()
+            .encode(&text, true, &mut w1252)
+            .unwrap();
+        let cp = dir.0.join("w1252.csv");
+        fs::write(&cp, &w1252).unwrap();
+        let best = |path: &Path| {
+            (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    let opened = open(path).unwrap();
+                    assert!(!opened.buffer.is_mapped());
+                    t.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        let (a, b) = (best(&utf8), best(&cp));
+        println!(
+            "open 10 MB: UTF-8 {a:?}, Windows-1252 {b:?} ({:.2}x)",
+            b.as_secs_f64() / a.as_secs_f64()
+        );
+        let t = Instant::now();
+        let opened = open(&cp).unwrap();
+        save_encoded(
+            &dir.0.join("out.csv"),
+            &opened.buffer,
+            opened.encoding,
+            false,
+        )
+        .unwrap();
+        println!("open and save the Windows-1252 file: {:?}", t.elapsed());
+    }
+
     #[test]
     fn opened_text_matches_file() {
         let dir = TempDir::new("read");

@@ -14,7 +14,7 @@ ignore = "0.4"
 log = "0.4.34"
 memchr = "2.8.3"
 memmap2 = "0.9"
-nimbus-core = { version = "0.4.0", path = "../core" }
+nimbus-core = { version = "0.5.0", path = "../core" }
 nimbus-render = { version = "0.1.0", path = "../render" }
 nimbus-syntax = { version = "0.2.1", path = "../syntax" }
 notify = "8.2.0"
@@ -31,8 +31,9 @@ winit = "0.30"
 default = []
 # East Asian encodings (Shift_JIS, EUC-JP, ISO-2022-JP, GBK, GB18030, Big5,
 # EUC-KR) in the encoding pickers, --encoding and the config's [encodings]
-# table. Off by default (DESIGN.md §9): sniffing them is unreliable, so
-# they are offered only by explicit choice.
+# table. Off by default (DESIGN.md §9). Their tables are linked either way
+# (encoding_rs dispatches at run time; all of encoding_rs costs 0.3 MB), so
+# this only decides whether they are offered.
 east-asian = []
 
 [lints]

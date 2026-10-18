@@ -93,6 +93,37 @@ a longer pattern beats a shorter one (`*.d.ts` before `*.ts`). The table
 beats everything else. Next come your own languages' extensions, then the
 built-in detection (extension, file name, `#!` line).
 
+## Which encoding a file is
+
+Nimbus reads a file as UTF-8 unless it says otherwise: a UTF-16 byte order
+mark opens it as UTF-16, and a file that is not valid UTF-8 but whose first
+64 KB read as Western text opens as Windows-1252. The status bar shows the
+result (`UTF-8`, `UTF-8 BOM`, `UTF-16 LE`, `Windows-1252`, …). When the
+guess is wrong, click it, or run **Reopen with Encoding…**; **Save with
+Encoding…** converts the file. Saving always writes the file's own
+encoding back, and a character that encoding cannot hold (an emoji in a
+Windows-1252 file) stops the save and offers UTF-8 instead.
+
+To skip the guess for some files, map file names or patterns to an
+encoding in `config.toml`; a pattern with a `/` is matched against the
+whole path:
+
+```toml
+[encodings]
+"*.csv" = "windows-1252"
+"legacy/*.txt" = "latin1"
+```
+
+Names are the usual ones: `utf-8`, `utf-16le`, `utf-16be`,
+`windows-1252` (or `cp1252`), `latin1` (or `iso-8859-1`), `iso-8859-15`,
+`windows-1250`, `koi8-r`, `mac-roman` and the other single-byte tables.
+`nimbus --encoding NAME FILE` does the same for the files on the command
+line. East Asian encodings (`shift_jis`, `euc-jp`, `gbk`, `big5`,
+`euc-kr`, …) are in builds made with `--features east-asian` only.
+
+Files over 256 MB are never converted in memory: one known to be in
+another encoding opens read-only, its bytes as they are.
+
 ## Your own languages
 
 ```

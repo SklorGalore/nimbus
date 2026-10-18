@@ -1,6 +1,6 @@
 # M17 — Encodings and line endings
 
-**Status: planned, after M16.** Written on 2026-10-18. Config and data files are
+**Status: done** (2026-10-18; smoke numbers to be recorded on the Mac). Written on 2026-10-18. Config and data files are
 the third content type `DESIGN.md` §1 names, and logs, CSV exports and
 Windows-born text files are often not UTF-8. Today such a file opens
 through M7's byte path with every non-UTF-8 byte shown as `�` (SUB
@@ -16,29 +16,29 @@ let the user change either.
 
 ## Done when
 
-- [ ] **Detection**: a file with a UTF-16 BOM (either order) opens as
+- [x] **Detection**: a file with a UTF-16 BOM (either order) opens as
       UTF-16; a file with a UTF-8 BOM keeps M2's handling; a file that is
       not valid UTF-8 and has no BOM is sniffed over its first 64 KB and
       opens as Windows-1252 when every byte decodes (the usual case for
       Western text), else through the byte path as today. Detection never
       reads the whole file.
-- [ ] **Round trip**: a file opened in an encoding is saved back in it,
+- [x] **Round trip**: a file opened in an encoding is saved back in it,
       byte for byte when unedited (the M2 rule, now per encoding). A
       character that cannot be encoded (an emoji into Latin-1) blocks the
       save with a message naming the line, and offers "Save as UTF-8".
-- [ ] **Status bar**: shows `UTF-8`, `UTF-8 BOM`, `UTF-16 LE`,
+- [x] **Status bar**: shows `UTF-8`, `UTF-8 BOM`, `UTF-16 LE`,
       `Windows-1252`, … and `LF` or `CRLF`; clicking either, or the palette
       actions "Reopen with Encoding…", "Save with Encoding…" and "Change
       Line Endings to LF/CRLF", changes it. Changing line endings is one
       undoable edit.
-- [ ] **Explicit choice**: `nimbus --encoding latin1 FILE` and a per-pattern
+- [x] **Explicit choice**: `nimbus --encoding latin1 FILE` and a per-pattern
       `[encodings]` table in the config (`"*.csv" = "windows-1252"`) skip
       detection.
-- [ ] **Huge files** are not transcoded into memory: a mapped file over
+- [x] **Huge files** are not transcoded into memory: a mapped file over
       the 256 MB threshold in a non-UTF-8 encoding opens read-only through
       the byte path with a message saying so. Under the threshold the
       decoded text goes into the rope like any file.
-- [ ] Budgets: opening a 10 MB Windows-1252 file costs no more than twice
+- [x] Budgets: opening a 10 MB Windows-1252 file costs no more than twice
       the UTF-8 open; `--smoke` unchanged; the binary grows by at most
       1 MB for the decoder tables.
 
@@ -112,4 +112,44 @@ text) applies.
 
 ## Results
 
-_To be filled in when the milestone lands._
+Landed 2026-10-18 (nimbus 0.6.0, nimbus-core 0.5.0).
+
+- **Open time** (`encoding_open_bench`, release, Linux container, best of
+  five): a 10 MB CSV opens in 18.8 ms as UTF-8 and 26.9 ms as
+  Windows-1252, 1.43x (budget 2x). Opening and saving it back: 70 ms.
+- **Binary size** (Linux release, stripped): 25.43 MB against 25.13 MB on
+  main before M17, +0.30 MB for `encoding_rs` and the new code (budget
+  1 MB). With `--features east-asian`: 25.43 MB, 1 KB
+  more. `encoding_rs` picks its decoder from a value known only at run
+  time, so its East Asian tables are linked whatever is offered; the
+  feature only decides whether they are offered. All of it costs 0.30 MB,
+  so the feature is kept off for the reason `DESIGN.md` §9 gives
+  (unreliable to guess) rather than for size.
+- **`--smoke`**: not measurable in the container (no GPU); to be recorded
+  on the Mac. Nothing new runs at startup: the `[encodings]` table is
+  compiled once with the config, and only the files on the command line
+  are sniffed (64 KB each, at most).
+- **Surprises**:
+  - Every byte decodes in Windows-1252 as `encoding_rs` reads it, so
+    "every byte decodes" (the plan's test) proves nothing. The sniff is
+    instead the plan's fallback: no NUL or control bytes, none of the five
+    undefined bytes, at least 95 % printable. A file whose first 64 KB are
+    UTF-8 with accents but which fails later stays on the byte path, since
+    reading it as Windows-1252 would garble every accent.
+  - `encoding_rs` follows the web standard: it writes UTF-16 as UTF-8 and
+    treats ISO-8859-1 as Windows-1252. UTF-16 output and true Latin-1 are
+    a few lines in `encoding.rs`.
+  - Huge files: the plan made any huge non-UTF-8 file read-only. Built
+    that way, a 4 GB log with one accented byte near its start would have
+    lost editing that M7 gave it. Read-only is now for huge files whose
+    encoding is *known* (UTF-16 byte order mark, `--encoding`, the config
+    table, Reopen with Encoding); a guessed one keeps M7's editable byte
+    path. Recorded in `DESIGN.md` §10.
+  - Undoing "Change Line Endings" restores the text but not the ending
+    Enter inserts; run the action again to switch back.
+  - Replace in Files leaves open tabs in another encoding alone (the
+    search reads files' bytes, whose offsets are not the tab's) and says
+    so in its summary. Files on disk are still edited as bytes, as M10
+    does, except that a non-ASCII replacement into a file that is not
+    UTF-8 is refused for that file ("open it to replace there") rather
+    than written as UTF-8 bytes into it.
