@@ -101,6 +101,15 @@ left is small or still speculative.
   100,000 keystrokes keep about 10 MB. Merging a contiguous typing run
   into one edit would cut that to the text itself; `undo_oracle.rs`
   covers coalescing.
+- **Open in the running window** (owner, 2026-10-18): `nimbus FILE`
+  starts a second window today, since nothing hands files to a Nimbus
+  that is already open. Passing them to the running one as new tabs
+  fits the one-window non-goal (`DESIGN.md` §2) better; it needs a small local
+  socket or pipe per user, checked before the window is created.
+- **`--wait`** (owner, 2026-10-18): stay running until the files given
+  on the command line are closed, so git can use `nimbus --wait` as its
+  commit editor. Pairs with the item above, where the waiting process
+  is the one that handed its files to the running window.
 - **Autosave of unsaved work** for crash recovery: the owner decided
   against it when approving M12 (it would write the user's text
   somewhere they did not choose); it stays here in case that changes.
