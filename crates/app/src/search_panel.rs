@@ -130,6 +130,8 @@ pub struct Panel {
     generation: Arc<Generation>,
     /// Scroll left over from trackpad deltas smaller than a row.
     wheel: f32,
+    /// The toggle under the pointer, for its tooltip.
+    pub hover: Option<Toggle>,
 }
 
 impl Default for Panel {
@@ -153,6 +155,7 @@ impl Default for Panel {
             rows: Vec::new(),
             generation: Arc::new(Generation::default()),
             wheel: 0.0,
+            hover: None,
         }
     }
 }
@@ -240,6 +243,17 @@ const TOGGLES: [(Toggle, &str); 4] = [
     (Toggle::Word, "ab"),
     (Toggle::Replace, "Replace"),
 ];
+
+/// What each toggle does, for the tooltip shown while the pointer rests
+/// on it; the labels alone ("Aa", ".*", "ab") are too terse to guess.
+fn describe(toggle: Toggle) -> &'static str {
+    match toggle {
+        Toggle::Case => "Match case",
+        Toggle::Regex => "Regular expression",
+        Toggle::Word => "Whole words only",
+        Toggle::Replace => "Show the replace field",
+    }
+}
 
 /// Label width in columns: three for the short ones, the text's length for
 /// "Replace".
@@ -599,6 +613,24 @@ impl Panel {
 
     /// What is at `(x, y)` of the panel.
     #[must_use]
+    /// Note the pointer's position for the toggle tooltips. Returns `true`
+    /// when the tooltip changed and the panel needs drawing again.
+    pub fn hover_at(&mut self, layout: &Layout, x: f32, y: f32) -> bool {
+        let hover = match self.hit(layout, x, y) {
+            Target::Toggle(t) if x < layout.left => Some(t),
+            _ => None,
+        };
+        let changed = hover != self.hover;
+        self.hover = hover;
+        changed
+    }
+
+    /// The pointer left the window: no tooltip. Returns `true` when one
+    /// was showing.
+    pub fn hover_gone(&mut self) -> bool {
+        self.hover.take().is_some()
+    }
+
     pub fn hit(&self, layout: &Layout, x: f32, y: f32) -> Target {
         let g = Geometry::of(layout, self.replace_mode);
         let lh = layout.metrics.line_height;
@@ -692,6 +724,49 @@ pub fn draw(gpu: &mut Gpu, ui: &Ui, layout: &Layout, panel: &Panel, focused: boo
     if let Some(results) = &panel.results {
         draw_list(gpu, ui, layout, (panel, results), &geo, focused);
     }
+    if let Some(toggle) = panel.hover {
+        draw_tooltip(gpu, ui, layout, panel, &geo, toggle);
+    }
+}
+
+/// A small box under the toggle the pointer rests on, saying what it does
+/// and whether it is on. Drawn last so it sits over the count line and
+/// the list, and kept inside the sidebar's width.
+fn draw_tooltip(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    panel: &Panel,
+    geo: &Geometry,
+    toggle: Toggle,
+) {
+    let (cell, lh) = (layout.metrics.cell_width, layout.metrics.line_height);
+    let on = match toggle {
+        Toggle::Case => panel.case_sensitive,
+        Toggle::Regex => panel.regex,
+        Toggle::Word => panel.whole_word,
+        Toggle::Replace => panel.replace_mode,
+    };
+    let text = format!("{} ({})", describe(toggle), if on { "on" } else { "off" });
+    let mut left = geo.left;
+    for (t, label) in TOGGLES {
+        if t == toggle {
+            break;
+        }
+        left += (toggle_cols(label) + TOGGLE_GAP) * cell;
+    }
+    let pad = cell / 2.0;
+    let width = f(text.chars().count()) * cell + 2.0 * pad;
+    let left = left.min(layout.left - width - layout.margin).max(0.0);
+    let top = geo.toggles + lh + layout.margin / 2.0;
+    let border = layout.scale.round().max(1.0);
+    gpu.push_rect([left, top], [width, lh + 2.0 * border], ui.picker_border);
+    gpu.push_rect(
+        [left + border, top + border],
+        [width - 2.0 * border, lh],
+        ui.picker,
+    );
+    gpu.push_text_line([left + pad, top + border], &text, ui.text);
 }
 
 /// The four fields, with placeholders while empty and unfocused.
@@ -982,6 +1057,26 @@ mod tests {
         p.move_selection(Motion::DocEnd, &l);
         assert_eq!(p.selected, Some(4));
         assert!(Panel::default().step(false, &l).is_none());
+    }
+
+    #[test]
+    fn the_pointer_over_a_toggle_shows_its_tooltip() {
+        let l = layout();
+        let mut p = panel();
+        let geo = Geometry::of(&l, false);
+        assert!(p.hover_at(&l, geo.left + 1.0, geo.toggles + 1.0));
+        assert_eq!(p.hover, Some(Toggle::Case));
+        assert_eq!(describe(Toggle::Case), "Match case");
+        // Still there: nothing to redraw.
+        assert!(!p.hover_at(&l, geo.left + 2.0, geo.toggles + 1.0));
+        // The second toggle.
+        assert!(p.hover_at(&l, geo.left + (3.0 + 1.0) * 10.0 + 1.0, geo.toggles + 1.0));
+        assert_eq!(p.hover, Some(Toggle::Regex));
+        // Off the row, and past the sidebar's edge.
+        assert!(p.hover_at(&l, geo.left + 1.0, geo.query + 1.0));
+        assert_eq!(p.hover, None);
+        assert!(!p.hover_at(&l, l.left + 5.0, geo.toggles + 1.0));
+        assert!(!p.hover_gone());
     }
 
     #[test]

@@ -135,6 +135,12 @@ dependency of `ignore`, so it costs nothing.
 `search.clear`. Keys chosen when building, checked by the keymap conflict
 test.
 
+**Tooltips**: the toggles' labels ("Aa", ".*", "ab") are too terse to
+guess, so the pointer resting on one shows a small box under it saying
+what it does and whether it is on (`draw_tooltip` in `search_panel.rs`);
+the app notes the pointer's position on every move and redraws only when
+the tooltip changes.
+
 **Themes**: `[ui]` keys `search_match` (the marked text in a preview) and
 `search_file` (the file header row), in both built-in themes.
 

@@ -2730,6 +2730,20 @@ impl App {
         }
     }
 
+    /// Show or hide the search toggles' tooltip as the pointer moves.
+    fn update_search_hover(&mut self) {
+        let Some(layout) = self.layout() else { return };
+        let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        let changed = if self.sidebar.visible && self.sidebar.mode == Mode::Search {
+            self.sidebar.search.hover_at(&layout, x, y)
+        } else {
+            self.sidebar.search.hover_gone()
+        };
+        if changed {
+            self.changed(false);
+        }
+    }
+
     /// Show the resize cursor over the sidebar's divider, the usual one
     /// elsewhere. Only tells the window when it changes.
     fn update_cursor_icon(&mut self) {
@@ -4569,6 +4583,13 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 self.update_scrollbar_hover();
                 self.update_cursor_icon();
+                self.update_search_hover();
+            }
+
+            WindowEvent::CursorLeft { .. } => {
+                if self.sidebar.search.hover_gone() {
+                    self.changed(false);
+                }
             }
 
             WindowEvent::MouseInput {
