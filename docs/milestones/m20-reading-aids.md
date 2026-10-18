@@ -36,7 +36,7 @@ model.
       editor's grammars), links and tables, in the UI font, scrolled in
       step with the source; it updates on a 150 ms pause after typing.
       Images and HTML are shown as placeholders.
-- [ ] Budgets: sticky scroll and the minimap add under 1 ms to a scroll
+- [x] Budgets: sticky scroll and the minimap add under 1 ms to a scroll
       frame on the 10 MB file; the preview re-renders a 1 MB document in
       under 50 ms off the main thread; `--smoke` unchanged.
 
@@ -104,24 +104,23 @@ source's first visible line to the block containing it.
 
 Landed on 2026-10-18 (nimbus 0.10.0, nimbus-render 0.3.0, nimbus-syntax
 0.3.0). Measured in the cloud container (4 cores, release build, Mesa's
-software Vulkan for the GPU numbers), except `--smoke`, which is from
-the owner's Apple M5 Pro. The budgets box stays open until the preview number is confirmed
-on the Mac.
+software Vulkan for the GPU numbers), except where a row says Mac: the
+owner's Apple M5 Pro.
 
 | What | Budget | Measured |
 |---|---|---|
 | Scroll frame on the 10 MB file, queueing time p50 (`m20_scroll_bench`): neither / sticky / minimap / both | under 1 ms added | 490 µs / 551 µs / 678 µs / 720 µs: both add 0.23 ms |
-| Preview layout of a 1 MB document after an edit (`m20_preview_bench`) | under 50 ms, off the main thread | 76–82 ms here; the first layout, which parses every code block, 190 ms |
+| Preview layout of a 1 MB document after an edit (`m20_preview_bench`) | under 50 ms, off the main thread | Mac: median 28.1 ms (min 27.8), first layout 60.3 ms. Container: 76–82 ms, first 190 ms |
 | `--smoke` on the Mac (`bench/smoke.sh`) | under 500 ms warm, unchanged | warm median 119.2 ms (114.7–122.2), cold 706.1 ms after a purge; in line with M19's 115–150 ms warm. The first frame looks up no fonts unless `ui_font` is set, and the preview starts nothing until opened |
 | Release binary (Linux) | under 35 MB | 26.4 MB; no new dependency |
 
 How the preview number breaks down: about 45 ms reads the blocks from
 the tree and about 30 ms wraps the text. A bare walk over every node of
 that document's tree takes 32 ms in this container, about 110 ns a
-node, which is slow for tree-sitter; the Mac is likely several times
-faster (an estimate, not yet measured). If it still misses the budget,
-the next step is to keep each top-level section's blocks between
-layouts, as the code colours already are.
+node, which is slow for tree-sitter; the Mac runs the whole layout in
+28 ms. If a larger document ever misses the budget, the next step is to
+keep each top-level section's blocks between layouts, as the code
+colours already are.
 
 Surprises:
 

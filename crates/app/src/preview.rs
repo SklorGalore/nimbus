@@ -1291,6 +1291,9 @@ impl<'a> Flow<'a> {
         // Each cell's pieces, read once.
         let mut cells: Vec<Vec<(String, Vec<Piece>)>> = Vec::with_capacity(rows.len());
         let mut natural = vec![0.0f32; cols];
+        // The widest word in each column: narrower than this, a cell
+        // breaks inside a word.
+        let mut least = vec![0.0f32; cols];
         for (r, row) in rows.iter().enumerate() {
             let mut out = Vec::with_capacity(row.len());
             for (c, range) in row.iter().enumerate() {
@@ -1310,17 +1313,18 @@ impl<'a> Flow<'a> {
                 if let Some(n) = natural.get_mut(c) {
                     *n = n.max(w + 2.0 * cell_pad);
                 }
+                let word = text
+                    .split_whitespace()
+                    .map(|word| self.measure.width(word, style))
+                    .fold(0.0f32, f32::max);
+                if let Some(l) = least.get_mut(c) {
+                    *l = l.max(word + 2.0 * cell_pad);
+                }
                 out.push((text, pieces));
             }
             cells.push(out);
         }
-        let room = right - left;
-        let total: f32 = natural.iter().sum();
-        let widths: Vec<f32> = if total > room {
-            natural.iter().map(|w| (w / total * room).floor()).collect()
-        } else {
-            natural
-        };
+        let widths = share_columns(&natural, &least, right - left);
         let table_w: f32 = widths.iter().sum();
         let line = 1.0;
         let starts_at = self.page.runs.len();
@@ -1355,6 +1359,34 @@ impl<'a> Flow<'a> {
             runs.sort_by(|a, b| a.y.total_cmp(&b.y));
         }
     }
+}
+
+/// Column widths for a table `room` wide, given each column's natural
+/// width (its widest cell on one line) and least width (its widest
+/// word). The browser's way: if everything fits, each column gets its
+/// natural width. Otherwise each gets its least width, so no word is
+/// broken, and the room left over goes to the columns that want more, in
+/// proportion to how much more they want. Only when even the words do
+/// not fit are the least widths shrunk to fit.
+fn share_columns(natural: &[f32], least: &[f32], room: f32) -> Vec<f32> {
+    let total: f32 = natural.iter().sum();
+    if total <= room {
+        return natural.to_vec();
+    }
+    let floor: f32 = least.iter().sum();
+    if floor >= room {
+        return least
+            .iter()
+            .map(|w| (w / floor.max(1.0) * room).floor())
+            .collect();
+    }
+    let want = (total - floor).max(1.0);
+    let spare = room - floor;
+    natural
+        .iter()
+        .zip(least)
+        .map(|(&n, &l)| (l + (n - l).max(0.0) / want * spare).floor())
+        .collect()
 }
 
 /// Heading levels' sizes: from 1.8 times the body down to the body's.
@@ -1583,6 +1615,23 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(p.runs.iter().any(|r| r.style.bold));
         assert!(p.runs.windows(2).all(|w| w[0].y <= w[1].y));
+    }
+
+    #[test]
+    fn narrow_columns_keep_their_words_whole() {
+        // A short date column beside a long prose one (DESIGN.md's
+        // decision log): the date keeps its width and the prose wraps.
+        let w = share_columns(&[100.0, 2000.0, 40.0], &[100.0, 120.0, 40.0], 800.0);
+        assert!(w[0] >= 100.0 && w[2] >= 40.0, "{w:?}");
+        assert!(w.iter().sum::<f32>() <= 800.0, "{w:?}");
+        // Everything fits: natural widths.
+        assert_eq!(
+            share_columns(&[10.0, 20.0], &[5.0, 5.0], 100.0),
+            vec![10.0, 20.0]
+        );
+        // Not even the words fit: shrunk in proportion.
+        let w = share_columns(&[300.0, 300.0], &[200.0, 200.0], 100.0);
+        assert!(w.iter().sum::<f32>() <= 100.0, "{w:?}");
     }
 
     #[test]
