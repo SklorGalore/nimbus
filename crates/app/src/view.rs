@@ -16,7 +16,7 @@ use nimbus_core::{Folds, LineEnding, Selection, Selections, Text, column, long_l
 use nimbus_render::{ColorRun, Gpu, Metrics, Style};
 use nimbus_syntax::highlight::{Highlighter, Span};
 
-use crate::document::{Carets, Document, Solo};
+use crate::document::{Carets, Document, Solo, Tail};
 use crate::find::{Field, FindBar};
 use crate::theme::{Color, Theme, Ui};
 
@@ -543,6 +543,8 @@ pub struct View {
     /// The character columns of the indentation item ("Spaces: 4") within
     /// `status`, so a click on it can be told apart.
     status_indent: Range<usize>,
+    /// The same for the Follow Tail item (M12), empty when not shown.
+    status_follow: Range<usize>,
     /// How many bytes of text the last frame showed, for the scrollbar's
     /// thumb. Kept as a count rather than an end, so it stays right while
     /// a drag moves the scroll before the next frame.
@@ -852,20 +854,44 @@ impl View {
             let pct = t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64;
             let _ = write!(out, "   Counting lines {pct:.0}%");
         }
+        // Offered once the file has grown on disk; a click toggles it.
+        self.status_follow = 0..0;
+        let follow = match doc.tail {
+            Tail::Fixed => None,
+            Tail::Grew => Some("Follow Tail"),
+            Tail::Following => Some("Following"),
+        };
+        if let Some(label) = follow {
+            out.push_str("   ");
+            let from = out.chars().count();
+            out.push_str(label);
+            self.status_follow = from..out.chars().count();
+        }
         &self.status
+    }
+
+    /// Whether `x` is over the Follow Tail item of the status bar.
+    #[must_use]
+    pub fn follow_item_hit(&self, layout: &Layout, x: f32) -> bool {
+        self.status_item_hit(layout, x, &self.status_follow)
     }
 
     /// Whether `x` is over the indentation item of the status bar as last
     /// built by [`View::status_info`], which [`draw_status`] right-aligns.
     #[must_use]
     pub fn indent_item_hit(&self, layout: &Layout, x: f32) -> bool {
+        self.status_item_hit(layout, x, &self.status_indent)
+    }
+
+    /// Whether `x` is over the characters `item` of the status bar.
+    fn status_item_hit(&self, layout: &Layout, x: f32, item: &Range<usize>) -> bool {
         let cell = layout.metrics.cell_width;
         let info_w = f(self.status.chars().count()) * cell;
         let info_x = (layout.width - layout.margin - info_w)
             .round()
             .max(layout.margin);
         let col = (x - info_x) / cell;
-        col >= f(self.status_indent.start) && col < f(self.status_indent.end)
+        col >= f(item.start) && col < f(item.end)
     }
 
     /// Scroll horizontally by `dx` pixels. Does nothing while wrapping.
