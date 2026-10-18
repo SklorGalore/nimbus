@@ -59,6 +59,9 @@ pub struct Replacement {
     pub expand: bool,
     /// The replacement text, or template.
     pub template: String,
+    /// The pattern can match across lines (M19), so it is checked against
+    /// the text past the match's first line too.
+    pub multi_line: bool,
 }
 
 impl Replacement {
@@ -71,9 +74,14 @@ impl Replacement {
         if range.end > hay.len() || range.start > range.end {
             return None;
         }
-        // The line's end: an anchor must not see the next line.
-        let line_end =
-            memchr::memchr(b'\n', &hay[range.start..]).map_or(hay.len(), |i| range.start + i);
+        // The line's end: an anchor must not see the next line. A
+        // multi-line pattern was searched over the whole text, so it is
+        // checked against the whole text.
+        let line_end = if self.multi_line {
+            hay.len()
+        } else {
+            memchr::memchr(b'\n', &hay[range.start..]).map_or(hay.len(), |i| range.start + i)
+        };
         let caps = self.re.captures_at(&hay[..line_end], range.start)?;
         if caps.get(0).map(|m| m.range()) != Some(range) {
             return None;
@@ -190,6 +198,15 @@ fn replace_one(rep: &Replacement, job: &Job) -> (Outcome, Option<Vec<u8>>, Optio
     if edits.is_empty() {
         return (Outcome::Changed, None, None);
     }
+    // Replacement text is UTF-8. Spliced into a file in another encoding
+    // (M17), anything beyond ASCII would be bytes of the wrong encoding.
+    if edits.iter().any(|(_, t)| !t.is_ascii()) && std::str::from_utf8(&bytes).is_err() {
+        return (
+            Outcome::Failed("not UTF-8; open it to replace there".to_owned()),
+            None,
+            None,
+        );
+    }
     let new = MappedBuffer::from_bytes(apply(&bytes, &edits));
     match io::save(&job.path, &new, false) {
         Ok(meta) => (
@@ -282,6 +299,7 @@ mod tests {
             re,
             expand: regex,
             template: template.into(),
+            multi_line: pattern.contains("\\n"),
         }
     }
 
@@ -289,6 +307,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nimbus-replace-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
+    }
+
+    #[test]
+    fn multi_line_patterns_replace_across_lines() {
+        let r = rep(r"a\nb", "X", true);
+        assert!(r.multi_line);
+        assert_eq!(r.at(b"za\nbz", 1..4), Some(b"X".to_vec()));
+        let single = Replacement {
+            multi_line: false,
+            ..rep(r"a\nb", "X", true)
+        };
+        assert_eq!(single.at(b"za\nbz", 1..4), None);
     }
 
     #[test]
@@ -361,5 +391,22 @@ mod tests {
         assert_eq!(restored, Vec::<PathBuf>::new());
         assert_eq!(failed[0].1, "changed since");
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "edited meanwhile\n");
+    }
+
+    #[test]
+    fn non_ascii_replacements_skip_files_that_are_not_utf8() {
+        let w = temp("w1252.txt");
+        std::fs::write(&w, b"caf\xe9 foo\n").unwrap();
+        let job = Job {
+            path: w.clone(),
+            ranges: std::iter::once(5..8).collect(),
+        };
+        let report = run(&rep("foo", "bär", false), std::slice::from_ref(&job));
+        assert!(matches!(report.files[0].1, Outcome::Failed(_)));
+        assert_eq!(std::fs::read(&w).unwrap(), b"caf\xe9 foo\n");
+        // ASCII is the same bytes in every Western encoding: written.
+        let report = run(&rep("foo", "bar", false), &[job]);
+        assert_eq!(report.files[0].1, Outcome::Replaced(1));
+        assert_eq!(std::fs::read(&w).unwrap(), b"caf\xe9 bar\n");
     }
 }

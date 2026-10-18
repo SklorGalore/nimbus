@@ -1,9 +1,11 @@
 # Example files
 
 Small, hand-sized inputs for trying features by eye. The bench files from
-`bench/gen.sh` measure; these show.
+`bench/gen.sh` measure; these show. The user manual's
+[Compare and merge](../docs/manual/compare-and-merge.md) chapter explains
+the views they exercise.
 
-## `merge/`: compare and merge (M9)
+## `merge/`: compare and merge
 
 Three versions of one small Rust file, and the conflicted result git makes
 of them:
@@ -36,11 +38,11 @@ R=examples/merge
 # A file with conflict markers: the message line offers "Resolve Conflicts".
 cp $R/conflicted.rs /tmp/conflicted.rs && ./target/release/nimbus /tmp/conflicted.rs
 
-# The M6 offer: a file that changes on disk under unsaved edits.
+# A file that changes on disk under unsaved edits.
 cp $R/base.rs /tmp/changing.rs && ./target/release/nimbus /tmp/changing.rs
 # ... type something in the window, then from another terminal:
 cp $R/remote.rs /tmp/changing.rs
-# ... and take "Merge with Disk" from the message line or the palette.
+# ... the message line lists the choices; run "Merge with Disk" from the palette.
 ```
 
 Inside the editor, "Merge Files…" and "Merge with Base…" in the palette

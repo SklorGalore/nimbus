@@ -18,6 +18,7 @@ use nimbus_core::{long_line, movement, multi};
 
 use nimbus_syntax::state::SyntaxState;
 
+use crate::encoding::Encoding;
 use crate::indexer::Indexing;
 use crate::input::Motion;
 use crate::io::{self, OpenError, SaveError};
@@ -26,6 +27,9 @@ use crate::mapping::MappedFile;
 use crate::saver::{self, ReplacePolicy, SaveJob, SaveStep, Written};
 use nimbus_core::line_index::{IndexChunk, LineIndex};
 use nimbus_core::mapped::Limits;
+
+mod tail;
+pub use tail::Tail;
 
 /// Copy and Cut refuse selections longer than this: 64 MiB. The text is
 /// copied into memory, then again by the system clipboard, and Select All
@@ -60,6 +64,9 @@ pub enum DiskChange {
     None,
     /// Reloaded: there were no unsaved edits.
     Reloaded,
+    /// The file grew at its end, and the new bytes were appended
+    /// ([`Document::append_external`]): no undo step, still clean.
+    Appended,
     /// Changed on disk, and there are unsaved edits here.
     Conflict,
     /// Changed on disk, but a mapped document does not reload by itself
@@ -75,6 +82,9 @@ pub enum DiskChange {
         /// Whether it was reloaded.
         reloaded: bool,
     },
+    /// A following mapped document's file grew again soon after it was
+    /// last extended: look again at this time.
+    Later(Instant),
     /// Deleted on disk.
     Deleted,
     /// Changed on disk, but reading it failed.
@@ -411,6 +421,10 @@ impl Solo {
 
 /// An open document.
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about the document, not a state machine"
+)]
 pub struct Document {
     /// The text: a rope, or a piece table over a mapped file (see
     /// [`io::Backend`]).
@@ -431,8 +445,19 @@ pub struct Document {
     /// to the new file, a merge result); panes' carets compare it with
     /// theirs and snap to the new text ([`Carets::fit`]).
     pub(crate) epoch: u64,
-    /// The file had a UTF-8 byte order mark, written back on save.
+    /// The file had its encoding's byte order mark, written back on save.
     pub bom: bool,
+    /// The encoding the file was read in and is saved in (M17).
+    pub encoding: Encoding,
+    /// The encoding was chosen rather than detected ("Reopen with
+    /// Encoding", `--encoding`): reloading after a change on disk keeps it.
+    pub chosen_encoding: Option<Encoding>,
+    /// Some bytes were not valid in the encoding and show as U+FFFD; the
+    /// next save asks first, since it writes U+FFFD in their place.
+    pub lossy: bool,
+    /// Why the text cannot be edited or saved, when it cannot: a huge file
+    /// in another encoding, shown as bytes.
+    pub read_only: Option<String>,
     /// Increments on every change to the text. Background work (search,
     /// parsing) records the version it read, so stale results can be
     /// recognised and dropped.
@@ -484,6 +509,20 @@ pub struct Document {
     /// shares storage with the buffer until edits part them, so this costs
     /// little; mapped documents keep none.
     disk_text: DiskText,
+    /// A stand-in for a restored tab whose file has not been read yet
+    /// ([`Document::placeholder`]).
+    placeholder: bool,
+    /// Whether the file grew on disk while open, and whether the view
+    /// follows its end (M12's Follow Tail).
+    pub tail: Tail,
+    /// When a following mapped document last mapped its grown file, so a
+    /// log written in many small pieces is mapped again a few times a
+    /// second, not on every write.
+    extended_at: Option<Instant>,
+    /// Earlier, shorter mappings of the file that Follow Tail replaced,
+    /// which snapshots or undo steps may still hold. On Windows a save
+    /// waits for these too before replacing the file.
+    superseded: Vec<std::sync::Weak<MappedFile>>,
 }
 
 /// A snapshot of the text as the file held it, or none; a wrapper only
@@ -662,10 +701,15 @@ impl Document {
         let Some(mapped) = self.buffer.as_mapped_mut() else {
             return false;
         };
+        let last = chunk.is_done();
         match mapped.merge_index(chunk) {
             Ok(()) => {
                 // Line numbers changed under the highlighter's checkpoints.
                 self.syntax.touch();
+                if last {
+                    // The file may have grown while it was counted.
+                    self.count_the_rest();
+                }
                 true
             }
             Err(e) => {
@@ -679,6 +723,42 @@ impl Document {
     #[must_use]
     pub fn untitled() -> Self {
         Self::default()
+    }
+
+    /// A stand-in for `path` in a restored tab that has not been shown yet:
+    /// the name for the tab bar and nothing else, no text read and no
+    /// syntax state. Restoring ten tabs then costs one file's work before
+    /// the first frame; the app swaps in the real document when the tab is
+    /// first shown, or when a worker has read it.
+    ///
+    /// It has no [`Document::canonical`] path, so everything that finds
+    /// open files by path (file watching, find and replace in files, the
+    /// tree's marker) treats the file as not open and reads the disk. It is
+    /// never dirty, so saving all and the quit prompt pass it by.
+    #[must_use]
+    pub fn placeholder(path: PathBuf) -> Self {
+        Self {
+            path: Some(path),
+            placeholder: true,
+            ..Self::default()
+        }
+    }
+
+    /// The file was moved to `path` (renamed in the tree): save there from
+    /// now on. Its contents did not change, so nothing is read again and
+    /// the edits and history stay.
+    pub fn moved_to(&mut self, path: PathBuf) {
+        if !self.placeholder {
+            self.canonical = Some(io::canonical(&path));
+            self.deleted = false;
+        }
+        self.path = Some(path);
+    }
+
+    /// Whether this is a [`Document::placeholder`].
+    #[must_use]
+    pub fn is_placeholder(&self) -> bool {
+        self.placeholder
     }
 
     /// An untitled document holding `text`, unmodified.
@@ -718,6 +798,22 @@ impl Document {
         Self::open_by(path, io::open)
     }
 
+    /// [`Document::open`] in `encoding`, skipping detection; reloading
+    /// keeps that encoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`OpenError`] for anything other than a missing file.
+    pub fn open_as(path: &Path, encoding: Encoding) -> Result<Self, OpenError> {
+        let mut doc = Self::open_by(path, |p| io::open_as(p, Some(encoding)))?;
+        doc.chosen_encoding = Some(encoding);
+        if doc.buffer.len_bytes() == 0 {
+            // A file still to be created is created in that encoding.
+            doc.encoding = encoding;
+        }
+        Ok(doc)
+    }
+
     /// Open `path` memory-mapped whatever its size, for tests of mapped
     /// documents.
     #[cfg(test)]
@@ -742,6 +838,9 @@ impl Document {
                 buffer: AnyBuffer::default(),
                 line_ending: LineEnding::default(),
                 bom: false,
+                encoding: Encoding::Utf8,
+                lossy: false,
+                read_only: None,
                 mapping: None,
                 indexing: None,
             },
@@ -753,6 +852,9 @@ impl Document {
             path: Some(path.to_path_buf()),
             line_ending: opened.line_ending,
             bom: opened.bom,
+            encoding: opened.encoding,
+            lossy: opened.lossy,
+            read_only: opened.read_only,
             disk,
             canonical: Some(io::canonical(path)),
             ..Self::default()
@@ -824,11 +926,57 @@ impl Document {
             return DiskChange::None; // our own save, or no real change
         }
         self.deleted = false;
+        let grew = self.disk.is_some_and(|d| stamp.len > d.len);
+        if grew && self.tail == Tail::Fixed {
+            self.tail = Tail::Grew;
+        }
+        if grew
+            && !self.buffer.is_mapped()
+            && !self.is_dirty()
+            && let Some(old) = self.disk
+        {
+            match self.append_external(&path, old, stamp) {
+                Ok(true) => return DiskChange::Appended,
+                Ok(false) => {} // not a plain append: reload as before
+                Err(e) => return DiskChange::Failed(e.to_string()),
+            }
+        }
         if let Some(mapping) = &self.mapping {
             // A document still reading the temp file of a save that could
             // not replace this file is not reading this file: cutting it
             // short takes nothing from under the document.
             let truncated = mapping.temp_path().is_none() && stamp.len < mapping.file_len();
+            if grew
+                && !truncated
+                && self.tail == Tail::Following
+                && mapping.temp_path().is_none()
+                && !self.is_dirty()
+            {
+                let now = Instant::now();
+                if let Some(at) = self.extended_at
+                    && now.duration_since(at) < tail::EXTEND_GAP
+                {
+                    return DiskChange::Later(at + tail::EXTEND_GAP);
+                }
+                // Every attempt counts, so a file that keeps failing is not
+                // mapped again on every write.
+                self.extended_at = Some(now);
+                match self.extend_mapping(&path, stamp) {
+                    Ok(tail::Extended::Appended) => return DiskChange::Appended,
+                    Ok(tail::Extended::Shrunk) => {
+                        return self.mapped_disk_changed(true, languages, carets);
+                    }
+                    // Rewritten or replaced (a rotated log) while followed:
+                    // read it again, as a rope document would be.
+                    Ok(tail::Extended::NotAppended) => {
+                        return match self.reload(languages, carets) {
+                            Ok(()) => DiskChange::Reloaded,
+                            Err(e) => DiskChange::Failed(e.to_string()),
+                        };
+                    }
+                    Err(e) => return DiskChange::Failed(e),
+                }
+            }
             return self.mapped_disk_changed(truncated, languages, carets);
         }
         if self.is_dirty() {
@@ -897,9 +1045,12 @@ impl Document {
         }
         let disk = Stamp::of(&path);
         #[cfg(test)]
-        let opened = self.opener.unwrap_or(io::open)(&path)?;
+        let opened = match self.opener {
+            Some(open) => open(&path)?,
+            None => io::open_as(&path, self.chosen_encoding)?,
+        };
         #[cfg(not(test))]
-        let opened = io::open(&path)?;
+        let opened = io::open_as(&path, self.chosen_encoding)?;
         // Where each pane's cursor was, to put it back. A rope keeps its line and
         // column. A mapped document keeps the byte offset instead: its file
         // may have been cut short, and working out the line could read the
@@ -921,6 +1072,9 @@ impl Document {
         self.mapping = opened.mapping;
         self.line_ending = opened.line_ending;
         self.bom = opened.bom;
+        self.encoding = opened.encoding;
+        self.lossy = opened.lossy;
+        self.read_only = opened.read_only;
         self.disk = disk;
         self.reloaded_at = Some(Instant::now());
         self.history = History::default();
@@ -1009,14 +1163,19 @@ impl Document {
     }
 
     /// The encoding, as far as it is known, for the status bar. A rope
-    /// holds only UTF-8. A piece table held in memory holds a small file
-    /// that is not UTF-8. A huge mapped file's bytes are never checked as
-    /// a whole, so nothing is claimed for it.
+    /// holds text decoded from the file's encoding. A piece table held in
+    /// memory holds a small file that is not UTF-8 nor any text encoding
+    /// Nimbus recognises. A huge mapped file's bytes are never checked as a
+    /// whole, so nothing is claimed for it unless its start was not UTF-8
+    /// (it is then read-only).
     #[must_use]
     pub fn encoding_label(&self) -> Option<&'static str> {
+        if self.read_only.is_some() {
+            return Some(self.encoding.name());
+        }
         match (self.buffer.is_mapped(), self.mapping.is_some(), self.bom) {
-            (false, _, false) => Some("UTF-8"),
-            (false, _, true) => Some("UTF-8 BOM"),
+            (false, _, true) if self.encoding.is_utf8() => Some("UTF-8 BOM"),
+            (false, _, _) => Some(self.encoding.name()),
             (true, false, _) => Some("Not UTF-8"),
             (true, true, true) => Some("BOM"),
             (true, true, false) => None,
@@ -1057,6 +1216,24 @@ impl Document {
         (std::mem::take(&mut self.edits.spans), reset)
     }
 
+    /// The file's size and modification time (nanoseconds since 1970) as
+    /// last read or written, when the text here is still what is on disk:
+    /// what folds saved with the session are checked against (M13). `None`
+    /// with unsaved edits, a change on disk not taken in, or no time.
+    #[must_use]
+    pub fn disk_stamp(&self) -> Option<[u64; 2]> {
+        if self.is_dirty() || self.conflict || self.deleted {
+            return None;
+        }
+        let d = self.disk?;
+        let since = d.modified?.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+        let nanos = u64::try_from(since.as_nanos()).ok()?;
+        // TOML integers are signed 64-bit; a larger value would stop the
+        // whole state file from writing.
+        let fits = |n: u64| i64::try_from(n).is_ok();
+        (fits(d.len) && fits(nanos)).then_some([d.len, nanos])
+    }
+
     /// Whether there are unsaved changes.
     #[must_use]
     pub fn is_dirty(&self) -> bool {
@@ -1092,7 +1269,13 @@ impl Document {
                 source: std::io::Error::other("it saves on a worker; nothing was written"),
             });
         }
-        let written = io::save(&path, &self.buffer, self.bom)?;
+        if let Some(why) = &self.read_only {
+            return Err(SaveError {
+                step: "saving a read-only document",
+                source: std::io::Error::other(why.clone()),
+            });
+        }
+        let written = io::save_encoded(&path, &self.buffer, self.encoding, self.bom)?;
         self.mark_saved(&written);
         Ok(())
     }
@@ -1108,6 +1291,7 @@ impl Document {
         // the saved step and the document would look clean.
         self.history.seal();
         self.saved_at = self.history.top_id();
+        self.lossy = false;
         self.remember_disk_text();
     }
 
@@ -1168,6 +1352,13 @@ impl Document {
         }
         if !self.saves_on_worker() {
             return Err(refuse("only mapped documents save on a worker"));
+        }
+        if let Some(why) = &self.read_only {
+            return Err(refuse(why));
+        }
+        if !self.encoding.is_utf8() {
+            // Huge files are written as they are, never converted.
+            return Err(refuse("files this large save only as UTF-8"));
         }
         // No undo step may stay open to absorb edits made after the save.
         self.history.seal();
@@ -1327,10 +1518,9 @@ impl Document {
         };
         // One reference is `replace.old` itself. More means a search (or a
         // line counter on its way out) still maps the old file.
-        let held = replace
-            .old
-            .as_ref()
-            .is_some_and(|o| Arc::strong_count(o) > 1);
+        let held = replace.old.as_ref().is_some_and(|o| {
+            Arc::strong_count(o) > 1 || self.superseded.iter().any(|w| w.strong_count() > 0)
+        });
         if !held {
             return self.replace_now();
         }
@@ -2819,17 +3009,51 @@ mod tests {
     }
 
     #[test]
-    fn small_files_that_are_not_utf8_stay_in_memory_and_save_at_once() {
+    fn small_files_that_are_not_text_stay_in_memory_and_save_at_once() {
         let dir = TempDir::new("bytes-save");
-        let path = dir.0.join("latin1.txt");
-        std::fs::write(&path, b"caf\xe9\n").unwrap();
+        let path = dir.0.join("data.bin");
+        // A NUL byte: not Western text, so bytes (M7's path).
+        std::fs::write(&path, b"caf\xe9\x00\n").unwrap();
         let mut d = Solo::of(Document::open(&path).unwrap());
         assert!(d.buffer.is_mapped() && !d.saves_on_worker());
+        assert_eq!(d.encoding_label(), Some("Not UTF-8"));
         d.ed().click(0, false);
         d.ed().insert("le ").unwrap();
         d.save().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"le caf\xe9\n");
+        assert_eq!(std::fs::read(&path).unwrap(), b"le caf\xe9\x00\n");
         assert!(!d.is_dirty());
+    }
+
+    #[test]
+    fn western_files_are_decoded_edited_and_saved_back_in_their_encoding() {
+        let dir = TempDir::new("w1252-save");
+        let path = dir.0.join("latin1.txt");
+        std::fs::write(&path, b"caf\xe9\n").unwrap();
+        let mut d = Solo::of(Document::open(&path).unwrap());
+        assert!(!d.buffer.is_mapped());
+        assert_eq!(d.encoding_label(), Some("Windows-1252"));
+        assert_eq!(d.buffer.line(0), "café");
+        d.ed().click(0, false);
+        d.ed().insert("€ ").unwrap();
+        d.save().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"\x80 caf\xe9\n");
+        assert!(!d.is_dirty());
+
+        // Reopened as Latin-1, the same bytes read differently, and the
+        // choice survives a reload.
+        let mut d = Solo::of(Document::open_as(&path, Encoding::Latin1).unwrap());
+        assert_eq!(d.buffer.line(0), "\u{80} café");
+        assert_eq!(d.encoding_label(), Some("ISO-8859-1"));
+        let langs = Languages::default();
+        d.doc.reload(&langs, &mut [&mut d.carets]).unwrap();
+        assert_eq!(d.encoding_label(), Some("ISO-8859-1"));
+        // "€" has no byte in Latin-1: the save stops, naming the place.
+        d.ed().click(0, false);
+        d.ed().insert("€").unwrap();
+        let err = d.save().unwrap_err();
+        assert_eq!(err.unencodable().map(|u| u.offset), Some(0));
+        assert!(d.is_dirty());
+        assert_eq!(std::fs::read(&path).unwrap(), b"\x80 caf\xe9\n");
     }
 
     fn cursors(d: &mut Solo, at: &[usize]) {

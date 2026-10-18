@@ -1,5 +1,6 @@
 //! The fuzzy picker behind the command palette (Primary+Shift+P), the
-//! file opener (Primary+P), Go to Line and Go to Symbol (Primary+Shift+R).
+//! file opener (Primary+P), Open Recent (Primary+Shift+O), Go to Line and
+//! Go to Symbol (Primary+Shift+R).
 //!
 //! Matching runs in `nucleo`, which scores items on its own thread pool and
 //! accepts new items while it works. The file opener exploits that: a
@@ -18,6 +19,7 @@ use nucleo::{Config, Nucleo};
 
 use crate::action::{self, ActionInfo};
 use crate::document::Solo;
+use crate::encoding::{Choice, Encoding};
 use crate::keymap::Keymap;
 
 /// Walking stops after this many files, so a huge folder (a home directory
@@ -32,7 +34,8 @@ pub const VISIBLE_ROWS: usize = 12;
 pub enum Item {
     /// A palette entry.
     Action(&'static ActionInfo),
-    /// A file, as a path relative to the project folder.
+    /// A file in the workspace, by its full path; shown and matched
+    /// relative to its root ([`crate::tree::shown_path`]).
     File(PathBuf),
     /// A line to go to, counting from 1.
     Line(usize),
@@ -41,8 +44,35 @@ pub enum Item {
     Symbol(Symbol, Option<usize>),
     /// An open tab to compare with (M9): its index and name.
     Tab(usize, String),
+    /// An encoding to reopen or save the file in (M17), and whether it is
+    /// the one the file has now.
+    Encoding(EncodingFor, Choice, bool),
+    /// A recently opened file, by its full path.
+    Recent(PathBuf),
+    /// A name typed for something being saved (M19).
+    Name(String),
+    /// A saved workspace, by name.
+    Workspace(String),
     /// A git revision to compare the tab's file with (M18), as typed.
     Revision(String),
+}
+
+/// What a name typed in a [`Kind::Name`] picker is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Naming {
+    /// Save Workspace As.
+    Workspace,
+    /// Save Search.
+    Search,
+}
+
+/// What an encoding picker is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodingFor {
+    /// Read the file again in the chosen encoding.
+    Reopen,
+    /// Write the file in the chosen encoding.
+    Save,
 }
 
 /// Which picker is open.
@@ -58,6 +88,14 @@ pub enum Kind {
     Symbols,
     /// Choosing another tab to compare with.
     Tabs,
+    /// Choosing an encoding (M17).
+    Encoding(EncodingFor),
+    /// Files opened lately, in any project.
+    Recent,
+    /// Typing a name: the query is the name.
+    Name(Naming),
+    /// The saved workspaces.
+    Workspaces,
     /// Compare with Revision (M18): the query is a git revision or ref.
     Revision,
 }
@@ -92,6 +130,12 @@ pub struct Picker {
     pub root: PathBuf,
     /// For go-to-line: how many lines the document has, if all are counted.
     lines: Option<usize>,
+    /// For Open Recent: the files listed, to list again without the ones
+    /// found missing.
+    recent: Vec<PathBuf>,
+    /// For the file opener: the workspace's roots, to show paths relative
+    /// to them.
+    roots: Vec<PathBuf>,
 }
 
 impl std::fmt::Debug for Picker {
@@ -124,54 +168,71 @@ impl Picker {
         picker
     }
 
-    /// Open the file opener on `root`, starting a background walk.
-    pub fn files(root: &Path, notify: Arc<dyn Fn() + Send + Sync>) -> Self {
-        let picker = Self::new(
+    /// Open the file opener on the workspace's `roots`, starting a
+    /// background walk over all of them. `recent` are files in the roots
+    /// opened lately (full paths, most recent first): they are listed
+    /// first, so with nothing typed the opener shows them at the top, and
+    /// the walk leaves them out.
+    pub fn files(
+        roots: &[PathBuf],
+        recent: Vec<PathBuf>,
+        notify: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        let mut picker = Self::new(
             Kind::Files,
             Config::DEFAULT.match_paths(),
             Arc::clone(&notify),
-            root.to_path_buf(),
+            roots.first().cloned().unwrap_or_default(),
         );
+        picker.roots = roots.to_vec();
+        let roots: Arc<[PathBuf]> = roots.into();
         let injector = picker.matcher.injector();
+        for path in &recent {
+            push_file(&injector, &roots, path.clone());
+        }
+        let recent: Arc<std::collections::HashSet<PathBuf>> =
+            Arc::new(recent.into_iter().collect());
         let (done, stop) = (Arc::clone(&picker.walk_done), Arc::clone(&picker.stop));
         let notify_done = notify;
-        let root = root.to_path_buf();
         let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let spawned = std::thread::Builder::new()
             .name("file-walk".into())
             .spawn(move || {
-                ignore::WalkBuilder::new(&root)
-                    .hidden(true)
-                    .build_parallel()
-                    .run(|| {
-                        let injector = injector.clone();
-                        let (root, stop, count) =
-                            (root.clone(), Arc::clone(&stop), Arc::clone(&count));
-                        Box::new(move |entry| {
-                            if stop.load(Ordering::Relaxed)
-                                || count.load(Ordering::Relaxed) >= MAX_FILES
-                            {
-                                return ignore::WalkState::Quit;
+                let Some(first) = roots.first() else {
+                    done.store(true, Ordering::Relaxed);
+                    notify_done();
+                    return;
+                };
+                let mut walk = ignore::WalkBuilder::new(first);
+                for r in roots.iter().skip(1) {
+                    walk.add(r);
+                }
+                walk.hidden(true).build_parallel().run(|| {
+                    let injector = injector.clone();
+                    let (roots, stop, count, recent) = (
+                        Arc::clone(&roots),
+                        Arc::clone(&stop),
+                        Arc::clone(&count),
+                        Arc::clone(&recent),
+                    );
+                    Box::new(move |entry| {
+                        if stop.load(Ordering::Relaxed)
+                            || count.load(Ordering::Relaxed) >= MAX_FILES
+                        {
+                            return ignore::WalkState::Quit;
+                        }
+                        let Ok(entry) = entry else {
+                            return ignore::WalkState::Continue;
+                        };
+                        if entry.file_type().is_some_and(|t| t.is_file()) {
+                            count.fetch_add(1, Ordering::Relaxed);
+                            if !recent.contains(entry.path()) {
+                                push_file(&injector, &roots, entry.into_path());
                             }
-                            let Ok(entry) = entry else {
-                                return ignore::WalkState::Continue;
-                            };
-                            if entry.file_type().is_some_and(|t| t.is_file()) {
-                                let rel = entry
-                                    .path()
-                                    .strip_prefix(&root)
-                                    .unwrap_or(entry.path())
-                                    .to_path_buf();
-                                count.fetch_add(1, Ordering::Relaxed);
-                                injector.push(Item::File(rel), |item, cols| {
-                                    if let Item::File(p) = item {
-                                        cols[0] = p.to_string_lossy().as_ref().into();
-                                    }
-                                });
-                            }
-                            ignore::WalkState::Continue
-                        })
-                    });
+                        }
+                        ignore::WalkState::Continue
+                    })
+                });
                 done.store(true, Ordering::Relaxed);
                 // Wake the app once more so "loading" can end on screen.
                 notify_done();
@@ -195,7 +256,48 @@ impl Picker {
             stop: Arc::new(AtomicBool::new(false)),
             root,
             lines: None,
+            recent: Vec::new(),
+            roots: Vec::new(),
         }
+    }
+
+    /// Open Recent: `paths` (full, most recent first), matched on the whole
+    /// path. `root` is the project folder, for showing where each file is.
+    pub fn recent(paths: Vec<PathBuf>, root: &Path, notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let mut picker = Self::new(
+            Kind::Recent,
+            Config::DEFAULT.match_paths(),
+            notify,
+            root.to_path_buf(),
+        );
+        picker.recent = paths;
+        picker.inject_recent();
+        picker.walk_done.store(true, Ordering::Relaxed);
+        picker
+    }
+
+    fn inject_recent(&self) {
+        let injector = self.matcher.injector();
+        for p in &self.recent {
+            injector.push(Item::Recent(p.clone()), |item, cols| {
+                if let Item::Recent(p) = item {
+                    cols[0] = p.to_string_lossy().as_ref().into();
+                }
+            });
+        }
+    }
+
+    /// Open Recent: leave out `gone`, files found missing since it opened.
+    pub fn drop_recent(&mut self, gone: &[PathBuf]) {
+        if self.kind != Kind::Recent || !self.recent.iter().any(|p| gone.contains(p)) {
+            return;
+        }
+        self.recent.retain(|p| !gone.contains(p));
+        self.matcher.restart(true);
+        self.inject_recent();
+        // The query stays; matching runs again on the new list.
+        self.last_query.clear();
+        self.tick();
     }
 
     /// Open go-to-line for a document of `lines` lines (`None` while a
@@ -257,6 +359,89 @@ impl Picker {
         picker
     }
 
+    /// Ask for a name for `naming`. No list to match: the query is the
+    /// name, and Enter takes it.
+    pub fn name(naming: Naming, notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let picker = Self::new(Kind::Name(naming), Config::DEFAULT, notify, PathBuf::new());
+        picker.walk_done.store(true, Ordering::Relaxed);
+        picker
+    }
+
+    /// List the saved workspaces, by name, to open one.
+    pub fn workspaces(names: Vec<String>, notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let picker = Self::new(Kind::Workspaces, Config::DEFAULT, notify, PathBuf::new());
+        let injector = picker.matcher.injector();
+        for name in names {
+            injector.push(Item::Workspace(name), |item, cols| {
+                if let Item::Workspace(n) = item {
+                    cols[0] = n.as_str().into();
+                }
+            });
+        }
+        picker.walk_done.store(true, Ordering::Relaxed);
+        picker
+    }
+
+    /// Open the list of encodings, `for` reopening or saving the file whose
+    /// encoding is `current`. Saving offers UTF-8 with and without a byte
+    /// order mark, and UTF-16 with one (as Windows writes it).
+    pub fn encodings(
+        purpose: EncodingFor,
+        current: Choice,
+        notify: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        let picker = Self::new(
+            Kind::Encoding(purpose),
+            Config::DEFAULT,
+            notify,
+            PathBuf::new(),
+        );
+        let injector = picker.matcher.injector();
+        let mut choices: Vec<Choice> = Encoding::all()
+            .into_iter()
+            .map(|encoding| Choice {
+                encoding,
+                bom: purpose == EncodingFor::Save
+                    && matches!(encoding, Encoding::Utf16Le | Encoding::Utf16Be),
+            })
+            .collect();
+        if purpose == EncodingFor::Save {
+            choices.insert(
+                1,
+                Choice {
+                    encoding: Encoding::Utf8,
+                    bom: true,
+                },
+            );
+        }
+        for choice in choices {
+            let is_current = if purpose == EncodingFor::Save {
+                choice == current
+            } else {
+                choice.encoding == current.encoding
+            };
+            injector.push(Item::Encoding(purpose, choice, is_current), |item, cols| {
+                if let Item::Encoding(_, c, _) = item {
+                    cols[0] = c.label().into();
+                }
+            });
+        }
+        picker.walk_done.store(true, Ordering::Relaxed);
+        picker
+    }
+
+    /// The name typed in a [`Kind::Name`] picker, trimmed.
+    fn typed_name(&self) -> Option<String> {
+        let text = self.input.doc.buffer.line(0);
+        let name = text.trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+
+    /// No list behind it: the query is the answer.
+    fn is_typed(&self) -> bool {
+        matches!(self.kind, Kind::Line | Kind::Name(_) | Kind::Revision)
+    }
+
     /// The line number typed, counting from 1; a leading `:` is allowed, as
     /// some editors write it.
     fn line_target(&self) -> Option<usize> {
@@ -268,7 +453,7 @@ impl Picker {
     /// Feed the current query to the matcher and let it work for up to a
     /// millisecond. Returns whether results changed or are still coming.
     pub fn tick(&mut self) -> bool {
-        if matches!(self.kind, Kind::Line | Kind::Revision) {
+        if self.is_typed() {
             return false;
         }
         let query = self.input.doc.buffer.line(0).into_owned();
@@ -299,6 +484,9 @@ impl Picker {
         }
         if self.kind == Kind::Revision {
             return usize::from(self.revision_target().is_some());
+        }
+        if let Kind::Name(_) = self.kind {
+            return usize::from(self.typed_name().is_some());
         }
         self.matcher.snapshot().matched_item_count() as usize
     }
@@ -333,6 +521,9 @@ impl Picker {
         }
         if self.kind == Kind::Revision {
             return self.revision_target().map(Item::Revision);
+        }
+        if let Kind::Name(_) = self.kind {
+            return self.typed_name().map(Item::Name);
         }
         let i = u32::try_from(self.selected).ok()?;
         self.matcher
@@ -369,6 +560,22 @@ impl Picker {
             };
             return (vec![row], Some(0));
         }
+        if let Kind::Name(naming) = self.kind {
+            let Some(name) = self.typed_name() else {
+                return (Vec::new(), None);
+            };
+            let (text, detail) = match naming {
+                Naming::Workspace => (
+                    format!("Save workspace as \u{201c}{name}\u{201d}"),
+                    "in the config folder's workspaces".to_owned(),
+                ),
+                Naming::Search => (
+                    format!("Save search as \u{201c}{name}\u{201d}"),
+                    "listed at the top of the Search panel".to_owned(),
+                ),
+            };
+            return (vec![Row { text, detail }], Some(0));
+        }
         let snap = self.matcher.snapshot();
         let n = snap.matched_item_count();
         let start = u32::try_from(self.scroll).unwrap_or(0).min(n);
@@ -393,22 +600,68 @@ impl Picker {
                         None => s.kind.label().to_owned(),
                     },
                 },
-                Item::Tab(_, name) | Item::Revision(name) => Row {
+                Item::Tab(_, name)
+                | Item::Revision(name)
+                | Item::Name(name)
+                | Item::Workspace(name) => Row {
                     text: name.clone(),
                     detail: String::new(),
+                },
+                Item::Encoding(_, choice, current) => Row {
+                    text: choice.label().to_owned(),
+                    detail: if *current { "current" } else { "" }.to_owned(),
+                },
+                Item::Recent(p) => Row {
+                    text: p
+                        .file_name()
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                    detail: p.parent().map_or_else(String::new, |d| self.place(d)),
                 },
                 Item::File(p) => Row {
                     text: p
                         .file_name()
                         .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
-                    detail: p
-                        .parent()
+                    detail: crate::tree::shown_path(&self.roots, p)
+                        .as_deref()
+                        .and_then(Path::parent)
                         .map_or_else(String::new, |d| d.to_string_lossy().into_owned()),
                 },
             })
             .collect();
         (rows, self.selected.checked_sub(self.scroll))
     }
+}
+
+impl Picker {
+    /// Where a recent file's folder is, short: relative to the project, or
+    /// with the home folder as `~`.
+    fn place(&self, dir: &Path) -> String {
+        if let Ok(rel) = dir.strip_prefix(&self.root) {
+            let rel = rel.to_string_lossy();
+            let name = self.root.file_name().map(|n| n.to_string_lossy());
+            return match (rel.is_empty(), name) {
+                (true, Some(n)) => n.into_owned(),
+                (false, Some(n)) => format!("{n}/{rel}"),
+                (_, None) => rel.into_owned(),
+            };
+        }
+        if let Some(home) = dirs::home_dir()
+            && let Ok(rel) = dir.strip_prefix(&home)
+        {
+            return Path::new("~").join(rel).to_string_lossy().into_owned();
+        }
+        dir.to_string_lossy().into_owned()
+    }
+}
+
+/// Add a file (full path) to the file opener's list, matched on its path
+/// as shown: relative to its root, with the root's name when there are
+/// several, so typing a root's name narrows to it.
+fn push_file(injector: &nucleo::Injector<Item>, roots: &[PathBuf], path: PathBuf) {
+    let shown = crate::tree::shown_path(roots, &path).unwrap_or_else(|| path.clone());
+    injector.push(Item::File(path), |_, cols| {
+        cols[0] = shown.to_string_lossy().as_ref().into();
+    });
 }
 
 #[cfg(test)]
@@ -425,6 +678,29 @@ mod tests {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn encoding_picker_lists_choices_and_marks_the_current_one() {
+        let current = Choice {
+            encoding: crate::encoding::WINDOWS_1252,
+            bom: false,
+        };
+        let mut p = Picker::encodings(EncodingFor::Save, current, no_notify());
+        settle(&mut p);
+        let keymap = Keymap::new(&std::collections::HashMap::new()).0;
+        let (rows, _) = p.rows(&keymap);
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            &texts[..4],
+            ["UTF-8", "UTF-8 BOM", "UTF-16 LE", "UTF-16 BE"]
+        );
+        let _ = p.input.ed().insert("1252");
+        settle(&mut p);
+        match p.chosen() {
+            Some(Item::Encoding(EncodingFor::Save, c, true)) => assert_eq!(c, current),
+            other => panic!("{other:?}"),
         }
     }
 
@@ -451,13 +727,21 @@ mod tests {
         std::fs::write(dir.join("README.md"), "").unwrap();
         std::fs::write(dir.join("target/junk.rs"), "").unwrap();
         std::fs::write(dir.join(".ignore"), "target/\n").unwrap();
-        let mut p = Picker::files(&dir, no_notify());
+        let mut p = Picker::files(
+            std::slice::from_ref(&dir),
+            vec![dir.join("README.md")],
+            no_notify(),
+        );
         settle(&mut p);
-        assert_eq!(p.match_count(), 2, "target/ is ignored");
+        assert_eq!(p.match_count(), 2, "target/ is ignored; README listed once");
+        match p.chosen() {
+            Some(Item::File(path)) => assert_eq!(path, dir.join("README.md"), "recent first"),
+            other => panic!("{other:?}"),
+        }
         let _ = p.input.ed().insert("mainrs");
         settle(&mut p);
         match p.chosen() {
-            Some(Item::File(path)) => assert_eq!(path, PathBuf::from("src/main.rs")),
+            Some(Item::File(path)) => assert_eq!(path, dir.join("src").join("main.rs")),
             other => panic!("{other:?}"),
         }
         let (rows, sel) = p.rows(&Keymap::default());
@@ -466,6 +750,33 @@ mod tests {
             ("main.rs", "src", Some(0))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_opener_covers_every_root() {
+        let base = std::env::temp_dir().join(format!("nimbus-picker-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (a, b) = (base.join("app"), base.join("lib"));
+        std::fs::create_dir_all(a.join("src")).unwrap();
+        std::fs::create_dir_all(b.join("src")).unwrap();
+        std::fs::write(a.join("src/main.rs"), "").unwrap();
+        std::fs::write(b.join("src/main.rs"), "").unwrap();
+        let mut p = Picker::files(&[a.clone(), b.clone()], Vec::new(), no_notify());
+        settle(&mut p);
+        assert_eq!(p.match_count(), 2);
+        let _ = p.input.ed().insert("lib main");
+        settle(&mut p);
+        match p.chosen() {
+            Some(Item::File(path)) => assert_eq!(path, b.join("src").join("main.rs")),
+            other => panic!("{other:?}"),
+        }
+        let (rows, _) = p.rows(&Keymap::default());
+        assert_eq!(
+            Path::new(&rows[0].detail),
+            Path::new("lib").join("src"),
+            "the root's name shows"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Time to first results and to the end of the walk on a big folder.
@@ -479,7 +790,7 @@ mod tests {
             return;
         };
         let start = std::time::Instant::now();
-        let mut p = Picker::files(Path::new(&dir), no_notify());
+        let mut p = Picker::files(&[PathBuf::from(&dir)], Vec::new(), no_notify());
         let _ = p.input.ed().insert("lib.rs");
         let mut first = None;
         while p.tick() {
@@ -493,6 +804,36 @@ mod tests {
             start.elapsed(),
             p.match_count()
         );
+    }
+
+    #[test]
+    fn open_recent_matches_paths_and_drops_missing_files() {
+        let root = PathBuf::from("/p");
+        let paths = vec![
+            PathBuf::from("/p/src/main.rs"),
+            PathBuf::from("/elsewhere/notes.md"),
+            PathBuf::from("/p/README.md"),
+        ];
+        let mut p = Picker::recent(paths, &root, no_notify());
+        settle(&mut p);
+        assert_eq!(p.match_count(), 3);
+        let (rows, _) = p.rows(&Keymap::default());
+        assert_eq!(rows[0].text, "main.rs", "most recent first");
+        assert_eq!(rows[0].detail, "p/src");
+        assert_eq!(rows[1].detail, "/elsewhere");
+        let _ = p.input.ed().insert("notes");
+        settle(&mut p);
+        match p.chosen() {
+            Some(Item::Recent(path)) => assert_eq!(path, PathBuf::from("/elsewhere/notes.md")),
+            other => panic!("{other:?}"),
+        }
+        p.drop_recent(&[PathBuf::from("/elsewhere/notes.md")]);
+        settle(&mut p);
+        assert_eq!(p.match_count(), 0, "the query still applies");
+        p.input.ed().select_all();
+        let _ = p.input.ed().insert("");
+        settle(&mut p);
+        assert_eq!(p.match_count(), 2);
     }
 
     #[test]
@@ -536,6 +877,23 @@ mod tests {
             (rows[0].text.as_str(), rows[0].detail.as_str()),
             ("Config", "type, line 5")
         );
+    }
+
+    #[test]
+    fn names_are_typed_and_workspaces_listed() {
+        let mut p = Picker::name(Naming::Search, no_notify());
+        assert_eq!(p.match_count(), 0);
+        assert!(p.chosen().is_none());
+        let _ = p.input.ed().insert("  todos ");
+        assert!(!p.tick());
+        assert!(matches!(p.chosen(), Some(Item::Name(n)) if n == "todos"));
+        let (rows, sel) = p.rows(&Keymap::default());
+        assert!(rows[0].text.contains("todos") && sel == Some(0));
+        let mut p = Picker::workspaces(vec!["web".into(), "tools".into()], no_notify());
+        settle(&mut p);
+        let _ = p.input.ed().insert("tl");
+        settle(&mut p);
+        assert!(matches!(p.chosen(), Some(Item::Workspace(n)) if n == "tools"));
     }
 
     #[test]

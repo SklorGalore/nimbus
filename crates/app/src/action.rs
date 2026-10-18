@@ -7,6 +7,7 @@
 //! the config overrides on top of it, so nothing is reachable by a
 //! hard-coded key alone (DESIGN.md §4.4).
 
+use nimbus_core::LineEnding;
 use nimbus_core::transform::{Case, Lines};
 
 use crate::input::{Command, Motion};
@@ -149,6 +150,110 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::all(&["Primary+O"]),
     ),
     act(
+        "file.openRecent",
+        "Open Recent…",
+        Command::OpenRecent,
+        Keys::all(&["Primary+Shift+O"]),
+    ),
+    act(
+        "file.reopenClosed",
+        "Reopen Closed Tab",
+        Command::ReopenClosedTab,
+        Keys::all(&["Primary+Shift+T"]),
+    ),
+    act(
+        "file.clearRecent",
+        "Clear Recent Files",
+        Command::ClearRecent,
+        Keys::NONE,
+    ),
+    act(
+        "tree.newFile",
+        "New File in Tree…",
+        Command::TreeNewFile,
+        Keys::NONE,
+    ),
+    act(
+        "tree.newFolder",
+        "New Folder in Tree…",
+        Command::TreeNewFolder,
+        Keys::NONE,
+    ),
+    act(
+        "tree.rename",
+        "Rename in Tree…",
+        Command::TreeRename,
+        Keys::all(&["F2"]),
+    ),
+    act(
+        "tree.delete",
+        "Move to Trash",
+        Command::TreeDelete,
+        Keys::NONE,
+    ),
+    act(
+        "tree.reveal",
+        if cfg!(target_os = "macos") {
+            "Reveal in Finder"
+        } else if cfg!(target_os = "windows") {
+            "Reveal in Explorer"
+        } else {
+            "Reveal in File Manager"
+        },
+        Command::TreeReveal,
+        Keys::NONE,
+    ),
+    act(
+        "session.reopenLast",
+        "Reopen Last Session",
+        Command::ReopenLastSession,
+        Keys::NONE,
+    ),
+    act("tree.undoMove", "Undo Move", Command::UndoMove, Keys::NONE),
+    act(
+        "tree.searchInFolder",
+        "Search in Folder",
+        Command::SearchInFolder,
+        Keys::NONE,
+    ),
+    // Workspaces (M19).
+    act(
+        "workspace.addFolder",
+        "Add Folder to Workspace…",
+        Command::AddRoot,
+        Keys::NONE,
+    ),
+    act(
+        "workspace.removeFolder",
+        "Remove Folder from Workspace",
+        Command::RemoveRoot,
+        Keys::NONE,
+    ),
+    act(
+        "workspace.saveAs",
+        "Save Workspace As…",
+        Command::SaveWorkspaceAs,
+        Keys::NONE,
+    ),
+    act(
+        "workspace.open",
+        "Open Workspace…",
+        Command::OpenWorkspace,
+        Keys::NONE,
+    ),
+    act(
+        "workspace.saveHere",
+        "Save Workspace Here",
+        Command::SaveWorkspaceHere,
+        Keys::NONE,
+    ),
+    act(
+        "workspace.openHere",
+        "Open Project Workspace",
+        Command::OpenProjectWorkspace,
+        Keys::NONE,
+    ),
+    act(
         "file.save",
         "Save",
         Command::Save,
@@ -159,6 +264,18 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Save As…",
         Command::SaveAs,
         Keys::all(&["Primary+Shift+S"]),
+    ),
+    act(
+        "file.reopenWithEncoding",
+        "Reopen with Encoding…",
+        Command::ReopenWithEncoding,
+        Keys::NONE,
+    ),
+    act(
+        "file.saveWithEncoding",
+        "Save with Encoding…",
+        Command::SaveWithEncoding,
+        Keys::NONE,
     ),
     act(
         "file.close",
@@ -645,6 +762,18 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::DetectIndent,
         Keys::NONE,
     ),
+    act(
+        "edit.lineEndingsLf",
+        "Change Line Endings to LF",
+        Command::ChangeLineEndings(LineEnding::Lf),
+        Keys::NONE,
+    ),
+    act(
+        "edit.lineEndingsCrlf",
+        "Change Line Endings to CRLF",
+        Command::ChangeLineEndings(LineEnding::CrLf),
+        Keys::NONE,
+    ),
     // Find.
     act(
         "find.open",
@@ -737,6 +866,12 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::ClearSearch,
         Keys::NONE,
     ),
+    act(
+        "search.save",
+        "Save Search…",
+        Command::SaveSearch,
+        Keys::NONE,
+    ),
     // View.
     act(
         "view.toggleWrap",
@@ -757,6 +892,12 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Go to Symbol…",
         Command::GoToSymbol,
         Keys::all(&["Primary+Shift+R"]),
+    ),
+    act(
+        "view.followTail",
+        "Follow Tail",
+        Command::FollowTail,
+        Keys::NONE,
     ),
     act(
         "view.toggleSidebar",

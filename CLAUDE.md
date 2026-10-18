@@ -15,6 +15,7 @@ cargo build                              # debug build (deps are built at opt-le
 cargo run -- --smoke                     # open window, exit after first frame, print first-frame-ms=
 cargo build --release && ./target/release/nimbus --smoke   # the startup number that matters
 RUST_LOG=nimbus=debug ./target/release/nimbus --smoke       # same, with per-phase startup times
+bench/smoke.sh                                              # release build, purge, then 1 cold + 4 warm --smoke times (sudo)
 cargo run -- --screenshot /tmp/frame.bmp                    # save the first frame; convert with `sips -s format png`
 NIMBUS_SCALE=1 cargo run -- --screenshot /tmp/1x.bmp         # debug builds: render at another scale factor
 ./target/release/nimbus FILE --bench-typing 300            # type 300 chars through the edit path; prints latency percentiles

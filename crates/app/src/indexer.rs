@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use nimbus_core::Source;
-use nimbus_core::line_index::{IndexChunk, LineIndex, Scanner};
+use nimbus_core::line_index::{IndexChunk, LineIndex, Scanner, Spacing};
 
 use crate::mapping::MappedFile;
 
@@ -77,6 +77,35 @@ pub fn start(source: &Arc<MappedFile>) -> std::io::Result<(LineIndex, Option<Ind
         cancel: Arc::new(AtomicBool::new(false)),
     });
     Ok((index, rest))
+}
+
+/// Carry on counting `source`'s lines from where `index` stops: its file
+/// grew (M12's Follow Tail), and `source` maps it at the new length.
+#[must_use]
+pub fn resume(source: &Arc<MappedFile>, index: &LineIndex) -> Indexing {
+    Indexing {
+        token: NEXT_TOKEN.fetch_add(1, Ordering::Relaxed),
+        scanner: Scanner::resume(index, Spacing::DEFAULT),
+        source: Arc::clone(source),
+        cancel: Arc::new(AtomicBool::new(false)),
+    }
+}
+
+/// [`resume`], run here rather than on a worker, for the few bytes a
+/// growing log adds at a time. Returns the chunks to merge, in order.
+///
+/// # Errors
+///
+/// Returns the error from reading the file.
+pub fn catch_up(source: &Arc<MappedFile>, index: &LineIndex) -> Result<Vec<IndexChunk>, String> {
+    let mut chunks = Vec::new();
+    let mut failed = None;
+    resume(source, index).run(|_, chunk, error| {
+        chunks.push(chunk);
+        failed = error;
+        true
+    });
+    failed.map_or(Ok(chunks), Err)
 }
 
 impl Indexing {

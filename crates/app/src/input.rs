@@ -103,6 +103,12 @@ pub enum Command<'a> {
     IndentUsingTabs,
     /// Work the indentation out from the file again.
     DetectIndent,
+    /// Pick an encoding and read the file again in it (M17).
+    ReopenWithEncoding,
+    /// Pick an encoding and save the file in it.
+    SaveWithEncoding,
+    /// Change every line ending in the file, as one undoable edit.
+    ChangeLineEndings(nimbus_core::LineEnding),
     /// Undo the last change.
     Undo,
     /// Redo the last undone change.
@@ -218,6 +224,44 @@ pub enum Command<'a> {
     FoldLevel(usize),
     /// Open the fuzzy file opener.
     QuickOpen,
+    /// Tree: name a new file in the selected folder.
+    TreeNewFile,
+    /// Tree: name a new folder in the selected folder.
+    TreeNewFolder,
+    /// Tree: rename the selected file or folder.
+    TreeRename,
+    /// Tree: move the selected file or folder to the trash.
+    TreeDelete,
+    /// Tree: show the selected file in Finder, Explorer or the file manager.
+    TreeReveal,
+    /// Open the list of recently opened files.
+    OpenRecent,
+    /// Open the last closed tab again, with its cursor.
+    ReopenClosedTab,
+    /// Forget the recently opened files.
+    ClearRecent,
+    /// Switch to the most recent other project's session.
+    ReopenLastSession,
+    /// Add a folder to the workspace as another root (M19).
+    AddRoot,
+    /// Take the selected root out of the workspace.
+    RemoveRoot,
+    /// Save the workspace under a name in the config folder.
+    SaveWorkspaceAs,
+    /// List the named workspaces and open one.
+    OpenWorkspace,
+    /// Save the workspace as `.nimbus/workspace.toml` in the first root.
+    SaveWorkspaceHere,
+    /// Open the first root's `.nimbus/workspace.toml`.
+    OpenProjectWorkspace,
+    /// Undo the tree's last move, copy or trash in this session.
+    UndoMove,
+    /// Search in the selected folder of the tree.
+    SearchInFolder,
+    /// Pin the Search panel's search with a name.
+    SaveSearch,
+    /// Keep the view at the end of a growing file, or stop.
+    FollowTail,
     /// Open the command palette.
     Palette,
     /// Read the config file again.
@@ -340,6 +384,34 @@ impl Command<'_> {
                 | Command::ReplaceInFilesAll
                 | Command::UndoReplaceInFiles
                 | Command::ClearSearch
+                | Command::SaveSearch
+        )
+    }
+
+    /// Whether the command is about the workspace, its tree, sessions or
+    /// recent files: never text for a focused field to take.
+    #[must_use]
+    pub fn is_workspace(self) -> bool {
+        matches!(
+            self,
+            Command::OpenRecent
+                | Command::ReopenClosedTab
+                | Command::ClearRecent
+                | Command::ReopenLastSession
+                | Command::FollowTail
+                | Command::TreeNewFile
+                | Command::TreeNewFolder
+                | Command::TreeRename
+                | Command::TreeDelete
+                | Command::TreeReveal
+                | Command::AddRoot
+                | Command::RemoveRoot
+                | Command::SaveWorkspaceAs
+                | Command::OpenWorkspace
+                | Command::SaveWorkspaceHere
+                | Command::OpenProjectWorkspace
+                | Command::UndoMove
+                | Command::SearchInFolder
         )
     }
 
@@ -376,6 +448,7 @@ impl Command<'_> {
                 | Command::ChangeCase(_)
                 | Command::RewriteLines(_)
                 | Command::TrimWhitespace
+                | Command::ChangeLineEndings(_)
         )
     }
 }
