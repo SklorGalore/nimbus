@@ -40,7 +40,7 @@ repeated in each file:
 | 10 | [Find in files](m10-find-in-files.md) | Done |
 | 11 | [Everyday editing](m11-everyday-editing.md) | Done |
 | 12 | [Workspace](m12-workspace.md) | Next |
-| 13 | [Split views and folding](m13-splits-and-folding.md) | Planned |
+| 13 | [Split views and folding](m13-splits-and-folding.md) | In progress |
 | 14 | [Languages, second pass](m14-languages.md) | In progress |
 | 15 | [Distribution](m15-distribution.md) | Done |
 | 16 | [Rendering, second pass](m16-rendering-second-pass.md) | Planned |

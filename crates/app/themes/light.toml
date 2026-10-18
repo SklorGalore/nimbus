@@ -34,6 +34,7 @@ diff_changed = "#f6eccb"
 diff_word = "#8fcf9a66"
 diff_filler = "#efece5"
 merge_conflict = "#f6c9c9"
+fold_chip = "#e6e1d6"
 
 [syntax]
 attribute = "#0184bc"

@@ -31,10 +31,13 @@ use crate::columns::Click;
 use crate::compare::{Compare, DiffResult, Other};
 use crate::config::{self, Config};
 use crate::debug::Debug;
-use crate::document::{DiskChange, Document, MAX_COPY_BYTES, Occurrence};
+use crate::docs::{DocId, Docs};
+use crate::document::{Carets, DiskChange, Document, Editor, MAX_COPY_BYTES, Occurrence, Solo};
 use crate::editing::Outcome;
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::find_files::{self, Batch as FilesBatch};
+use crate::folding;
+use crate::groups::{self, Groups};
 use crate::input::{self, Command, Motion, Resolved};
 use crate::io;
 use crate::keymap::{Chord, Keymap, chord_label};
@@ -91,6 +94,8 @@ pub enum AppEvent {
     /// A check for updates finished; `true` when it was the startup
     /// check, which stays quiet unless a newer release exists.
     Update(Result<update::Outcome, UpdateError>, bool),
+    /// A Fold All or Fold Level N scan finished on a worker (M13).
+    Folded(folding::FoldResult),
 }
 
 /// Ask GitHub for the latest release on its own thread.
@@ -193,8 +198,14 @@ const CHORD_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// One open file: its text and history, and where it is scrolled to.
 pub struct Tab {
-    /// The document.
-    pub doc: Document,
+    /// The document it shows, in [`App::docs`].
+    pub doc: DocId,
+    /// The editor group whose strip it is in (M13).
+    pub group: usize,
+    /// A Fold All or Fold Level N waiting for its worker.
+    fold_job: Option<folding::FoldAll>,
+    /// This tab's cursors and selections in it.
+    pub carets: Carets,
     /// Its scroll position and wrap setting.
     pub view: View,
     /// The "too large to highlight" note has been shown.
@@ -215,22 +226,29 @@ pub struct Tab {
 /// The tabs the app starts with: one per document given on the command
 /// line, each indented and wrapped as its language says, or one untitled
 /// tab when none was.
-fn first_tabs(docs: Vec<Document>, options: &Options, config: &Config) -> Vec<Tab> {
+fn first_tabs(docs: Vec<Document>, options: &Options, config: &Config) -> (Docs, Vec<Tab>) {
+    let mut open = Docs::default();
     let mut tabs: Vec<Tab> = docs
         .into_iter()
         .map(|mut d| {
             d.configure_indent(config.indent.for_language(d.language_key()));
             let wrap = options.wrap || wrap_for(config, &d);
-            Tab::new(d, wrap)
+            Tab::new(open.insert(d), wrap)
         })
         .collect();
     if tabs.is_empty() {
-        tabs.push(Tab::new(
-            Document::untitled(),
-            options.wrap || config.soft_wrap,
-        ));
+        let wrap = options.wrap || config.soft_wrap;
+        tabs.push(Tab::new(open.insert(Document::untitled()), wrap));
     }
-    tabs
+    (open, tabs)
+}
+
+/// The cursors of every tab showing `doc`.
+fn carets_of(tabs: &mut [Tab], doc: DocId) -> Vec<&mut Carets> {
+    tabs.iter_mut()
+        .filter(|t| t.doc == doc)
+        .map(|t| &mut t.carets)
+        .collect()
 }
 
 /// Whether a tab for `doc` opens with soft wrap: the language's setting
@@ -247,11 +265,14 @@ fn wrap_for(config: &Config, doc: &Document) -> bool {
 impl Tab {
     /// A tab showing `doc`, wrapped if `wrap`.
     #[must_use]
-    pub fn new(doc: Document, wrap: bool) -> Self {
+    pub fn new(doc: DocId, wrap: bool) -> Self {
         let mut view = View::default();
         view.set_wrap(wrap);
         Self {
             doc,
+            group: 0,
+            fold_job: None,
+            carets: Carets::default(),
             view,
             noted_size: false,
             after_save: AfterSave::default(),
@@ -394,6 +415,13 @@ pub struct App {
     /// conflicts left, which decides the exit code (0 then, else 1).
     merge_saved_clean: Option<bool>,
     frames: u64,
+    /// The open documents, which tabs name.
+    docs: Docs,
+    /// The editor groups side by side; tabs say which one they are in.
+    groups: Groups,
+    /// The tab, document version and line the fold marker was last worked
+    /// out for under the pointer.
+    fold_hover_key: Option<(usize, u64, usize)>,
     tabs: Vec<Tab>,
     active: usize,
     blink: Blink,
@@ -529,7 +557,7 @@ impl App {
             sidebar.search.focus_query(Some(pattern.clone()));
             started
         });
-        let tabs = first_tabs(docs, &options, &config);
+        let (open, tabs) = first_tabs(docs, &options, &config);
         let all_warnings: Vec<String> = warnings
             .into_iter()
             .chain(key_warnings)
@@ -561,6 +589,9 @@ impl App {
             exit_code: 0,
             merge_saved_clean: None,
             frames: 0,
+            docs: open,
+            groups: Groups::default(),
+            fold_hover_key: None,
             tabs,
             active: 0,
             blink: Blink::new(started),
@@ -630,23 +661,63 @@ impl App {
     }
 
     fn doc(&self) -> &Document {
-        &self.tabs[self.active].doc
+        &self.docs[self.tabs[self.active].doc]
     }
 
     fn doc_mut(&mut self) -> &mut Document {
-        &mut self.tabs[self.active].doc
+        &mut self.docs[self.tabs[self.active].doc]
+    }
+
+    /// Reload the active tab's file from disk, on request.
+    fn reload_active(&mut self) {
+        let id = self.tabs[self.active].doc;
+        let mut carets = carets_of(&mut self.tabs, id);
+        match self.docs[id].reload(&self.languages, &mut carets) {
+            Ok(()) => self.say("Reloaded from disk", false),
+            Err(e) => self.say(format!("Cannot reload: {e}"), true),
+        }
+    }
+
+    /// The active tab's document and cursors, to edit.
+    fn ed(&mut self) -> Editor<'_> {
+        let tab = &mut self.tabs[self.active];
+        Editor::new(&mut self.docs[tab.doc], &mut tab.carets)
+    }
+
+    /// The active tab's cursors.
+    fn carets(&self) -> &Carets {
+        &self.tabs[self.active].carets
+    }
+
+    /// The active tab's cursor, snapped to its text.
+    fn cursor(&self) -> usize {
+        let tab = &self.tabs[self.active];
+        tab.carets.cursor(&self.docs[tab.doc].buffer)
+    }
+
+    /// The active tab's primary selection, snapped to its text.
+    fn selection(&self) -> nimbus_core::Selection {
+        let tab = &self.tabs[self.active];
+        tab.carets.selection(&self.docs[tab.doc].buffer)
     }
 
     fn font_px(&self, scale: f64) -> f32 {
         to_f32(self.config.font_size * scale)
     }
 
-    /// Geometry for the current window, if it exists.
-    fn layout(&self) -> Option<Layout> {
+    /// Geometry for the whole window, if it exists, sized for the focused
+    /// tab. The sidebar, the status bar and the overlays use it; the text
+    /// of each group uses its own column, [`App::group_layout`].
+    fn window_layout(&self) -> Option<Layout> {
         let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
         let scale = to_f32(effective_scale(window.scale_factor()));
-        let tab = &self.tabs[self.active];
-        let mut lines = line_estimate(&tab.doc.buffer);
+        let lines = self.tab_lines(&self.tabs[self.active]);
+        Some(layout_for_lines(gpu, scale, lines, &self.find).with_sidebar(self.sidebar.px(scale)))
+    }
+
+    /// The most lines any document on `tab` has: the gutter's width.
+    fn tab_lines(&self, tab: &Tab) -> usize {
+        let mut lines = line_estimate(&self.docs[tab.doc].buffer);
         if let Some(c) = &tab.compare {
             lines = lines.max(line_estimate(&c.other.buffer));
         }
@@ -655,7 +726,106 @@ impl App {
                 .max(line_estimate(&m.ours.buffer))
                 .max(line_estimate(&m.theirs.buffer));
         }
-        Some(layout_for_lines(gpu, scale, lines, &self.find).with_sidebar(self.sidebar.px(scale)))
+        lines
+    }
+
+    /// Geometry for group `g`'s column: its tab strip, find bar and text,
+    /// between the dividers. With one group it is the window's layout.
+    fn group_layout(&self, g: usize) -> Option<Layout> {
+        let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
+        let scale = to_f32(effective_scale(window.scale_factor()));
+        let lines = self.tab_lines(&self.tabs[self.group_active(g)]);
+        let full = layout_for_lines(gpu, scale, lines, self.group_find(g))
+            .with_sidebar(self.sidebar.px(scale));
+        if self.groups.len() == 1 {
+            return Some(full);
+        }
+        let &(a, b) = self.groups.columns(full.left, full.width).get(g)?;
+        Some(full.column(a, b))
+    }
+
+    /// Geometry for the focused group, where the keyboard's edits show.
+    fn layout(&self) -> Option<Layout> {
+        self.group_layout(self.groups.focused)
+    }
+
+    /// The left and right edges of every group's column.
+    fn group_columns(&self, window: &Layout) -> Vec<(f32, f32)> {
+        self.groups.columns(window.left, window.width)
+    }
+
+    /// Group `g`'s active tab, as an index into `tabs`.
+    fn group_active(&self, g: usize) -> usize {
+        if g == self.groups.focused {
+            self.active
+        } else {
+            self.groups.list.get(g).map_or(self.active, |x| x.active)
+        }
+        .min(self.tabs.len() - 1)
+    }
+
+    /// Group `g`'s find bar.
+    fn group_find(&self, g: usize) -> &FindBar {
+        if g == self.groups.focused {
+            &self.find
+        } else {
+            self.groups.list.get(g).map_or(&self.find, |x| &x.find)
+        }
+    }
+
+    /// The tabs in group `g`'s strip, in order, as indices into `tabs`.
+    fn group_tabs(&self, g: usize) -> Vec<usize> {
+        (0..self.tabs.len())
+            .filter(|&i| self.tabs[i].group == g)
+            .collect()
+    }
+
+    /// Put the focused group's active tab and find bar in its slot, ready
+    /// for another group to take the focus.
+    fn park_focus(&mut self) {
+        let f = self.groups.focused;
+        if let Some(slot) = self.groups.list.get_mut(f) {
+            slot.active = self.active;
+            // The keyboard leaves the group, its find bar included.
+            self.find.focused = false;
+            std::mem::swap(&mut self.find, &mut slot.find);
+        }
+    }
+
+    /// Take the focused group's active tab and find bar from its slot.
+    fn unpark_focus(&mut self) {
+        let f = self.groups.focused;
+        if let Some(slot) = self.groups.list.get_mut(f) {
+            self.active = slot.active.min(self.tabs.len() - 1);
+            std::mem::swap(&mut self.find, &mut slot.find);
+        }
+    }
+
+    /// Give group `g` the keyboard: its active tab and its find bar
+    /// become the app's.
+    fn focus_group(&mut self, g: usize) {
+        if g == self.groups.focused || g >= self.groups.len() {
+            return;
+        }
+        // Typing in the other group starts a new undo step, even when it
+        // shows the same document.
+        self.doc_mut().history.seal();
+        self.park_focus();
+        self.groups.focused = g;
+        self.unpark_focus();
+        self.after_focus_moved();
+    }
+
+    /// The focused tab changed: forget what belonged to the old one.
+    fn after_focus_moved(&mut self) {
+        self.preedit = None;
+        self.title_key = None;
+        if self.find.open {
+            self.find_origin = self.cursor();
+            self.search(false);
+        }
+        self.reveal_active();
+        self.changed(false);
     }
 
     /// What the debug overlay reports about the active document and the
@@ -687,13 +857,40 @@ impl App {
 
     /// Something changed what is on screen.
     fn changed(&mut self, keep_cursor_visible: bool) {
+        self.sync_panes();
+        if keep_cursor_visible {
+            // A cursor put inside a fold (a search match, Go to Line, an
+            // edit elsewhere) opens it.
+            let tab = &mut self.tabs[self.active];
+            let cursor = tab.carets.cursor(&self.docs[tab.doc].buffer);
+            tab.view.folds.reveal(cursor);
+        }
         if keep_cursor_visible && let Some(layout) = self.layout() {
             let tab_width = self.tab_width();
             let tab = &mut self.tabs[self.active];
             match (tab.compare.as_mut(), tab.merge.as_mut()) {
-                (Some(c), _) => c.ensure_cursor_visible(&tab.doc, &layout),
-                (None, Some(m)) => m.ensure_cursor_visible(&tab.doc, &layout),
-                (None, None) => tab.view.ensure_cursor_visible(&tab.doc, &layout, tab_width),
+                (Some(c), _) => {
+                    c.ensure_cursor_visible(
+                        &self.docs[tab.doc],
+                        tab.carets.cursor(&self.docs[tab.doc].buffer),
+                        &layout,
+                    );
+                }
+                (None, Some(m)) => {
+                    m.ensure_cursor_visible(
+                        &self.docs[tab.doc],
+                        tab.carets.cursor(&self.docs[tab.doc].buffer),
+                        &layout,
+                    );
+                }
+                (None, None) => {
+                    tab.view.ensure_cursor_visible(
+                        &self.docs[tab.doc],
+                        &tab.carets,
+                        &layout,
+                        tab_width,
+                    );
+                }
             }
         }
         self.update_title();
@@ -704,6 +901,9 @@ impl App {
 
     /// Run a command from a key, menu, the palette or the IME.
     fn run(&mut self, cmd: Command<'_>, event_loop: &ActiveEventLoop) {
+        // Edits made from another group since the last frame move this
+        // tab's cursors and folds first.
+        self.sync_panes();
         if self.picker.is_some() && self.run_picker(cmd, event_loop) {
             self.changed(false);
             return;
@@ -755,16 +955,23 @@ impl App {
             }
             Command::OpenFile => self.open_dialog(),
             Command::NewFile => {
-                let wrap = self.config.soft_wrap;
-                self.tabs.push(Tab::new(Document::untitled(), wrap));
-                self.switch_to(self.tabs.len() - 1);
+                let tab = Tab::new(
+                    self.docs.insert(Document::untitled()),
+                    self.config.soft_wrap,
+                );
+                let i = self.add_tab(tab);
+                self.switch_to(i);
             }
             Command::CloseTab => self.close_tab(self.active, event_loop),
-            Command::NextTab => self.switch_to((self.active + 1) % self.tabs.len()),
-            Command::PrevTab => {
-                self.switch_to((self.active + self.tabs.len() - 1) % self.tabs.len());
+            Command::NextTab => self.step_tab(1),
+            Command::PrevTab => self.step_tab(-1),
+            Command::GoToTab(i) => {
+                let ids = self.group_tabs(self.groups.focused);
+                if let Some(&t) = ids.get(i.min(ids.len().saturating_sub(1))) {
+                    self.switch_to(t);
+                }
             }
-            Command::GoToTab(i) => self.switch_to(i.min(self.tabs.len() - 1)),
+            _ if cmd.is_layout() => self.run_layout_command(cmd, event_loop),
             Command::QuickOpen => self.open_picker(Kind::Files),
             Command::GoToLine => self.open_picker(Kind::Line),
             Command::GoToSymbol => self.open_picker(Kind::Symbols),
@@ -809,13 +1016,7 @@ impl App {
                 );
             }
             Command::ReloadFromDisk if self.waits_for_save() => {}
-            Command::ReloadFromDisk => {
-                let languages = &self.languages;
-                match self.tabs[self.active].doc.reload(languages) {
-                    Ok(()) => self.say("Reloaded from disk", false),
-                    Err(e) => self.say(format!("Cannot reload: {e}"), true),
-                }
-            }
+            Command::ReloadFromDisk => self.reload_active(),
             Command::KeepMine => {
                 self.doc_mut().keep_mine();
                 self.say(
@@ -871,10 +1072,10 @@ impl App {
             Command::DiffClose => {
                 let tab = &mut self.tabs[self.active];
                 if let Some(c) = tab.compare.take() {
-                    c.finish(&mut tab.doc);
+                    c.finish(&mut self.docs[tab.doc]);
                 }
                 if let Some(m) = tab.merge.take() {
-                    m.finish(&mut tab.doc);
+                    m.finish(&mut self.docs[tab.doc]);
                 }
             }
             Command::MergeFiles => self.merge_files(),
@@ -968,19 +1169,19 @@ impl App {
         if reports {
             self.merge_saved_clean = Some(false);
         }
-        let mut tab = Tab::new(result, false);
+        let mut tab = Tab::new(self.docs.insert(result), false);
         tab.merge = Some(Box::new(merge));
         // An untouched empty tab, the one a bare start makes, gives way.
         let only_blank = self.tabs.len() == 1
-            && self.tabs[0].doc.path.is_none()
-            && !self.tabs[0].doc.is_dirty()
-            && self.tabs[0].doc.buffer.len_bytes() == 0;
+            && self.docs[self.tabs[0].doc].path.is_none()
+            && !self.docs[self.tabs[0].doc].is_dirty()
+            && self.docs[self.tabs[0].doc].buffer.len_bytes() == 0;
         if only_blank {
-            self.tabs[0] = tab;
+            let old = std::mem::replace(&mut self.tabs[0], tab);
+            self.docs.remove(old.doc);
             self.active = 0;
         } else {
-            self.tabs.push(tab);
-            self.active = self.tabs.len() - 1;
+            self.active = self.add_tab(tab);
         }
         self.start_syntax();
         self.title_key = None;
@@ -1004,8 +1205,8 @@ impl App {
             return;
         };
         let Some(m) = tab.merge.as_mut() else { return };
-        m.receive(&mut tab.doc, merged);
-        tab.doc.detect_language(&self.languages);
+        m.receive(&mut self.docs[tab.doc], merged);
+        self.docs[tab.doc].detect_language(&self.languages);
         let n = m.open_conflicts();
         let noun = if n == 1 { "conflict" } else { "conflicts" };
         let (note, is_error) = match m.failure() {
@@ -1055,9 +1256,9 @@ impl App {
         }
         let tab = &mut self.tabs[self.active];
         if let Some(c) = tab.compare.take() {
-            c.finish(&mut tab.doc);
+            c.finish(&mut self.docs[tab.doc]);
         }
-        tab.doc = result;
+        self.docs[tab.doc] = result;
         tab.view = View::default();
         tab.merge = Some(Box::new(merge));
         self.start_syntax();
@@ -1136,7 +1337,10 @@ impl App {
             self.say("Not merging; run Merge Files… first", false);
             return;
         };
-        if let Err(e) = m.take(&mut tab.doc, take) {
+        if let Err(e) = m.take(
+            &mut Editor::new(&mut self.docs[tab.doc], &mut tab.carets),
+            take,
+        ) {
             self.say(e, false);
         }
         self.changed(true);
@@ -1150,9 +1354,14 @@ impl App {
             self.say("Not merging", false);
             return;
         };
-        match m.step_conflict(forward, &tab.doc, &layout) {
+        match m.step_conflict(
+            forward,
+            &self.docs[tab.doc],
+            tab.carets.cursor(&self.docs[tab.doc].buffer),
+            &layout,
+        ) {
             Some(p) => {
-                tab.doc.click(p, false);
+                Editor::new(&mut self.docs[tab.doc], &mut tab.carets).click(p, false);
                 self.changed(true);
             }
             None => self.say("No more conflicts that way", false),
@@ -1165,7 +1374,7 @@ impl App {
             if let Some(c) = tab.compare.as_mut()
                 && c.wants(&result)
             {
-                c.receive(&tab.doc, result);
+                c.receive(&self.docs[tab.doc], result);
                 self.changed(false);
                 return;
             }
@@ -1212,10 +1421,15 @@ impl App {
         }
         let tab = &mut self.tabs[self.active];
         if let Some(old) = tab.compare.take() {
-            old.finish(&mut tab.doc);
+            old.finish(&mut self.docs[tab.doc]);
         }
         tab.view.set_wrap(false);
-        tab.compare = Some(Box::new(Compare::start(&mut tab.doc, other, what, send)));
+        tab.compare = Some(Box::new(Compare::start(
+            &mut self.docs[tab.doc],
+            other,
+            what,
+            send,
+        )));
         self.changed(true);
     }
 
@@ -1259,7 +1473,7 @@ impl App {
         if i == self.active || i >= self.tabs.len() {
             return;
         }
-        let src = &self.tabs[i].doc;
+        let src = &self.docs[self.tabs[i].doc];
         let name = src.display_name();
         match (src.copy_of(), src.path.clone()) {
             (Some(copy), _) => self.start_compare(copy, Other::Tab(name)),
@@ -1275,10 +1489,11 @@ impl App {
     fn diff_step(&mut self, forward: bool) {
         let Some(layout) = self.layout() else { return };
         let tab = &mut self.tabs[self.active];
+        let cursor = tab.carets.cursor(&self.docs[tab.doc].buffer);
         let pos = match (tab.compare.as_mut(), tab.merge.as_mut()) {
-            (Some(c), _) if forward => c.next_change(&tab.doc, &layout),
-            (Some(c), _) => c.prev_change(&tab.doc, &layout),
-            (None, Some(m)) => m.step_change(forward, &tab.doc, &layout),
+            (Some(c), _) if forward => c.next_change(&self.docs[tab.doc], cursor, &layout),
+            (Some(c), _) => c.prev_change(&self.docs[tab.doc], cursor, &layout),
+            (None, Some(m)) => m.step_change(forward, &self.docs[tab.doc], cursor, &layout),
             (None, None) => {
                 self.say("Not comparing; run Compare with Saved first", false);
                 return;
@@ -1286,7 +1501,7 @@ impl App {
         };
         match pos {
             Some(p) => {
-                tab.doc.click(p, false);
+                Editor::new(&mut self.docs[tab.doc], &mut tab.carets).click(p, false);
                 self.changed(true);
             }
             None => self.say("No more changes", false),
@@ -1307,19 +1522,19 @@ impl App {
             }
             Command::Insert(text) => {
                 let auto_pairs = self.editing().auto_pairs;
-                self.doc_mut().type_text(text, auto_pairs)
+                self.ed().type_text(text, auto_pairs)
             }
-            Command::Newline => self.doc_mut().insert_newline(),
-            Command::Tab => match self.doc_mut().indent_lines() {
+            Command::Newline => self.ed().insert_newline(),
+            Command::Tab => match self.ed().indent_lines() {
                 Ok(true) => Ok(()),
-                Ok(false) => self.doc_mut().insert_indent(),
+                Ok(false) => self.ed().insert_indent(),
                 Err(e) => Err(e),
             },
-            Command::Outdent => self.doc_mut().outdent_lines(),
-            Command::Undo => self.doc_mut().undo().map(drop),
-            Command::Redo => self.doc_mut().redo().map(drop),
+            Command::Outdent => self.ed().outdent_lines(),
+            Command::Undo => self.ed().undo().map(drop),
+            Command::Redo => self.ed().redo().map(drop),
             Command::SelectAll => {
-                self.doc_mut().select_all();
+                self.ed().select_all();
                 Ok(())
             }
             Command::AddNextOccurrence => {
@@ -1332,16 +1547,16 @@ impl App {
                 } else {
                     1
                 };
-                self.doc_mut().add_cursor_vertical(lines, tab_width);
+                self.ed().add_cursor_vertical(lines, tab_width);
                 Ok(())
             }
             Command::Copy | Command::Cut | Command::Paste => self.clipboard_command(cmd),
             Command::Escape => {
                 if self.find.open {
                     self.find.close();
-                } else if !self.doc_mut().collapse_cursors() {
-                    let head = self.doc().selection().head;
-                    self.doc_mut().click(head, false);
+                } else if !self.ed().collapse_cursors() {
+                    let head = self.selection().head;
+                    self.ed().click(head, false);
                 }
                 Ok(())
             }
@@ -1359,53 +1574,57 @@ impl App {
                 let tab = &mut self.tabs[self.active];
                 let on = !tab.view.wrap;
                 tab.view.set_wrap(on);
-                tab.doc.preferred_column = None;
+                tab.carets.preferred_column = None;
                 self.say(if on { "Soft wrap on" } else { "Soft wrap off" }, false);
                 Ok(())
             }
-            Command::DeleteBack => self.doc_mut().backspace().map(drop),
-            Command::DeleteForward => self.doc_mut().delete_forward().map(drop),
-            Command::DeleteWordBack => self.doc_mut().delete_to(Motion::WordLeft).map(drop),
-            Command::DeleteWordForward => self.doc_mut().delete_to(Motion::WordRight).map(drop),
-            Command::DeleteToLineStart => self.doc_mut().delete_to(Motion::LineStart).map(drop),
+            Command::DeleteBack => self.ed().backspace().map(drop),
+            Command::DeleteForward => self.ed().delete_forward().map(drop),
+            Command::DeleteWordBack => self.ed().delete_to(Motion::WordLeft).map(drop),
+            Command::DeleteWordForward => self.ed().delete_to(Motion::WordRight).map(drop),
+            Command::DeleteToLineStart => self.ed().delete_to(Motion::LineStart).map(drop),
             _ => self.run_everyday_edit(cmd),
         }
     }
 
     /// The everyday editing commands of M11 (comments, lines, selection,
     /// text, indentation), on the active tab.
+    #[expect(
+        clippy::redundant_closure_for_method_calls,
+        reason = "a method path fixes the editor's lifetime; the closure is general over it"
+    )]
     fn run_everyday_edit(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
         match cmd {
-            Command::ToggleLineComment => self.edit_op(Document::toggle_line_comment),
-            Command::ToggleBlockComment => self.edit_op(Document::toggle_block_comment),
-            Command::Duplicate => self.edit_op(Document::duplicate),
+            Command::ToggleLineComment => self.edit_op(|e| e.toggle_line_comment()),
+            Command::ToggleBlockComment => self.edit_op(|e| e.toggle_block_comment()),
+            Command::Duplicate => self.edit_op(|e| e.duplicate()),
             Command::MoveLineUp => self.edit_op(|d| d.move_lines(false)),
             Command::MoveLineDown => self.edit_op(|d| d.move_lines(true)),
-            Command::DeleteLine => self.edit_op(Document::delete_lines),
-            Command::JoinLines => self.edit_op(Document::join_lines),
+            Command::DeleteLine => self.edit_op(|e| e.delete_lines()),
+            Command::JoinLines => self.edit_op(|e| e.join_lines()),
             Command::InsertLineBelow => self.edit_op(|d| d.insert_line(false)),
             Command::InsertLineAbove => self.edit_op(|d| d.insert_line(true)),
             Command::SelectLine => {
-                self.doc_mut().select_line();
+                self.ed().select_line();
                 Ok(())
             }
             Command::ExpandSelection => {
-                self.doc_mut().expand_selection();
+                self.ed().expand_selection();
                 Ok(())
             }
             Command::ShrinkSelection => {
-                self.doc_mut().shrink_selection();
+                self.ed().shrink_selection();
                 Ok(())
             }
             Command::MatchingBracket(select) => {
-                if self.doc_mut().matching_bracket(select) == Outcome::Nothing {
+                if self.ed().matching_bracket(select) == Outcome::Nothing {
                     self.say("No bracket at the cursor", false);
                 }
                 Ok(())
             }
             Command::ChangeCase(case) => self.edit_op(|d| d.change_case(case)),
             Command::RewriteLines(op) => self.edit_op(|d| d.rewrite_lines(op)),
-            Command::TrimWhitespace => self.edit_op(Document::trim_whitespace),
+            Command::TrimWhitespace => self.edit_op(|e| e.trim_whitespace()),
             Command::IndentUsingSpaces | Command::IndentUsingTabs => {
                 let settings = self.config.indent.for_language(self.doc().language_key());
                 let indent = nimbus_core::indent::Indent {
@@ -1443,9 +1662,9 @@ impl App {
     /// Run an M11 operation on the active document and report a refusal.
     fn edit_op(
         &mut self,
-        op: impl FnOnce(&mut Document) -> Result<Outcome, nimbus_core::EditError>,
+        op: impl FnOnce(&mut Editor<'_>) -> Result<Outcome, nimbus_core::EditError>,
     ) -> Result<(), nimbus_core::EditError> {
-        let outcome = op(self.doc_mut())?;
+        let outcome = op(&mut self.ed())?;
         self.report(outcome);
         Ok(())
     }
@@ -1455,11 +1674,32 @@ impl App {
         let layout = self.layout();
         let tab = &mut self.tabs[self.active];
         match &layout {
-            Some(layout) if tab.view.wrap => {
+            // Row by row through soft wrap, and over folded lines.
+            Some(layout) if tab.view.wrap || !tab.view.folds.is_empty() => {
                 let mut w = tab.view.wrap_view(layout, tab_width);
-                tab.doc.move_cursor_wrapped(motion, extend, &mut w, page);
+                Editor::new(&mut self.docs[tab.doc], &mut tab.carets)
+                    .move_cursor_wrapped(motion, extend, &mut w, page);
             }
-            _ => tab.doc.move_cursor(motion, extend, tab_width, page),
+            _ => Editor::new(&mut self.docs[tab.doc], &mut tab.carets)
+                .move_cursor(motion, extend, tab_width, page),
+        }
+        if !tab.view.folds.is_empty() {
+            // Left and right step over a fold rather than into it.
+            let back = matches!(
+                motion,
+                Motion::Left | Motion::WordLeft | Motion::LineStart | Motion::DocStart
+            );
+            let t = &self.docs[tab.doc].buffer;
+            let folds = &tab.view.folds;
+            tab.carets.selections.transform(|_, sel| {
+                let head = match folds.hiding(sel.head) {
+                    Some(f) if back => f.start,
+                    Some(f) => t.line_span(f.end).next.unwrap_or(sel.head),
+                    None => sel.head,
+                };
+                let anchor = if extend { sel.anchor } else { head };
+                nimbus_core::Selection { anchor, head }
+            });
         }
         if matches!(motion, Motion::PageUp | Motion::PageDown)
             && let Some(layout) = layout
@@ -1468,33 +1708,59 @@ impl App {
             let dir = if motion == Motion::PageUp { -1.0 } else { 1.0 };
             #[expect(clippy::cast_precision_loss, reason = "page is a few hundred lines")]
             let dy = dir * page as f32 * layout.metrics.line_height;
-            tab.view.scroll_by(dy, &tab.doc, &layout, tab_width);
+            tab.view
+                .scroll_by(dy, &self.docs[tab.doc], &layout, tab_width);
         }
     }
 
-    /// Make tab `i` the active one.
+    /// Make tab `i` the active one, focusing its group.
     fn switch_to(&mut self, i: usize) {
-        if i == self.active || i >= self.tabs.len() {
+        if i >= self.tabs.len() {
             return;
         }
-        self.active = i;
-        self.preedit = None;
-        self.sidebar.focused = false;
-        if self.find.open {
-            self.find_origin = self.doc().cursor();
-            self.search(false);
+        let g = self.tabs[i].group;
+        if i == self.active && g == self.groups.focused {
+            return;
         }
-        self.reveal_active();
-        self.changed(false);
+        if g != self.groups.focused {
+            self.doc_mut().history.seal();
+            self.park_focus();
+            self.groups.focused = g;
+            self.unpark_focus();
+        }
+        self.active = i;
+        self.sidebar.focused = false;
+        self.after_focus_moved();
+    }
+
+    /// The next (`step` 1) or previous (-1) tab in the focused group's
+    /// strip, wrapping around.
+    fn step_tab(&mut self, step: isize) {
+        let ids = self.group_tabs(self.groups.focused);
+        let Some(at) = ids.iter().position(|&i| i == self.active) else {
+            return;
+        };
+        let n = ids.len().cast_signed();
+        let next = (at.cast_signed() + step).rem_euclid(n).cast_unsigned();
+        if let Some(&i) = ids.get(next) {
+            self.switch_to(i);
+        }
+    }
+
+    /// Add `tab` to the focused group, returning its index.
+    fn add_tab(&mut self, mut tab: Tab) -> usize {
+        tab.group = self.groups.focused;
+        self.tabs.push(tab);
+        self.tabs.len() - 1
     }
 
     /// Move the cursor to the start of line `n` (counting from 1). Past the
     /// last line it goes to the last line; in a huge file whose lines are
     /// still being counted, the jump waits until counting reaches it.
     fn go_to_line(&mut self, n: usize) {
-        let t = &self.tabs[self.active].doc.buffer;
+        let t = &self.docs[self.tabs[self.active].doc].buffer;
         let line = n.saturating_sub(1);
-        if line >= t.len_lines() && self.tabs[self.active].doc.counting_lines() {
+        if line >= t.len_lines() && self.docs[self.tabs[self.active].doc].counting_lines() {
             self.pending_line = Some(n);
             self.say(
                 format!("Going to line {n} once lines are counted that far"),
@@ -1504,26 +1770,26 @@ impl App {
         }
         self.pending_line = None;
         let pos = t.line_to_byte(line.min(t.len_lines().saturating_sub(1)));
-        let doc = self.doc_mut();
-        doc.click(pos, false);
-        doc.preferred_column = None;
+        let mut ed = self.ed();
+        ed.click(pos, false);
+        ed.carets.preferred_column = None;
         self.changed(true);
     }
 
     /// Put the cursor at byte `pos` of the active document (a symbol
     /// chosen in the picker) and scroll it into view.
     fn go_to_byte(&mut self, pos: usize) {
-        let doc = self.doc_mut();
-        let pos = pos.min(doc.buffer.len_bytes());
-        doc.click(pos, false);
-        doc.preferred_column = None;
+        let mut ed = self.ed();
+        let pos = pos.min(ed.doc.buffer.len_bytes());
+        ed.click(pos, false);
+        ed.carets.preferred_column = None;
         self.changed(true);
     }
 
     /// Start line counting for any mapped document that has not started.
     fn start_indexing(&mut self) {
         for tab in &mut self.tabs {
-            if let Some(job) = tab.doc.indexing.take() {
+            if let Some(job) = self.docs[tab.doc].indexing.take() {
                 let proxy = self.proxy.clone();
                 job.spawn(move |token, chunk, error| {
                     proxy
@@ -1540,19 +1806,19 @@ impl App {
         let Some(i) = self
             .tabs
             .iter_mut()
-            .position(|t| t.doc.index_token == Some(token))
+            .position(|t| self.docs[t.doc].index_token == Some(token))
         else {
             return; // closed or reloaded meanwhile
         };
-        let merged = self.tabs[i].doc.merge_index(token, chunk);
+        let merged = self.docs[self.tabs[i].doc].merge_index(token, chunk);
         if error.is_some() {
             // Nothing more comes: stop waiting for it.
-            self.tabs[i].doc.stop_indexing();
+            self.docs[self.tabs[i].doc].stop_indexing();
         }
         if !merged || i != self.active {
             return;
         }
-        let t = &self.tabs[i].doc.buffer;
+        let t = &self.docs[self.tabs[i].doc].buffer;
         if let Some(e) = error {
             #[expect(clippy::cast_precision_loss, reason = "a percentage for display")]
             let pct = t.indexed_bytes() as f64 * 100.0 / t.len_bytes().max(1) as f64;
@@ -1563,8 +1829,8 @@ impl App {
         }
         // Progress meanwhile shows in the status bar.
         if let Some(n) = self.pending_line {
-            let t = &self.tabs[i].doc.buffer;
-            if n <= t.len_lines() || !self.tabs[i].doc.counting_lines() {
+            let t = &self.docs[self.tabs[i].doc].buffer;
+            if n <= t.len_lines() || !self.docs[self.tabs[i].doc].counting_lines() {
                 self.go_to_line(n);
             }
         }
@@ -1594,7 +1860,7 @@ impl App {
         let Some(path) = self.doc().canonical.clone() else {
             return;
         };
-        let layout = self.layout();
+        let layout = self.window_layout();
         let requests = self.sidebar.reveal(&path, layout.as_ref());
         self.start_listings(requests);
     }
@@ -1624,7 +1890,11 @@ impl App {
             .map(Path::to_path_buf)
             .collect();
         for tab in &self.tabs {
-            if let Some(parent) = tab.doc.canonical.as_deref().and_then(Path::parent) {
+            if let Some(parent) = self.docs[tab.doc]
+                .canonical
+                .as_deref()
+                .and_then(Path::parent)
+            {
                 wanted.insert(parent.to_path_buf());
             }
         }
@@ -1644,19 +1914,26 @@ impl App {
         let now = Instant::now();
         let mut notes = Vec::new();
         let mut is_error = false;
-        for tab in &mut self.tabs {
-            let Some(path) = tab.doc.canonical.as_deref() else {
+        let on_disk: Vec<DocId> = self
+            .docs
+            .iter()
+            .filter(|(_, d)| {
+                d.canonical
+                    .as_deref()
+                    .is_some_and(|p| changes.iter().any(|c| c.path == p))
+            })
+            .map(|(id, _)| id)
+            .collect();
+        for id in on_disk {
+            let Some(path) = self.docs[id].canonical.as_deref() else {
                 continue;
             };
-            if !changes.iter().any(|c| c.path == path) {
-                continue;
-            }
             // A file written to over and over (a growing log) reloads at
             // most once per RELOAD_GAP; the rest wait for the timer. Not a
             // mapped one: it never reloads by itself unless cut short, and
             // that must be handled at once.
-            if let Some(at) = tab.doc.reloaded_at
-                && !tab.doc.buffer.is_mapped()
+            if let Some(at) = self.docs[id].reloaded_at
+                && !self.docs[id].buffer.is_mapped()
                 && now.duration_since(at) < RELOAD_GAP
             {
                 let due = at + RELOAD_GAP;
@@ -1666,8 +1943,10 @@ impl App {
                 }
                 continue;
             }
-            let name = tab.doc.display_name();
-            let note = match tab.doc.disk_changed(&self.languages) {
+            let name = self.docs[id].display_name();
+            // Every tab showing it keeps its place in the new text.
+            let mut carets = carets_of(&mut self.tabs, id);
+            let note = match self.docs[id].disk_changed(&self.languages, &mut carets) {
                 DiskChange::None => continue,
                 DiskChange::Reloaded => format!("{name} changed on disk; reloaded"),
                 DiskChange::Conflict => {
@@ -1713,7 +1992,7 @@ impl App {
     /// the tree, Escape gives focus back to the text, and typing is
     /// ignored. Returns `false` for commands that should run as usual.
     fn run_sidebar(&mut self, cmd: Command<'_>) -> bool {
-        let Some(layout) = self.layout() else {
+        let Some(layout) = self.window_layout() else {
             return false;
         };
         let (motion, enter) = match cmd {
@@ -1753,11 +2032,25 @@ impl App {
         // gets the keyboard.
         self.sidebar.focused = false;
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        if let Some(i) = self.tabs.iter().position(|t| {
-            t.doc.path.as_ref().is_some_and(|p| {
-                std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canonical
+        let showing: Vec<usize> = (0..self.tabs.len())
+            .filter(|&i| {
+                self.docs[self.tabs[i].doc].path.as_ref().is_some_and(|p| {
+                    std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canonical
+                })
             })
-        }) {
+            .collect();
+        // Already open in this group: go to it. Open in another group
+        // only: a tab here on the same document (M13).
+        let here = showing
+            .iter()
+            .find(|&&i| self.tabs[i].group == self.groups.focused);
+        if let Some(&i) = here {
+            self.switch_to(i);
+            return;
+        }
+        if let Some(&other) = showing.first() {
+            let tab = Tab::new(self.tabs[other].doc, self.tabs[other].view.wrap);
+            let i = self.add_tab(tab);
             self.switch_to(i);
             return;
         }
@@ -1767,18 +2060,19 @@ impl App {
                 self.configure_indent(&mut doc);
                 // Replace a lone untouched untitled tab rather than keeping it.
                 let replace = self.tabs.len() == 1
-                    && self.tabs[0].doc.path.is_none()
-                    && !self.tabs[0].doc.is_dirty();
+                    && self.docs[self.tabs[0].doc].path.is_none()
+                    && !self.docs[self.tabs[0].doc].is_dirty();
                 let wrap = wrap_for(&self.config, &doc);
-                let tab = Tab::new(doc, wrap);
+                let tab = Tab::new(self.docs.insert(doc), wrap);
                 if replace {
-                    self.tabs[0] = tab;
+                    let old = std::mem::replace(&mut self.tabs[0], tab);
+                    self.docs.remove(old.doc);
                     self.active = 0;
                     self.title_key = None;
                     self.reveal_active();
                 } else {
-                    self.tabs.push(tab);
-                    self.switch_to(self.tabs.len() - 1);
+                    let i = self.add_tab(tab);
+                    self.switch_to(i);
                 }
                 self.sync_watch();
                 self.changed(false);
@@ -1809,29 +2103,31 @@ impl App {
         if !self.confirm_conflicts(i) {
             return Saved::No;
         }
-        if self.tabs[i].doc.path.is_none() {
+        if self.docs[self.tabs[i].doc].path.is_none() {
             return self.save_as(i);
         }
-        if self.tabs[i].doc.is_saving() {
+        if self.docs[self.tabs[i].doc].is_saving() {
             self.say("Already saving; edits wait until it is done", false);
             return Saved::Started;
         }
-        if self.tabs[i].doc.saves_on_worker() {
+        if self.docs[self.tabs[i].doc].saves_on_worker() {
             return self.start_save(i);
         }
         let editing = self
             .config
             .editor
-            .for_language(self.tabs[i].doc.language_key());
-        if let Err(e) = self.tabs[i]
-            .doc
-            .tidy_for_save(editing.trim_trailing_whitespace, editing.final_newline)
+            .for_language(self.docs[self.tabs[i].doc].language_key());
+        if let Err(e) = {
+            let tab = &mut self.tabs[i];
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets)
+        }
+        .tidy_for_save(editing.trim_trailing_whitespace, editing.final_newline)
         {
             log::error!("tidying before save refused: {e}");
         }
-        match self.tabs[i].doc.save() {
+        match self.docs[self.tabs[i].doc].save() {
             Ok(()) => {
-                let name = self.tabs[i].doc.display_name();
+                let name = self.docs[self.tabs[i].doc].display_name();
                 log::info!("saved {name}");
                 self.title_key = None;
                 self.note_merge_saved(i);
@@ -1879,7 +2175,7 @@ impl App {
 
     /// Start saving the mapped document in tab `i` on a worker.
     fn start_save(&mut self, i: usize) -> Saved {
-        let doc = &mut self.tabs[i].doc;
+        let doc = &mut self.docs[self.tabs[i].doc];
         let name = doc.display_name();
         let job = match doc.begin_save(ReplacePolicy::default()) {
             Ok(job) => job,
@@ -1898,7 +2194,7 @@ impl App {
                 step: "starting the save",
                 source: e,
             });
-            let step = self.tabs[i].doc.save_written(token, failed, Instant::now());
+            let step = self.docs[self.tabs[i].doc].save_written(token, failed, Instant::now());
             log::debug!("save of {name} ended before it began: {step:?}");
             self.dialog(
                 MessageLevel::Error,
@@ -1924,7 +2220,7 @@ impl App {
                     return;
                 };
                 if i == self.active {
-                    let name = self.tabs[i].doc.display_name();
+                    let name = self.docs[self.tabs[i].doc].display_name();
                     let pct = written.saturating_mul(100) / total.max(1);
                     self.say(format!("Saving {name}… {pct}%"), false);
                 }
@@ -1935,9 +2231,7 @@ impl App {
                 let Some(i) = self.tab_saving(token) else {
                     return;
                 };
-                let step = self.tabs[i]
-                    .doc
-                    .save_written(token, *result, Instant::now());
+                let step = self.docs[self.tabs[i].doc].save_written(token, *result, Instant::now());
                 self.save_step(i, step, event_loop);
             }
         }
@@ -1947,7 +2241,7 @@ impl App {
     fn tab_saving(&self, token: u64) -> Option<usize> {
         self.tabs
             .iter()
-            .position(|t| t.doc.save_token() == Some(token))
+            .position(|t| self.docs[t.doc].save_token() == Some(token))
     }
 
     /// A save of tab `i` moved on to `step`.
@@ -1970,8 +2264,8 @@ impl App {
         let now = Instant::now();
         // From the end: finishing a save may close its tab.
         for i in (0..self.tabs.len()).rev() {
-            if i < self.tabs.len() && self.tabs[i].doc.is_replacing() {
-                let step = self.tabs[i].doc.poll_replace(now);
+            if i < self.tabs.len() && self.docs[self.tabs[i].doc].is_replacing() {
+                let step = self.docs[self.tabs[i].doc].poll_replace(now);
                 self.save_step(i, step, event_loop);
             }
         }
@@ -1981,9 +2275,9 @@ impl App {
     /// the tab or quit if that was waiting for it.
     fn save_ended(&mut self, i: usize, step: SaveStep, event_loop: &ActiveEventLoop) {
         let after = std::mem::take(&mut self.tabs[i].after_save);
-        let name = self.tabs[i].doc.display_name();
+        let name = self.docs[self.tabs[i].doc].display_name();
         self.title_key = None;
-        if self.saves.search_stopped && !self.tabs.iter().any(|t| t.doc.is_replacing()) {
+        if self.saves.search_stopped && !self.tabs.iter().any(|t| self.docs[t.doc].is_replacing()) {
             self.saves.search_stopped = false;
             if self.find.open {
                 self.search(false);
@@ -1999,7 +2293,9 @@ impl App {
         if let Some(message) = failure {
             log::error!("{message}");
             if let Some(save_as) = &after.save_as {
-                self.tabs[i].doc.path.clone_from(&save_as.old_path);
+                self.docs[self.tabs[i].doc]
+                    .path
+                    .clone_from(&save_as.old_path);
             }
             // Whatever was waiting for this save must not go ahead.
             self.saves.quit_after = false;
@@ -2013,17 +2309,17 @@ impl App {
             self.say(format!("Saved {name}"), false);
             if after.save_as.is_some() {
                 // Saved under a new name (see App::save_as).
-                self.tabs[i].doc.detect_language(&self.languages);
-                let mut doc = std::mem::take(&mut self.tabs[i].doc);
+                self.docs[self.tabs[i].doc].detect_language(&self.languages);
+                let mut doc = std::mem::take(&mut self.docs[self.tabs[i].doc]);
                 self.configure_indent(&mut doc);
-                self.tabs[i].doc = doc;
+                self.docs[self.tabs[i].doc] = doc;
                 self.sync_watch();
                 self.reveal_active();
             }
         }
         // Changes on disk while it ran were set aside; look now, after the
         // report so that any warning stays on screen.
-        if let Some(path) = self.tabs[i].doc.canonical.clone() {
+        if let Some(path) = self.docs[self.tabs[i].doc].canonical.clone() {
             self.disk_changed(&[Change {
                 path,
                 structural: false,
@@ -2049,11 +2345,11 @@ impl App {
 
     /// Ask for a file name and save tab `i` there.
     fn save_as(&mut self, i: usize) -> Saved {
-        if self.tabs[i].doc.is_saving() {
+        if self.docs[self.tabs[i].doc].is_saving() {
             self.say("Already saving; edits wait until it is done", false);
             return Saved::Started;
         }
-        let doc = &self.tabs[i].doc;
+        let doc = &self.docs[self.tabs[i].doc];
         let dir = doc
             .path
             .as_ref()
@@ -2068,16 +2364,16 @@ impl App {
         let Some(path) = dialog.save_file() else {
             return Saved::No;
         };
-        let old = self.tabs[i].doc.path.replace(path);
+        let old = self.docs[self.tabs[i].doc].path.replace(path);
         self.title_key = None;
         let saved = self.save(i);
         match saved {
             Saved::Yes => {
                 // A new name can mean a new language: untitled to `notes.md`.
-                self.tabs[i].doc.detect_language(&self.languages);
-                let mut doc = std::mem::take(&mut self.tabs[i].doc);
+                self.docs[self.tabs[i].doc].detect_language(&self.languages);
+                let mut doc = std::mem::take(&mut self.docs[self.tabs[i].doc]);
                 self.configure_indent(&mut doc);
-                self.tabs[i].doc = doc;
+                self.docs[self.tabs[i].doc] = doc;
                 self.sync_watch();
                 self.reveal_active();
             }
@@ -2087,7 +2383,7 @@ impl App {
             Saved::No => {
                 // Keep pointing at the old file, so the next save does not
                 // silently retry the path that failed.
-                self.tabs[i].doc.path = old;
+                self.docs[self.tabs[i].doc].path = old;
             }
         }
         saved
@@ -2110,7 +2406,7 @@ impl App {
     /// the tab must stay open; [`Discard::Wait`] while a save runs.
     fn confirm_discard(&mut self, i: usize) -> Discard {
         let unattended = self.options.smoke || self.options.screenshot.is_some();
-        let doc = &self.tabs[i].doc;
+        let doc = &self.docs[self.tabs[i].doc];
         if doc.is_saving() {
             return Discard::Wait;
         }
@@ -2122,7 +2418,7 @@ impl App {
             return Discard::Yes; // answered earlier in this quit
         }
         self.switch_to(i);
-        let doc = &self.tabs[i].doc;
+        let doc = &self.docs[self.tabs[i].doc];
         let name = doc.display_name();
         let question = if doc.deleted {
             format!("{name} was deleted on disk. Save it before closing?")
@@ -2149,7 +2445,7 @@ impl App {
             _ => return Discard::Cancel, // Cancel or dismissed: keep editing.
         };
         if !save {
-            self.tabs[i].discard_at = Some(self.tabs[i].doc.history.top_id());
+            self.tabs[i].discard_at = Some(self.docs[self.tabs[i].doc].history.top_id());
             return Discard::Yes;
         }
         match self.save(i) {
@@ -2162,12 +2458,18 @@ impl App {
     /// Close tab `i`, offering to save it. Closing the last tab quits. A
     /// tab whose huge file is being saved closes once that is done.
     fn close_tab(&mut self, i: usize, event_loop: &ActiveEventLoop) {
-        match self.confirm_discard(i) {
+        // Another tab still shows the document: nothing to ask.
+        let discard = if self.shown_elsewhere(i) {
+            Discard::Yes
+        } else {
+            self.confirm_discard(i)
+        };
+        match discard {
             Discard::Yes => {}
             Discard::Cancel => return,
             Discard::Wait => {
                 self.tabs[i].after_save.close = true;
-                let name = self.tabs[i].doc.display_name();
+                let name = self.docs[self.tabs[i].doc].display_name();
                 self.say(format!("Saving {name}; it closes when that is done"), false);
                 return;
             }
@@ -2176,10 +2478,7 @@ impl App {
             event_loop.exit();
             return;
         }
-        self.tabs.remove(i);
-        if self.active >= i && self.active > 0 {
-            self.active -= 1;
-        }
+        self.remove_tab(i);
         self.title_key = None;
         self.preedit = None;
         if self.find.open {
@@ -2187,6 +2486,253 @@ impl App {
         }
         self.sync_watch();
         self.reveal_active();
+        self.changed(false);
+    }
+
+    /// Whether another tab shows tab `i`'s document, so closing `i` loses
+    /// nothing.
+    fn shown_elsewhere(&self, i: usize) -> bool {
+        let doc = self.tabs[i].doc;
+        self.tabs
+            .iter()
+            .enumerate()
+            .any(|(j, t)| j != i && t.doc == doc)
+    }
+
+    /// Let every tab catch up with the edits other tabs made to its
+    /// document: cursors and the top of the view move through them, so
+    /// both stay on the same text. Then the edits are dropped, since every
+    /// tab has followed them. Runs before each frame.
+    fn sync_panes(&mut self) {
+        for tab in &mut self.tabs {
+            tab.view.follow(&self.docs[tab.doc]);
+            let shifts = tab.carets.fit(&self.docs[tab.doc]);
+            for shift in shifts {
+                tab.view.scroll_top = shift.map(tab.view.scroll_top);
+            }
+        }
+        for (_, doc) in self.docs.iter_mut() {
+            doc.journal_mut().trim();
+        }
+    }
+
+    /// The groups and folds commands ([`Command::is_layout`]).
+    fn run_layout_command(&mut self, cmd: Command<'_>, event_loop: &ActiveEventLoop) {
+        match cmd {
+            Command::SplitRight => self.split_right(),
+            Command::CloseGroup => self.close_group(event_loop),
+            Command::FocusLeftGroup => {
+                if let Some(g) = self.groups.focused.checked_sub(1) {
+                    self.focus_group(g);
+                }
+            }
+            Command::FocusRightGroup => self.focus_group(self.groups.focused + 1),
+            Command::MoveTabToNextGroup => self.move_tab_to_next_group(),
+            Command::Fold => self.fold_at_cursor(false),
+            Command::ToggleFold => self.fold_at_cursor(true),
+            Command::Unfold => self.unfold_at_cursor(),
+            Command::FoldAll => self.fold_all(None),
+            Command::FoldLevel(n) => self.fold_all(Some(n)),
+            Command::UnfoldAll => {
+                self.tabs[self.active].view.folds.clear();
+                self.changed(true);
+            }
+            _ => {}
+        }
+    }
+
+    /// Fold the region the cursor's line starts, or else the one around
+    /// the cursor (M13). With `toggle`, a folded line unfolds instead.
+    fn fold_at_cursor(&mut self, toggle: bool) {
+        let tab_width = self.tab_width();
+        let tab = &mut self.tabs[self.active];
+        if tab.compare.is_some() || tab.merge.is_some() {
+            return;
+        }
+        let doc = &self.docs[tab.doc];
+        let cursor = tab.carets.cursor(&doc.buffer);
+        let span = doc.buffer.line_span(cursor);
+        if toggle && tab.view.folds.unfold_line(span).is_some() {
+            self.changed(true);
+            return;
+        }
+        let mut window = Vec::new();
+        let folded = |r: &Range<usize>| tab.view.folds.active().contains(r);
+        let region = folding::region_at(doc, cursor, tab_width, &mut window)
+            .filter(|r| !folded(r))
+            .or_else(|| folding::enclosing(doc, cursor, tab_width, &mut window))
+            .filter(|r| !folded(r));
+        let Some(region) = region else {
+            self.say("Nothing to fold here", false);
+            return;
+        };
+        tab.view.folds.fold(region);
+        self.cursor_out_of_folds(self.active);
+        self.changed(false);
+    }
+
+    /// Unfold the fold on the cursor's line.
+    fn unfold_at_cursor(&mut self) {
+        let tab = &mut self.tabs[self.active];
+        let t = &self.docs[tab.doc].buffer;
+        let cursor = tab.carets.cursor(t);
+        if tab.view.folds.unfold_line(t.line_span(cursor)).is_some()
+            || tab.view.folds.reveal(cursor)
+        {
+            self.changed(true);
+        }
+    }
+
+    /// A fold just made may hide the cursor: put it at the end of the
+    /// fold's first line, where it stays in view.
+    fn cursor_out_of_folds(&mut self, i: usize) {
+        let tab = &mut self.tabs[i];
+        let cursor = tab.carets.cursor(&self.docs[tab.doc].buffer);
+        if let Some(f) = tab.view.folds.hiding(cursor) {
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets).click(f.start, false);
+        }
+    }
+
+    /// Fold All (`level` `None`) or Fold Level N: the regions are found on
+    /// a worker, and fold when it reports ([`App::folded`]).
+    fn fold_all(&mut self, level: Option<usize>) {
+        let tab_width = self.tab_width();
+        let tab = &self.tabs[self.active];
+        if tab.compare.is_some() || tab.merge.is_some() {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        let started = folding::start(&self.docs[tab.doc], tab_width, level, move |r| {
+            let _ = proxy.send_event(AppEvent::Folded(r));
+        });
+        match started {
+            Ok(job) => self.tabs[self.active].fold_job = Some(job),
+            Err(e) => self.say(e, true),
+        }
+    }
+
+    /// A Fold All scan finished: fold what it found, unless the text
+    /// changed meanwhile.
+    fn folded(&mut self, result: folding::FoldResult) {
+        let Some(i) = self
+            .tabs
+            .iter()
+            .position(|t| t.fold_job.as_ref().is_some_and(|j| j.token == result.token))
+        else {
+            return; // closed meanwhile
+        };
+        let tab = &mut self.tabs[i];
+        let Some(job) = tab.fold_job.take() else {
+            return;
+        };
+        let doc = &self.docs[tab.doc];
+        if doc.version != job.version {
+            self.say("The file changed while folding; fold again", false);
+            return;
+        }
+        if result.regions.is_empty() {
+            self.say("Nothing to fold", false);
+            return;
+        }
+        tab.view.follow(doc);
+        tab.view.folds.fold_many(result.regions);
+        self.cursor_out_of_folds(i);
+        self.changed(false);
+    }
+
+    /// Split Right: a new group right of the focused one, showing the
+    /// current document in a tab of its own, with the same cursors and
+    /// scroll to start from. Its find bar starts closed.
+    fn split_right(&mut self) {
+        if self.groups.len() >= groups::MAX_GROUPS {
+            self.say(
+                format!("At most {} groups side by side", groups::MAX_GROUPS),
+                false,
+            );
+            return;
+        }
+        let at = self.groups.insert_after(self.groups.focused);
+        for tab in &mut self.tabs {
+            if tab.group >= at {
+                tab.group += 1;
+            }
+        }
+        self.groups.list[at].find = FindBar::sharing(&self.find);
+        let from = &self.tabs[self.active];
+        let mut tab = Tab::new(from.doc, from.view.wrap);
+        tab.group = at;
+        tab.carets = from.carets.clone();
+        tab.view.scroll_top = from.view.scroll_top;
+        tab.view.scroll_px = from.view.scroll_px;
+        self.tabs.push(tab);
+        self.switch_to(self.tabs.len() - 1);
+    }
+
+    /// Close Group: close the focused group's tabs, asking about unsaved
+    /// changes as Close Tab does; the group goes with its last tab. The
+    /// last group stays.
+    fn close_group(&mut self, event_loop: &ActiveEventLoop) {
+        if self.groups.len() == 1 {
+            return;
+        }
+        let g = self.groups.focused;
+        for i in self.group_tabs(g).into_iter().rev() {
+            let before = self.tabs.len();
+            self.close_tab(i, event_loop);
+            if self.tabs.len() == before {
+                return; // cancelled, or waiting on a save
+            }
+        }
+    }
+
+    /// Move Tab to Next Group: the current tab moves to the group on the
+    /// right, a new one if this is the rightmost and there is room, else
+    /// the first. A group left empty closes.
+    fn move_tab_to_next_group(&mut self) {
+        let i = self.active;
+        let from = self.groups.focused;
+        let mut to = from + 1;
+        if to == self.groups.len() {
+            if self.groups.len() < groups::MAX_GROUPS {
+                to = self.groups.insert_after(from);
+                self.groups.list[to].find = FindBar::sharing(&self.find);
+            } else {
+                to = 0;
+            }
+        }
+        if to == from {
+            return;
+        }
+        self.doc_mut().history.seal();
+        self.park_focus();
+        let mut tabs: Vec<usize> = self.tabs.iter().map(|t| t.group).collect();
+        self.groups.tab_moved(&mut tabs, i, to);
+        for (tab, g) in self.tabs.iter_mut().zip(tabs) {
+            tab.group = g;
+        }
+        self.unpark_focus();
+        self.after_focus_moved();
+    }
+
+    /// Take tab `i` out of the list, keeping every group's active tab
+    /// pointing at the same tab, or at a neighbour in its strip when it
+    /// was the one removed. A group left with no tabs closes. Needs
+    /// another tab to remain.
+    fn remove_tab(&mut self, i: usize) {
+        let g = self.tabs[i].group;
+        let last_view = !self.shown_elsewhere(i);
+        self.park_focus();
+        let closed = self.tabs.remove(i);
+        if last_view {
+            // Its last tab: the document closes.
+            self.docs.remove(closed.doc);
+        }
+        let mut tabs: Vec<usize> = self.tabs.iter().map(|t| t.group).collect();
+        self.groups.tab_removed(&mut tabs, i, g);
+        for (tab, g) in self.tabs.iter_mut().zip(tabs) {
+            tab.group = g;
+        }
+        self.unpark_focus();
     }
 
     /// Quit, offering to save every tab with unsaved changes. If a huge
@@ -2195,6 +2741,10 @@ impl App {
     /// answered.
     fn quit(&mut self, event_loop: &ActiveEventLoop) {
         for i in 0..self.tabs.len() {
+            // A document in two tabs is asked about once.
+            if (0..i).any(|j| self.tabs[j].doc == self.tabs[i].doc) {
+                continue;
+            }
             match self.confirm_discard(i) {
                 Discard::Yes => {}
                 Discard::Cancel => {
@@ -2206,7 +2756,7 @@ impl App {
                 }
                 Discard::Wait => {
                     self.saves.quit_after = true;
-                    let name = self.tabs[i].doc.display_name();
+                    let name = self.docs[self.tabs[i].doc].display_name();
                     self.say(format!("Saving {name}; quitting when that is done"), false);
                     return;
                 }
@@ -2234,10 +2784,9 @@ impl App {
         let (languages, language_warnings) = Languages::load(&config.languages);
         warnings.extend(language_warnings);
         self.languages = languages;
-        for tab in &mut self.tabs {
-            tab.doc.detect_language(&self.languages);
-            tab.doc
-                .configure_indent(config.indent.for_language(tab.doc.language_key()));
+        for (_, doc) in self.docs.iter_mut() {
+            doc.detect_language(&self.languages);
+            doc.configure_indent(config.indent.for_language(doc.language_key()));
         }
         self.keymap = keymap;
         self.config = config;
@@ -2371,7 +2920,7 @@ impl App {
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != self.active)
-                    .map(|(i, t)| (i, t.doc.display_name()))
+                    .map(|(i, t)| (i, self.docs[t.doc].display_name()))
                     .collect();
                 Picker::tabs(names, notify)
             }
@@ -2451,9 +3000,9 @@ impl App {
     }
     fn open_find(&mut self, replace_mode: bool) {
         self.sidebar.focused = false;
-        let selection = self.doc().selected_text();
+        let selection = self.carets().selected_text(&self.doc().buffer);
         self.find.open(replace_mode, selection);
-        self.find_origin = self.doc().selection().range().start;
+        self.find_origin = self.selection().range().start;
         self.search(true);
     }
 
@@ -2461,7 +3010,7 @@ impl App {
     /// first match from where the search started, as incremental search does.
     fn search(&mut self, jump: bool) {
         let proxy = self.proxy.clone();
-        let doc = &self.tabs[self.active].doc;
+        let doc = &self.docs[self.tabs[self.active].doc];
         let complete = self
             .find
             .search(doc, move |b| proxy.send_event(AppEvent::Search(b)).is_ok());
@@ -2474,11 +3023,16 @@ impl App {
     /// Select the match at or after `from` (or before, `backwards`).
     fn jump_to_match(&mut self, from: usize, backwards: bool) {
         if let Some(range) = self.find.select_from(from, backwards) {
-            self.doc_mut().select(range);
+            self.ed().select(range);
             if let Some(layout) = self.layout() {
                 let tab_width = self.tab_width();
                 let tab = &mut self.tabs[self.active];
-                tab.view.ensure_cursor_visible(&tab.doc, &layout, tab_width);
+                tab.view.ensure_cursor_visible(
+                    &self.docs[tab.doc],
+                    &tab.carets,
+                    &layout,
+                    tab_width,
+                );
             }
         }
     }
@@ -2499,12 +3053,12 @@ impl App {
                     Field::Find => Field::Replace,
                     Field::Replace => Field::Find,
                 };
-                self.find.field_mut().select_all();
+                self.find.field_mut().ed().select_all();
             }
             Command::Tab | Command::Outdent => {}
             Command::Newline if self.find.focus == Field::Replace => self.replace_one(),
             Command::Newline => {
-                let sel = self.doc().selection().range();
+                let sel = self.selection().range();
                 let from = if backwards {
                     sel.start
                 } else {
@@ -2563,16 +3117,16 @@ impl App {
             | Command::MergeWithDisk
             | Command::CheckUpdates
             | Command::OpenRelease => return false,
-            _ if cmd.is_find_in_files() => return false,
+            _ if cmd.is_find_in_files() || cmd.is_layout() => return false,
             _ => {
                 let paste = (cmd == Command::Paste)
                     .then(|| self.clipboard_get())
                     .flatten();
                 let tab_width = self.tab_width();
                 let field = self.find.field_mut();
-                let before = field.version;
+                let before = field.doc.version;
                 let copied = edit_field(field, cmd, paste.as_deref(), tab_width);
-                let changed = field.version != before;
+                let changed = field.doc.version != before;
                 if let Some(text) = copied {
                     self.clipboard_set(text);
                 }
@@ -2590,22 +3144,22 @@ impl App {
         if self.waits_for_save() {
             return;
         }
-        let sel = self.doc().selection().range();
+        let sel = self.selection().range();
         let is_match = self.find.current.and_then(|i| self.find.matches.get(i)) == Some(&sel);
         if is_match && !sel.is_empty() {
             if let Some(replacement) = self.find.replacement_for(self.doc(), sel.clone())
-                && let Err(e) = self.doc_mut().replace(sel, &replacement)
+                && let Err(e) = self.ed().replace(sel, &replacement)
             {
                 log::error!("replace refused: {e}");
             }
             self.doc_mut().history.seal();
             // Search the changed text, then go to the next match after the
             // replacement; on large files that waits for the results.
-            self.find_origin = self.doc().cursor();
+            self.find_origin = self.cursor();
             self.search(true);
             return;
         }
-        let from = self.doc().cursor();
+        let from = self.cursor();
         self.jump_to_match(from, false);
     }
 
@@ -2615,7 +3169,7 @@ impl App {
             return;
         }
         if !self.find.complete && !self.find.capped {
-            let doc = &self.tabs[self.active].doc;
+            let doc = &self.docs[self.tabs[self.active].doc];
             if doc.buffer.is_mapped() {
                 // Finishing the search here could read gigabytes on the
                 // main thread.
@@ -2651,7 +3205,7 @@ impl App {
                 Some((r.clone(), rep))
             })
             .collect();
-        match self.doc_mut().replace_many(&items) {
+        match self.ed().replace_many(&items) {
             Ok(n) => {
                 self.search(false);
                 self.say(
@@ -2668,7 +3222,7 @@ impl App {
 
     /// Primary+D, saying when there is nothing more to add.
     fn add_next_occurrence(&mut self) {
-        let note = match self.doc_mut().add_next_occurrence() {
+        let note = match self.ed().add_next_occurrence() {
             Occurrence::SelectedWord | Occurrence::Added | Occurrence::NoWord => return,
             Occurrence::AllSelected => "Every occurrence is selected",
             Occurrence::NotFound => "No other occurrence",
@@ -2683,11 +3237,11 @@ impl App {
     fn clipboard_command(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
         if cmd == Command::Paste {
             return match self.clipboard_get() {
-                Some(text) => self.doc_mut().paste(&text).map(drop),
+                Some(text) => self.ed().paste(&text).map(drop),
                 None => Ok(()),
             };
         }
-        let len = self.doc().selected_len();
+        let len = self.carets().selected_len();
         if len > MAX_COPY_BYTES {
             // Refused before reading anything, and Cut deletes nothing.
             self.say(
@@ -2700,17 +3254,17 @@ impl App {
             );
             return Ok(());
         }
-        let Some(text) = self.doc().selected_text() else {
+        let Some(text) = self.carets().selected_text(&self.doc().buffer) else {
             return Ok(());
         };
         self.clipboard_set(text);
         if cmd != Command::Cut {
             return Ok(());
         }
-        let doc = self.doc_mut();
-        doc.history.seal();
-        let result = doc.delete_selections().map(drop);
-        doc.history.seal();
+        let mut ed = self.ed();
+        ed.doc.history.seal();
+        let result = ed.delete_selections().map(drop);
+        ed.doc.history.seal();
         result
     }
 
@@ -2746,24 +3300,41 @@ impl App {
     /// A left-button press: place the cursor, or select a word or line on a
     /// double- or triple-click, and start dragging.
     fn mouse_down(&mut self, now: Instant) {
-        let Some(layout) = self.layout() else { return };
+        let Some(window) = self.window_layout() else {
+            return;
+        };
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
         if self.picker.is_some() {
-            self.picker_click(&layout, x, y);
+            self.picker_click(&window, x, y);
             return;
         }
-        if self.sidebar.on_divider(&layout, x) {
+        if self.sidebar.on_divider(&window, x) {
             self.sidebar.resizing = true;
             return;
         }
-        if self.sidebar.contains(&layout, x) {
-            self.sidebar_click(&layout, x, y);
+        if self.sidebar.contains(&window, x) {
+            self.sidebar_click(&window, x, y);
             return;
         }
         self.sidebar.focused = false;
-        let labels = self.tab_labels();
-        if let Some(i) = view::tab_at(&layout, &labels, self.active, x, y) {
-            self.switch_to(i);
+        if y >= window.bottom {
+            return self.status_bar_click(&window, x);
+        }
+        let columns = self.group_columns(&window);
+        if let Some(d) = Groups::on_divider(&columns, x, window.scale) {
+            self.groups.dragging = Some(d);
+            return;
+        }
+        // A press in another group gives it the keyboard first.
+        if let Some(g) = Groups::at(&columns, x) {
+            self.focus_group(g);
+        }
+        let Some(layout) = self.layout() else { return };
+        let (labels, active) = self.tab_labels(self.groups.focused);
+        if let Some(n) = view::tab_at(&layout, &labels, active, x, y) {
+            if let Some(&i) = self.group_tabs(self.groups.focused).get(n) {
+                self.switch_to(i);
+            }
             return;
         }
         let rows =
@@ -2779,12 +3350,16 @@ impl App {
             self.changed(false);
             return;
         }
-        if y >= layout.bottom {
-            return self.status_bar_click(&layout, x);
-        }
         if y < layout.top {
             return;
         }
+        self.text_press(&layout, (x, y), now);
+    }
+
+    /// A left-button press on the focused group's text: the scrollbar, a
+    /// compare or merge view's columns, or the text itself.
+    fn text_press(&mut self, layout: &Layout, (x, y): (f32, f32), now: Instant) {
+        let layout = *layout;
         self.find.focused = false;
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
@@ -2800,20 +3375,27 @@ impl App {
             self.grab_scrollbar(hit, y, &layout);
             return;
         }
-        let pos = tab.view.hit(x, y, &tab.doc, &layout, tab_width);
+        if self.fold_click(&layout, x, y) {
+            return;
+        }
+        let tab = &mut self.tabs[self.active];
+        let pos = tab.view.hit(x, y, &self.docs[tab.doc], &layout, tab_width);
         let count = self.clicks.press(now, (x, y), layout.metrics.cell_width);
         // Shift+Alt+press: a column selection, grown by dragging.
         self.clicks.column = (count == 1 && self.modifiers.alt_key() && self.modifiers.shift_key())
-            .then(|| tab.view.hit_column(x, y, &tab.doc, &layout, tab_width));
+            .then(|| {
+                tab.view
+                    .hit_column(x, y, &self.docs[tab.doc], &layout, tab_width)
+            });
         if let Some(at) = self.clicks.column {
-            tab.doc.column_select(at, at, tab_width);
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets).column_select(at, at, tab_width);
             self.clicks.adding = false;
             self.clicks.dragging = true;
             self.blink.reset(now);
             self.changed(false);
             return;
         }
-        let doc = &mut tab.doc;
+        let mut doc = Editor::new(&mut self.docs[tab.doc], &mut tab.carets);
         self.clicks.adding = count == 1 && self.modifiers.alt_key();
         match count {
             1 if self.clicks.adding => {
@@ -2830,12 +3412,12 @@ impl App {
                 self.clicks.anchor = anchor..anchor;
             }
             2 => {
-                let word = nimbus_core::movement::word_at(&doc.buffer, pos);
+                let word = nimbus_core::movement::word_at(&doc.doc.buffer, pos);
                 self.clicks.anchor = word.clone();
                 doc.select(word);
             }
             _ => {
-                let line = nimbus_core::movement::line_range(&doc.buffer, pos);
+                let line = nimbus_core::movement::line_range(&doc.doc.buffer, pos);
                 self.clicks.anchor = line.clone();
                 doc.select(line);
             }
@@ -2843,6 +3425,72 @@ impl App {
         self.clicks.dragging = !(count == 1 && self.modifiers.alt_key() && !self.clicks.adding);
         self.blink.reset(now);
         self.changed(false);
+    }
+
+    /// A press on a fold chip (it unfolds) or on the gutter's fold marker
+    /// column (the line folds or unfolds). Returns whether it was one.
+    fn fold_click(&mut self, layout: &Layout, x: f32, y: f32) -> bool {
+        let tab_width = self.tab_width();
+        let tab = &mut self.tabs[self.active];
+        let doc = &self.docs[tab.doc];
+        if let Some(start) = tab.view.chip_at(x, y, layout.metrics.line_height) {
+            tab.view.folds.unfold_line(doc.buffer.line_span(start));
+            self.changed(false);
+            return true;
+        }
+        if !View::on_fold_marker(layout, x) {
+            return false;
+        }
+        let pos = tab.view.hit(layout.text_left, y, doc, layout, tab_width);
+        let span = doc.buffer.line_span(pos);
+        if tab.view.folds.unfold_line(span).is_none() {
+            let mut window = Vec::new();
+            let Some(region) = folding::region_at(doc, span.start, tab_width, &mut window) else {
+                return false;
+            };
+            tab.view.folds.fold(region);
+            self.cursor_out_of_folds(self.active);
+        }
+        self.changed(false);
+        true
+    }
+
+    /// Show the fold marker on the line under the pointer while it is in
+    /// the gutter, if that line can fold. Asks about a line only when the
+    /// pointer moves to another one.
+    fn update_fold_hover(&mut self) {
+        let Some(layout) = self.layout() else { return };
+        let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        let tab_width = self.tab_width();
+        let active = self.active;
+        let tab = &mut self.tabs[active];
+        let doc = &self.docs[tab.doc];
+        let in_gutter = x >= layout.left
+            && x < layout.text_left
+            && y >= layout.top
+            && y < layout.bottom
+            && tab.compare.is_none()
+            && tab.merge.is_none();
+        let line = in_gutter.then(|| {
+            let pos = tab.view.hit(layout.text_left, y, doc, &layout, tab_width);
+            doc.buffer.line_span(pos).start
+        });
+        let key = line.map(|l| (active, doc.version, l));
+        if key == self.fold_hover_key {
+            return;
+        }
+        self.fold_hover_key = key;
+        let mut window = Vec::new();
+        let foldable = line.filter(|&l| {
+            tab.view.folds.on_line(doc.buffer.line_span(l)).is_none()
+                && folding::region_at(doc, l, tab_width, &mut window).is_some()
+        });
+        if tab.view.fold_hover != foldable {
+            tab.view.fold_hover = foldable;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
     }
 
     /// A press in the sidebar: the tree, or the Search panel.
@@ -2870,7 +3518,7 @@ impl App {
             view::ScrollbarHit::Track => {
                 let half = tab.view.thumb_height() / 2.0;
                 tab.view
-                    .drag_scrollbar(y - half, &tab.doc, layout, tab_width);
+                    .drag_scrollbar(y - half, &self.docs[tab.doc], layout, tab_width);
                 half
             }
         };
@@ -2922,7 +3570,8 @@ impl App {
         if tab.compare.is_some() || tab.merge.is_some() {
             self.drag_columns_scrollbar(y, &layout);
         } else {
-            tab.view.drag_scrollbar(y, &tab.doc, &layout, tab_width);
+            tab.view
+                .drag_scrollbar(y, &self.docs[tab.doc], &layout, tab_width);
         }
         self.changed(false);
     }
@@ -2943,12 +3592,14 @@ impl App {
         let shift = self.modifiers.shift_key();
         let tab = &mut self.tabs[self.active];
         let click = match (tab.compare.as_mut(), tab.merge.as_mut()) {
-            (Some(c), _) => c.click(&tab.doc, &mut tab.view, layout, tab_width, x, y),
-            (None, Some(m)) => m.click(&tab.doc, &mut tab.view, layout, tab_width, x, y),
+            (Some(c), _) => c.click(&self.docs[tab.doc], &mut tab.view, layout, tab_width, x, y),
+            (None, Some(m)) => m.click(&self.docs[tab.doc], &mut tab.view, layout, tab_width, x, y),
             (None, None) => return,
         };
         match click {
-            Click::Cursor(pos) => tab.doc.click(pos, shift),
+            Click::Cursor(pos) => {
+                Editor::new(&mut self.docs[tab.doc], &mut tab.carets).click(pos, shift);
+            }
             Click::Toggled | Click::None => {}
         }
         self.clicks.dragging = false;
@@ -3010,7 +3661,7 @@ impl App {
         }
         self.open_picker(Kind::Palette);
         if let Some(p) = self.picker.as_mut()
-            && let Err(e) = p.input.insert("indent")
+            && let Err(e) = p.input.ed().insert("indent")
         {
             log::debug!("picker query: {e}");
         }
@@ -3019,7 +3670,16 @@ impl App {
 
     /// Scroll the sidebar or the text under the pointer.
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
-        let Some(layout) = self.layout() else { return };
+        let Some(window) = self.window_layout() else {
+            return;
+        };
+        let x = to_f32(self.mouse.x);
+        // The group under the pointer scrolls, focused or not.
+        let g = Groups::at(&self.group_columns(&window), x).unwrap_or(self.groups.focused);
+        let Some(layout) = self.group_layout(g) else {
+            return;
+        };
+        let i = self.group_active(g);
         let lh = layout.metrics.line_height;
         let cell = layout.metrics.cell_width;
         // Trackpads send pixels, with momentum from the OS; wheels send
@@ -3031,18 +3691,32 @@ impl App {
                 (x * cell * lines_per_notch, y * lh * lines_per_notch)
             }
         };
-        if self.sidebar.contains(&layout, to_f32(self.mouse.x)) {
-            self.sidebar.wheel(-dy, &layout);
+        if self.sidebar.contains(&window, x) {
+            self.sidebar.wheel(-dy, &window);
         } else {
             let tab_width = self.tab_width();
-            let tab = &mut self.tabs[self.active];
+            let tab = &mut self.tabs[i];
             match (tab.compare.as_mut(), tab.merge.as_mut()) {
                 (Some(c), _) => c.scroll_by(-dy, &layout),
                 (None, Some(m)) => m.scroll_by(-dy, &layout),
-                (None, None) => tab.view.scroll_by(-dy, &tab.doc, &layout, tab_width),
+                (None, None) => tab
+                    .view
+                    .scroll_by(-dy, &self.docs[tab.doc], &layout, tab_width),
             }
             tab.view.scroll_x_by(-dx);
         }
+        self.changed(false);
+    }
+
+    /// The pointer moved while dragging divider `d`: resize the groups
+    /// either side, none narrower than [`groups::MIN_CELLS`] cells.
+    fn drag_group_divider(&mut self, d: usize, x: f32) {
+        let Some(window) = self.window_layout() else {
+            return;
+        };
+        let columns = self.group_columns(&window);
+        let min = groups::MIN_CELLS * window.metrics.cell_width;
+        self.groups.drag_divider(&columns, d, x, min);
         self.changed(false);
     }
 
@@ -3064,7 +3738,9 @@ impl App {
 
     /// Show or hide the search toggles' tooltip as the pointer moves.
     fn update_search_hover(&mut self) {
-        let Some(layout) = self.layout() else { return };
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
         let changed = if self.sidebar.visible && self.sidebar.mode == Mode::Search {
             self.sidebar.search.hover_at(&layout, x, y, Instant::now())
@@ -3079,9 +3755,15 @@ impl App {
     /// Show the resize cursor over the sidebar's divider, the usual one
     /// elsewhere. Only tells the window when it changes.
     fn update_cursor_icon(&mut self) {
-        let Some(layout) = self.layout() else { return };
-        let resize =
-            self.sidebar.resizing || self.sidebar.on_divider(&layout, to_f32(self.mouse.x));
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
+        let x = to_f32(self.mouse.x);
+        let resize = self.sidebar.resizing
+            || self.groups.dragging.is_some()
+            || self.sidebar.on_divider(&layout, x)
+            || (self.groups.len() > 1
+                && Groups::on_divider(&self.group_columns(&layout), x, layout.scale).is_some());
         if resize != self.resize_cursor {
             self.resize_cursor = resize;
             if let Some(window) = &self.window {
@@ -3105,13 +3787,16 @@ impl App {
             return;
         }
         if let Some(from) = self.clicks.column {
-            let to = tab.view.hit_column(x, y, &tab.doc, &layout, tab_width);
-            tab.doc.column_select(from, to, tab_width);
+            let to = tab
+                .view
+                .hit_column(x, y, &self.docs[tab.doc], &layout, tab_width);
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets)
+                .column_select(from, to, tab_width);
             self.changed(true);
             return;
         }
-        let pos = tab.view.hit(x, y, &tab.doc, &layout, tab_width);
-        let t = &tab.doc.buffer;
+        let pos = tab.view.hit(x, y, &self.docs[tab.doc], &layout, tab_width);
+        let t = &self.docs[tab.doc].buffer;
         let unit = match self.clicks.count {
             1 => pos..pos,
             2 => nimbus_core::movement::word_at(t, pos),
@@ -3125,32 +3810,42 @@ impl App {
         };
         if self.clicks.adding {
             // Alt+drag: the added selection grows; the others stay.
-            tab.doc.drag_added(from, to);
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets).drag_added(from, to);
         } else {
-            tab.doc.select_span(from, to);
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets).select_span(from, to);
         }
         self.changed(true);
     }
 
-    /// Labels for the tab bar.
-    fn tab_labels(&self) -> Vec<TabLabel> {
-        self.tabs
-            .iter()
-            .map(|t| {
-                let name = t.doc.display_name();
-                let name = if t.doc.deleted {
+    /// Labels for group `g`'s tab strip, and which of them is its active
+    /// tab.
+    fn tab_labels(&self, g: usize) -> (Vec<TabLabel>, usize) {
+        let active = self.group_active(g);
+        let mut at = 0;
+        let labels = self
+            .group_tabs(g)
+            .into_iter()
+            .enumerate()
+            .map(|(n, i)| {
+                if i == active {
+                    at = n;
+                }
+                let d = &self.docs[self.tabs[i].doc];
+                let name = d.display_name();
+                let name = if d.deleted {
                     format!("{name} (deleted)")
-                } else if t.doc.conflict {
+                } else if d.conflict {
                     format!("{name} (changed on disk)")
                 } else {
                     name
                 };
                 TabLabel {
                     name,
-                    dirty: t.doc.is_dirty(),
+                    dirty: d.is_dirty(),
                 }
             })
-            .collect()
+            .collect();
+        (labels, at)
     }
 
     /// A click while the picker is open: choose a row, or close it.
@@ -3187,39 +3882,35 @@ impl App {
     /// once if its file is too large to highlight.
     fn start_syntax(&mut self) {
         let tab = &mut self.tabs[self.active];
-        if let Some(job) = tab.doc.syntax.take_job(&tab.doc.buffer) {
+        let d = &mut self.docs[tab.doc];
+        if let Some(job) = d.syntax.take_job(&d.buffer) {
             spawn_syntax(&self.proxy, job);
         }
-        if tab.doc.syntax.lexical().is_some() && !tab.noted_size {
+        if self.docs[tab.doc].syntax.lexical().is_some() && !tab.noted_size {
             tab.noted_size = true;
             let mb = MAX_HIGHLIGHT_BYTES / (1024 * 1024);
             self.say(format!("Over {mb} MB: simpler syntax colours"), false);
         }
     }
 
-    /// Queue the whole frame: editor text, then the overlays.
-    fn paint(&mut self, gpu: &mut Gpu, layout: &Layout) {
-        let labels = self.tab_labels();
-        let tab_width = self.tab_width();
-        let chord_message = self.pending_chord.map(|(chord, until)| Message {
-            text: format!("{} …", chord_label(chord)),
-            is_error: false,
-            until,
-        });
-        let tab = &mut self.tabs[self.active];
+    /// Bring tab `i`'s syntax tree, compare or merge up to date before it
+    /// is drawn, and snap its cursors to a text swapped wholesale.
+    fn prepare_tab(&mut self, i: usize) {
+        let tab = &mut self.tabs[i];
         // Bring the tree up to date with this frame's edits, or hand the
         // rest to a worker if that would take too long.
-        if let Some(job) = tab.doc.syntax.refresh(&tab.doc.buffer, SYNTAX_BUDGET) {
+        let d = &mut self.docs[tab.doc];
+        if let Some(job) = d.syntax.refresh(&d.buffer, SYNTAX_BUDGET) {
             spawn_syntax(&self.proxy, job);
         }
         if let Some(c) = tab.compare.as_mut() {
-            c.sync(&mut tab.doc);
+            c.sync(&mut self.docs[tab.doc]);
             if let Some(job) = c.other.syntax.refresh(&c.other.buffer, SYNTAX_BUDGET) {
                 spawn_syntax(&self.proxy, job);
             }
         }
         if let Some(m) = tab.merge.as_mut() {
-            if m.sync(&mut tab.doc) {
+            if m.sync(&mut self.docs[tab.doc]) {
                 for doc in m.inputs_mut() {
                     if let Some(job) = doc.syntax.refresh(&doc.buffer, SYNTAX_BUDGET) {
                         spawn_syntax(&self.proxy, job);
@@ -3229,7 +3920,7 @@ impl App {
                 // The result was reloaded from disk: the regions no longer
                 // describe it.
                 if let Some(m) = tab.merge.take() {
-                    m.finish(&mut tab.doc);
+                    m.finish(&mut self.docs[tab.doc]);
                 }
                 self.message = Some(Message {
                     text: "Merge ended: the file was reloaded".into(),
@@ -3238,33 +3929,79 @@ impl App {
                 });
             }
         }
-        paint_scene(
-            gpu,
-            layout,
-            &mut Scene {
-                doc: &tab.doc,
+        // A text swapped wholesale (a save, a merge result) leaves the
+        // cursors to be snapped to it before they are drawn.
+        tab.carets.fit(&self.docs[tab.doc]);
+    }
+
+    /// Queue the whole frame: each group's text, tab strip and find bar,
+    /// the dividers between groups, the status bar, then the overlays.
+    /// `panes` holds each group's layout, `layout` the window's.
+    fn paint(&mut self, gpu: &mut Gpu, layout: &Layout, panes: &[Layout]) {
+        let tab_width = self.tab_width();
+        let chord_message = self.pending_chord.map(|(chord, until)| Message {
+            text: format!("{} …", chord_label(chord)),
+            is_error: false,
+            until,
+        });
+        view::begin_frame(gpu, &self.theme.ui);
+        let focused = self.groups.focused;
+        let many = self.groups.len() > 1;
+        for (g, pane) in panes.iter().enumerate() {
+            let i = self.group_active(g);
+            self.prepare_tab(i);
+            let (labels, active_label) = self.tab_labels(g);
+            let is_focused = g == focused;
+            let tab = &mut self.tabs[i];
+            let find = if is_focused {
+                &self.find
+            } else {
+                &self.groups.list[g].find
+            };
+            let mut scene = Scene {
+                doc: &self.docs[tab.doc],
+                carets: &tab.carets,
                 view: &mut tab.view,
                 compare: tab.compare.as_deref_mut(),
                 merge: tab.merge.as_deref_mut(),
                 theme: &mut self.theme,
-                find: &self.find,
+                find,
                 message: chord_message.as_ref().or(self.message.as_ref()),
-                cursor_visible: self.blink.visible
-                    && self.picker.is_none()
-                    && !self.sidebar.focused,
-                preedit: self.preedit.as_ref(),
+                // Only the focused group's cursor blinks; another group
+                // showing the same file shows its cursor still.
+                cursor_visible: !is_focused
+                    || (self.blink.visible && self.picker.is_none() && !self.sidebar.focused),
+                preedit: if is_focused {
+                    self.preedit.as_ref()
+                } else {
+                    None
+                },
                 tab_width,
-            },
-        );
-        // Nested languages the budget left unparsed colour on the next
-        // frame.
-        if tab.doc.syntax.injections_pending()
-            && let Some(window) = &self.window
-        {
-            window.request_redraw();
+            };
+            paint_pane(gpu, pane, &mut scene);
+            if is_focused {
+                paint_status(gpu, layout, &mut scene);
+            }
+            // Nested languages the budget left unparsed colour on the
+            // next frame.
+            if self.docs[tab.doc].syntax.injections_pending()
+                && let Some(window) = &self.window
+            {
+                window.request_redraw();
+            }
+            view::draw_tabs(
+                gpu,
+                &self.theme.ui,
+                pane,
+                &labels,
+                active_label,
+                is_focused || !many,
+            );
         }
-        view::draw_tabs(gpu, &self.theme.ui, layout, &labels, self.active);
-        let active = self.tabs[self.active].doc.canonical.as_deref();
+        if many {
+            view::draw_dividers(gpu, &self.theme.ui, layout, panes);
+        }
+        let active = self.docs[self.tabs[self.active].doc].canonical.as_deref();
         sidebar::draw(
             gpu,
             &self.theme.ui,
@@ -3281,6 +4018,30 @@ impl App {
         }
     }
 
+    /// Tell the IME where the cursor is, so its candidate window appears
+    /// next to it. Only when it moved.
+    fn tell_ime(&mut self, window: &Window, pane: &Layout) {
+        let tab_width = self.config.tab_width;
+        let r = self.tabs[self.active].view.cursor_rect(
+            pane,
+            self.preedit
+                .as_ref()
+                .map_or(0, |p| nimbus_core::column::line_width(&p.text, tab_width)),
+        );
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "on-screen pixel coordinates fit in i32"
+        )]
+        let area = [r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32];
+        if self.ime_area != Some(area) {
+            window.set_ime_cursor_area(
+                PhysicalPosition::new(area[0], area[1]),
+                PhysicalSize::new(area[2].max(1).unsigned_abs(), area[3].max(1).unsigned_abs()),
+            );
+            self.ime_area = Some(area);
+        }
+    }
+
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let frame_started = Instant::now();
         // The first parse runs on a worker while this frame shows the
@@ -3291,12 +4052,20 @@ impl App {
             // Listing runs on a worker; this only starts it.
             self.show_sidebar();
         }
-        let Some(layout) = self.layout() else { return };
+        // Edits another group made to a document shown here too.
+        self.sync_panes();
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
+        let panes: Vec<Layout> = (0..self.groups.len())
+            .filter_map(|g| self.group_layout(g))
+            .collect();
         // Painting reads the whole app; take the GPU out while it does.
         if let Some(mut gpu) = self.gpu.take() {
-            self.paint(&mut gpu, &layout);
+            self.paint(&mut gpu, &layout, &panes);
             self.gpu = Some(gpu);
         }
+        let focused_pane = panes.get(self.groups.focused).copied().unwrap_or(layout);
         // Picker results arriving later wake the loop through the
         // matcher's notify callback (AppEvent::PickerChanged), not by
         // redrawing continuously.
@@ -3349,27 +4118,7 @@ impl App {
         self.debug.latency.presented();
         self.debug.frames.push(frame_started.elapsed());
 
-        // Tell the IME where the cursor is, so its candidate window appears
-        // next to it. Physical pixels, relative to the window.
-        let tab_width = self.config.tab_width;
-        let r = self.tabs[self.active].view.cursor_rect(
-            &layout,
-            self.preedit
-                .as_ref()
-                .map_or(0, |p| nimbus_core::column::line_width(&p.text, tab_width)),
-        );
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "on-screen pixel coordinates fit in i32"
-        )]
-        let area = [r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32];
-        if self.ime_area != Some(area) {
-            window.set_ime_cursor_area(
-                PhysicalPosition::new(area[0], area[1]),
-                PhysicalSize::new(area[2].max(1).unsigned_abs(), area[3].max(1).unsigned_abs()),
-            );
-            self.ime_area = Some(area);
-        }
+        self.tell_ime(&window, &focused_pane);
 
         if self.options.bench_typing > 0 && self.frames >= 2 {
             self.bench_step(event_loop);
@@ -3378,7 +4127,8 @@ impl App {
 
         if self.frames == 1 {
             if let Some(path) = &self.options.screenshot {
-                if !save_screenshot(path, gpu.take_capture().as_ref()) {
+                let capture = self.gpu.as_mut().and_then(Gpu::take_capture);
+                if !save_screenshot(path, capture.as_ref()) {
                     self.exit_code = 1;
                 }
                 event_loop.exit();
@@ -3491,14 +4241,14 @@ impl App {
         self.sidebar.visible = true;
         self.sidebar.mode = Mode::Search;
         self.sidebar.focused = true;
-        let selection = self.doc().selected_text();
+        let selection = self.carets().selected_text(&self.doc().buffer);
         let panel = &mut self.sidebar.search;
-        let before = panel.query.version;
+        let before = panel.query.doc.version;
         panel.focus_query(selection);
         if replace {
             panel.replace_mode = true;
         }
-        if panel.query.version != before {
+        if panel.query.doc.version != before {
             self.search_files_at = Some(Instant::now());
         }
         self.show_sidebar();
@@ -3510,7 +4260,7 @@ impl App {
     /// Tab moves between them; Escape gives the editor the keyboard.
     /// Returns `false` for commands that run as usual.
     fn run_search_panel(&mut self, cmd: Command<'_>) -> bool {
-        let Some(layout) = self.layout() else {
+        let Some(layout) = self.window_layout() else {
             return false;
         };
         let in_list = self.sidebar.search.focus == Focus::List;
@@ -3574,7 +4324,7 @@ impl App {
             | Command::PrevConflict
             | Command::ResolveMarkers
             | Command::MergeWithDisk => return false,
-            _ if cmd.is_find_in_files() => return false,
+            _ if cmd.is_find_in_files() || cmd.is_layout() => return false,
             _ if in_list => {}
             _ => {
                 let paste = (cmd == Command::Paste)
@@ -3586,9 +4336,9 @@ impl App {
                 let Some(field) = panel.field_mut() else {
                     return true;
                 };
-                let before = field.version;
+                let before = field.doc.version;
                 let copied = edit_field(field, cmd, paste.as_deref(), tab_width);
-                let changed = field.version != before;
+                let changed = field.doc.version != before;
                 if let Some(text) = copied {
                     self.clipboard_set(text);
                 }
@@ -3618,10 +4368,13 @@ impl App {
     fn snapshots(&self) -> find_files::Snapshots {
         let mut map = find_files::Snapshots::new();
         for tab in &self.tabs {
-            if let Some(path) = &tab.doc.canonical
-                && tab.doc.is_dirty()
+            if let Some(path) = &self.docs[tab.doc].canonical
+                && self.docs[tab.doc].is_dirty()
             {
-                map.insert(path.clone(), Arc::from(tab.doc.buffer.snapshot()));
+                map.insert(
+                    path.clone(),
+                    Arc::from(self.docs[tab.doc].buffer.snapshot()),
+                );
             }
         }
         map
@@ -3700,13 +4453,15 @@ impl App {
             let at = nimbus_core::movement::clamp(t, range.start);
             at..at
         });
-        self.doc_mut().select(select);
+        self.ed().select(select);
         self.changed(true);
     }
 
     /// F4 and Shift+F4: open the next or previous hit across files.
     fn step_result(&mut self, backwards: bool) {
-        let Some(layout) = self.layout() else { return };
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
         self.sidebar.visible = true;
         self.sidebar.mode = Mode::Search;
         match self.sidebar.search.step(backwards, &layout) {
@@ -3768,7 +4523,7 @@ impl App {
             let tab = self
                 .tabs
                 .iter()
-                .position(|t| t.doc.canonical.as_deref() == Some(canonical.as_path()));
+                .position(|t| self.docs[t.doc].canonical.as_deref() == Some(canonical.as_path()));
             let Some(ti) = tab else {
                 jobs.push(replace_files::Job {
                     path: file.path.clone(),
@@ -3778,17 +4533,18 @@ impl App {
             };
             let ranges: Vec<std::ops::Range<usize>> =
                 hits.iter().map(|&j| file.hits[j].range.clone()).collect();
-            let doc = &mut self.tabs[ti].doc;
-            if doc.is_saving() {
+            let tab = &mut self.tabs[ti];
+            if self.docs[tab.doc].is_saving() {
                 summary.busy += 1;
                 continue;
             }
-            match replace_in_tab(doc, &replacement, &ranges) {
+            let mut ed = Editor::new(&mut self.docs[tab.doc], &mut tab.carets);
+            match replace_in_tab(&mut ed, &replacement, &ranges) {
                 Some(0) => summary.changed += 1,
                 Some(n) => {
                     summary.tab_replaced += n;
                     summary.tab_files += 1;
-                    undo.tabs.push((canonical, doc.history.top_id()));
+                    undo.tabs.push((canonical, ed.doc.history.top_id()));
                 }
                 None => log::error!("replace in {} refused", file.rel),
             }
@@ -3907,16 +4663,16 @@ impl App {
             let Some(tab) = self
                 .tabs
                 .iter_mut()
-                .find(|t| t.doc.canonical.as_deref() == Some(path.as_path()))
+                .find(|t| self.docs[t.doc].canonical.as_deref() == Some(path.as_path()))
             else {
                 problems.push(format!("{} (tab closed)", name_of(path)));
                 continue;
             };
-            if tab.doc.history.top_id() != *top || tab.doc.is_saving() {
+            if self.docs[tab.doc].history.top_id() != *top || self.docs[tab.doc].is_saving() {
                 problems.push(format!("{} (edited since)", name_of(path)));
                 continue;
             }
-            match tab.doc.undo() {
+            match Editor::new(&mut self.docs[tab.doc], &mut tab.carets).undo() {
                 Ok(true) => restored += 1,
                 Ok(false) => problems.push(name_of(path)),
                 Err(e) => {
@@ -3947,11 +4703,11 @@ impl App {
 /// where the text still matches. Returns how many were replaced, or `None`
 /// if the buffer refused the edit (nothing is changed then).
 fn replace_in_tab(
-    doc: &mut Document,
+    ed: &mut Editor<'_>,
     replacement: &Replacement,
     ranges: &[std::ops::Range<usize>],
 ) -> Option<usize> {
-    let t = &doc.buffer;
+    let t = &ed.doc.buffer;
     let items: Vec<(std::ops::Range<usize>, String)> = ranges
         .iter()
         .filter_map(|range| {
@@ -3968,10 +4724,10 @@ fn replace_in_tab(
     if items.is_empty() {
         return Some(0);
     }
-    let n = doc.replace_many(&items).ok()?;
+    let n = ed.replace_many(&items).ok()?;
     // Typing after must start a new undo step, so undoing the replace
     // later puts back exactly the replace.
-    doc.history.seal();
+    ed.doc.history.seal();
     Some(n)
 }
 
@@ -4043,7 +4799,7 @@ fn draw_headless_picker(
         "symbols" => Picker::symbols(notify, symbol_items(doc)),
         _ => Picker::palette(notify),
     };
-    let _ = p.input.insert(query);
+    let _ = p.input.ed().insert(query);
     // Let the walk and matcher finish, up to two seconds.
     let deadline = Instant::now() + Duration::from_secs(2);
     while p.tick() && Instant::now() < deadline {
@@ -4121,6 +4877,8 @@ pub fn layout_for_lines(gpu: &Gpu, scale: f32, lines: usize, find: &FindBar) -> 
 /// Everything one frame shows.
 pub struct Scene<'a> {
     doc: &'a Document,
+    /// The cursors drawn in it.
+    carets: &'a Carets,
     view: &'a mut View,
     /// A compare on the tab: two columns instead of the view alone.
     compare: Option<&'a mut Compare>,
@@ -4135,9 +4893,18 @@ pub struct Scene<'a> {
     tab_width: usize,
 }
 
-/// Queue a whole frame: editor text, then the find bar and status bar.
-/// Shared by the window and headless rendering.
+/// Queue a whole frame of one tab: editor text, then the find bar and
+/// status bar. Headless rendering uses it; the window paints each group
+/// with [`paint_pane`] and the status bar once.
 pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
+    view::begin_frame(gpu, &scene.theme.ui);
+    paint_pane(gpu, layout, scene);
+    paint_status(gpu, layout, scene);
+}
+
+/// Queue one group's text and find bar inside `layout`'s column. The
+/// frame was started with [`view::begin_frame`].
+pub fn paint_pane(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     let find = scene.find;
     let current = find.current.and_then(|i| find.matches.get(i)).cloned();
     let ui = scene.theme.ui;
@@ -4149,11 +4916,11 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
         &[]
     };
     if let Some(c) = scene.compare.as_deref_mut() {
-        view::begin_frame(gpu, &ui);
         c.draw(
             gpu,
             layout,
             scene.doc,
+            scene.carets,
             scene.view,
             scene.theme,
             scene.tab_width,
@@ -4162,11 +4929,11 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
             (matches, current),
         );
     } else if let Some(m) = scene.merge.as_deref_mut() {
-        view::begin_frame(gpu, &ui);
         m.draw(
             gpu,
             layout,
             scene.doc,
+            scene.carets,
             scene.view,
             scene.theme,
             scene.tab_width,
@@ -4184,6 +4951,7 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
         scene.view.draw(
             gpu,
             scene.doc,
+            scene.carets,
             layout,
             scene.tab_width,
             &Decorations {
@@ -4204,11 +4972,19 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     if find.open {
         view::draw_find_bar(gpu, &ui, find, layout, scene.cursor_visible);
     }
+}
+
+/// Queue the status bar across the bottom of the window, for the scene's
+/// tab.
+pub fn paint_status(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
+    let ui = scene.theme.ui;
     let message = scene.message.map(|m| (m.text.as_str(), m.is_error));
-    let info = scene.view.status_info(scene.doc, scene.tab_width);
+    let info = scene
+        .view
+        .status_info(scene.doc, scene.carets, scene.tab_width);
     let info = match (scene.compare.as_deref_mut(), scene.merge.as_deref_mut()) {
         (Some(c), _) => c.status(info),
-        (None, Some(m)) => m.status(scene.doc, info),
+        (None, Some(m)) => m.status(scene.doc, scene.carets.cursor(&scene.doc.buffer), info),
         (None, None) => info,
     };
     view::draw_status(gpu, &ui, layout, message, info);
@@ -4254,15 +5030,19 @@ pub fn run_headless(
     if options.wait_index {
         index_now(&mut doc);
     }
-    let find = headless_find(options.find.as_deref(), &mut doc);
-    headless_cursors(options, &mut doc);
+    let mut carets = Carets::default();
+    let find = headless_find(
+        options.find.as_deref(),
+        &mut Editor::new(&mut doc, &mut carets),
+    );
+    headless_cursors(options, &doc, &mut carets);
     let (sidebar, layout) = headless_sidebar(
         &root,
         layout_for(&gpu, to_f32(scale), &doc, &find),
         doc.canonical.as_deref(),
         options.search.as_deref(),
     );
-    view.ensure_cursor_visible(&doc, &layout, config.tab_width);
+    view.ensure_cursor_visible(&doc, &carets, &layout, config.tab_width);
     // One frame only: parse here rather than on a worker.
     doc.syntax.parse_now(&doc.buffer);
     print_warnings(nimbus_syntax::registry::take_warnings());
@@ -4279,6 +5059,7 @@ pub fn run_headless(
             &layout,
             &mut Scene {
                 doc: &doc,
+                carets: &carets,
                 view: &mut view,
                 compare: compare.as_deref_mut(),
                 merge: merge.as_deref_mut(),
@@ -4291,7 +5072,7 @@ pub fn run_headless(
             },
         );
         let ui = &theme.ui;
-        view::draw_tabs(&mut gpu, ui, &layout, &labels, 0);
+        view::draw_tabs(&mut gpu, ui, &layout, &labels, 0, true);
         sidebar::draw(
             &mut gpu,
             ui,
@@ -4343,7 +5124,7 @@ fn headless_labels(docs: &[Document]) -> Vec<TabLabel> {
 
 /// `--cursors a,b,c`: several cursors at those byte offsets, the last
 /// primary.
-fn headless_cursors(options: &Options, doc: &mut Document) {
+fn headless_cursors(options: &Options, doc: &Document, carets: &mut Carets) {
     if options.cursors.is_empty() {
         return;
     }
@@ -4353,7 +5134,7 @@ fn headless_cursors(options: &Options, doc: &mut Document) {
         .iter()
         .map(|&p| nimbus_core::Selection::cursor(nimbus_core::movement::clamp(t, p)))
         .collect();
-    doc.selections = nimbus_core::Selections::from_vec(sels, options.cursors.len() - 1);
+    carets.selections = nimbus_core::Selections::from_vec(sels, options.cursors.len() - 1);
 }
 
 /// `--diff A B` headless: the compare, diffed on this thread.
@@ -4449,14 +5230,14 @@ fn index_now(doc: &mut Document) {
 }
 
 /// `--find PATTERN`: the find bar searching, with the first match selected.
-fn headless_find(pattern: Option<&str>, doc: &mut Document) -> FindBar {
+fn headless_find(pattern: Option<&str>, ed: &mut Editor<'_>) -> FindBar {
     let mut find = FindBar::default();
     if let Some(pattern) = pattern {
         find.open(false, None);
-        let _ = find.find.insert(pattern);
-        find.search_now(doc);
+        let _ = find.find.ed().insert(pattern);
+        find.search_now(ed.doc);
         if let Some(range) = find.select_from(0, false) {
-            doc.select(range);
+            ed.select(range);
         }
     }
     find
@@ -4567,11 +5348,12 @@ fn draw_picker_overlay(
 /// text to put on the clipboard for Copy and Cut. Line breaks are not typed
 /// into fields; pasted ones are kept, so a multi-line literal can be found.
 fn edit_field(
-    field: &mut Document,
+    field: &mut Solo,
     cmd: Command<'_>,
     paste: Option<&str>,
     tab_width: usize,
 ) -> Option<String> {
+    let mut field = field.ed();
     let result = match cmd {
         Command::Move(motion, extend) => {
             field.move_cursor(motion, extend, tab_width, 1);
@@ -4639,11 +5421,11 @@ impl ApplicationHandler<AppEvent> for App {
                 let Some(i) = self
                     .tabs
                     .iter()
-                    .position(|t| t.doc.syntax.waiting_for(result.id()))
+                    .position(|t| self.docs[t.doc].syntax.waiting_for(result.id()))
                 else {
                     return; // the tab closed, or its file was reloaded
                 };
-                let doc = &mut self.tabs[i].doc;
+                let doc = &mut self.docs[self.tabs[i].doc];
                 if let Some(job) = doc.syntax.finish(result, &doc.buffer, SYNTAX_BUDGET) {
                     spawn_syntax(&self.proxy, job);
                 }
@@ -4668,7 +5450,7 @@ impl ApplicationHandler<AppEvent> for App {
                         Vec::new()
                     }
                 };
-                let layout = self.layout();
+                let layout = self.window_layout();
                 self.sidebar.after_change(layout.as_ref());
                 self.start_listings(requests);
                 self.sync_watch();
@@ -4676,6 +5458,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
             AppEvent::Disk(paths) => self.disk_changed(&paths),
             AppEvent::Index(token, chunk, error) => self.index_arrived(token, chunk, error),
+            AppEvent::Folded(result) => self.folded(result),
             AppEvent::Save(event) => {
                 self.save_event(event, event_loop);
                 self.changed(false);
@@ -4789,7 +5572,7 @@ impl ApplicationHandler<AppEvent> for App {
         self.update_title();
         if let Some(pattern) = self.options.find.clone() {
             self.open_find(false);
-            let _ = self.find.find.insert(&pattern);
+            let _ = self.find.find.ed().insert(&pattern);
             self.search(true);
         }
         if self.options.find.is_none() && self.options.diff.is_none() {
@@ -4808,7 +5591,7 @@ impl ApplicationHandler<AppEvent> for App {
             let found = self
                 .tabs
                 .iter()
-                .position(|t| t.doc.canonical.as_deref() == Some(b.as_path()));
+                .position(|t| self.docs[t.doc].canonical.as_deref() == Some(b.as_path()));
             if let Some(i) = found {
                 self.switch_to(i);
                 match Document::open(&a) {
@@ -4965,16 +5748,19 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = position;
                 if self.sidebar.resizing {
-                    if let Some(layout) = self.layout() {
+                    if let Some(layout) = self.window_layout() {
                         self.sidebar.drag_to(&layout, to_f32(position.x));
                         self.changed(false);
                     }
+                } else if let Some(d) = self.groups.dragging {
+                    self.drag_group_divider(d, to_f32(position.x));
                 } else if let Some(grab) = self.clicks.scrollbar_grab {
                     self.drag_scrollbar_to(to_f32(position.y) - grab);
                 } else if self.clicks.dragging {
                     self.mouse_drag();
                 }
                 self.update_scrollbar_hover();
+                self.update_fold_hover();
                 self.update_cursor_icon();
                 self.update_search_hover();
             }
@@ -4998,6 +5784,7 @@ impl ApplicationHandler<AppEvent> for App {
                 } else {
                     self.clicks.dragging = false;
                     self.clicks.scrollbar_grab = None;
+                    self.groups.dragging = None;
                     if self.sidebar.resizing {
                         self.sidebar.resizing = false;
                         self.remember();
