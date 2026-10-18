@@ -61,6 +61,33 @@ pub fn matching_with(
         .find_map(|at| partner_of(t, at, limit, window).map(|other| (at.min(other), at.max(other))))
 }
 
+/// The nearest opening bracket of the kind that `closer` closes before
+/// `pos` that has no partner before `pos`, within `limit` bytes: where a
+/// closer typed at `pos` would pair to. For lining a closer up with its
+/// opener's line (M11).
+#[must_use]
+pub fn opener_before(t: &dyn Text, pos: usize, closer: u8, limit: usize) -> Option<usize> {
+    let (opener, opens) = partner(closer)?;
+    if opens {
+        return None;
+    }
+    let start = pos.saturating_sub(limit);
+    let mut window = Vec::new();
+    t.read_into(start..pos, &mut window).ok()?;
+    let mut depth = 0usize;
+    for (i, &b) in window.iter().enumerate().rev() {
+        if b == closer {
+            depth += 1;
+        } else if b == opener {
+            if depth == 0 {
+                return Some(start + i);
+            }
+            depth -= 1;
+        }
+    }
+    None
+}
+
 /// The partner of the bracket at `at`, within `limit` bytes.
 fn partner_of(t: &dyn Text, at: usize, limit: usize, window: &mut Vec<u8>) -> Option<usize> {
     let me = t.byte_at(at)?;
@@ -112,6 +139,19 @@ mod tests {
         assert_eq!(matching(&t, 3, 1024), Some((3, 5)), "square ones");
         assert_eq!(matching(&t, 13, 1024), Some((13, 15)), "curly ones");
         assert_eq!(matching(&t, 7, 1024), None, "not next to a bracket");
+    }
+
+    #[test]
+    fn the_opener_a_closer_would_pair_with_is_found_backwards() {
+        let t = RopeBuffer::from_text("f(a, (b)) {\n  x");
+        assert_eq!(opener_before(&t, 14, b'}', 1024), Some(10));
+        assert_eq!(opener_before(&t, 14, b')', 1024), None, "both closed");
+        assert_eq!(
+            opener_before(&t, 8, b')', 1024),
+            Some(1),
+            "past the inner pair"
+        );
+        assert_eq!(opener_before(&t, 14, b'{', 1024), None, "not a closer");
     }
 
     #[test]

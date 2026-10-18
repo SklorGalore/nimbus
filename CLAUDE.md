@@ -41,6 +41,7 @@ cargo test --workspace
 python3 scripts/make-icons.py                               # redraw the app icon (PNG, .icns via iconutil, .ico) into assets/icon
 scripts/bundle-macos.sh target/release/nimbus VERSION OUT_DIR  # Nimbus.app and its zip; releases: push a tag vX.Y.Z matching Cargo.toml (.github/workflows/release.yml)
 NIMBUS_UPDATE_SCREENSHOT=1 cargo test -p nimbus --test screenshot   # remake the screenshot test's reference after an intended drawing change; look at it before committing
+# Without a Mac: put the remake-screenshot label on the pull request (or run the "Screenshot reference" workflow once it is on main); the image is in the run's artifact and, gzipped and base64, in its log
 cargo test -p nimbus-core <test_name>    # single test in one crate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets   # strict lints from Cargo.toml; CI fails on any warning

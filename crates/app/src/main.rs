@@ -11,6 +11,7 @@ mod compare;
 mod config;
 mod debug;
 mod document;
+mod editing;
 mod find;
 mod find_files;
 mod indexer;

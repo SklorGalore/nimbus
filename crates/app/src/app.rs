@@ -32,11 +32,12 @@ use crate::compare::{Compare, DiffResult, Other};
 use crate::config::{self, Config};
 use crate::debug::Debug;
 use crate::document::{DiskChange, Document, MAX_COPY_BYTES, Occurrence};
+use crate::editing::Outcome;
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::find_files::{self, Batch as FilesBatch};
-use crate::input::{self, Command, Motion};
+use crate::input::{self, Command, Motion, Resolved};
 use crate::io;
-use crate::keymap::Keymap;
+use crate::keymap::{Chord, Keymap, chord_label};
 use crate::languages::Languages;
 use crate::menu::{self, MenuBar};
 use crate::merge_view::{Inputs, MergeView, Merged, Shape, Take};
@@ -168,6 +169,9 @@ const MENU_REPEAT_GAP: Duration = Duration::from_millis(250);
 
 /// How long a message stays on screen.
 const MESSAGE_TIME: Duration = Duration::from_secs(4);
+
+/// How long the first chord of a two-chord binding waits for the second.
+const CHORD_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// One open file: its text and history, and where it is scrolled to.
 pub struct Tab {
@@ -375,6 +379,9 @@ pub struct App {
     research_at: Option<Instant>,
     /// A palette action chosen by mouse, run once the click is handled.
     pending_action: Option<Command<'static>>,
+    /// The first chord of a two-chord binding, pressed and waiting for
+    /// the second until the deadline (M11).
+    pending_chord: Option<(Chord, Instant)>,
     /// The last menu event and when it arrived, to drop auto-repeats.
     last_menu: Option<(String, Instant)>,
     /// The project tree.
@@ -473,7 +480,13 @@ impl App {
             started
         });
         let wrap = options.wrap || config.soft_wrap;
-        let mut tabs: Vec<Tab> = docs.into_iter().map(|d| Tab::new(d, wrap)).collect();
+        let mut tabs: Vec<Tab> = docs
+            .into_iter()
+            .map(|mut d| {
+                d.configure_indent(config.indent.for_language(d.language_key()));
+                Tab::new(d, wrap)
+            })
+            .collect();
         if tabs.is_empty() {
             tabs.push(Tab::new(Document::untitled(), wrap));
         }
@@ -527,6 +540,7 @@ impl App {
             proxy,
             research_at: None,
             pending_action: None,
+            pending_chord: None,
             last_menu: None,
             sidebar,
             watch: Watch::new(
@@ -552,6 +566,27 @@ impl App {
 
     fn tab_width(&self) -> usize {
         self.config.tab_width
+    }
+
+    /// Set a document's indentation from the config and, when it says to
+    /// detect, from the file: after opening, renaming or reloading the
+    /// config.
+    fn configure_indent(&self, doc: &mut Document) {
+        doc.configure_indent(self.config.indent.for_language(doc.language_key()));
+    }
+
+    /// The editing settings for the active document's language.
+    fn editing(&self) -> config::Editing {
+        self.config.editor.for_language(self.doc().language_key())
+    }
+
+    /// Tell the user what an M11 operation refused, if it did.
+    fn report(&mut self, outcome: Outcome) {
+        match outcome {
+            Outcome::Done | Outcome::Nothing => {}
+            Outcome::TooLarge => self.say("Selection too large for this operation", true),
+            Outcome::NoComment => self.say("This language has no comment syntax", true),
+        }
     }
 
     fn doc(&self) -> &Document {
@@ -821,6 +856,7 @@ impl App {
         match Document::open(&path) {
             Ok(mut doc) => {
                 doc.detect_language(&self.languages);
+                self.configure_indent(&mut doc);
                 Some((doc, path))
             }
             Err(e) => {
@@ -1222,14 +1258,17 @@ impl App {
                 self.move_cursor(motion, extend, page);
                 Ok(())
             }
-            Command::Insert(text) => self.doc_mut().insert(text).map(drop),
-            Command::Newline => self.doc_mut().insert_newline().map(drop),
+            Command::Insert(text) => {
+                let auto_pairs = self.editing().auto_pairs;
+                self.doc_mut().type_text(text, auto_pairs)
+            }
+            Command::Newline => self.doc_mut().insert_newline(),
             Command::Tab => match self.doc_mut().indent_lines() {
                 Ok(true) => Ok(()),
-                Ok(false) => self.doc_mut().insert("\t").map(drop),
+                Ok(false) => self.doc_mut().insert_indent(),
                 Err(e) => Err(e),
             },
-            Command::Outdent => self.doc_mut().outdent_lines(tab_width),
+            Command::Outdent => self.doc_mut().outdent_lines(),
             Command::Undo => self.doc_mut().undo().map(drop),
             Command::Redo => self.doc_mut().redo().map(drop),
             Command::SelectAll => {
@@ -1277,13 +1316,91 @@ impl App {
                 self.say(if on { "Soft wrap on" } else { "Soft wrap off" }, false);
                 Ok(())
             }
-            Command::DeleteBack => self.doc_mut().delete_back().map(drop),
+            Command::DeleteBack => self.doc_mut().backspace().map(drop),
             Command::DeleteForward => self.doc_mut().delete_forward().map(drop),
             Command::DeleteWordBack => self.doc_mut().delete_to(Motion::WordLeft).map(drop),
             Command::DeleteWordForward => self.doc_mut().delete_to(Motion::WordRight).map(drop),
             Command::DeleteToLineStart => self.doc_mut().delete_to(Motion::LineStart).map(drop),
+            _ => self.run_everyday_edit(cmd),
+        }
+    }
+
+    /// The everyday editing commands of M11 (comments, lines, selection,
+    /// text, indentation), on the active tab.
+    fn run_everyday_edit(&mut self, cmd: Command<'_>) -> Result<(), nimbus_core::EditError> {
+        match cmd {
+            Command::ToggleLineComment => self.edit_op(Document::toggle_line_comment),
+            Command::ToggleBlockComment => self.edit_op(Document::toggle_block_comment),
+            Command::Duplicate => self.edit_op(Document::duplicate),
+            Command::MoveLineUp => self.edit_op(|d| d.move_lines(false)),
+            Command::MoveLineDown => self.edit_op(|d| d.move_lines(true)),
+            Command::DeleteLine => self.edit_op(Document::delete_lines),
+            Command::JoinLines => self.edit_op(Document::join_lines),
+            Command::InsertLineBelow => self.edit_op(|d| d.insert_line(false)),
+            Command::InsertLineAbove => self.edit_op(|d| d.insert_line(true)),
+            Command::SelectLine => {
+                self.doc_mut().select_line();
+                Ok(())
+            }
+            Command::ExpandSelection => {
+                self.doc_mut().expand_selection();
+                Ok(())
+            }
+            Command::ShrinkSelection => {
+                self.doc_mut().shrink_selection();
+                Ok(())
+            }
+            Command::MatchingBracket(select) => {
+                if self.doc_mut().matching_bracket(select) == Outcome::Nothing {
+                    self.say("No bracket at the cursor", false);
+                }
+                Ok(())
+            }
+            Command::ChangeCase(case) => self.edit_op(|d| d.change_case(case)),
+            Command::RewriteLines(op) => self.edit_op(|d| d.rewrite_lines(op)),
+            Command::TrimWhitespace => self.edit_op(Document::trim_whitespace),
+            Command::IndentUsingSpaces | Command::IndentUsingTabs => {
+                let settings = self.config.indent.for_language(self.doc().language_key());
+                let indent = nimbus_core::indent::Indent {
+                    width: settings.indent.width,
+                    tabs: cmd == Command::IndentUsingTabs,
+                };
+                self.doc_mut().indent = indent;
+                self.say(
+                    format!("Indenting with {}", indent.label().to_lowercase()),
+                    false,
+                );
+                Ok(())
+            }
+            Command::DetectIndent => {
+                let settings = config::Indenting {
+                    detect: true,
+                    ..self.config.indent.for_language(self.doc().language_key())
+                };
+                let found = self.doc_mut().configure_indent(settings);
+                let label = self.doc().indent.label().to_lowercase();
+                self.say(
+                    if found {
+                        format!("Detected {label}")
+                    } else {
+                        format!("No indentation found; using {label}")
+                    },
+                    false,
+                );
+                Ok(())
+            }
             _ => Ok(()),
         }
+    }
+
+    /// Run an M11 operation on the active document and report a refusal.
+    fn edit_op(
+        &mut self,
+        op: impl FnOnce(&mut Document) -> Result<Outcome, nimbus_core::EditError>,
+    ) -> Result<(), nimbus_core::EditError> {
+        let outcome = op(self.doc_mut())?;
+        self.report(outcome);
+        Ok(())
     }
 
     fn move_cursor(&mut self, motion: Motion, extend: bool, page: usize) {
@@ -1590,6 +1707,7 @@ impl App {
         match Document::open(path) {
             Ok(mut doc) => {
                 doc.detect_language(&self.languages);
+                self.configure_indent(&mut doc);
                 // Replace a lone untouched untitled tab rather than keeping it.
                 let replace = self.tabs.len() == 1
                     && self.tabs[0].doc.path.is_none()
@@ -1642,6 +1760,16 @@ impl App {
         }
         if self.tabs[i].doc.saves_on_worker() {
             return self.start_save(i);
+        }
+        let editing = self
+            .config
+            .editor
+            .for_language(self.tabs[i].doc.language_key());
+        if let Err(e) = self.tabs[i]
+            .doc
+            .tidy_for_save(editing.trim_trailing_whitespace, editing.final_newline)
+        {
+            log::error!("tidying before save refused: {e}");
         }
         match self.tabs[i].doc.save() {
             Ok(()) => {
@@ -1828,6 +1956,9 @@ impl App {
             if after.save_as.is_some() {
                 // Saved under a new name (see App::save_as).
                 self.tabs[i].doc.detect_language(&self.languages);
+                let mut doc = std::mem::take(&mut self.tabs[i].doc);
+                self.configure_indent(&mut doc);
+                self.tabs[i].doc = doc;
                 self.sync_watch();
                 self.reveal_active();
             }
@@ -1886,6 +2017,9 @@ impl App {
             Saved::Yes => {
                 // A new name can mean a new language: untitled to `notes.md`.
                 self.tabs[i].doc.detect_language(&self.languages);
+                let mut doc = std::mem::take(&mut self.tabs[i].doc);
+                self.configure_indent(&mut doc);
+                self.tabs[i].doc = doc;
                 self.sync_watch();
                 self.reveal_active();
             }
@@ -2044,6 +2178,8 @@ impl App {
         self.languages = languages;
         for tab in &mut self.tabs {
             tab.doc.detect_language(&self.languages);
+            tab.doc
+                .configure_indent(config.indent.for_language(tab.doc.language_key()));
         }
         self.keymap = keymap;
         self.config = config;
@@ -2495,11 +2631,8 @@ impl App {
             self.switch_to(i);
             return;
         }
-        let rows = match (self.find.open, self.find.replace_mode) {
-            (false, _) => 0,
-            (true, false) => 1,
-            (true, true) => 2,
-        };
+        let rows =
+            usize::from(self.find.open) + usize::from(self.find.open && self.find.replace_mode);
         if let Some(row) = view::find_bar_row(&layout, y, rows) {
             // A click in the bar focuses the field on that row.
             self.find.focused = true;
@@ -2510,6 +2643,9 @@ impl App {
             };
             self.changed(false);
             return;
+        }
+        if y >= layout.bottom {
+            return self.status_bar_click(&layout, x);
         }
         if y < layout.top {
             return;
@@ -2682,6 +2818,67 @@ impl App {
         }
         self.clicks.dragging = false;
         self.blink.reset(now);
+        self.changed(false);
+    }
+
+    /// A key press or release: run what it is bound to, or type it. The
+    /// first chord of a two-chord binding waits for the second (M11).
+    fn key_input(
+        &mut self,
+        event: &winit::event::KeyEvent,
+        now: Instant,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let pending = self.pending_chord.map(|(c, _)| c);
+        let resolved = input::resolve(
+            &self.keymap,
+            input::KeyPress {
+                key: &event.logical_key,
+                physical: event.physical_key,
+                text: event.text.as_deref(),
+                pressed: event.state == ElementState::Pressed,
+                repeat: event.repeat,
+                mods: self.modifiers,
+            },
+            self.find.open,
+            pending,
+        );
+        let was_pending = pending.is_some() && event.state == ElementState::Pressed;
+        match resolved {
+            Resolved::Command(cmd) => {
+                self.pending_chord = None;
+                self.blink.reset(now);
+                self.debug.latency.input(now);
+                self.run(cmd, event_loop);
+            }
+            Resolved::Prefix(chord) => {
+                // Wait for the second chord; the status bar shows the
+                // first meanwhile.
+                self.pending_chord = Some((chord, now + CHORD_TIMEOUT));
+                self.changed(false);
+            }
+            Resolved::Nothing => {
+                if was_pending {
+                    // Any other key cancels the chord.
+                    self.pending_chord = None;
+                    self.changed(false);
+                }
+            }
+        }
+    }
+
+    /// A click on the status bar: the indentation item ("Spaces: 4")
+    /// offers the choices for this file, through the palette.
+    fn status_bar_click(&mut self, layout: &Layout, x: f32) {
+        if !self.tabs[self.active].view.indent_item_hit(layout, x) {
+            return;
+        }
+        self.open_picker(Kind::Palette);
+        if let Some(p) = self.picker.as_mut()
+            && let Err(e) = p.input.insert("indent")
+        {
+            log::debug!("picker query: {e}");
+        }
         self.changed(false);
     }
 
@@ -2868,6 +3065,11 @@ impl App {
     fn paint(&mut self, gpu: &mut Gpu, layout: &Layout) {
         let labels = self.tab_labels();
         let tab_width = self.tab_width();
+        let chord_message = self.pending_chord.map(|(chord, until)| Message {
+            text: format!("{} …", chord_label(chord)),
+            is_error: false,
+            until,
+        });
         let tab = &mut self.tabs[self.active];
         // Bring the tree up to date with this frame's edits, or hand the
         // rest to a worker if that would take too long.
@@ -2910,7 +3112,7 @@ impl App {
                 merge: tab.merge.as_deref_mut(),
                 theme: &mut self.theme,
                 find: &self.find,
-                message: self.message.as_ref(),
+                message: chord_message.as_ref().or(self.message.as_ref()),
                 cursor_visible: self.blink.visible
                     && self.picker.is_none()
                     && !self.sidebar.focused,
@@ -4479,6 +4681,12 @@ impl ApplicationHandler<AppEvent> for App {
                 window.request_redraw();
             }
         }
+        if self.pending_chord.is_some_and(|(_, until)| now >= until) {
+            self.pending_chord = None;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
         if (blink_changed || retry_due)
             && let Some(window) = &self.window
         {
@@ -4521,6 +4729,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.blink.next,
             self.hidden_retry.map(|(at, _)| at),
             self.message.as_ref().map(|m| m.until),
+            self.pending_chord.map(|(_, until)| until),
             self.research_at,
             self.search_files_at,
             self.sidebar.search.wake_at(),
@@ -4551,25 +4760,7 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
 
-            WindowEvent::KeyboardInput { event, .. } => {
-                let cmd = input::resolve(
-                    &self.keymap,
-                    input::KeyPress {
-                        key: &event.logical_key,
-                        physical: event.physical_key,
-                        text: event.text.as_deref(),
-                        pressed: event.state == ElementState::Pressed,
-                        repeat: event.repeat,
-                        mods: self.modifiers,
-                    },
-                    self.find.open,
-                );
-                if let Some(cmd) = cmd {
-                    self.blink.reset(now);
-                    self.debug.latency.input(now);
-                    self.run(cmd, event_loop);
-                }
-            }
+            WindowEvent::KeyboardInput { event, .. } => self.key_input(&event, now, event_loop),
 
             WindowEvent::Ime(ime) => self.ime(ime, event_loop),
 
