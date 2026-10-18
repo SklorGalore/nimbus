@@ -6,6 +6,14 @@ section before tagging.
 
 ## Unreleased
 
+## 1.1.0
+
+### Added
+
+- `remember_workspace = false` in the config stops Nimbus reopening
+  the last session at startup and saving one, while recent files, the
+  window position and the zoom are still kept.
+
 ## 1.0.0
 
 The first stable release: everything from milestones 9 to 21 since

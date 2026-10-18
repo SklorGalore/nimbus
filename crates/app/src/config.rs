@@ -54,6 +54,11 @@ pub struct Config {
     /// Start with the zoom the last session ended with (kept in
     /// `state.toml`); `false` starts every session at `font_size`.
     pub remember_zoom: bool,
+    /// Reopen the last session at startup and save this one (the open
+    /// tabs, editor groups and tree, `DESIGN.md` §9). `false` starts every
+    /// run fresh, as `--no-session` does, but still keeps recent files,
+    /// the window position and the zoom. Read once at startup.
+    pub remember_workspace: bool,
     /// Where spaces and tabs show as `·` and `→`.
     pub render_whitespace: Whitespace,
     /// Draw a hairline at each indentation level.
@@ -234,6 +239,7 @@ impl Default for Config {
             font: String::new(),
             ligatures: false,
             remember_zoom: true,
+            remember_workspace: true,
             render_whitespace: Whitespace::Selection,
             indent_guides: false,
             sticky_scroll: true,
@@ -274,6 +280,7 @@ const KNOWN: &[&str] = &[
     "font",
     "ligatures",
     "remember_zoom",
+    "remember_workspace",
     "render_whitespace",
     "indent_guides",
     "sticky_scroll",
@@ -300,6 +307,9 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # Zoom (View > Zoom In/Out, Primary+= and Primary+-) is remembered between
 # sessions; false starts every session at font_size.
 # remember_zoom = true
+# `nimbus` alone reopens the last session's tabs, and `nimbus FOLDER` that
+# folder's; false starts every run with one empty tab and saves no session.
+# remember_workspace = true
 # Show spaces as · and tabs as →: "selection", "all" or "none".
 # render_whitespace = "selection"
 # indent_guides = false     # true: a hairline at each indentation level
@@ -404,6 +414,12 @@ impl Config {
             &table,
             "remember_zoom",
             &mut config.remember_zoom,
+            &mut warnings,
+        );
+        take(
+            &table,
+            "remember_workspace",
+            &mut config.remember_workspace,
             &mut warnings,
         );
         take(
@@ -582,11 +598,15 @@ mod tests {
         assert_eq!(w, Vec::<String>::new());
         assert_eq!(c.font, "Fira Code");
         assert!(c.ligatures && !c.remember_zoom && c.indent_guides);
+        assert!(c.remember_workspace, "on unless set");
         assert_eq!(c.render_whitespace, Whitespace::All);
         let (c, w) = Config::parse("render_whitespace = \"some\"\n");
         assert_eq!(c.render_whitespace, Whitespace::Selection);
         assert_eq!(w.len(), 1, "{w:?}");
         assert_eq!(Whitespace::All.next(), Whitespace::None);
+        let (c, w) = Config::parse("remember_workspace = false\n");
+        assert_eq!(w, Vec::<String>::new());
+        assert!(!c.remember_workspace);
     }
 
     #[test]
