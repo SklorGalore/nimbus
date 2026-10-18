@@ -730,8 +730,10 @@ pub fn draw(gpu: &mut Gpu, ui: &Ui, layout: &Layout, panel: &Panel, focused: boo
 }
 
 /// A small box under the toggle the pointer rests on, saying what it does
-/// and whether it is on. Drawn last so it sits over the count line and
-/// the list, and kept inside the sidebar's width.
+/// and whether it is on. It covers the row beneath (the replace field and
+/// its All button, or the include globs), and within one layer every
+/// rectangle draws under every glyph, so the box gets a layer of its own;
+/// it is kept inside the sidebar's width.
 fn draw_tooltip(
     gpu: &mut Gpu,
     ui: &Ui,
@@ -760,6 +762,7 @@ fn draw_tooltip(
     let left = left.min(layout.left - width - layout.margin).max(0.0);
     let top = geo.toggles + lh + layout.margin / 2.0;
     let border = layout.scale.round().max(1.0);
+    gpu.begin_layer(Some([0.0, 0.0, layout.left, layout.bottom]));
     gpu.push_rect([left, top], [width, lh + 2.0 * border], ui.picker_border);
     gpu.push_rect(
         [left + border, top + border],
