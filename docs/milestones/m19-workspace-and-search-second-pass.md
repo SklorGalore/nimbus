@@ -124,12 +124,13 @@ is cheaper and bounds memory tighter.
 ## Results
 
 Built on 2026-10-18 in a Linux container with no GPU; the owner then
-checked the drawing and behaviour on their Mac the same day. The
-`--smoke` first-frame times were not recorded. CI's `release-size` job
+checked the drawing and behaviour on their Mac the same day and timed
+the first frame there with `bench/smoke.sh`. CI's `release-size` job
 passed the 35 MB budget on all three systems.
 
 | Metric | Value |
 |---|---|
+| `--smoke` first frame, release, M5 Pro | warm 113.2–123.1 ms (median 116.8 ms); cold 714.4 ms, the first run after a purge (budget 500 ms, measured warm) |
 | Tests | 573 passing in the workspace, plus the opt-in benchmarks |
 | Multi-line search, 251 MB of crate sources (11,929 files), warm | `unsafe \{\n\s*// SAFETY`: 142 ms, 95 hits; `rg -U -i` 408–695 ms, 95 hits. `\}\n\nimpl Drop for`: 106 ms, 262 hits; `rg -U --hidden` 361–524 ms, 262 hits |
 | Single-line search, same tree | `fn main`: 97 ms; `rg` 161 ms |
