@@ -748,8 +748,10 @@ mod tests {
     fn walk_order_is_path_order() {
         let l = tempfile_dir::Dir::new("fc-order-l");
         let r = tempfile_dir::Dir::new("fc-order-r");
+        // No two names may differ only in case: macOS and Windows treat
+        // `A` and the folder `a` as the same path.
         for name in [
-            "a/b", "a/c/d", "a.txt", "a-b", "A", "a b", "ab", "b/a", "a/b.c", "z", "_x",
+            "a/b", "a/c/d", "a.txt", "a-b", "C", "a b", "ab", "b/a", "a/b.c", "z", "_x",
         ] {
             l.write(name, name);
         }
