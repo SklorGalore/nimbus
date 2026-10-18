@@ -105,8 +105,11 @@ encoding back, and a character that encoding cannot hold (an emoji in a
 Windows-1252 file) stops the save and offers UTF-8 instead.
 
 To skip the guess for some files, map file names or patterns to an
-encoding in `config.toml`; a pattern with a `/` is matched against the
-whole path:
+encoding in `config.toml`. A pattern without a `/` matches file names
+anywhere; one with a `/` matches the end of the path, so `legacy/*.txt`
+is any `.txt` file directly in a folder called `legacy`. Start a pattern
+with `/` to match from the root, and use `**` to cross folders
+(`legacy/**/*.txt`):
 
 ```toml
 [encodings]
