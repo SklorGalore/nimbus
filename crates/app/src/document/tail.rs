@@ -333,13 +333,17 @@ mod tests {
         assert_eq!(doc.disk_changed(&languages), DiskChange::Appended);
         assert_eq!(all(&doc), "one\ntwo\nthree\nfour\n");
 
-        // Rewritten, not appended to: not taken as an append.
-        doc.extended_at = None;
-        std::fs::write(&path, "\u{feff}ONE\ntwo\nthree\nfour\nfive\n").unwrap();
-        assert_eq!(doc.disk_changed(&languages), DiskChange::NotReloaded);
-        // (Rewritten in place, so the mapped bytes changed too: M7's
-        // documented hazard. The document is just not extended.)
-        assert_eq!(doc.buffer.len_bytes(), 19);
+        // Rewritten, not appended to: not taken as an append. (Windows
+        // refuses to truncate a mapped file, so this cannot happen there.)
+        #[cfg(unix)]
+        {
+            doc.extended_at = None;
+            std::fs::write(&path, "\u{feff}ONE\ntwo\nthree\nfour\nfive\n").unwrap();
+            assert_eq!(doc.disk_changed(&languages), DiskChange::NotReloaded);
+            // (Rewritten in place, so the mapped bytes changed too: M7's
+            // documented hazard. The document is just not extended.)
+            assert_eq!(doc.buffer.len_bytes(), 19);
+        }
         drop(doc);
         let _ = std::fs::remove_dir_all(&dir);
     }
