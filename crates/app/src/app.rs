@@ -36,6 +36,7 @@ use crate::document::{Carets, DiskChange, Document, Editor, MAX_COPY_BYTES, Occu
 use crate::editing::Outcome;
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::find_files::{self, Batch as FilesBatch};
+use crate::groups::{self, Groups};
 use crate::input::{self, Command, Motion, Resolved};
 use crate::io;
 use crate::keymap::{Chord, Keymap, chord_label};
@@ -196,6 +197,8 @@ const CHORD_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct Tab {
     /// The document it shows, in [`App::docs`].
     pub doc: DocId,
+    /// The editor group whose strip it is in (M13).
+    pub group: usize,
     /// This tab's cursors and selections in it.
     pub carets: Carets,
     /// Its scroll position and wrap setting.
@@ -235,6 +238,14 @@ fn first_tabs(docs: Vec<Document>, options: &Options, config: &Config) -> (Docs,
     (open, tabs)
 }
 
+/// The cursors of every tab showing `doc`.
+fn carets_of(tabs: &mut [Tab], doc: DocId) -> Vec<&mut Carets> {
+    tabs.iter_mut()
+        .filter(|t| t.doc == doc)
+        .map(|t| &mut t.carets)
+        .collect()
+}
+
 /// Whether a tab for `doc` opens with soft wrap: the language's setting
 /// (`[editor.markdown] wrap`, on for Markdown by default) over the
 /// top-level `soft_wrap`.
@@ -254,6 +265,7 @@ impl Tab {
         view.set_wrap(wrap);
         Self {
             doc,
+            group: 0,
             carets: Carets::default(),
             view,
             noted_size: false,
@@ -399,6 +411,8 @@ pub struct App {
     frames: u64,
     /// The open documents, which tabs name.
     docs: Docs,
+    /// The editor groups side by side; tabs say which one they are in.
+    groups: Groups,
     tabs: Vec<Tab>,
     active: usize,
     blink: Blink,
@@ -567,6 +581,7 @@ impl App {
             merge_saved_clean: None,
             frames: 0,
             docs: open,
+            groups: Groups::default(),
             tabs,
             active: 0,
             blink: Blink::new(started),
@@ -645,8 +660,9 @@ impl App {
 
     /// Reload the active tab's file from disk, on request.
     fn reload_active(&mut self) {
-        let tab = &mut self.tabs[self.active];
-        match self.docs[tab.doc].reload(&self.languages, &mut [&mut tab.carets]) {
+        let id = self.tabs[self.active].doc;
+        let mut carets = carets_of(&mut self.tabs, id);
+        match self.docs[id].reload(&self.languages, &mut carets) {
             Ok(()) => self.say("Reloaded from disk", false),
             Err(e) => self.say(format!("Cannot reload: {e}"), true),
         }
@@ -679,11 +695,18 @@ impl App {
         to_f32(self.config.font_size * scale)
     }
 
-    /// Geometry for the current window, if it exists.
-    fn layout(&self) -> Option<Layout> {
+    /// Geometry for the whole window, if it exists, sized for the focused
+    /// tab. The sidebar, the status bar and the overlays use it; the text
+    /// of each group uses its own column, [`App::group_layout`].
+    fn window_layout(&self) -> Option<Layout> {
         let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
         let scale = to_f32(effective_scale(window.scale_factor()));
-        let tab = &self.tabs[self.active];
+        let lines = self.tab_lines(&self.tabs[self.active]);
+        Some(layout_for_lines(gpu, scale, lines, &self.find).with_sidebar(self.sidebar.px(scale)))
+    }
+
+    /// The most lines any document on `tab` has: the gutter's width.
+    fn tab_lines(&self, tab: &Tab) -> usize {
         let mut lines = line_estimate(&self.docs[tab.doc].buffer);
         if let Some(c) = &tab.compare {
             lines = lines.max(line_estimate(&c.other.buffer));
@@ -693,7 +716,106 @@ impl App {
                 .max(line_estimate(&m.ours.buffer))
                 .max(line_estimate(&m.theirs.buffer));
         }
-        Some(layout_for_lines(gpu, scale, lines, &self.find).with_sidebar(self.sidebar.px(scale)))
+        lines
+    }
+
+    /// Geometry for group `g`'s column: its tab strip, find bar and text,
+    /// between the dividers. With one group it is the window's layout.
+    fn group_layout(&self, g: usize) -> Option<Layout> {
+        let (window, gpu) = (self.window.as_ref()?, self.gpu.as_ref()?);
+        let scale = to_f32(effective_scale(window.scale_factor()));
+        let lines = self.tab_lines(&self.tabs[self.group_active(g)]);
+        let full = layout_for_lines(gpu, scale, lines, self.group_find(g))
+            .with_sidebar(self.sidebar.px(scale));
+        if self.groups.len() == 1 {
+            return Some(full);
+        }
+        let &(a, b) = self.groups.columns(full.left, full.width).get(g)?;
+        Some(full.column(a, b))
+    }
+
+    /// Geometry for the focused group, where the keyboard's edits show.
+    fn layout(&self) -> Option<Layout> {
+        self.group_layout(self.groups.focused)
+    }
+
+    /// The left and right edges of every group's column.
+    fn group_columns(&self, window: &Layout) -> Vec<(f32, f32)> {
+        self.groups.columns(window.left, window.width)
+    }
+
+    /// Group `g`'s active tab, as an index into `tabs`.
+    fn group_active(&self, g: usize) -> usize {
+        if g == self.groups.focused {
+            self.active
+        } else {
+            self.groups.list.get(g).map_or(self.active, |x| x.active)
+        }
+        .min(self.tabs.len() - 1)
+    }
+
+    /// Group `g`'s find bar.
+    fn group_find(&self, g: usize) -> &FindBar {
+        if g == self.groups.focused {
+            &self.find
+        } else {
+            self.groups.list.get(g).map_or(&self.find, |x| &x.find)
+        }
+    }
+
+    /// The tabs in group `g`'s strip, in order, as indices into `tabs`.
+    fn group_tabs(&self, g: usize) -> Vec<usize> {
+        (0..self.tabs.len())
+            .filter(|&i| self.tabs[i].group == g)
+            .collect()
+    }
+
+    /// Put the focused group's active tab and find bar in its slot, ready
+    /// for another group to take the focus.
+    fn park_focus(&mut self) {
+        let f = self.groups.focused;
+        if let Some(slot) = self.groups.list.get_mut(f) {
+            slot.active = self.active;
+            // The keyboard leaves the group, its find bar included.
+            self.find.focused = false;
+            std::mem::swap(&mut self.find, &mut slot.find);
+        }
+    }
+
+    /// Take the focused group's active tab and find bar from its slot.
+    fn unpark_focus(&mut self) {
+        let f = self.groups.focused;
+        if let Some(slot) = self.groups.list.get_mut(f) {
+            self.active = slot.active.min(self.tabs.len() - 1);
+            std::mem::swap(&mut self.find, &mut slot.find);
+        }
+    }
+
+    /// Give group `g` the keyboard: its active tab and its find bar
+    /// become the app's.
+    fn focus_group(&mut self, g: usize) {
+        if g == self.groups.focused || g >= self.groups.len() {
+            return;
+        }
+        // Typing in the other group starts a new undo step, even when it
+        // shows the same document.
+        self.doc_mut().history.seal();
+        self.park_focus();
+        self.groups.focused = g;
+        self.unpark_focus();
+        self.after_focus_moved();
+    }
+
+    /// The focused tab changed: forget what belonged to the old one.
+    fn after_focus_moved(&mut self) {
+        self.preedit = None;
+        self.title_key = None;
+        if self.find.open {
+            self.find_origin = self.cursor();
+            self.search(false);
+        }
+        self.reveal_active();
+        self.changed(false);
     }
 
     /// What the debug overlay reports about the active document and the
@@ -816,15 +938,27 @@ impl App {
                     self.docs.insert(Document::untitled()),
                     self.config.soft_wrap,
                 );
-                self.tabs.push(tab);
-                self.switch_to(self.tabs.len() - 1);
+                let i = self.add_tab(tab);
+                self.switch_to(i);
             }
             Command::CloseTab => self.close_tab(self.active, event_loop),
-            Command::NextTab => self.switch_to((self.active + 1) % self.tabs.len()),
-            Command::PrevTab => {
-                self.switch_to((self.active + self.tabs.len() - 1) % self.tabs.len());
+            Command::NextTab => self.step_tab(1),
+            Command::PrevTab => self.step_tab(-1),
+            Command::GoToTab(i) => {
+                let ids = self.group_tabs(self.groups.focused);
+                if let Some(&t) = ids.get(i.min(ids.len().saturating_sub(1))) {
+                    self.switch_to(t);
+                }
             }
-            Command::GoToTab(i) => self.switch_to(i.min(self.tabs.len() - 1)),
+            Command::SplitRight => self.split_right(),
+            Command::CloseGroup => self.close_group(event_loop),
+            Command::FocusLeftGroup => {
+                if let Some(g) = self.groups.focused.checked_sub(1) {
+                    self.focus_group(g);
+                }
+            }
+            Command::FocusRightGroup => self.focus_group(self.groups.focused + 1),
+            Command::MoveTabToNextGroup => self.move_tab_to_next_group(),
             Command::QuickOpen => self.open_picker(Kind::Files),
             Command::GoToLine => self.open_picker(Kind::Line),
             Command::GoToSymbol => self.open_picker(Kind::Symbols),
@@ -1034,8 +1168,7 @@ impl App {
             self.docs.remove(old.doc);
             self.active = 0;
         } else {
-            self.tabs.push(tab);
-            self.active = self.tabs.len() - 1;
+            self.active = self.add_tab(tab);
         }
         self.start_syntax();
         self.title_key = None;
@@ -1548,20 +1681,45 @@ impl App {
         }
     }
 
-    /// Make tab `i` the active one.
+    /// Make tab `i` the active one, focusing its group.
     fn switch_to(&mut self, i: usize) {
-        if i == self.active || i >= self.tabs.len() {
+        if i >= self.tabs.len() {
             return;
         }
-        self.active = i;
-        self.preedit = None;
-        self.sidebar.focused = false;
-        if self.find.open {
-            self.find_origin = self.cursor();
-            self.search(false);
+        let g = self.tabs[i].group;
+        if i == self.active && g == self.groups.focused {
+            return;
         }
-        self.reveal_active();
-        self.changed(false);
+        if g != self.groups.focused {
+            self.doc_mut().history.seal();
+            self.park_focus();
+            self.groups.focused = g;
+            self.unpark_focus();
+        }
+        self.active = i;
+        self.sidebar.focused = false;
+        self.after_focus_moved();
+    }
+
+    /// The next (`step` 1) or previous (-1) tab in the focused group's
+    /// strip, wrapping around.
+    fn step_tab(&mut self, step: isize) {
+        let ids = self.group_tabs(self.groups.focused);
+        let Some(at) = ids.iter().position(|&i| i == self.active) else {
+            return;
+        };
+        let n = ids.len().cast_signed();
+        let next = (at.cast_signed() + step).rem_euclid(n).cast_unsigned();
+        if let Some(&i) = ids.get(next) {
+            self.switch_to(i);
+        }
+    }
+
+    /// Add `tab` to the focused group, returning its index.
+    fn add_tab(&mut self, mut tab: Tab) -> usize {
+        tab.group = self.groups.focused;
+        self.tabs.push(tab);
+        self.tabs.len() - 1
     }
 
     /// Move the cursor to the start of line `n` (counting from 1). Past the
@@ -1670,7 +1828,7 @@ impl App {
         let Some(path) = self.doc().canonical.clone() else {
             return;
         };
-        let layout = self.layout();
+        let layout = self.window_layout();
         let requests = self.sidebar.reveal(&path, layout.as_ref());
         self.start_listings(requests);
     }
@@ -1724,19 +1882,26 @@ impl App {
         let now = Instant::now();
         let mut notes = Vec::new();
         let mut is_error = false;
-        for tab in &mut self.tabs {
-            let Some(path) = self.docs[tab.doc].canonical.as_deref() else {
+        let on_disk: Vec<DocId> = self
+            .docs
+            .iter()
+            .filter(|(_, d)| {
+                d.canonical
+                    .as_deref()
+                    .is_some_and(|p| changes.iter().any(|c| c.path == p))
+            })
+            .map(|(id, _)| id)
+            .collect();
+        for id in on_disk {
+            let Some(path) = self.docs[id].canonical.as_deref() else {
                 continue;
             };
-            if !changes.iter().any(|c| c.path == path) {
-                continue;
-            }
             // A file written to over and over (a growing log) reloads at
             // most once per RELOAD_GAP; the rest wait for the timer. Not a
             // mapped one: it never reloads by itself unless cut short, and
             // that must be handled at once.
-            if let Some(at) = self.docs[tab.doc].reloaded_at
-                && !self.docs[tab.doc].buffer.is_mapped()
+            if let Some(at) = self.docs[id].reloaded_at
+                && !self.docs[id].buffer.is_mapped()
                 && now.duration_since(at) < RELOAD_GAP
             {
                 let due = at + RELOAD_GAP;
@@ -1746,42 +1911,43 @@ impl App {
                 }
                 continue;
             }
-            let name = self.docs[tab.doc].display_name();
-            let note =
-                match self.docs[tab.doc].disk_changed(&self.languages, &mut [&mut tab.carets]) {
-                    DiskChange::None => continue,
-                    DiskChange::Reloaded => format!("{name} changed on disk; reloaded"),
-                    DiskChange::Conflict => {
-                        is_error = true;
-                        format!(
-                            "{name} changed on disk. From the command palette: Reload from Disk, \
+            let name = self.docs[id].display_name();
+            // Every tab showing it keeps its place in the new text.
+            let mut carets = carets_of(&mut self.tabs, id);
+            let note = match self.docs[id].disk_changed(&self.languages, &mut carets) {
+                DiskChange::None => continue,
+                DiskChange::Reloaded => format!("{name} changed on disk; reloaded"),
+                DiskChange::Conflict => {
+                    is_error = true;
+                    format!(
+                        "{name} changed on disk. From the command palette: Reload from Disk, \
                          Keep My Version, Compare with Saved, or Merge with Disk"
-                        )
-                    }
-                    DiskChange::NotReloaded => format!(
-                        "{name} changed on disk; huge files do not reload by themselves. \
+                    )
+                }
+                DiskChange::NotReloaded => format!(
+                    "{name} changed on disk; huge files do not reload by themselves. \
                      Run Reload from Disk from the command palette to see the changes"
-                    ),
-                    DiskChange::Truncated { reloaded: true } => {
-                        is_error = true;
-                        format!("{name} was truncated on disk; reloaded it")
-                    }
-                    DiskChange::Truncated { reloaded: false } => {
-                        is_error = true;
-                        format!(
-                            "{name} was truncated on disk. Reload it now (Reload from Disk in the \
+                ),
+                DiskChange::Truncated { reloaded: true } => {
+                    is_error = true;
+                    format!("{name} was truncated on disk; reloaded it")
+                }
+                DiskChange::Truncated { reloaded: false } => {
+                    is_error = true;
+                    format!(
+                        "{name} was truncated on disk. Reload it now (Reload from Disk in the \
                          command palette): reading the missing part can crash Nimbus"
-                        )
-                    }
-                    DiskChange::Deleted => {
-                        is_error = true;
-                        format!("{name} was deleted on disk; saving recreates it")
-                    }
-                    DiskChange::Failed(e) => {
-                        is_error = true;
-                        format!("{name} changed on disk but cannot be read: {e}")
-                    }
-                };
+                    )
+                }
+                DiskChange::Deleted => {
+                    is_error = true;
+                    format!("{name} was deleted on disk; saving recreates it")
+                }
+                DiskChange::Failed(e) => {
+                    is_error = true;
+                    format!("{name} changed on disk but cannot be read: {e}")
+                }
+            };
             notes.push(note);
         }
         if !notes.is_empty() {
@@ -1794,7 +1960,7 @@ impl App {
     /// the tree, Escape gives focus back to the text, and typing is
     /// ignored. Returns `false` for commands that should run as usual.
     fn run_sidebar(&mut self, cmd: Command<'_>) -> bool {
-        let Some(layout) = self.layout() else {
+        let Some(layout) = self.window_layout() else {
             return false;
         };
         let (motion, enter) = match cmd {
@@ -1834,11 +2000,26 @@ impl App {
         // gets the keyboard.
         self.sidebar.focused = false;
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        if let Some(i) = self.tabs.iter().position(|t| {
-            self.docs[t.doc].path.as_ref().is_some_and(|p| {
-                std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canonical
+        let showing: Vec<usize> = (0..self.tabs.len())
+            .filter(|&i| {
+                self.docs[self.tabs[i].doc].path.as_ref().is_some_and(|p| {
+                    std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canonical
+                })
             })
-        }) {
+            .collect();
+        // Already open in this group: go to it. Open in another group
+        // only: a tab here on the same document (M13).
+        let here = showing
+            .iter()
+            .find(|&&i| self.tabs[i].group == self.groups.focused);
+        if let Some(&i) = here {
+            self.switch_to(i);
+            return;
+        }
+        if let Some(&other) = showing.first() {
+            let tab = Tab::new(self.tabs[other].doc, self.tabs[other].view.wrap);
+            let i = self.add_tab(tab);
+            self.update_shared();
             self.switch_to(i);
             return;
         }
@@ -1859,8 +2040,8 @@ impl App {
                     self.title_key = None;
                     self.reveal_active();
                 } else {
-                    self.tabs.push(tab);
-                    self.switch_to(self.tabs.len() - 1);
+                    let i = self.add_tab(tab);
+                    self.switch_to(i);
                 }
                 self.sync_watch();
                 self.changed(false);
@@ -2246,7 +2427,13 @@ impl App {
     /// Close tab `i`, offering to save it. Closing the last tab quits. A
     /// tab whose huge file is being saved closes once that is done.
     fn close_tab(&mut self, i: usize, event_loop: &ActiveEventLoop) {
-        match self.confirm_discard(i) {
+        // Another tab still shows the document: nothing to ask.
+        let discard = if self.shown_elsewhere(i) {
+            Discard::Yes
+        } else {
+            self.confirm_discard(i)
+        };
+        match discard {
             Discard::Yes => {}
             Discard::Cancel => return,
             Discard::Wait => {
@@ -2260,11 +2447,7 @@ impl App {
             event_loop.exit();
             return;
         }
-        let closed = self.tabs.remove(i);
-        self.docs.remove(closed.doc);
-        if self.active >= i && self.active > 0 {
-            self.active -= 1;
-        }
+        self.remove_tab(i);
         self.title_key = None;
         self.preedit = None;
         if self.find.open {
@@ -2272,6 +2455,139 @@ impl App {
         }
         self.sync_watch();
         self.reveal_active();
+        self.changed(false);
+    }
+
+    /// Whether another tab shows tab `i`'s document, so closing `i` loses
+    /// nothing.
+    fn shown_elsewhere(&self, i: usize) -> bool {
+        let doc = self.tabs[i].doc;
+        self.tabs
+            .iter()
+            .enumerate()
+            .any(|(j, t)| j != i && t.doc == doc)
+    }
+
+    /// Mark each document shared while more than one tab shows it, so its
+    /// edits are kept for the other tabs to follow.
+    fn update_shared(&mut self) {
+        for (id, doc) in self.docs.iter_mut() {
+            let shown = self.tabs.iter().filter(|t| t.doc == id).count();
+            doc.journal_mut().shared = shown > 1;
+        }
+    }
+
+    /// Let every tab catch up with the edits other tabs made to its
+    /// document: cursors and the top of the view move through them, so
+    /// both stay on the same text. Then the edits are dropped, since every
+    /// tab has followed them. Runs before each frame.
+    fn sync_panes(&mut self) {
+        for tab in &mut self.tabs {
+            let shifts = tab.carets.fit(&self.docs[tab.doc]);
+            for shift in shifts {
+                tab.view.scroll_top = shift.map(tab.view.scroll_top);
+            }
+        }
+        for (_, doc) in self.docs.iter_mut() {
+            doc.journal_mut().trim();
+        }
+    }
+
+    /// Split Right: a new group right of the focused one, showing the
+    /// current document in a tab of its own, with the same cursors and
+    /// scroll to start from. Its find bar starts closed.
+    fn split_right(&mut self) {
+        if self.groups.len() >= groups::MAX_GROUPS {
+            self.say(
+                format!("At most {} groups side by side", groups::MAX_GROUPS),
+                false,
+            );
+            return;
+        }
+        let at = self.groups.insert_after(self.groups.focused);
+        for tab in &mut self.tabs {
+            if tab.group >= at {
+                tab.group += 1;
+            }
+        }
+        self.groups.list[at].find = FindBar::sharing(&self.find);
+        let from = &self.tabs[self.active];
+        let mut tab = Tab::new(from.doc, from.view.wrap);
+        tab.group = at;
+        tab.carets = from.carets.clone();
+        tab.view.scroll_top = from.view.scroll_top;
+        tab.view.scroll_px = from.view.scroll_px;
+        self.tabs.push(tab);
+        self.update_shared();
+        self.switch_to(self.tabs.len() - 1);
+    }
+
+    /// Close Group: close the focused group's tabs, asking about unsaved
+    /// changes as Close Tab does; the group goes with its last tab. The
+    /// last group stays.
+    fn close_group(&mut self, event_loop: &ActiveEventLoop) {
+        if self.groups.len() == 1 {
+            return;
+        }
+        let g = self.groups.focused;
+        for i in self.group_tabs(g).into_iter().rev() {
+            let before = self.tabs.len();
+            self.close_tab(i, event_loop);
+            if self.tabs.len() == before {
+                return; // cancelled, or waiting on a save
+            }
+        }
+    }
+
+    /// Move Tab to Next Group: the current tab moves to the group on the
+    /// right, a new one if this is the rightmost and there is room, else
+    /// the first. A group left empty closes.
+    fn move_tab_to_next_group(&mut self) {
+        let i = self.active;
+        let from = self.groups.focused;
+        let mut to = from + 1;
+        if to == self.groups.len() {
+            if self.groups.len() < groups::MAX_GROUPS {
+                to = self.groups.insert_after(from);
+                self.groups.list[to].find = FindBar::sharing(&self.find);
+            } else {
+                to = 0;
+            }
+        }
+        if to == from {
+            return;
+        }
+        self.doc_mut().history.seal();
+        self.park_focus();
+        let mut tabs: Vec<usize> = self.tabs.iter().map(|t| t.group).collect();
+        self.groups.tab_moved(&mut tabs, i, to);
+        for (tab, g) in self.tabs.iter_mut().zip(tabs) {
+            tab.group = g;
+        }
+        self.unpark_focus();
+        self.after_focus_moved();
+    }
+
+    /// Take tab `i` out of the list, keeping every group's active tab
+    /// pointing at the same tab, or at a neighbour in its strip when it
+    /// was the one removed. A group left with no tabs closes. Needs
+    /// another tab to remain.
+    fn remove_tab(&mut self, i: usize) {
+        let g = self.tabs[i].group;
+        let last_view = !self.shown_elsewhere(i);
+        self.park_focus();
+        let closed = self.tabs.remove(i);
+        if last_view {
+            // Its last tab: the document closes.
+            self.docs.remove(closed.doc);
+        }
+        let mut tabs: Vec<usize> = self.tabs.iter().map(|t| t.group).collect();
+        self.groups.tab_removed(&mut tabs, i, g);
+        for (tab, g) in self.tabs.iter_mut().zip(tabs) {
+            tab.group = g;
+        }
+        self.unpark_focus();
+        self.update_shared();
     }
 
     /// Quit, offering to save every tab with unsaved changes. If a huge
@@ -2280,6 +2596,10 @@ impl App {
     /// answered.
     fn quit(&mut self, event_loop: &ActiveEventLoop) {
         for i in 0..self.tabs.len() {
+            // A document in two tabs is asked about once.
+            if (0..i).any(|j| self.tabs[j].doc == self.tabs[i].doc) {
+                continue;
+            }
             match self.confirm_discard(i) {
                 Discard::Yes => {}
                 Discard::Cancel => {
@@ -2629,6 +2949,11 @@ impl App {
             | Command::NextTab
             | Command::PrevTab
             | Command::GoToTab(_)
+            | Command::SplitRight
+            | Command::CloseGroup
+            | Command::FocusLeftGroup
+            | Command::FocusRightGroup
+            | Command::MoveTabToNextGroup
             | Command::QuickOpen
             | Command::Palette
             | Command::ReloadConfig
@@ -2835,24 +3160,41 @@ impl App {
     /// A left-button press: place the cursor, or select a word or line on a
     /// double- or triple-click, and start dragging.
     fn mouse_down(&mut self, now: Instant) {
-        let Some(layout) = self.layout() else { return };
+        let Some(window) = self.window_layout() else {
+            return;
+        };
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
         if self.picker.is_some() {
-            self.picker_click(&layout, x, y);
+            self.picker_click(&window, x, y);
             return;
         }
-        if self.sidebar.on_divider(&layout, x) {
+        if self.sidebar.on_divider(&window, x) {
             self.sidebar.resizing = true;
             return;
         }
-        if self.sidebar.contains(&layout, x) {
-            self.sidebar_click(&layout, x, y);
+        if self.sidebar.contains(&window, x) {
+            self.sidebar_click(&window, x, y);
             return;
         }
         self.sidebar.focused = false;
-        let labels = self.tab_labels();
-        if let Some(i) = view::tab_at(&layout, &labels, self.active, x, y) {
-            self.switch_to(i);
+        if y >= window.bottom {
+            return self.status_bar_click(&window, x);
+        }
+        let columns = self.group_columns(&window);
+        if let Some(d) = Groups::on_divider(&columns, x, window.scale) {
+            self.groups.dragging = Some(d);
+            return;
+        }
+        // A press in another group gives it the keyboard first.
+        if let Some(g) = Groups::at(&columns, x) {
+            self.focus_group(g);
+        }
+        let Some(layout) = self.layout() else { return };
+        let (labels, active) = self.tab_labels(self.groups.focused);
+        if let Some(n) = view::tab_at(&layout, &labels, active, x, y) {
+            if let Some(&i) = self.group_tabs(self.groups.focused).get(n) {
+                self.switch_to(i);
+            }
             return;
         }
         let rows =
@@ -2868,12 +3210,16 @@ impl App {
             self.changed(false);
             return;
         }
-        if y >= layout.bottom {
-            return self.status_bar_click(&layout, x);
-        }
         if y < layout.top {
             return;
         }
+        self.text_press(&layout, (x, y), now);
+    }
+
+    /// A left-button press on the focused group's text: the scrollbar, a
+    /// compare or merge view's columns, or the text itself.
+    fn text_press(&mut self, layout: &Layout, (x, y): (f32, f32), now: Instant) {
+        let layout = *layout;
         self.find.focused = false;
         let tab_width = self.tab_width();
         let tab = &mut self.tabs[self.active];
@@ -3114,7 +3460,16 @@ impl App {
 
     /// Scroll the sidebar or the text under the pointer.
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
-        let Some(layout) = self.layout() else { return };
+        let Some(window) = self.window_layout() else {
+            return;
+        };
+        let x = to_f32(self.mouse.x);
+        // The group under the pointer scrolls, focused or not.
+        let g = Groups::at(&self.group_columns(&window), x).unwrap_or(self.groups.focused);
+        let Some(layout) = self.group_layout(g) else {
+            return;
+        };
+        let i = self.group_active(g);
         let lh = layout.metrics.line_height;
         let cell = layout.metrics.cell_width;
         // Trackpads send pixels, with momentum from the OS; wheels send
@@ -3126,11 +3481,11 @@ impl App {
                 (x * cell * lines_per_notch, y * lh * lines_per_notch)
             }
         };
-        if self.sidebar.contains(&layout, to_f32(self.mouse.x)) {
-            self.sidebar.wheel(-dy, &layout);
+        if self.sidebar.contains(&window, x) {
+            self.sidebar.wheel(-dy, &window);
         } else {
             let tab_width = self.tab_width();
-            let tab = &mut self.tabs[self.active];
+            let tab = &mut self.tabs[i];
             match (tab.compare.as_mut(), tab.merge.as_mut()) {
                 (Some(c), _) => c.scroll_by(-dy, &layout),
                 (None, Some(m)) => m.scroll_by(-dy, &layout),
@@ -3140,6 +3495,18 @@ impl App {
             }
             tab.view.scroll_x_by(-dx);
         }
+        self.changed(false);
+    }
+
+    /// The pointer moved while dragging divider `d`: resize the groups
+    /// either side, none narrower than [`groups::MIN_CELLS`] cells.
+    fn drag_group_divider(&mut self, d: usize, x: f32) {
+        let Some(window) = self.window_layout() else {
+            return;
+        };
+        let columns = self.group_columns(&window);
+        let min = groups::MIN_CELLS * window.metrics.cell_width;
+        self.groups.drag_divider(&columns, d, x, min);
         self.changed(false);
     }
 
@@ -3161,7 +3528,9 @@ impl App {
 
     /// Show or hide the search toggles' tooltip as the pointer moves.
     fn update_search_hover(&mut self) {
-        let Some(layout) = self.layout() else { return };
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
         let changed = if self.sidebar.visible && self.sidebar.mode == Mode::Search {
             self.sidebar.search.hover_at(&layout, x, y, Instant::now())
@@ -3176,9 +3545,15 @@ impl App {
     /// Show the resize cursor over the sidebar's divider, the usual one
     /// elsewhere. Only tells the window when it changes.
     fn update_cursor_icon(&mut self) {
-        let Some(layout) = self.layout() else { return };
-        let resize =
-            self.sidebar.resizing || self.sidebar.on_divider(&layout, to_f32(self.mouse.x));
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
+        let x = to_f32(self.mouse.x);
+        let resize = self.sidebar.resizing
+            || self.groups.dragging.is_some()
+            || self.sidebar.on_divider(&layout, x)
+            || (self.groups.len() > 1
+                && Groups::on_divider(&self.group_columns(&layout), x, layout.scale).is_some());
         if resize != self.resize_cursor {
             self.resize_cursor = resize;
             if let Some(window) = &self.window {
@@ -3232,25 +3607,35 @@ impl App {
         self.changed(true);
     }
 
-    /// Labels for the tab bar.
-    fn tab_labels(&self) -> Vec<TabLabel> {
-        self.tabs
-            .iter()
-            .map(|t| {
-                let name = self.docs[t.doc].display_name();
-                let name = if self.docs[t.doc].deleted {
+    /// Labels for group `g`'s tab strip, and which of them is its active
+    /// tab.
+    fn tab_labels(&self, g: usize) -> (Vec<TabLabel>, usize) {
+        let active = self.group_active(g);
+        let mut at = 0;
+        let labels = self
+            .group_tabs(g)
+            .into_iter()
+            .enumerate()
+            .map(|(n, i)| {
+                if i == active {
+                    at = n;
+                }
+                let d = &self.docs[self.tabs[i].doc];
+                let name = d.display_name();
+                let name = if d.deleted {
                     format!("{name} (deleted)")
-                } else if self.docs[t.doc].conflict {
+                } else if d.conflict {
                     format!("{name} (changed on disk)")
                 } else {
                     name
                 };
                 TabLabel {
                     name,
-                    dirty: self.docs[t.doc].is_dirty(),
+                    dirty: d.is_dirty(),
                 }
             })
-            .collect()
+            .collect();
+        (labels, at)
     }
 
     /// A click while the picker is open: choose a row, or close it.
@@ -3298,16 +3683,10 @@ impl App {
         }
     }
 
-    /// Queue the whole frame: editor text, then the overlays.
-    fn paint(&mut self, gpu: &mut Gpu, layout: &Layout) {
-        let labels = self.tab_labels();
-        let tab_width = self.tab_width();
-        let chord_message = self.pending_chord.map(|(chord, until)| Message {
-            text: format!("{} …", chord_label(chord)),
-            is_error: false,
-            until,
-        });
-        let tab = &mut self.tabs[self.active];
+    /// Bring tab `i`'s syntax tree, compare or merge up to date before it
+    /// is drawn, and snap its cursors to a text swapped wholesale.
+    fn prepare_tab(&mut self, i: usize) {
+        let tab = &mut self.tabs[i];
         // Bring the tree up to date with this frame's edits, or hand the
         // rest to a worker if that would take too long.
         let d = &mut self.docs[tab.doc];
@@ -3343,33 +3722,75 @@ impl App {
         // A text swapped wholesale (a save, a merge result) leaves the
         // cursors to be snapped to it before they are drawn.
         tab.carets.fit(&self.docs[tab.doc]);
-        paint_scene(
-            gpu,
-            layout,
-            &mut Scene {
+    }
+
+    /// Queue the whole frame: each group's text, tab strip and find bar,
+    /// the dividers between groups, the status bar, then the overlays.
+    /// `panes` holds each group's layout, `layout` the window's.
+    fn paint(&mut self, gpu: &mut Gpu, layout: &Layout, panes: &[Layout]) {
+        let tab_width = self.tab_width();
+        let chord_message = self.pending_chord.map(|(chord, until)| Message {
+            text: format!("{} …", chord_label(chord)),
+            is_error: false,
+            until,
+        });
+        view::begin_frame(gpu, &self.theme.ui);
+        let focused = self.groups.focused;
+        let many = self.groups.len() > 1;
+        for (g, pane) in panes.iter().enumerate() {
+            let i = self.group_active(g);
+            self.prepare_tab(i);
+            let (labels, active_label) = self.tab_labels(g);
+            let is_focused = g == focused;
+            let tab = &mut self.tabs[i];
+            let find = if is_focused {
+                &self.find
+            } else {
+                &self.groups.list[g].find
+            };
+            let mut scene = Scene {
                 doc: &self.docs[tab.doc],
                 carets: &tab.carets,
                 view: &mut tab.view,
                 compare: tab.compare.as_deref_mut(),
                 merge: tab.merge.as_deref_mut(),
                 theme: &mut self.theme,
-                find: &self.find,
+                find,
                 message: chord_message.as_ref().or(self.message.as_ref()),
-                cursor_visible: self.blink.visible
+                cursor_visible: is_focused
+                    && self.blink.visible
                     && self.picker.is_none()
                     && !self.sidebar.focused,
-                preedit: self.preedit.as_ref(),
+                preedit: if is_focused {
+                    self.preedit.as_ref()
+                } else {
+                    None
+                },
                 tab_width,
-            },
-        );
-        // Nested languages the budget left unparsed colour on the next
-        // frame.
-        if self.docs[tab.doc].syntax.injections_pending()
-            && let Some(window) = &self.window
-        {
-            window.request_redraw();
+            };
+            paint_pane(gpu, pane, &mut scene);
+            if is_focused {
+                paint_status(gpu, layout, &mut scene);
+            }
+            // Nested languages the budget left unparsed colour on the
+            // next frame.
+            if self.docs[tab.doc].syntax.injections_pending()
+                && let Some(window) = &self.window
+            {
+                window.request_redraw();
+            }
+            view::draw_tabs(
+                gpu,
+                &self.theme.ui,
+                pane,
+                &labels,
+                active_label,
+                is_focused || !many,
+            );
         }
-        view::draw_tabs(gpu, &self.theme.ui, layout, &labels, self.active);
+        if many {
+            view::draw_dividers(gpu, &self.theme.ui, layout, panes);
+        }
         let active = self.docs[self.tabs[self.active].doc].canonical.as_deref();
         sidebar::draw(
             gpu,
@@ -3387,6 +3808,30 @@ impl App {
         }
     }
 
+    /// Tell the IME where the cursor is, so its candidate window appears
+    /// next to it. Only when it moved.
+    fn tell_ime(&mut self, window: &Window, pane: &Layout) {
+        let tab_width = self.config.tab_width;
+        let r = self.tabs[self.active].view.cursor_rect(
+            pane,
+            self.preedit
+                .as_ref()
+                .map_or(0, |p| nimbus_core::column::line_width(&p.text, tab_width)),
+        );
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "on-screen pixel coordinates fit in i32"
+        )]
+        let area = [r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32];
+        if self.ime_area != Some(area) {
+            window.set_ime_cursor_area(
+                PhysicalPosition::new(area[0], area[1]),
+                PhysicalSize::new(area[2].max(1).unsigned_abs(), area[3].max(1).unsigned_abs()),
+            );
+            self.ime_area = Some(area);
+        }
+    }
+
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let frame_started = Instant::now();
         // The first parse runs on a worker while this frame shows the
@@ -3397,12 +3842,20 @@ impl App {
             // Listing runs on a worker; this only starts it.
             self.show_sidebar();
         }
-        let Some(layout) = self.layout() else { return };
+        // Edits another group made to a document shown here too.
+        self.sync_panes();
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
+        let panes: Vec<Layout> = (0..self.groups.len())
+            .filter_map(|g| self.group_layout(g))
+            .collect();
         // Painting reads the whole app; take the GPU out while it does.
         if let Some(mut gpu) = self.gpu.take() {
-            self.paint(&mut gpu, &layout);
+            self.paint(&mut gpu, &layout, &panes);
             self.gpu = Some(gpu);
         }
+        let focused_pane = panes.get(self.groups.focused).copied().unwrap_or(layout);
         // Picker results arriving later wake the loop through the
         // matcher's notify callback (AppEvent::PickerChanged), not by
         // redrawing continuously.
@@ -3455,27 +3908,7 @@ impl App {
         self.debug.latency.presented();
         self.debug.frames.push(frame_started.elapsed());
 
-        // Tell the IME where the cursor is, so its candidate window appears
-        // next to it. Physical pixels, relative to the window.
-        let tab_width = self.config.tab_width;
-        let r = self.tabs[self.active].view.cursor_rect(
-            &layout,
-            self.preedit
-                .as_ref()
-                .map_or(0, |p| nimbus_core::column::line_width(&p.text, tab_width)),
-        );
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "on-screen pixel coordinates fit in i32"
-        )]
-        let area = [r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32];
-        if self.ime_area != Some(area) {
-            window.set_ime_cursor_area(
-                PhysicalPosition::new(area[0], area[1]),
-                PhysicalSize::new(area[2].max(1).unsigned_abs(), area[3].max(1).unsigned_abs()),
-            );
-            self.ime_area = Some(area);
-        }
+        self.tell_ime(&window, &focused_pane);
 
         if self.options.bench_typing > 0 && self.frames >= 2 {
             self.bench_step(event_loop);
@@ -3484,7 +3917,8 @@ impl App {
 
         if self.frames == 1 {
             if let Some(path) = &self.options.screenshot {
-                if !save_screenshot(path, gpu.take_capture().as_ref()) {
+                let capture = self.gpu.as_mut().and_then(Gpu::take_capture);
+                if !save_screenshot(path, capture.as_ref()) {
                     self.exit_code = 1;
                 }
                 event_loop.exit();
@@ -3616,7 +4050,7 @@ impl App {
     /// Tab moves between them; Escape gives the editor the keyboard.
     /// Returns `false` for commands that run as usual.
     fn run_search_panel(&mut self, cmd: Command<'_>) -> bool {
-        let Some(layout) = self.layout() else {
+        let Some(layout) = self.window_layout() else {
             return false;
         };
         let in_list = self.sidebar.search.focus == Focus::List;
@@ -3659,6 +4093,11 @@ impl App {
             | Command::NextTab
             | Command::PrevTab
             | Command::GoToTab(_)
+            | Command::SplitRight
+            | Command::CloseGroup
+            | Command::FocusLeftGroup
+            | Command::FocusRightGroup
+            | Command::MoveTabToNextGroup
             | Command::QuickOpen
             | Command::Palette
             | Command::ReloadConfig
@@ -3815,7 +4254,9 @@ impl App {
 
     /// F4 and Shift+F4: open the next or previous hit across files.
     fn step_result(&mut self, backwards: bool) {
-        let Some(layout) = self.layout() else { return };
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
         self.sidebar.visible = true;
         self.sidebar.mode = Mode::Search;
         match self.sidebar.search.step(backwards, &layout) {
@@ -4247,9 +4688,18 @@ pub struct Scene<'a> {
     tab_width: usize,
 }
 
-/// Queue a whole frame: editor text, then the find bar and status bar.
-/// Shared by the window and headless rendering.
+/// Queue a whole frame of one tab: editor text, then the find bar and
+/// status bar. Headless rendering uses it; the window paints each group
+/// with [`paint_pane`] and the status bar once.
 pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
+    view::begin_frame(gpu, &scene.theme.ui);
+    paint_pane(gpu, layout, scene);
+    paint_status(gpu, layout, scene);
+}
+
+/// Queue one group's text and find bar inside `layout`'s column. The
+/// frame was started with [`view::begin_frame`].
+pub fn paint_pane(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     let find = scene.find;
     let current = find.current.and_then(|i| find.matches.get(i)).cloned();
     let ui = scene.theme.ui;
@@ -4261,7 +4711,6 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
         &[]
     };
     if let Some(c) = scene.compare.as_deref_mut() {
-        view::begin_frame(gpu, &ui);
         c.draw(
             gpu,
             layout,
@@ -4275,7 +4724,6 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
             (matches, current),
         );
     } else if let Some(m) = scene.merge.as_deref_mut() {
-        view::begin_frame(gpu, &ui);
         m.draw(
             gpu,
             layout,
@@ -4319,6 +4767,12 @@ pub fn paint_scene(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
     if find.open {
         view::draw_find_bar(gpu, &ui, find, layout, scene.cursor_visible);
     }
+}
+
+/// Queue the status bar across the bottom of the window, for the scene's
+/// tab.
+pub fn paint_status(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
+    let ui = scene.theme.ui;
     let message = scene.message.map(|m| (m.text.as_str(), m.is_error));
     let info = scene
         .view
@@ -4413,7 +4867,7 @@ pub fn run_headless(
             },
         );
         let ui = &theme.ui;
-        view::draw_tabs(&mut gpu, ui, &layout, &labels, 0);
+        view::draw_tabs(&mut gpu, ui, &layout, &labels, 0, true);
         sidebar::draw(
             &mut gpu,
             ui,
@@ -4791,7 +5245,7 @@ impl ApplicationHandler<AppEvent> for App {
                         Vec::new()
                     }
                 };
-                let layout = self.layout();
+                let layout = self.window_layout();
                 self.sidebar.after_change(layout.as_ref());
                 self.start_listings(requests);
                 self.sync_watch();
@@ -5088,10 +5542,12 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = position;
                 if self.sidebar.resizing {
-                    if let Some(layout) = self.layout() {
+                    if let Some(layout) = self.window_layout() {
                         self.sidebar.drag_to(&layout, to_f32(position.x));
                         self.changed(false);
                     }
+                } else if let Some(d) = self.groups.dragging {
+                    self.drag_group_divider(d, to_f32(position.x));
                 } else if let Some(grab) = self.clicks.scrollbar_grab {
                     self.drag_scrollbar_to(to_f32(position.y) - grab);
                 } else if self.clicks.dragging {
@@ -5121,6 +5577,7 @@ impl ApplicationHandler<AppEvent> for App {
                 } else {
                     self.clicks.dragging = false;
                     self.clicks.scrollbar_grab = None;
+                    self.groups.dragging = None;
                     if self.sidebar.resizing {
                         self.sidebar.resizing = false;
                         self.remember();

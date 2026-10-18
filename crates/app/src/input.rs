@@ -193,6 +193,17 @@ pub enum Command<'a> {
     PrevTab,
     /// Switch to tab n (0-based); `usize::MAX` is the last tab.
     GoToTab(usize),
+    /// Open a new editor group to the right of the focused one, showing
+    /// the current tab's document (M13).
+    SplitRight,
+    /// Close the focused group's tabs, and with them the group.
+    CloseGroup,
+    /// Give the group to the left the keyboard.
+    FocusLeftGroup,
+    /// Give the group to the right the keyboard.
+    FocusRightGroup,
+    /// Move the current tab to the next group, making one if needed.
+    MoveTabToNextGroup,
     /// Open the fuzzy file opener.
     QuickOpen,
     /// Open the command palette.

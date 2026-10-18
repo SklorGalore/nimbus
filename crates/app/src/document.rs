@@ -153,6 +153,10 @@ pub struct Carets {
     pub(crate) pairs: Option<(Selections, usize)>,
     /// [`Document::epoch`] when these were last fitted to the text.
     epoch: u64,
+    /// How many of the document's edits ([`Journal::end`]) these carets
+    /// have followed. Another pane's edits since then move them on the
+    /// next [`Carets::fit`].
+    synced: u64,
 }
 
 impl Carets {
@@ -203,12 +207,42 @@ impl Carets {
     /// Snap every selection to a valid position in `doc`'s text if the
     /// text was swapped since they last looked (a save switching files,
     /// a merge result arriving), merging any that now coincide.
-    pub fn fit(&mut self, doc: &Document) {
-        if self.epoch == doc.epoch {
-            return;
+    ///
+    /// Then follow the edits another pane made to the same document since
+    /// these last looked (M13): each selection moves through them as text
+    /// before it grows or shrinks, so it stays on the same characters.
+    /// Returns those edits, for the pane to move its scroll position the
+    /// same way; empty when nothing changed under it.
+    pub fn fit<'d>(&mut self, doc: &'d Document) -> &'d [Shift] {
+        let end = doc.journal().end();
+        if self.epoch != doc.epoch {
+            self.epoch = doc.epoch;
+            self.synced = end;
+            self.clamp_to(&doc.buffer);
+            return &[];
         }
-        self.epoch = doc.epoch;
-        let t = &doc.buffer;
+        if self.synced == end {
+            return &[];
+        }
+        // Edits that went by unrecorded (the document was not shared
+        // then) leave the cursors where they are, made valid.
+        let shifts = doc.journal().since(self.synced).unwrap_or(&[]);
+        self.synced = end;
+        self.selections.transform(|_, s| {
+            let (mut anchor, mut head) = (s.anchor, s.head);
+            for shift in shifts {
+                anchor = shift.map(anchor);
+                head = shift.map(head);
+            }
+            Selection { anchor, head }
+        });
+        self.clamp_to(&doc.buffer);
+        self.forget_goals();
+        shifts
+    }
+
+    /// Snap every selection to a valid position in `t`.
+    fn clamp_to(&mut self, t: &dyn Text) {
         self.selections.transform(|_, s| Selection {
             anchor: movement::clamp(t, s.anchor),
             head: movement::clamp(t, s.head),
@@ -242,6 +276,83 @@ impl<'a> Editor<'a> {
     pub fn new(doc: &'a mut Document, carets: &'a mut Carets) -> Self {
         carets.fit(doc);
         Self { doc, carets }
+    }
+}
+
+/// One edit as other panes follow it: the bytes `start..start + removed`
+/// became `inserted` bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shift {
+    /// Where it starts, in the text before it.
+    pub start: usize,
+    /// How many bytes it removed.
+    pub removed: usize,
+    /// How many bytes it inserted.
+    pub inserted: usize,
+}
+
+impl Shift {
+    /// Where `pos`, in the text before this edit, is after it. Before the
+    /// edit or at its start it stays; after the removed bytes it shifts
+    /// by the change in length; inside them it goes to the edit's start.
+    /// So another pane's cursor next to typed text stays in front of it.
+    #[must_use]
+    pub fn map(&self, pos: usize) -> usize {
+        if pos <= self.start {
+            pos
+        } else if pos >= self.start + self.removed {
+            pos - self.removed + self.inserted
+        } else {
+            self.start
+        }
+    }
+}
+
+/// The edits a document went through, for the panes that show it (M13).
+/// Every edit counts towards [`Journal::end`]; while the document is in
+/// more than one pane each is also kept, until every pane has followed
+/// it. A document in one pane keeps nothing.
+#[derive(Debug, Default)]
+pub struct Journal {
+    /// Keep the edits: another pane shows the document.
+    pub shared: bool,
+    /// How many edits came before `shifts[0]`.
+    base: u64,
+    /// The edits kept, in the order they were made.
+    shifts: Vec<Shift>,
+}
+
+impl Journal {
+    /// How many edits the document has gone through.
+    #[must_use]
+    pub fn end(&self) -> u64 {
+        self.base + self.shifts.len() as u64
+    }
+
+    fn note(&mut self, edit: &Edit) {
+        if self.shared {
+            self.shifts.push(Shift {
+                start: edit.start,
+                removed: edit.removed.len(),
+                inserted: edit.inserted.len(),
+            });
+        } else {
+            self.base += 1;
+        }
+    }
+
+    /// The edits after the first `synced`, or `None` if some of them were
+    /// not kept.
+    #[must_use]
+    pub fn since(&self, synced: u64) -> Option<&[Shift]> {
+        let skip = usize::try_from(synced.checked_sub(self.base)?).ok()?;
+        self.shifts.get(skip..)
+    }
+
+    /// Drop the kept edits: every pane has followed them.
+    pub fn trim(&mut self) {
+        self.base = self.end();
+        self.shifts.clear();
     }
 }
 
@@ -406,6 +517,9 @@ pub struct EditLog {
     spans: Vec<Option<NotedEdit>>,
     /// The text was replaced wholesale (a reload), with no edit records.
     reset: bool,
+    /// Every edit again, for the other panes showing the document (M13).
+    /// Here because every edit passes through [`EditLog::note`].
+    journal: Journal,
 }
 
 impl std::fmt::Debug for EditLog {
@@ -415,12 +529,14 @@ impl std::fmt::Debug for EditLog {
             .field("on", &self.on)
             .field("spans", &self.spans.len())
             .field("reset", &self.reset)
+            .field("journal", &self.journal)
             .finish()
     }
 }
 
 impl EditLog {
     fn note(&mut self, buffer: &dyn Buffer, edit: &Edit) {
+        self.journal.note(edit);
         if self.on {
             let entry = EditSpan::after(buffer, edit).map(|span| (span, buffer.snapshot().into()));
             self.spans.push(entry);
@@ -490,6 +606,23 @@ struct Replace {
 }
 
 impl Document {
+    /// The edits other panes showing this document follow.
+    pub(crate) fn journal(&self) -> &Journal {
+        &self.edits.journal
+    }
+
+    /// The same, to mark the document shared or drop followed edits.
+    pub(crate) fn journal_mut(&mut self) -> &mut Journal {
+        &mut self.edits.journal
+    }
+
+    /// The text was swapped wholesale: every pane snaps its carets to it
+    /// rather than following edits ([`Carets::fit`]).
+    fn bump_epoch(&mut self) {
+        self.epoch += 1;
+        self.edits.journal.trim();
+    }
+
     /// Whether this document's lines are still being counted: a go-to-line
     /// past the counted part waits for them. False once counting is done,
     /// or stopped because the file could not be read.
@@ -635,7 +768,7 @@ impl Document {
     pub fn set_text(&mut self, text: &str) {
         self.buffer = nimbus_core::RopeBuffer::from_text(text).into();
         self.history = History::default();
-        self.epoch += 1;
+        self.bump_epoch();
         self.language = None;
         self.saved_at = if self.path.is_some() {
             NOT_SAVED
@@ -796,7 +929,7 @@ impl Document {
         self.edits.reset = true;
         self.version += 1;
         self.remember_disk_text();
-        self.epoch += 1;
+        self.bump_epoch();
         for (c, (head, place)) in carets.iter_mut().zip(places) {
             let pos = match place {
                 Some((line, col)) => {
@@ -811,6 +944,7 @@ impl Document {
                 .set_single(Selection::cursor(movement::clamp(&self.buffer, pos)));
             c.forget_goals();
             c.epoch = self.epoch;
+            c.synced = self.edits.journal.end();
         }
         // The text is new, so the tree is too, even in the same language.
         self.language = None;
@@ -1176,7 +1310,7 @@ impl Document {
         // Every line is counted now: the highlighter's line-based state
         // may change.
         self.syntax.touch();
-        self.epoch += 1;
+        self.bump_epoch();
         Ok(old)
     }
 
@@ -1347,7 +1481,7 @@ impl Document {
             MappedBuffer::with_index(source, index, limits).map_err(std::io::Error::other)?;
         self.buffer = buffer.into();
         self.mapping = Some(mapped);
-        self.epoch += 1;
+        self.bump_epoch();
         self.syntax.touch();
         Ok(changed)
     }
@@ -1363,7 +1497,7 @@ impl Document {
         self.canonical = None;
         self.disk = None;
         self.stop_indexing();
-        self.epoch += 1;
+        self.bump_epoch();
         self.saved_at = self.history.top_id();
         SaveStep::NotReplaced(format!(
             "Saved to {} but could not read it back ({e}); open that file to go on",
@@ -1418,7 +1552,14 @@ impl Editor<'_> {
         );
         self.carets.preferred_column = None;
         self.doc.version += 1;
+        self.followed();
         Ok(edit)
+    }
+
+    /// The edits just made through this editor already moved its own
+    /// carets: count them as followed, so only other panes replay them.
+    fn followed(&mut self) {
+        self.carets.synced = self.doc.edits.journal.end();
     }
 
     /// Apply several replacements as one undo step. `items` pairs each
@@ -1489,6 +1630,7 @@ impl Editor<'_> {
                 .record_group(edits, &before, &self.carets.selections);
             self.doc.version += 1;
         }
+        self.followed();
         result.map(|()| count)
     }
 
@@ -2150,6 +2292,7 @@ impl Editor<'_> {
         self.carets.preferred_column = None;
         self.carets.goals.clear();
         self.doc.version += 1;
+        self.followed();
     }
 
     /// Snap every selection to a valid position in the text as it is now
@@ -2190,6 +2333,7 @@ impl Editor<'_> {
         self.carets.preferred_column = None;
         self.carets.goals.clear();
         self.doc.version += 1;
+        self.followed();
         Ok(true)
     }
 
@@ -2216,6 +2360,72 @@ mod tests {
 
     fn text(d: &Solo) -> String {
         d.buffer.slice(0..d.buffer.len_bytes()).into_owned()
+    }
+
+    #[test]
+    fn a_second_pane_follows_edits_and_undo_from_the_first() {
+        // One document, two panes: `a` edits, `b` watches (M13).
+        let mut d = Document::from_text("one two three");
+        d.journal_mut().shared = true;
+        let (mut a, mut b) = (Carets::default(), Carets::default());
+        Editor::new(&mut d, &mut b).click(8, false); // before "three"
+        Editor::new(&mut d, &mut a).click(4, false); // before "two"
+        Editor::new(&mut d, &mut a).insert("big ").unwrap();
+        assert_eq!(d.buffer.slice(0..d.buffer.len_bytes()), "one big two three");
+        // `b` stays on the same character: four bytes later.
+        assert_eq!(b.fit(&d).len(), 1);
+        assert_eq!(b.cursor(&d.buffer), 12);
+        // `a` made the edit and has nothing to follow.
+        assert!(a.fit(&d).is_empty());
+        assert_eq!(a.cursor(&d.buffer), 8);
+        // Undo from `b`: the document's last edit goes, `b` takes the
+        // recorded selection and `a` moves back through the change.
+        assert!(Editor::new(&mut d, &mut b).undo().unwrap());
+        assert_eq!(d.buffer.slice(0..d.buffer.len_bytes()), "one two three");
+        assert_eq!(b.cursor(&d.buffer), 4);
+        a.fit(&d);
+        assert_eq!(a.cursor(&d.buffer), 4);
+        // Once every pane has followed, the kept edits can go.
+        d.journal_mut().trim();
+        assert!(
+            d.journal()
+                .since(d.journal().end())
+                .is_some_and(<[Shift]>::is_empty)
+        );
+    }
+
+    #[test]
+    fn a_pane_inside_deleted_text_lands_at_the_deletion() {
+        let mut d = Document::from_text("abcdef\nghi");
+        d.journal_mut().shared = true;
+        let (mut a, mut b) = (Carets::default(), Carets::default());
+        Editor::new(&mut d, &mut b).select(3..9);
+        let mut ed = Editor::new(&mut d, &mut a);
+        ed.select(2..5);
+        ed.insert("").unwrap();
+        b.fit(&d);
+        assert_eq!(b.selection(&d.buffer).range(), 2..6);
+        // A cursor typed in front of keeps its place before the text.
+        let at = Shift {
+            start: 2,
+            removed: 0,
+            inserted: 3,
+        };
+        assert_eq!((at.map(2), at.map(1), at.map(3)), (2, 1, 6));
+    }
+
+    #[test]
+    fn an_unshared_document_keeps_no_edits() {
+        let mut d = Document::from_text("abc");
+        let mut a = Carets::default();
+        Editor::new(&mut d, &mut a).insert("x").unwrap();
+        assert_eq!(d.journal().end(), 1);
+        assert_eq!(d.journal().since(0), None, "nothing was kept");
+        // A pane that missed them is made valid without moving.
+        let mut late = Carets::default();
+        late.selections.set_single(Selection::cursor(3));
+        late.fit(&d);
+        assert_eq!(late.cursor(&d.buffer), 3);
     }
 
     #[test]

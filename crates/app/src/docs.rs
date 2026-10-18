@@ -53,10 +53,6 @@ impl Docs {
     }
 
     /// The open documents and their ids.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read once documents are shared, M13 task 3")
-    )]
     pub fn iter(&self) -> impl Iterator<Item = (DocId, &Document)> {
         self.slots
             .iter()

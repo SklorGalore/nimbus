@@ -316,16 +316,9 @@ fn f32_of(n: usize) -> f32 {
     n as f32
 }
 
-/// Start a frame with the text area as its own layer, clipped so rows
-/// scrolled under a bar above or below do not show through it.
-fn begin_text(gpu: &mut Gpu, layout: &Layout, ui: &Ui) {
-    begin_frame(gpu, ui);
-    begin_column(gpu, layout);
-}
-
-/// Start a frame: everything queued before is dropped. The compare view
-/// calls this once, then [`begin_column`] per column through
-/// [`View::draw_rows`].
+/// Start a frame: everything queued before is dropped. Called once per
+/// frame; each group's view, or each column of a compare view, then
+/// begins its own clipped layer with [`begin_column`].
 pub fn begin_frame(gpu: &mut Gpu, ui: &Ui) {
     gpu.begin_frame();
     gpu.set_background(ui.background);
@@ -1007,7 +1000,7 @@ impl View {
         self.cache.next_frame();
         self.cursor_at = None;
 
-        begin_text(gpu, layout, deco.ui);
+        begin_column(gpu, layout);
 
         let px = self.px();
         let (wrapping, scroll_x) = (self.wrap, self.scroll_x);
@@ -1894,8 +1887,17 @@ pub fn tab_at(layout: &Layout, tabs: &[TabLabel], active: usize, x: f32, y: f32)
         .position(|&(a, b)| x >= a && x < b)
 }
 
-/// Draw the tab bar across the top of the window.
-pub fn draw_tabs(gpu: &mut Gpu, ui: &Ui, layout: &Layout, tabs: &[TabLabel], active: usize) {
+/// Draw a tab bar across the top of `layout`'s column. Only the focused
+/// group's active tab carries the accent line, so it is clear which
+/// group the keyboard talks to.
+pub fn draw_tabs(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    tabs: &[TabLabel],
+    active: usize,
+    focused: bool,
+) {
     if layout.tabs_h <= 0.0 {
         return;
     }
@@ -1913,6 +1915,8 @@ pub fn draw_tabs(gpu: &mut Gpu, ui: &Ui, layout: &Layout, tabs: &[TabLabel], act
         let is_active = i == active;
         if is_active {
             gpu.push_rect([x0, 0.0], [x1 - x0, layout.tabs_h], ui.tab_active);
+        }
+        if is_active && focused {
             gpu.push_rect(
                 [x0, layout.tabs_h - accent],
                 [x1 - x0, accent],
@@ -1925,6 +1929,16 @@ pub fn draw_tabs(gpu: &mut Gpu, ui: &Ui, layout: &Layout, tabs: &[TabLabel], act
             let dot_x = x1 - 2.0 * cell;
             gpu.push_text_line([dot_x, text_y], "●", color);
         }
+    }
+}
+
+/// Draw a line between neighbouring groups, from the top of the window
+/// to the status bar. `panes` are the groups' layouts, left to right.
+pub fn draw_dividers(gpu: &mut Gpu, ui: &Ui, window: &Layout, panes: &[Layout]) {
+    let line = window.scale.round().max(1.0);
+    gpu.begin_layer(None);
+    for pane in panes.iter().skip(1) {
+        gpu.push_rect([pane.left, 0.0], [line, window.bottom], ui.picker_border);
     }
 }
 

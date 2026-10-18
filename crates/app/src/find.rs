@@ -103,6 +103,20 @@ impl Default for FindBar {
     }
 }
 
+impl FindBar {
+    /// A closed bar for another editor group, sharing `other`'s search
+    /// generation: only the focused group's bar searches, and a shared
+    /// counter means a batch still queued from one bar can never pass for
+    /// the other's (M13).
+    #[must_use]
+    pub fn sharing(other: &Self) -> Self {
+        Self {
+            generation: Arc::clone(&other.generation),
+            ..Self::default()
+        }
+    }
+}
+
 /// Matches kept for one search, about 4 MB of ranges; past this they are
 /// counted as "+" but not stored, and Replace All is refused.
 pub const MAX_KEPT: usize = 250_000;

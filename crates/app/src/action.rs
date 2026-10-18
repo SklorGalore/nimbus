@@ -728,6 +728,36 @@ pub const ACTIONS: &[ActionInfo] = &[
         Keys::all(&["Primary+B"]),
     ),
     act(
+        "view.splitRight",
+        "Split Right",
+        Command::SplitRight,
+        Keys::all(&["Primary+\\"]),
+    ),
+    act(
+        "view.closeGroup",
+        "Close Group",
+        Command::CloseGroup,
+        Keys::NONE,
+    ),
+    act(
+        "view.focusLeftGroup",
+        "Focus Left Group",
+        Command::FocusLeftGroup,
+        Keys::all(&["Primary+Alt+Left"]),
+    ),
+    act(
+        "view.focusRightGroup",
+        "Focus Right Group",
+        Command::FocusRightGroup,
+        Keys::all(&["Primary+Alt+Right"]),
+    ),
+    act(
+        "tab.moveToNextGroup",
+        "Move Tab to Next Group",
+        Command::MoveTabToNextGroup,
+        Keys::NONE,
+    ),
+    act(
         "view.focusSidebar",
         "Focus Sidebar",
         Command::FocusSidebar,

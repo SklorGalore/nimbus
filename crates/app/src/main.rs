@@ -15,6 +15,7 @@ mod document;
 mod editing;
 mod find;
 mod find_files;
+mod groups;
 mod indexer;
 mod input;
 mod io;
