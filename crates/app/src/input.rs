@@ -289,6 +289,18 @@ pub enum Command<'a> {
     CompareFile,
     /// Compare the active tab with another open tab.
     CompareTab,
+    /// Compare the active tab's file with its last commit, via git (M18).
+    CompareHead,
+    /// Compare the active tab's file with a git revision typed in.
+    CompareRevision,
+    /// Compare two folders, listed in the sidebar's Compare mode (M18).
+    CompareFolders,
+    /// Cycle the compare's whitespace option: off, ends, all (M18).
+    DiffWhitespace,
+    /// Toggle the compare's ignore-case option.
+    DiffCase,
+    /// Toggle the compare's ignore-blank-lines option.
+    DiffBlankLines,
     /// Go to the next change in a compare.
     DiffNext,
     /// Go to the previous change in a compare.
@@ -354,6 +366,21 @@ impl Command<'_> {
                 | Self::ResetZoom
                 | Self::ToggleWhitespace
                 | Self::ToggleIndentGuides
+        )
+    }
+
+    /// Whether this is one of M18's compare commands, which run whatever
+    /// field has the keyboard.
+    #[must_use]
+    pub fn is_compare_extra(self) -> bool {
+        matches!(
+            self,
+            Self::CompareHead
+                | Self::CompareRevision
+                | Self::CompareFolders
+                | Self::DiffWhitespace
+                | Self::DiffCase
+                | Self::DiffBlankLines
         )
     }
 

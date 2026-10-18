@@ -28,7 +28,8 @@ use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
 use crate::columns::Click;
-use crate::compare::{Compare, DiffResult, Other};
+use crate::compare::{Compare, DiffResult, Other, Toggle};
+use crate::compare_panel;
 use crate::config::{self, Config, Whitespace};
 use crate::debug::Debug;
 use crate::docs::{DocId, Docs};
@@ -37,7 +38,9 @@ use crate::editing::Outcome;
 use crate::encoding::{Choice, Encoding};
 use crate::find::{self, Field, FindBar, SearchBatch};
 use crate::find_files::{self, Batch as FilesBatch};
+use crate::folder_compare;
 use crate::folding;
+use crate::git;
 use crate::groups::{self, Groups};
 use crate::input::{self, Command, Motion, Resolved};
 use crate::io;
@@ -117,6 +120,21 @@ pub enum AppEvent {
     Update(Result<update::Outcome, UpdateError>, bool),
     /// A Fold All or Fold Level N scan finished on a worker (M13).
     Folded(folding::FoldResult),
+    /// `git` read a file at a revision for Compare with HEAD (M18).
+    Revision(Revision),
+    /// Rows from a folder compare's workers (M18).
+    FolderCompare(folder_compare::Batch),
+}
+
+/// A file read at a git revision on a worker (M18).
+#[derive(Debug)]
+pub struct Revision {
+    /// The file (the tab's path) it was read for.
+    path: PathBuf,
+    /// The revision, as asked for.
+    rev: String,
+    /// Its contents, or why git could not give them.
+    outcome: Result<Vec<u8>, git::GitError>,
 }
 
 /// Ask GitHub for the latest release on its own thread.
@@ -1243,13 +1261,21 @@ impl App {
             Command::CompareSaved => self.compare_with_saved(),
             Command::CompareFile => self.compare_with_file(),
             Command::CompareTab => self.compare_with_tab(),
-            Command::DiffNext => self.diff_step(true),
-            Command::DiffPrev => self.diff_step(false),
-            Command::DiffUnified => {
-                if let Some(c) = self.tabs[self.active].compare.as_mut() {
-                    c.toggle_unified();
+            Command::CompareHead => self.compare_with_revision("HEAD".to_owned()),
+            Command::CompareRevision => {
+                if self.doc().path.is_some() {
+                    self.open_picker(Kind::Revision);
+                } else {
+                    self.say("This tab has no file to compare with a revision", true);
                 }
             }
+            Command::CompareFolders => self.compare_folders(),
+            Command::DiffWhitespace => self.toggle_diff_option(Toggle::Whitespace),
+            Command::DiffCase => self.toggle_diff_option(Toggle::Case),
+            Command::DiffBlankLines => self.toggle_diff_option(Toggle::BlankLines),
+            Command::DiffNext => self.diff_step(true),
+            Command::DiffPrev => self.diff_step(false),
+            Command::DiffUnified => self.toggle_diff_option(Toggle::Unified),
             Command::DiffClose => {
                 let tab = &mut self.tabs[self.active];
                 if let Some(c) = tab.compare.take() {
@@ -1596,6 +1622,8 @@ impl App {
     /// Put the active tab side by side with `other`.
     fn start_compare(&mut self, mut other: Document, what: Other) {
         let send = self.diff_sender();
+        // The options live in the sidebar's Compare tab: bring it forward.
+        self.sidebar.mode = sidebar::Mode::Compare;
         other.detect_language(&self.languages);
         if let Some(job) = other.syntax.take_job(&other.buffer) {
             spawn_syntax(&self.proxy, job);
@@ -1609,9 +1637,197 @@ impl App {
             &mut self.docs[tab.doc],
             other,
             what,
+            self.ws.state.diff_options(),
             send,
         )));
         self.changed(true);
+    }
+
+    /// Flip one of the compare options (the sidebar's Compare tab). The diff options apply to
+    /// every compare and are remembered in `state.toml`; Unified is the
+    /// active compare's alone.
+    fn toggle_diff_option(&mut self, toggle: Toggle) {
+        use nimbus_core::Whitespace;
+        if toggle == Toggle::Unified {
+            if let Some(c) = self.tabs[self.active].compare.as_mut() {
+                c.toggle_unified();
+                self.changed(false);
+            } else {
+                self.say("Not comparing; run Compare with Saved first", false);
+            }
+            return;
+        }
+        let mut n = self.ws.state.diff_options();
+        let said = match toggle {
+            Toggle::Whitespace => {
+                n.whitespace = match n.whitespace {
+                    Whitespace::Exact => Whitespace::Ends,
+                    Whitespace::Ends => Whitespace::All,
+                    Whitespace::All => Whitespace::Exact,
+                };
+                match n.whitespace {
+                    Whitespace::Exact => "Compare: whitespace counts",
+                    Whitespace::Ends => "Compare: ignoring whitespace at line ends",
+                    Whitespace::All => "Compare: ignoring all whitespace",
+                }
+            }
+            Toggle::Case => {
+                n.case = !n.case;
+                if n.case {
+                    "Compare: ignoring case"
+                } else {
+                    "Compare: case counts"
+                }
+            }
+            Toggle::BlankLines | Toggle::Unified => {
+                n.blank_lines = !n.blank_lines;
+                if n.blank_lines {
+                    "Compare: ignoring blank-line changes"
+                } else {
+                    "Compare: blank-line changes count"
+                }
+            }
+        };
+        self.ws.state.set_diff_options(n);
+        self.save_state_soon();
+        for tab in &mut self.tabs {
+            if let Some(c) = tab.compare.as_mut() {
+                c.set_normalize(&self.docs[tab.doc], n);
+            }
+        }
+        self.say(said, false);
+        self.changed(false);
+    }
+
+    /// Compare the active tab's file with `rev` from git, read on a worker
+    /// ([`git::show`]); the result arrives as [`AppEvent::Revision`].
+    fn compare_with_revision(&mut self, rev: String) {
+        let Some(path) = self.doc().path.clone() else {
+            self.say("This tab has no file to compare with a revision", true);
+            return;
+        };
+        let proxy = self.proxy.clone();
+        self.say(format!("Reading {rev} from git…"), false);
+        let spawned = std::thread::Builder::new()
+            .name("nimbus-git".to_owned())
+            .spawn(move || {
+                let outcome = git::show(&path, &rev);
+                let _ = proxy.send_event(AppEvent::Revision(Revision { path, rev, outcome }));
+            });
+        if let Err(e) = spawned {
+            self.say(format!("Cannot start git: {e}"), true);
+        }
+    }
+
+    /// git finished reading a revision: open it beside its tab, or say
+    /// why not. A missing git or a file outside a repository is a message,
+    /// never a dialog.
+    fn revision_read(&mut self, r: Revision) {
+        let text = match r.outcome {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) => {
+                self.say(format!("Cannot compare with {}: {e}", r.rev), true);
+                return;
+            }
+        };
+        let found = self
+            .tabs
+            .iter()
+            .position(|t| self.docs[t.doc].path.as_deref() == Some(r.path.as_path()));
+        let Some(i) = found else {
+            return;
+        };
+        if i != self.active {
+            self.switch_to(i);
+        }
+        let other = Document::with_text(Some(r.path.clone()), &text);
+        let name = r.path.file_name().map_or_else(
+            || r.rev.clone(),
+            |n| format!("{} @ {}", n.to_string_lossy(), r.rev),
+        );
+        self.message = None;
+        self.start_compare(other, Other::Revision(name));
+    }
+
+    /// Ask for two folders and compare them in the sidebar.
+    fn compare_folders(&mut self) {
+        let pick = |title: &str| {
+            let mut dialog = FileDialog::new().set_directory(&self.root).set_title(title);
+            if let Some(window) = &self.window {
+                dialog = dialog.set_parent(window.as_ref());
+            }
+            dialog.pick_folder()
+        };
+        let Some(left) = pick("Left folder") else {
+            return;
+        };
+        let Some(right) = pick("Right folder") else {
+            return;
+        };
+        self.start_folder_compare(&left, &right);
+    }
+
+    /// A batch of folder-compare results from the workers.
+    fn folder_compare_arrived(&mut self, batch: folder_compare::Batch) {
+        if self.sidebar.compare.receive(batch) {
+            self.changed(false);
+        }
+    }
+
+    /// Compare `left` with `right` on workers, listing what differs in the
+    /// sidebar's Compare mode as it is found (M18).
+    fn start_folder_compare(&mut self, left: &Path, right: &Path) {
+        let (include, exclude) = self.sidebar.search.globs();
+        let params = folder_compare::Params {
+            left: io::canonical(left),
+            right: io::canonical(right),
+            include,
+            exclude,
+            show_ignored: self.sidebar.tree.show_ignored,
+        };
+        let proxy = self.proxy.clone();
+        let generation = Arc::clone(&self.sidebar.compare.generation);
+        match folder_compare::start(&params, &generation, move |b| {
+            proxy.send_event(AppEvent::FolderCompare(b)).is_ok()
+        }) {
+            Ok(g) => {
+                self.sidebar.compare.begin(g, &params.left, &params.right);
+                self.sidebar.visible = true;
+                self.sidebar.mode = Mode::Compare;
+                self.sidebar.focused = true;
+                self.changed(true);
+            }
+            Err(e) => self.say(format!("Cannot compare folders: {e}"), true),
+        }
+    }
+
+    /// Open row `row` of the folder compare: the right file in a tab beside
+    /// the left one. A file on one side only opens alone (left only) or
+    /// against nothing (right only).
+    fn open_folder_pair(&mut self, row: usize) {
+        let Some(results) = &self.sidebar.compare.results else {
+            return;
+        };
+        let (left, right) = results.pair(row);
+        self.sidebar.compare.opened = Some(row);
+        match (left, right) {
+            (Some(l), Some(r)) => {
+                self.open_path(&r);
+                match Document::open(&l) {
+                    Ok(other) => self.start_compare(other, Other::File(l)),
+                    Err(e) => self.say(format!("Cannot read {}: {e}", l.display()), true),
+                }
+            }
+            (None, Some(r)) => {
+                self.open_path(&r);
+                self.start_compare(Document::with_text(None, ""), Other::Missing);
+            }
+            (Some(l), None) => {
+                self.open_path(&l);
+                self.say("Only in the left folder", false);
+            }
+            (None, None) => {}
+        }
     }
 
     fn compare_with_saved(&mut self) {
@@ -1690,12 +1906,20 @@ impl App {
                 return;
             }
         };
-        match pos {
-            Some(p) => {
-                Editor::new(&mut self.docs[tab.doc], &mut tab.carets).click(p, false);
-                self.changed(true);
+        if let Some(p) = pos {
+            Editor::new(&mut self.docs[tab.doc], &mut tab.carets).click(p, false);
+            self.changed(true);
+        } else {
+            // At the end of a folder compare's file: on to the next.
+            let is_compare = tab.compare.is_some();
+            let next = self
+                .window_layout()
+                .filter(|_| is_compare)
+                .and_then(|l| self.sidebar.step_compare(forward, &l));
+            match next {
+                Some(row) => self.open_folder_pair(row),
+                None => self.say("No more changes", false),
             }
-            None => self.say("No more changes", false),
         }
     }
 
@@ -2261,6 +2485,9 @@ impl App {
         if let Some(path) = outcome.open {
             self.sidebar.focused = false;
             self.open_path(&path);
+        }
+        if let Some(row) = outcome.pair {
+            self.open_folder_pair(row);
         }
         true
     }
@@ -3409,6 +3636,7 @@ impl App {
                 let t = &self.doc().buffer;
                 Picker::go_to_line(notify, t.is_fully_indexed().then(|| t.len_lines()))
             }
+            Kind::Revision => Picker::revision(notify),
             Kind::Symbols => {
                 let doc = self.doc();
                 let symbols = symbol_items(doc);
@@ -3484,6 +3712,7 @@ impl App {
                     Some(Item::Line(n)) => self.go_to_line(n),
                     Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
+                    Some(Item::Revision(rev)) => self.compare_with_revision(rev),
                     Some(Item::Encoding(purpose, choice, _)) => {
                         self.encoding_chosen(purpose, choice);
                     }
@@ -3643,7 +3872,9 @@ impl App {
             | Command::MergeWithDisk
             | Command::CheckUpdates
             | Command::OpenRelease => return false,
-            _ if cmd.is_find_in_files() || cmd.is_layout() => return false,
+            _ if cmd.is_find_in_files() || cmd.is_layout() || cmd.is_compare_extra() => {
+                return false;
+            }
             _ => {
                 let paste = (cmd == Command::Paste)
                     .then(|| self.clipboard_get())
@@ -4031,6 +4262,12 @@ impl App {
         if let Some(reply) = outcome.search {
             self.act_on_search_reply(&reply);
         }
+        if let Some(row) = outcome.pair {
+            self.open_folder_pair(row);
+        }
+        if let Some(toggle) = outcome.toggle {
+            self.toggle_diff_option(toggle);
+        }
         self.changed(false);
     }
 
@@ -4406,6 +4643,7 @@ impl App {
                     Some(Item::Line(n)) => self.go_to_line(n),
                     Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
                     Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
+                    Some(Item::Revision(rev)) => self.compare_with_revision(rev),
                     Some(Item::Encoding(purpose, choice, _)) => {
                         self.encoding_chosen(purpose, choice);
                     }
@@ -4553,6 +4791,10 @@ impl App {
         if many {
             view::draw_dividers(gpu, &self.theme.ui, layout, panes);
         }
+        self.sidebar.compare.options = compare_panel::Options {
+            normalize: self.ws.state.diff_options(),
+            unified: self.tabs[self.active].compare.as_ref().map(|c| c.unified),
+        };
         let active = self.docs[self.tabs[self.active].doc].canonical.as_deref();
         sidebar::draw(
             gpu,
@@ -5705,6 +5947,7 @@ pub fn run_headless(
         layout_for(&gpu, to_f32(scale), &doc, &find),
         doc.canonical.as_deref(),
         options.search.as_deref(),
+        folder_diff(options),
     );
     view.ensure_cursor_visible(&doc, &carets, &layout, config.tab_width);
     // One frame only: parse here rather than on a worker.
@@ -5810,6 +6053,9 @@ fn headless_compare(
     doc: &mut Document,
 ) -> Option<Box<Compare>> {
     let (a, _) = options.diff.as_ref()?;
+    if folder_diff(options).is_some() {
+        return None;
+    }
     match Document::open(a) {
         Ok(mut other) => {
             other.detect_language(&Languages::load(&config.languages).0);
@@ -5818,6 +6064,7 @@ fn headless_compare(
                 doc,
                 other,
                 Other::File(a.clone()),
+                State::load().diff_options(),
             )))
         }
         Err(e) => {
@@ -5937,11 +6184,12 @@ fn headless_sidebar(
     layout: Layout,
     file: Option<&Path>,
     search: Option<&str>,
+    folders: Option<(&Path, &Path)>,
 ) -> (Sidebar, Layout) {
     let state = State::load();
     let mut sidebar = Sidebar::new(
         io::canonical(root),
-        state.sidebar_visible,
+        state.sidebar_visible || folders.is_some(),
         state.sidebar_width,
     );
     for r in more_roots {
@@ -5969,7 +6217,39 @@ fn headless_sidebar(
     if let Some(pattern) = search {
         headless_search(&mut sidebar, pattern, &layout);
     }
+    if let Some((left, right)) = folders {
+        headless_folder_compare(&mut sidebar, left, right);
+    }
     (sidebar, layout)
+}
+
+/// `--diff DIR_A DIR_B`: the two folders, when both are folders (M18).
+fn folder_diff(options: &Options) -> Option<(&Path, &Path)> {
+    let (a, b) = options.diff.as_ref()?;
+    (a.is_dir() && b.is_dir()).then_some((a.as_path(), b.as_path()))
+}
+
+/// The folder compare run to the end on this thread, for a headless frame.
+fn headless_folder_compare(sidebar: &mut Sidebar, left: &Path, right: &Path) {
+    let params = folder_compare::Params {
+        left: io::canonical(left),
+        right: io::canonical(right),
+        ..folder_compare::Params::default()
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let generation = Arc::clone(&sidebar.compare.generation);
+    match folder_compare::start(&params, &generation, move |b| tx.send(b).is_ok()) {
+        Ok(g) => sidebar.compare.begin(g, &params.left, &params.right),
+        Err(e) => {
+            print_err(&format!("nimbus: {e}"));
+            return;
+        }
+    }
+    sidebar.mode = Mode::Compare;
+    while sidebar.compare.results.as_ref().is_some_and(|r| !r.done) {
+        let Ok(batch) = rx.recv() else { break };
+        sidebar.compare.receive(batch);
+    }
 }
 
 /// Draw an open picker over everything else.
@@ -5991,7 +6271,7 @@ fn draw_picker_overlay(
         (Kind::Files, false) => "files",
         (Kind::Symbols, true) => "symbol",
         (Kind::Symbols, false) => "symbols",
-        (Kind::Line | Kind::Name(_), _) => "",
+        (Kind::Line | Kind::Name(_) | Kind::Revision, _) => "",
         (Kind::Workspaces, true) => "workspace",
         (Kind::Workspaces, false) => "workspaces",
         (Kind::Tabs, true) => "tab",
@@ -6002,7 +6282,7 @@ fn draw_picker_overlay(
         (Kind::Recent, false) => "recent files",
     };
     let more = if p.loading() { "…" } else { "" };
-    let status = if matches!(p.kind, Kind::Line | Kind::Name(_)) {
+    let status = if matches!(p.kind, Kind::Line | Kind::Name(_) | Kind::Revision) {
         String::new()
     } else {
         format!("{n} {noun}{more}")
@@ -6013,6 +6293,7 @@ fn draw_picker_overlay(
         Kind::Line => "Type a line number",
         Kind::Symbols => "Type a function, type or heading name",
         Kind::Tabs => "Type a tab name",
+        Kind::Revision => "Type a git revision: HEAD~1, a branch, a tag or a hash",
         Kind::Encoding(EncodingFor::Reopen) => "Reopen with encoding",
         Kind::Encoding(EncodingFor::Save) => "Save with encoding",
         Kind::Recent => "Type a file name or folder",
@@ -6208,6 +6489,8 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::Disk(paths) => self.disk_changed(&paths),
             AppEvent::Index(token, chunk, error) => self.index_arrived(token, chunk, error),
             AppEvent::Folded(result) => self.folded(result),
+            AppEvent::Revision(r) => self.revision_read(r),
+            AppEvent::FolderCompare(batch) => self.folder_compare_arrived(batch),
             AppEvent::Save(event) => {
                 self.save_event(event, event_loop);
                 self.changed(false);
@@ -6338,7 +6621,10 @@ impl ApplicationHandler<AppEvent> for App {
                 Err(e) => self.say(e, true),
             }
         }
-        if let Some((a, b)) = self.options.diff.clone() {
+        if let Some((a, b)) = folder_diff(&self.options).map(|(a, b)| (a.to_owned(), b.to_owned()))
+        {
+            self.start_folder_compare(&a, &b);
+        } else if let Some((a, b)) = self.options.diff.clone() {
             let b = io::canonical(&b);
             let found = self
                 .tabs

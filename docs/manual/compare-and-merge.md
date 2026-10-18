@@ -14,6 +14,13 @@ on the **left**, read-only. Start one from the palette:
 | Compare with Saved | The file as it is on disk, so you see your unsaved changes. |
 | Compare with File… | A file you pick in a dialog. |
 | Compare with Tab… | A copy of another tab's text as it is now. With only one other tab it is used straight away; otherwise a picker lists them. |
+| Compare with HEAD | The file as last committed to git. |
+| Compare with Revision… | The file at a git revision you type: `HEAD~3`, a branch, a tag or a commit hash. |
+
+The two git commands need `git` installed and the file inside a git
+repository; they read the file the way a checkout would, line endings
+included. If git cannot find the revision, or takes more than ten
+seconds, the message line says why and nothing changes.
 
 From the command line, `nimbus --diff OLD NEW` opens `NEW` in a tab and
 compares it with `OLD`.
@@ -33,6 +40,48 @@ What you see:
   each change's old lines stacked above its new ones.
 - Edits on the right update the comparison as you type.
 - **Close Compare or Merge** (palette) returns the tab to a plain editor.
+
+Lines over 4 KB, as in a minified JSON or JavaScript file, are cut into
+pieces of about 1 KB and compared piece by piece, so one changed word in
+a one-line file shows as one small change, not the whole line. Each
+piece after the first is its own row with `⤶` in the line-number gutter,
+and the status bar says `long lines compared in pieces`.
+
+### Compare options
+
+The sidebar's **Compare** tab starts with four buttons; it comes forward
+when a compare starts. Each is also a palette command.
+
+| Button | Palette | What it does |
+|---|---|---|
+| Ignore whitespace | Ignore Whitespace (Off, Ends, All) | Each press steps through off, **ends** (spaces and tabs at the start and end of a line don't count) and **all** (no spaces or tabs count). |
+| Ignore case | Ignore Case in Compare | `A` and `a` count as the same (ASCII letters only). |
+| Ignore blank lines | Ignore Blank Lines in Compare | A change that only adds or removes empty lines isn't shown. |
+| Unified | Toggle Unified Compare | One column instead of two, for the active tab's compare. |
+
+A button that is on is filled with the highlight colour and underlined.
+The three ignore options apply to every compare, are remembered between
+runs, and never apply to merges, where every difference matters.
+
+### Comparing folders
+
+**Compare Folders…** asks for two folders, one after the other (or run
+`nimbus --diff FOLDER_A FOLDER_B`). The Compare tab lists every file that
+differs, sorted by path, as the two folders are read:
+
+| Mark | Meaning |
+|---|---|
+| `−` | only in the left folder |
+| `+` | only in the right folder |
+| `≠` | in both, with different contents |
+| `!` | could not be read |
+
+The line above the list counts each kind, and files that are the same.
+Files your `.gitignore` excludes are left out, and so are files the
+Search panel's include and exclude fields leave out. Click a row, or
+select it with the arrow keys and press `Enter`, to compare the pair;
+`F7` past a file's last change opens the next file that differs, and
+`Shift+F7` before its first change the one before.
 
 Very large texts are compared in the background; the status bar says
 `comparing…` until the result is in. Beyond 256 MB the comparison is

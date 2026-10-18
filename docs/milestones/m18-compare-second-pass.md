@@ -1,6 +1,6 @@
 # M18 — Compare, second pass
 
-**Status: planned, after M17.** Written on 2026-10-18 from the three
+**Status: done (2026-10-18).** Written on 2026-10-18 from the three
 items M9 deferred: diff options (ignore whitespace and case), folder
 compare and long-line splitting. Each builds on machinery that exists:
 the interner, M10's walker and the compare view. Approved the same day
@@ -16,32 +16,32 @@ file that is one long line, and what changed since the last commit.
 
 ## Done when
 
-- [ ] **Diff options**: "Ignore Whitespace" (leading and trailing, then
+- [x] **Diff options**: "Ignore Whitespace" (leading and trailing, then
       all), "Ignore Case" and "Ignore Blank Lines" toggle from the palette
-      and the compare view's header, and re-diff in the background; the
+      and the sidebar's Compare tab, and re-diff in the background; the
       merge views keep exact matching (a merge must not drop a whitespace
       change). The choice is remembered in `state.toml`.
-- [ ] **Folder compare**: "Compare Folders…" walks two roots with M10's
+- [x] **Folder compare**: "Compare Folders…" walks two roots with M10's
       walker (`.gitignore` respected, same include and exclude globs),
       lists files only on one side or differing on both in the sidebar's
       Compare mode, streaming as found, and opens a file pair in the
       compare view on Enter. Same-size files are compared by content in
       4 MB blocks; a tree of 100,000 files lists in under two seconds.
       `nimbus --diff DIR_A DIR_B` opens it from the command line.
-- [ ] **Long lines**: a line over 4 KB is cut at content-chosen points
+- [x] **Long lines**: a line over 4 KB is cut at content-chosen points
       (a rolling hash over 64-byte windows, so cuts survive insertions)
       before interning, so minified JSON and a one-line log show real
       changes. The view shows a split line's pieces as rows of their own
       with a continuation mark in the gutter; the pieces are never
       written back split.
-- [ ] **Compare with HEAD** (`diff.compareHead`): for a file inside a git
+- [x] **Compare with HEAD** (`diff.compareHead`): for a file inside a git
       repository, runs `git show HEAD:PATH` as a subprocess on a worker
       and opens the result against the tab in the compare view; "Compare
       with Revision…" asks for a revision or ref instead. No git library
       is linked; a missing `git` or a file outside a repository gives a
       message, never an error dialog. Nimbus never runs git for anything
       else (no status colours, no commits).
-- [ ] Budgets: toggling an option on the 10 MB bench pair re-diffs within
+- [x] Budgets: toggling an option on the 10 MB bench pair re-diffs within
       M9's time; a 50 MB one-line file diffs against an edited copy in
       under two seconds and the view scrolls at frame rate.
 
@@ -128,4 +128,81 @@ picker takes any ref and shows git's error text in the message line.
 
 ## Results
 
-_To be filled in when the milestone lands._
+Landed on 2026-10-18 (nimbus 0.9.0, nimbus-core 0.7.0). Measured in the
+cloud container (4 cores, release build); the owner's Mac numbers are to
+be added.
+
+| What | Budget | Measured |
+|---|---|---|
+| 10 MB bench pair, exact (`compare_bench`) | M9: under 300 ms | 133 ms, 293 hunks |
+| same, ignore whitespace at ends / all | M9's time | 209 ms / 282 ms |
+| same, ignore case / ignore blank lines | M9's time | 214 ms / 194 ms (289 hunks) |
+| 50 MB one-line file against a copy with 5 edits (`one_line_bench`) | under 2 s | 381 ms, 5 hunks over 50,764 pieces |
+| Folder compare of 100,000 files, 300 differing (`folder_compare` bench) | under 2 s | 0.96 s and 1.13 s; first row after 17–30 ms |
+
+Startup: `--smoke` on the owner's M5 Pro gave 143–144 ms warm (three
+runs), under the 500 ms budget and in line with M1's 116–132 ms. The first
+run after the build took 632 ms, all of it before our code drew anything
+(window and GPU ready in 301 ms against 83–88 ms warm): macOS warming its
+caches for a new binary, not M18 work. No new dependency and no startup
+work (the folder walk and git run only when asked).
+
+What landed, and where:
+
+- **Options** (`crates/core/src/diff.rs`, `Normalize`): each line is
+  normalised (whitespace trimmed or removed, ASCII letters lowercased)
+  into a reused buffer before hashing, and representatives are normalised
+  again to confirm a hash match, so nothing extra is stored per line.
+  Ignore Blank Lines drops hunks whose lines are all blank on both sides,
+  as `git diff --ignore-blank-lines` does. The live diff takes the same
+  options (`LiveDiff::with_normalize`); merges never do.
+- **Option buttons** (`compare_panel.rs`): "Ignore whitespace" (cycles
+  off, ends, all), "Ignore case", "Ignore blank lines" and "Unified", at
+  the top of the sidebar's Compare tab, which comes forward when a compare
+  starts. They began as a header row above the columns; the owner found
+  them hard to read as buttons there and chose the sidebar instead, which
+  also gives the diff its row back.
+  The palette has the same actions (`diff.ignoreWhitespace`,
+  `diff.ignoreCase`, `diff.ignoreBlankLines`). The options apply to every
+  open compare and live in `state.toml`.
+- **Long lines** (`crates/core/src/split.rs`): a gear hash over the last 64
+  bytes, cut where its top ten bits are zero (about every 1 KB), never
+  inside a UTF-8 character or before the line ending, and at 16 KB
+  whatever the hash says. The property test checks that an insertion moves
+  at most two cuts. `Splits` maps units (lines and pieces) back to lines;
+  `Columns` converts at its edges, so the views outside still see lines.
+  A row for a piece draws only its bytes, with `⤶` in the gutter.
+- **Compare with HEAD / with Revision…** (`crates/app/src/git.rs`):
+  `git rev-parse --show-toplevel` in the file's folder, then `git cat-file
+  --filters REV:PATH` from the top, on a thread of its own.
+- **Folder compare** (`folder_compare.rs`, `compare_panel.rs`): two sorted
+  single-threaded walks merged by `Path` order as they run, content
+  compared on workers, rows streamed to the sidebar's third mode,
+  "Compare". `nimbus --diff DIR_A DIR_B` opens it.
+
+Surprises and deviations from the plan:
+
+- `git cat-file --filters` instead of `git show`: it applies the
+  line-ending and smudge conversion checkout would, so a CRLF working copy
+  on Windows does not differ from its LF blob on every line. git runs on a
+  thread of its own rather than the saver's worker, which is busy only
+  while saving huge files. Rejects a revision starting with `-`; on
+  Windows no console window flashes.
+- A pair with any line over 4 KB always takes the layered compare, redone
+  300 ms after typing pauses, because the live diff follows edits line by
+  line. Splitting applies only to texts within the 256 MB diff limit:
+  finding long lines in a 4 GB log would mean reading it all again.
+- Content-defined cuts need varied content: text that repeats a short
+  cycle (a few dozen bytes) never hits the hash and gets the 16 KB forced
+  cuts, which do move on insertion. Real minified data is varied enough.
+- Ignore Case folds ASCII only, so hashing stays a byte at a time.
+- A fold row over cut lines counts pieces, not lines.
+- The folder list is flat (one row per differing file with its relative
+  path), lists only differences (identical files are counted), takes its
+  include and exclude globs from the Search panel's fields, and asks for
+  the two folders with two folder dialogs. A file only in the left folder
+  opens on its own; one only in the right opens against an empty side.
+- Not checked here: rendering. The container has no GPU, so there is no
+  headless screenshot of the option buttons, the `⤶` rows or the Compare mode yet.
+  Strict clippy passes for Linux and Windows (`scripts/clippy-cross.sh`);
+  macOS is checked by CI.

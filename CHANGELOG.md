@@ -8,6 +8,13 @@ section before tagging.
 
 ### Added
 
+- Compare, second pass: Ignore whitespace (at line ends, or all), Ignore
+  case and Ignore blank lines, as buttons in the sidebar's Compare tab
+  and as palette commands, remembered between runs. Lines over 4 KB,
+  such as minified files, are compared in pieces. Compare with HEAD and
+  Compare with Revision… read the file from git. Compare Folders… (or
+  `nimbus --diff DIR_A DIR_B`) lists the files that differ; Enter opens a
+  pair, and F7 past the last change steps to the next file.
 - Workspaces of several folders: Add Folder to Workspace… (or drop a
   folder on the window, or `nimbus DIR1 DIR2`); Go to File and Find in
   Files cover every folder. Save Workspace As… and Open Workspace…, with

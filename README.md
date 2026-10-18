@@ -92,6 +92,9 @@ from opening your first file to themes, languages and key bindings.
 
 - Compare any two files side by side, or resolve a three-way merge.
   Both work as `git difftool` and `git mergetool`.
+- Ignore whitespace, case or blank lines; compare two folders; compare
+  a file with HEAD or any git revision. Minified one-line files are
+  compared in pieces, so a small edit shows as a small change.
 
 **Look and feel**
 
@@ -184,6 +187,7 @@ nimbus                       # empty window
 nimbus notes.md              # one file
 nimbus . src/main.rs         # a project folder, with one file open
 nimbus --diff old.rs new.rs  # compare two files
+nimbus --diff dir-a dir-b    # compare two folders
 nimbus --merge BASE LOCAL REMOTE -o RESULT   # three-way merge
 ```
 
@@ -330,6 +334,8 @@ milestone lands, move its line up to "Available now". -->
 - Rendering polish: color emoji, ligatures and zoom
 - Text encodings and line endings
 - Multi-folder workspaces and search history
+- Compare, second pass: ignore whitespace, compare folders and minified
+  files, and Compare with HEAD
 
 **In progress**
 
@@ -337,7 +343,6 @@ milestone lands, move its line up to "Available now". -->
 
 **Planned**
 
-- Compare, second pass, including Compare with HEAD
 - Reading aids, such as a minimap
 - Foundations for 1.0
 
