@@ -5,6 +5,8 @@ multi-gigabyte logs and files with lines millions of characters long. You
 do not have to do anything different; this chapter explains what changes
 behind the scenes, and the few limits you may meet.
 
+<img src="../../assets/screenshots/hugefile.png" alt="A 4 GB log open at its last line, line 65,352,535" width="800">
+
 ## How a file is held
 
 | File | How Nimbus holds it |

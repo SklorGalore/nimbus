@@ -190,6 +190,8 @@ only says how wide a tab character is drawn.
 
 ## Soft wrap
 
+<img src="../../assets/screenshots/wrap.png" alt="A Markdown table whose long rows wrap at the window edge, each wrapped row keeping one line number" width="800">
+
 Toggle Soft Wrap (`Option+Z` / `Alt+Z`) wraps long lines at word
 boundaries to fit the window, for the current tab only. Up and Down then
 move by screen row, and the top line stays put when you resize the
