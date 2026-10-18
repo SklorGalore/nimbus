@@ -127,6 +127,10 @@ from opening your first file to themes, languages and key bindings.
 <td><img src="assets/screenshots/multicursor.png" alt="Five cursors editing at once"><br><sub>Several cursors, one undo step</sub></td>
 <td><img src="assets/screenshots/find.png" alt="The find bar with highlighted matches"><br><sub>Find in the current file</sub></td>
 </tr>
+<tr>
+<td><img src="assets/screenshots/languages.png" alt="Python, shell, TOML and YAML highlighted"><br><sub>Fourteen languages built in</sub></td>
+<td><img src="assets/screenshots/hugefile.png" alt="A 4 GB log open at its last line"><br><sub>A 4 GB log, all 65 million lines counted</sub></td>
+</tr>
 </table>
 
 ## Installation

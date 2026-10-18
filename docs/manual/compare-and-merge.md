@@ -67,6 +67,8 @@ runs, and never apply to merges, where every difference matters.
 
 ### Comparing folders
 
+<img src="../../assets/screenshots/folders.png" alt="The Compare tab listing the files that differ between two folders, marked + for only on the right and ≠ for different" width="340">
+
 **Compare Folders…** asks for two folders, one after the other (or run
 `nimbus --diff FOLDER_A FOLDER_B`). The Compare tab lists every file that
 differs, sorted by path, as the two folders are read:

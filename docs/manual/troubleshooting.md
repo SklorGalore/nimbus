@@ -111,3 +111,5 @@ part of start-up took. Include the log when you report a problem.
 long frames take, the delay from key press to screen, how full the glyph
 cache is, how the file is held in memory, and what background work is
 running. `--debug-overlay` shows it from the start.
+
+<img src="../../assets/screenshots/debug.png" alt="The debug overlay in the top right corner: frame time, latency, glyph cache, buffer, syntax and workers" width="800">

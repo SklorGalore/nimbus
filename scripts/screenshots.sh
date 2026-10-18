@@ -17,7 +17,9 @@
 # pattern stops matching, the script stops and names it.
 #
 # Needs python3 (to find cursor positions), and sips (macOS) or
-# ImageMagick to turn the BMP frames into PNG.
+# ImageMagick to turn the BMP frames into PNG. The languages grid needs
+# ImageMagick, and the huge-file shot bench/out/log-4gb.log
+# (bench/gen.sh logs); each is skipped, with a note, when missing.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -30,10 +32,12 @@ cargo build --release --quiet
 nimbus=./target/release/nimbus
 
 # Two config folders: one with the sidebar showing, one without.
-mkdir -p "$tmp/sidebar" "$tmp/bare" "$tmp/wide"
+mkdir -p "$tmp/sidebar" "$tmp/bare" "$tmp/wide" "$tmp/guides"
 printf 'sidebar_visible = true\nsidebar_width = 260.0\nsessions = []\n' >"$tmp/sidebar/state.toml"
 printf 'sidebar_visible = true\nsidebar_width = 340.0\nsessions = []\n' >"$tmp/wide/state.toml"
 printf 'sidebar_visible = false\nsessions = []\n' >"$tmp/bare/state.toml"
+cp "$tmp/bare/state.toml" "$tmp/guides/state.toml"
+printf 'render_whitespace = "all"\nindent_guides = true\n' >"$tmp/guides/config.toml"
 
 # Byte offset just after NEEDLE in FILE, searching from the first line that
 # contains AFTER (or from the start). Nimbus's --cursors takes byte offsets.
@@ -62,14 +66,17 @@ to_png() {
 shot() {
 	local name=$1 config=$2
 	shift 2
-	if [ ${#wanted[@]} -gt 0 ] && [[ " ${wanted[*]} " != *" $name "* ]]; then
-		return
-	fi
+	want "$name" || return 0
 	NIMBUS_CONFIG_DIR="$tmp/$config" "$nimbus" "$@" --no-session \
 		--screenshot "$tmp/$name.bmp" >/dev/null 2>"$tmp/$name.log" ||
 		{ cat "$tmp/$name.log" >&2; exit 1; }
 	to_png "$tmp/$name.bmp" "$out/$name.png"
 	echo "$out/$name.png"
+}
+
+# want NAME: whether NAME is among the shots asked for (all when none are).
+want() {
+	[ ${#wanted[@]} -eq 0 ] || [[ " ${wanted[*]} " == *" $1 "* ]]
 }
 
 wanted=("$@")
@@ -97,3 +104,52 @@ shot multicursor bare "$undo" --cursors "$many" --headless 2000x1000
 shot search wide . "$undo" --search "$pattern" --headless $big
 shot diff bare --diff examples/merge/local.rs examples/merge/remote.rs --headless 2560x1400
 shot merge bare --merge examples/merge/{base,local,remote}.rs -o "$tmp/merged.rs" --headless 3200x1500
+
+# Reading and layout aids.
+shot workspace sidebar crates/core crates/syntax crates/syntax/src/symbols.rs --headless 2400x1400
+shot guides guides "$undo" --cursors "$at" --headless 2400x1000
+shot wrap bare docs/manual/getting-started.md --wrap --headless 2000x1200
+shot symbols sidebar . "${tabs[@]}" --cursors "$at" --picker symbols:record --headless $big
+shot debug bare "$undo" --cursors "$at" --debug-overlay --headless 2400x1200
+
+# Folder compare: crates/core/src at the v0.2.0 tag against a fixed later
+# commit (nimbus 0.9.1), so the list does not change as main moves on.
+if want folders; then
+	for rev in v0.2.0:0.2.0 d265e7c:0.9.1; do
+		mkdir -p "$tmp/folders/${rev#*:}"
+		git archive "${rev%%:*}" crates/core/src | tar -x -C "$tmp/folders/${rev#*:}" --strip-components 3
+	done
+fi
+shot folders wide --diff "$tmp/folders/0.2.0" "$tmp/folders/0.9.1" --headless 2000x1200
+# Only the sidebar: a folder compare leaves the editor an empty tab. The
+# wide sidebar is 340 points, 680 pixels plus its divider at 2x.
+if want folders; then
+	magick "$out/folders.png" -crop 682x1200+0+0 +repage "$out/folders.png"
+fi
+
+# A 4 GB log, every line counted, with the cursor on the last line.
+log=bench/out/log-4gb.log
+if [ -f "$log" ]; then
+	shot hugefile bare "$log" --cursors "$(wc -c <"$log" | tr -d ' ')" --wait-index --headless 1800x1000
+elif want hugefile; then
+	echo "skipping hugefile: run bench/gen.sh logs first" >&2
+fi
+
+# Four languages in a grid: each rendered alone, then joined.
+if want languages; then
+	if command -v magick >/dev/null; then
+		for file in scripts/make-icons.py bench/gen.sh Cargo.toml .github/workflows/ci.yml; do
+			name=lang-$(basename "$file" | tr . -)
+			wanted+=("$name")
+			shot "$name" bare "$file" --headless 1400x900 >/dev/null
+			parts+=("$out/$name.png")
+		done
+		gap=(-bordercolor '#101114' -border 8)
+		magick \( "${parts[0]}" "${parts[1]}" "${gap[@]}" +append \) \
+			\( "${parts[2]}" "${parts[3]}" "${gap[@]}" +append \) -append "$out/languages.png"
+		rm "${parts[@]}"
+		echo "$out/languages.png"
+	else
+		echo "skipping languages: needs ImageMagick (magick)" >&2
+	fi
+fi
