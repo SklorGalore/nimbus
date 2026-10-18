@@ -96,6 +96,11 @@ its own later.
 Items scheduled on 2026-10-18 moved to the M16–M21 and M22–M24 tables above; what is
 left is small or still speculative.
 
+- **Compact typing in the undo history** (M21 soak): each typed
+  character is its own `Edit` inside an undo group, about 100 bytes, so
+  100,000 keystrokes keep about 10 MB. Merging a contiguous typing run
+  into one edit would cut that to the text itself; `undo_oracle.rs`
+  covers coalescing.
 - **Autosave of unsaved work** for crash recovery: the owner decided
   against it when approving M12 (it would write the user's text
   somewhere they did not choose); it stays here in case that changes.

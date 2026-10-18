@@ -33,6 +33,14 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
+      # The fuzz targets (fuzz/, outside the workspace) run weekly on
+      # nightly (fuzz.yml); type-check them here so a core API change
+      # that breaks them shows up on the pull request. Stable is enough
+      # to check; only running them needs nightly. The theme target is
+      # left out: it would build wgpu a second time.
+      - name: Check the fuzz targets
+        if: runner.os == 'Linux'
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins --features app-config
 
   # Licences and advisories for every dependency, from deny.toml (M15).
   deny:

@@ -319,8 +319,8 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # "file.quickOpen" = ["Primary+P", "Primary+E"]
 
 # Languages: a file name or "*.ext" pattern = language. Built-in languages
-# are rust, markdown, json, toml, yaml, python, javascript, typescript and
-# bash. Add your own as languages/NAME.toml here (simple colouring rules),
+# are rust, markdown, json, toml, yaml, python, javascript, typescript,
+# bash, c, go, html, css and tsx. Add your own as languages/NAME.toml here (simple colouring rules),
 # and change a built-in's colours with queries/NAME.scm (restart to apply).
 # [languages]
 # "Justfile" = "bash"
@@ -608,5 +608,23 @@ mod tests {
     #[test]
     fn template_parses_cleanly() {
         assert_eq!(Config::parse(TEMPLATE), (Config::default(), vec![]));
+    }
+
+    #[test]
+    fn template_names_every_built_in_language() {
+        let words: String = TEMPLATE
+            .lines()
+            .skip_while(|l| !l.starts_with("# Languages:"))
+            .take(3)
+            .collect();
+        for l in nimbus_syntax::LanguageId::ALL {
+            let key = l.key();
+            assert!(
+                words
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|w| w == key),
+                "{key} missing from the template's language list"
+            );
+        }
     }
 }

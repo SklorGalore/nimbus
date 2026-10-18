@@ -524,6 +524,9 @@ pub struct App {
     preedit: Option<Preedit>,
     /// The debug overlay and the timings it shows.
     debug: Debug,
+    /// `--soak`: resident memory in KB, sampled every
+    /// [`SOAK_SAMPLE_EVERY`] keystrokes, with the keystroke count.
+    soak_memory: Vec<(usize, u64)>,
     /// Last mouse position in physical pixels; clicks carry no position.
     mouse: PhysicalPosition<f64>,
     /// Last rectangle sent to the IME, to avoid resending it every frame.
@@ -726,6 +729,7 @@ impl App {
             blink: Blink::new(started),
             preedit: None,
             debug: Debug::new(debug_overlay),
+            soak_memory: Vec::new(),
             mouse: PhysicalPosition::new(0.0, 0.0),
             ime_area: None,
             title_key: None,
@@ -5119,7 +5123,8 @@ impl App {
     /// One step of `--bench-typing`: type a character, or report and exit.
     fn bench_step(&mut self, event_loop: &ActiveEventLoop) {
         let samples = self.debug.latency.samples.get_or_insert_with(Vec::new);
-        if samples.len() >= self.options.bench_typing {
+        let n = samples.len();
+        if n >= self.options.bench_typing {
             let mut s = std::mem::take(samples);
             s.sort();
             let pick = |q: usize| s.get((s.len() * q / 100).min(s.len() - 1)).copied();
@@ -5130,12 +5135,56 @@ impl App {
                 pick(99).unwrap_or_default(),
                 s.last().copied().unwrap_or_default()
             ));
+            if self.options.soak {
+                self.soak_memory.extend(resident_kb().map(|kb| (n, kb)));
+                let curve: Vec<String> = self
+                    .soak_memory
+                    .iter()
+                    .filter(|(at, _)| at % 10_000 == 0)
+                    .map(|(_, kb)| format!("{}", kb / 1024))
+                    .collect();
+                print_out(&format!(
+                    "memory every 10,000 keystrokes (MB): {}",
+                    curve.join(" ")
+                ));
+                let (line, within) = soak_report(&self.soak_memory);
+                print_out(&line);
+                if !within {
+                    self.exit_code = 1;
+                }
+            }
             event_loop.exit();
             return;
         }
-        let ch = ["a", "b", "c", " ", "x", "y"][samples.len() % 6];
+        if !self.options.soak {
+            let ch = ["a", "b", "c", " ", "x", "y"][n % 6];
+            self.debug.latency.input(Instant::now());
+            self.run(Command::Insert(ch), event_loop);
+            return;
+        }
+        // Sampling runs a process, so it happens before the clock starts.
+        if n.is_multiple_of(SOAK_SAMPLE_EVERY) {
+            self.soak_memory.extend(resident_kb().map(|kb| (n, kb)));
+        }
         self.debug.latency.input(Instant::now());
-        self.run(Command::Insert(ch), event_loop);
+        match soak_step(n) {
+            SoakStep::Type(ch) => self.run(Command::Insert(ch), event_loop),
+            SoakStep::Newline => self.run(Command::Newline, event_loop),
+            SoakStep::Undo => self.run(Command::Undo, event_loop),
+            SoakStep::Find => {
+                self.open_find(false);
+                let _ = self.find.find.ed().insert("fn ");
+                self.search(true);
+                self.run(Command::Escape, event_loop);
+            }
+            SoakStep::Save => {
+                // A save of a big file may still be writing the last one.
+                if !self.doc().is_saving() {
+                    self.run(Command::Save, event_loop);
+                }
+            }
+        }
+        self.changed(true);
     }
 
     fn ime(&mut self, ime: Ime, event_loop: &ActiveEventLoop) {
@@ -5160,6 +5209,77 @@ impl App {
             }
         }
     }
+}
+
+/// Keystrokes between memory samples in a `--soak` run.
+pub const SOAK_SAMPLE_EVERY: usize = 1_000;
+
+/// Most a `--soak` run's resident memory may grow, first sample to last,
+/// before the run fails (M21). The plan said 10 MB, but the undo history
+/// keeps every edit on purpose, about 100 bytes per typed character, so
+/// 100,000 keystrokes hold about 10 MB of it; 20 MB leaves room for that
+/// and still fails a real leak of a line or a frame per keystroke.
+pub const SOAK_BUDGET_MB: u64 = 20;
+
+/// What keystroke `n` of a soak run does. The mix is fixed, so two runs do
+/// the same work: mostly typing, a line break every 60, an undo every
+/// 50, a find every 2,500 and a save every 10,000.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SoakStep {
+    Type(&'static str),
+    Newline,
+    Undo,
+    Find,
+    Save,
+}
+
+fn soak_step(n: usize) -> SoakStep {
+    if n % 10_000 == 5_000 {
+        SoakStep::Save
+    } else if n % 2_500 == 1_250 {
+        SoakStep::Find
+    } else if n % 50 == 49 {
+        SoakStep::Undo
+    } else if n % 60 == 59 {
+        SoakStep::Newline
+    } else {
+        SoakStep::Type(["a", "b", "c", " ", "x", "y"][n % 6])
+    }
+}
+
+/// This process's resident memory in KB, from `ps` (macOS and Linux), so
+/// no platform API and no `unsafe` is needed. `None` where `ps` is missing
+/// or says something unexpected, as on Windows.
+fn resident_kb() -> Option<u64> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// The soak summary line, and whether growth stayed within budget.
+/// Growth is last sample minus first; with fewer than two samples there
+/// is nothing to judge and the run passes.
+fn soak_report(samples: &[(usize, u64)]) -> (String, bool) {
+    let (Some(&(_, first)), Some(&(n, last))) = (samples.first(), samples.last()) else {
+        return ("memory: not sampled (no ps)".to_owned(), true);
+    };
+    let peak = samples.iter().map(|s| s.1).max().unwrap_or(last);
+    let growth = last.saturating_sub(first);
+    let within = growth <= SOAK_BUDGET_MB * 1024;
+    let mb = |kb: u64| f64::from(u32::try_from(kb).unwrap_or(u32::MAX)) / 1024.0;
+    (
+        format!(
+            "memory over {n} keystrokes: start {:.1} MB, end {:.1} MB, peak {:.1} MB, growth {:.1} MB (budget {SOAK_BUDGET_MB} MB): {}",
+            mb(first),
+            mb(last),
+            mb(peak),
+            mb(growth),
+            if within { "ok" } else { "over budget" }
+        ),
+        within,
+    )
 }
 
 /// What a Replace in Files did so far, for the summary once the files on
@@ -6606,6 +6726,15 @@ fn edit_field(
 }
 
 impl App {
+    /// Starting the window failed: say why (stderr, and a dialog when
+    /// launched without a terminal) and quit with exit code 1, so scripts
+    /// and the Dock both see the failure instead of a silent exit.
+    fn fail_start(&mut self, event_loop: &ActiveEventLoop, msg: &str) {
+        crate::fatal(&self.options, msg);
+        self.exit_code = 1;
+        event_loop.exit();
+    }
+
     /// The pointer moved: carry on whatever drag is under way, then
     /// update what hovering shows.
     fn cursor_moved(&mut self, position: PhysicalPosition<f64>) {
@@ -6796,8 +6925,7 @@ impl ApplicationHandler<AppEvent> for App {
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
-                log::error!("could not create window: {e}");
-                event_loop.exit();
+                self.fail_start(event_loop, &format!("Could not create a window: {e}"));
                 return;
             }
         };
@@ -6809,13 +6937,11 @@ impl ApplicationHandler<AppEvent> for App {
         let context = match self.gpu_init.take().map(JoinHandle::join) {
             Some(Ok(Ok(context))) => context,
             Some(Ok(Err(e))) => {
-                log::error!("{e}");
-                event_loop.exit();
+                self.fail_start(event_loop, &format!("Could not start the GPU: {e}"));
                 return;
             }
             Some(Err(_)) | None => {
-                log::error!("GPU setup thread did not complete");
-                event_loop.exit();
+                self.fail_start(event_loop, "GPU setup thread did not complete");
                 return;
             }
         };
@@ -6824,8 +6950,7 @@ impl ApplicationHandler<AppEvent> for App {
         let font = match Font::bundled() {
             Ok(f) => f,
             Err(e) => {
-                log::error!("{e}");
-                event_loop.exit();
+                self.fail_start(event_loop, &format!("Could not load the font: {e}"));
                 return;
             }
         };
@@ -6839,8 +6964,7 @@ impl ApplicationHandler<AppEvent> for App {
         ) {
             Ok(gpu) => self.gpu_ready(gpu),
             Err(e) => {
-                log::error!("{e}");
-                event_loop.exit();
+                self.fail_start(event_loop, &format!("Could not set up drawing: {e}"));
                 return;
             }
         }
@@ -7142,6 +7266,28 @@ impl ApplicationHandler<AppEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soak_mix_is_fixed_and_mostly_typing() {
+        let steps: Vec<SoakStep> = (0..10_000).map(soak_step).collect();
+        let count = |want: SoakStep| steps.iter().filter(|s| **s == want).count();
+        assert_eq!(count(SoakStep::Save), 1);
+        assert_eq!(count(SoakStep::Find), 4);
+        assert!(count(SoakStep::Undo) > 150);
+        assert!(count(SoakStep::Newline) > 100);
+        assert_eq!(soak_step(0), SoakStep::Type("a"));
+    }
+
+    #[test]
+    fn soak_report_judges_growth_first_to_last() {
+        let (line, ok) = soak_report(&[(0, 100_000), (1_000, 150_000), (2_000, 105_000)]);
+        assert!(ok, "{line}");
+        assert!(line.contains("growth 4.9 MB"), "{line}");
+        assert!(line.contains("peak 146.5 MB"), "{line}");
+        let (line, ok) = soak_report(&[(0, 100_000), (2_000, 125_000)]);
+        assert!(!ok, "{line}");
+        assert!(soak_report(&[]).1);
+    }
 
     #[test]
     fn the_zoom_starts_where_the_last_session_left_it_unless_told_not_to() {

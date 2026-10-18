@@ -19,6 +19,7 @@ bench/smoke.sh                                              # release build, pur
 cargo run -- --screenshot /tmp/frame.bmp                    # save the first frame; convert with `sips -s format png`
 NIMBUS_SCALE=1 cargo run -- --screenshot /tmp/1x.bmp         # debug builds: render at another scale factor
 ./target/release/nimbus FILE --bench-typing 300            # type 300 chars through the edit path; prints latency percentiles
+bench/soak.sh [N]                                           # M21 soak: N (100,000) keystrokes with undo, find and saves on a copy of the 100 MB file; fails if memory grows over 20 MB
 bench/gen.sh                                                # 10 MB / 100 MB test files in bench/out (also: logs, longline, sizes, diff, difflogs)
 bench/gen.sh diff && cargo run --release -- --diff bench/out/src-10mb.rs bench/out/src-10mb-edited.rs   # the compare view on the 10 MB bench pair
 NIMBUS_DIFF_FILES=$PWD/bench/out/src-10mb.rs:$PWD/bench/out/src-10mb-edited.rs cargo test --release -p nimbus-core -- --ignored --nocapture compare_bench   # time a comparison
@@ -47,6 +48,7 @@ NIMBUS_BENCH_FILE=$PWD/bench/out/src-10mb.rs cargo test --release -p nimbus -- -
 cargo run -- FILE --cursors 4,19,33 --headless 900x300 --screenshot /tmp/m.bmp  # several cursors (byte offsets; the last is primary)
 bench/gen.sh sizes && bench/threshold.sh                    # rope vs mapped open time and memory at 64-512 MB
 cargo test --release -p nimbus-syntax -- --ignored --nocapture --test-threads 1   # keystroke and first-parse cost, tree memory (needs bench/gen.sh)
+cargo +nightly fuzz run buffer -- -max_total_time=300             # M21 fuzz targets (buffer, diff, merge, search; config/theme need --features app-config/app-theme); fuzz/README.md
 cargo test --workspace
 python3 scripts/make-icons.py                               # redraw the app icon (PNG, .icns via iconutil, .ico) into assets/icon
 scripts/bundle-macos.sh target/release/nimbus VERSION OUT_DIR  # Nimbus.app and its zip; releases: push a tag vX.Y.Z matching Cargo.toml (.github/workflows/release.yml)

@@ -41,14 +41,14 @@ repeated in each file:
 | 11 | [Everyday editing](m11-everyday-editing.md) | Done |
 | 12 | [Workspace](m12-workspace.md) | Done |
 | 13 | [Split views and folding](m13-splits-and-folding.md) | Done |
-| 14 | [Languages, second pass](m14-languages.md) | In progress |
+| 14 | [Languages, second pass](m14-languages.md) | Done |
 | 15 | [Distribution](m15-distribution.md) | Done |
 | 16 | [Rendering, second pass](m16-rendering-second-pass.md) | Done |
 | 17 | [Encodings and line endings](m17-encodings.md) | Done |
 | 18 | [Compare, second pass](m18-compare-second-pass.md) | Done |
 | 19 | [Workspace and search, second pass](m19-workspace-and-search-second-pass.md) | Done |
 | 20 | [Reading aids](m20-reading-aids.md) | Done |
-| 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | Planned |
+| 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | Done |
 | 22 | [Screen readers](m22-screen-readers.md) | Next |
 | 23 | [Library upgrades](m23-library-upgrades.md) | Planned, waiting on stable releases |
 | 24 | [International text](m24-international-text.md) | Planned |

@@ -17,7 +17,7 @@ What you name also decides whether Nimbus uses a
 | `nimbus FOLDER` | That folder as the project, with the tabs it had last time. | Restored and saved. |
 | `nimbus` | The last project you worked in, with its tabs. With no earlier session (or if its folder is gone), the current folder. | Restored and saved. |
 | `nimbus FILE...` (with or without a folder), `--diff`, `--merge` | Just those files. | Left alone. |
-| `nimbus --no-session` | An empty untitled tab, with the current folder (or the folder you name) as the project. | Neither restored nor saved. |
+| `nimbus --no-session` | An empty untitled tab, with the current folder (or the folder you name) as the project. | Neither restored nor saved; recent files and the window position are not saved either. |
 
 The testing options below (`--headless`, `--screenshot`, `--smoke`,
 `--bench-typing`) never save anything Nimbus remembers, so measuring
@@ -28,7 +28,7 @@ does not overwrite your session.
 | Option | What it does |
 |---|---|
 | `--workspace NAME` | Open the workspace saved as `NAME` (see [Workspaces](window.md#workspaces-several-folders-at-once)): its folders and its tabs. |
-| `--no-session` | Start without reopening the last session, and do not save this run as one. |
+| `--no-session` | Start without reopening the last session, and remember nothing from this run: no session, recent files or window position. |
 | `--find PATTERN` | Open with the find bar searching the first tab for `PATTERN`. |
 | `--search PATTERN` | Open with the sidebar's Search panel searching the project folder for `PATTERN`. |
 | `--wrap` | Start every tab with soft wrap on, whatever the config says. |
@@ -70,6 +70,7 @@ need them for everyday use.
 | `--screenshot FILE.bmp` | Save the first frame as a BMP image and exit. |
 | `--smoke` | Open the window, print the time to the first frame (`first-frame-ms=…`) and exit. |
 | `--bench-typing N` | Type `N` characters through the normal editing path, print keystroke latency figures and exit. |
+| `--soak` | With `--bench-typing`: mix line breaks, undo, find and saves into the typing and report how much memory grew; exits 1 if it grew more than 20 MB. It saves into the file, so use a copy (`bench/soak.sh` does). |
 | `--backend rope\|mapped` | Hold every file in memory (`rope`) or memory-mapped (`mapped`), whatever its size. |
 | `--wait-index` | With `--headless`: count all of a huge file's lines before drawing. |
 | `--debug-overlay` | Start with the debug overlay (`F12`) showing. |
@@ -82,13 +83,13 @@ need them for everyday use.
 | Code | Meaning |
 |---|---|
 | 0 | Normal exit. With `--merge`: the result was saved with no conflicts left. |
-| 1 | A file could not be opened; with `--headless`, the GPU could not start; with `--screenshot` or `--smoke`, no frame could be drawn or saved; with `--merge`, the result was not saved or still had conflicts. |
+| 1 | A file could not be opened; the window, the GPU or the font could not start (the reason is printed, and shown in a dialog when there is no terminal); with `--soak`, memory grew more than 20 MB; with `--screenshot` or `--smoke`, no frame could be drawn or saved; with `--merge`, the result was not saved or still had conflicts. |
 | 2 | A mistake on the command line. |
 
 ## Environment variables
 
 | Variable | Effect |
 |---|---|
-| `NIMBUS_CONFIG_DIR` | Use this folder instead of the usual config folder, for `config.toml`, `state.toml`, themes, languages and queries. Handy for trying settings without touching your own. |
+| `NIMBUS_CONFIG_DIR` | Use this folder instead of the usual config folder, for `config.toml`, `state.toml`, `crash.log`, themes, languages and queries. Handy for trying settings without touching your own. |
 | `RUST_LOG` | How much Nimbus logs to the terminal. The default is `nimbus=info`; `RUST_LOG=nimbus=debug` adds detail such as startup times. |
 | `WGPU_BACKEND` | Which graphics API to use, such as `vulkan`, `gl`, `metal` or `dx12`. Useful if Nimbus fails to start on your graphics driver. |

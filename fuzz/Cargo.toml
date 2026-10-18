@@ -1,0 +1,88 @@
+# Fuzz targets for Nimbus (M21 task 3), in cargo-fuzz's layout. Run one
+# with `cargo +nightly fuzz run buffer` from the repository root; see
+# README.md here.
+#
+# This package is not a member of the root workspace: the empty
+# `[workspace]` table below makes it a workspace of its own, so a plain
+# `cargo build` or `cargo test` at the root never builds it (libfuzzer-sys
+# needs a nightly compiler and sanitizer flags that cargo-fuzz supplies).
+
+[package]
+name = "nimbus-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+nimbus-core = { path = "../crates/core" }
+regex = "1"
+# To tell which patterns anchor to the whole text (the search target).
+regex-syntax = "0.8"
+
+# Only the `config` and `theme` targets need these. They compile the app's
+# own parser source files (the app crate is a binary with no library to
+# link against), so they need that source's dependencies. Optional, so the
+# core targets build without wgpu and the tree-sitter grammars.
+dirs = { version = "7", optional = true }
+nimbus-render = { path = "../crates/render", optional = true }
+nimbus-syntax = { path = "../crates/syntax", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+toml = { version = "1", optional = true }
+
+[features]
+# `cargo fuzz run config --features app-config`
+app-config = ["dep:dirs", "dep:serde", "dep:toml"]
+# `cargo fuzz run theme --features app-theme`
+app-theme = ["app-config", "dep:nimbus-render", "dep:nimbus-syntax"]
+
+[[bin]]
+name = "buffer"
+path = "fuzz_targets/buffer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diff"
+path = "fuzz_targets/diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "search"
+path = "fuzz_targets/search.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "merge"
+path = "fuzz_targets/merge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+required-features = ["app-config"]
+
+[[bin]]
+name = "theme"
+path = "fuzz_targets/theme.rs"
+test = false
+doc = false
+bench = false
+required-features = ["app-theme"]
