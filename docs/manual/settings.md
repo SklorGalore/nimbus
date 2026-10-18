@@ -90,14 +90,16 @@ own. See [Languages](languages.md#how-a-files-language-is-chosen).
 
 Maps a file name or pattern to the encoding such files are read and
 saved in, skipping Nimbus's guess. A pattern without a `/` is matched
-against the file name. One with a `/` is matched against the file's
-whole path, usually a full path, so start it with `**/`. Encoding names
+against the file name. One with a `/` is matched against the end of
+the file's path, so `legacy/*.txt` is a `.txt` file directly inside any
+folder called `legacy`; `**` goes through folders and a leading `/`
+matches from the root. Encoding names
 are listed in [Encodings](encodings.md#encoding-names).
 
 ```toml
 [encodings]
 "*.csv" = "windows-1252"
-"**/legacy/*.txt" = "latin1"
+"legacy/*.txt" = "latin1"
 "export.dat" = "utf-16le"
 ```
 
