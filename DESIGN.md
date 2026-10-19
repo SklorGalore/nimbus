@@ -613,11 +613,9 @@ which is contained inside `render`.
 
 Open, from the M26 (security) draft, asked one at a time (the order
 is answered: security goes before the git client and updates, since
-updates depend on the signing key and the git client on the git rule):
+updates depend on the signing key and the git client on the git rule;
+and the signing key lives on the owner's Mac, never in GitHub):
 
-- Key custody: sign `SHA256SUMS` on the owner's Mac with a passworded
-  key (recommended), or keep signing in the release workflow with the
-  key as an Actions secret behind a protected environment?
 - Dependency review: `cargo vet` with imported audits and today's
   versions exempted (recommended), or `cargo deny` alone as now?
 
@@ -802,4 +800,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | Finder "Open With" moves from M23 to a 1.0.1 fix with a small `objc2` open-files listener in `app` (new `unsafe` outside `render` and the mmap buffer, owner's choice), since winit 0.31.0-beta.3 still does not pass the files on | §9, m23 |
 | 2026-10-18 | M25 Command line added at the owner's request: an "Install `nimbus` Command" palette action (macOS via the system administrator prompt, no `unsafe`), opening files in the running window, `--wait` | m25, backlog |
 | 2026-10-18 | Compatibility mode (Cumulus) joins M23: an automatic CPU painter over `FrameBuilder`'s rects and glyphs, presented with `softbuffer`, with a one-time notice and `--compat`; no wgpu CPU-driver step, no separate app or terminal editor | §9, m23 |
-| 2026-10-19 | M26 Security drafted at the owner's request and put before the git client (M27–M30) and updates (M31): no release has been signed yet (`minisign.pub` never committed), so the key comes first; actions pinned by SHA, protected branches and `v*` tags, `cargo vet`, provenance, a threat model; M31 owns the update check itself | §9, m26 |
+| 2026-10-19 | M26 Security drafted at the owner's request and put before the git client (M27–M30) and updates (M31): no release has been signed yet (`minisign.pub` never committed), so the key comes first, kept on the owner's Mac and used by `scripts/sign-release.sh`, never an Actions secret; actions pinned by SHA, protected branches and `v*` tags, `cargo vet`, provenance, a threat model; M31 owns the update check itself | §9, m26 |

@@ -131,7 +131,8 @@ draft's packages, recomputes every hash, compares them with
 `SHA256SUMS.minisig`, and only then does the owner publish. The key is
 made with a password (`minisign -G`, no `-W`), so a copied key file
 alone is useless; a second copy goes on a USB stick or in a password
-manager. §9 asks whether to keep CI signing instead.
+manager. The owner chose this over keeping the key as an Actions
+secret behind a protected environment (2026-10-19).
 
 **Rotation is planned before it is needed.** If the key leaks, the next
 release must be trusted by installs that know only the old key. The
