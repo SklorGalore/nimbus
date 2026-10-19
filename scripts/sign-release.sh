@@ -72,9 +72,17 @@ gh release download "$tag" --repo "$repo" \
 # The manifests zip is not a package and is not hashed; everything else
 # downloaded must be in SHA256SUMS, and everything in it must be here.
 listed=$(awk '{ sub(/^\*/, "", $2); print $2 }' SHA256SUMS | sort)
-present=$(for f in *; do
-	case $f in SHA256SUMS | winget-manifest.zip) ;; *) printf '%s\n' "$f" ;; esac
-done | sort)
+# (A function, not a case inside $(...): macOS's /bin/sh is bash 3.2,
+# which cannot parse a case pattern's ")" inside a command substitution.)
+packages() {
+	for f in *; do
+		case $f in
+		SHA256SUMS | winget-manifest.zip) ;;
+		*) printf '%s\n' "$f" ;;
+		esac
+	done
+}
+present=$(packages | sort)
 [ -n "$listed" ] || die "SHA256SUMS is empty"
 if [ "$listed" != "$present" ]; then
 	printf 'SHA256SUMS lists:\n%s\nthe release has:\n%s\n' "$listed" "$present" >&2
