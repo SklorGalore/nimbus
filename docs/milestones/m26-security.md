@@ -1,6 +1,7 @@
 # M26 — Security
 
-**Status: planned (2026-10-19).** Written on 2026-10-18 at the owner's
+**Status: in progress (built 2026-10-19; waiting on the owner's GitHub
+settings and on pinning the actions, see Results).** Written on 2026-10-18 at the owner's
 request: a security milestone for the program and the repository,
 supply chain attacks included. Approved on 2026-10-19 with three
 answers (`DESIGN.md` §9): it runs before the git client (M27–M30) and
@@ -49,7 +50,7 @@ What is missing, found while writing this plan:
 
 ## Done when
 
-- [ ] **Releases are signed, and the key is not on GitHub**:
+- [x] **Releases are signed, and the key is not on GitHub**:
       `minisign.pub` is committed and also printed in the README and the
       manual; 1.0.x's `SHA256SUMS` are checked against the packages and
       signed after the fact; each new release is signed by
@@ -69,7 +70,7 @@ What is missing, found while writing this plan:
       pinned by version and SHA-256; release jobs use no shared cache;
       `zizmor` checks the workflows on every pull request and reports
       nothing above "low".
-- [ ] **Dependencies are reviewed, not just scanned**: new and updated
+- [x] **Dependencies are reviewed, not just scanned**: new and updated
       crates pass `cargo vet` in CI (audits imported from Mozilla,
       Google, the Bytecode Alliance and others; the rest exempted at
       today's versions, so only what changes after this milestone needs
@@ -79,17 +80,17 @@ What is missing, found while writing this plan:
 - [ ] **Downloads are traceable**: each package has a GitHub build
       provenance attestation (`gh attestation verify` names the commit
       and workflow that built it), and the README says how to check it.
-- [ ] **Untrusted files stay data**: the threat model in
+- [x] **Untrusted files stay data**: the threat model in
       `docs/security.md` lists every input Nimbus reads (files, folders,
       `.nimbus/workspace.toml`, `.gitattributes` and git output, config,
       themes, queries, the update answer, dropped files, the clipboard)
       and what each may do; the audit in task 6 is written up in
       Results, with each gap fixed or listed.
-- [ ] **Hidden text is visible**: bidirectional controls (U+202A–202E,
+- [x] **Hidden text is visible**: bidirectional controls (U+202A–202E,
       U+2066–2069) and zero-width characters are drawn as visible marks
       even with whitespace rendering off, so "Trojan Source" code
       cannot hide in plain sight.
-- [ ] **More fuzzing**: new targets for highlighting every bundled
+- [x] **More fuzzing**: new targets for highlighting every bundled
       grammar (tree-sitter parsers are C), the Markdown preview scanner,
       encoding detection and decoding, workspace files and git's output
       parsing; all run weekly with the six existing ones.
@@ -279,4 +280,92 @@ what each one protects.
 
 ## Results
 
-_To be filled in when the milestone lands._
+Built on 2026-10-19 in one branch (`feature/m26-security-droye7`). What
+each task produced, and what is left:
+
+1. **Key** (PRs #58, #59, earlier): done. This branch removes the
+   signing step and the `MINISIGN_SECRET_KEY` read from `release.yml`
+   and writes the lost/leaked key procedure (`docs/security.md`).
+2. **Workflows**: every workflow starts from `permissions: contents:
+   read`, with write granted per job; checkouts drop their credentials;
+   `dtolnay/rust-toolchain` gets its toolchain as an input (needed once
+   it is pinned by SHA); `--locked` on every build, clippy, test and
+   fuzz check; `appimagetool` is pinned to 1.9.0 and checked against
+   `APPIMAGETOOL_SHA256`; the release's first job runs in the `release`
+   environment and the rest wait on it; release jobs use no cache;
+   `zizmor` runs on every pull request with `--min-severity medium`.
+   **Not done: the SHA pins.** The cloud session that built this could
+   not reach other repositories on GitHub to look up commits, so
+   `scripts/pin-actions.sh` does it (and fills in the appimagetool
+   hash); it has to run once on a machine with access, and `zizmor` and
+   the release's appimagetool step fail until it has. zizmor reports
+   nothing else, at any severity.
+3. **Dependencies**: `cargo vet` with audits imported from Mozilla,
+   Google, the Bytecode Alliance, Embark, ISRG, Zcash and Ariel OS: 73
+   crates fully audited, 2 partly, 342 exempted at their 1.0 versions.
+   `cargo auditable` builds the release binaries; each package gets a
+   build provenance attestation (`actions/attest-build-provenance`).
+4. **Docs**: `SECURITY.md`, `docs/security.md` (threat model, key
+   rotation, the pipeline, what each GitHub setting protects). The
+   settings themselves are the owner's (below).
+5. **Hidden characters**: a box in the theme's new `hidden_char` colour
+   on bidi controls (U+202A–202E, U+2066–2069, U+200E, U+200F, U+061C)
+   and zero-width characters (U+200B, U+2060–2064, U+FEFF, U+00AD,
+   U+180E), whatever `render_whitespace` says
+   (`column::is_hidden_char`, `View::hidden_chars`). Each already had a
+   cell of its own (`grapheme_cols` gives every grapheme at least one
+   column), so nothing moves. ZWJ and ZWNJ are left out (emoji, Persian,
+   Devanagari). The screenshot test was not extended: the cloud session
+   has no GPU, so the look is unverified until checked on the Mac.
+6. **Audit**, each with a test:
+   - `.nimbus/workspace.toml`: `load_local` drops roots, tabs and
+     expanded folders that resolve outside the project (absolute, `..`,
+     symlinks) and refuses a file whose first root is elsewhere; Save
+     Workspace Here says when outside folders will not reopen. Named
+     workspaces are unchanged.
+   - git: `-c core.fsmonitor=false -c core.hooksPath=/dev/null` and
+     `GIT_NO_LAZY_FETCH=1` on every call. The plan said to apply
+     `--filters` only when the repository passes `safe.directory`; that
+     check passes for every clone the user owns, so it would not stop a
+     hostile one. Instead filters apply unless the repository's own
+     config (`local` or `worktree` scope) names a `filter.*.smudge` or
+     `.process` program; then the blob is read unfiltered. Filters the
+     user installed (Git LFS in `~/.gitconfig`) still apply. The test
+     builds such a repository and checks no marker file appears. Windows
+     finds `git` on `PATH`, not in the current folder (Rust's `Command`
+     since 1.58), so a `git.exe` in a project cannot stand in.
+   - Preview links: absolute paths are no longer followed; schemes were
+     already refused.
+   - Mapped files: the `SAFETY` note in `mapping.rs` was re-read and is
+     accurate; the truncation `SIGBUS` on macOS and Linux stays an
+     accepted gap, written up in `docs/security.md`.
+   - Workspace names: `a/` passed the "plain name" check (a trailing
+     slash vanishes in `Path`) and saved to `workspaces/a/.toml`; now
+     refused.
+7. **Fuzz targets**: `highlight` (all 14 grammars, edits, injections,
+   Markdown blocks), `encoding`, `workspace`, `git_output`, in
+   `fuzz.yml` and type-checked in CI. Two minutes each on the first run
+   found two bugs, both fixed with regression tests: ISO-2022-JP reports
+   an unencodable ESC as U+FFFD, so the offset of the unencodable
+   character underflowed (a panic in debug builds, a wrong offset in
+   release; East Asian encodings are behind their feature); and the
+   workspace-name slash above. After the fixes, three more minutes each
+   found nothing.
+8. **Measurements**: the Linux release binary is 26,449,408 bytes, 26,453,128 with `cargo auditable`: 3.6 KB for the embedded dependency list (`.dep-v0` section), well under the 50 KB budget; the hidden-character marks add nothing measurable. `--smoke` is unaffected: nothing
+   new runs at startup. CI: the `cargo vet` job installs cargo-vet from
+   source (about two minutes, in parallel with the platform jobs, so
+   the wall-clock time of a run does not grow); `zizmor` takes seconds.
+   OpenSSF Scorecard: not run yet (it needs the settings below first).
+
+**Still to do**, all needing the owner:
+
+- [ ] Run `scripts/pin-actions.sh` on the Mac, check `git diff`, commit
+      (or let a session with github.com access do it).
+- [ ] The GitHub settings below (also listed, with what each protects,
+      in `docs/security.md`).
+- [ ] Look at a file with hidden characters on the Mac; remake the
+      screenshot reference if the test text ever gains one.
+- [ ] The first release through the `release` environment (1.1.0) shows
+      the approval step, the attestations and the auditable binary
+      working.
+- [ ] Run OpenSSF Scorecard once and record the score here.

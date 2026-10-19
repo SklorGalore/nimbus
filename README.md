@@ -227,6 +227,17 @@ RWQP3Q/4Mc3fpXtWGJHvMnuFQsX7WPR3tW8cPRKRzPeF+B8DlSwzqodi
 so `minisign -V -P RWQP3Q/4Mc3fpXtWGJHvMnuFQsX7WPR3tW8cPRKRzPeF+B8DlSwzqodi -m SHA256SUMS`
 works without a copy of the repository.
 
+Releases from 1.1.0 on also carry a build provenance attestation for
+each package: GitHub's own record of the commit and workflow that built
+it. With the [GitHub CLI](https://cli.github.com):
+
+```sh
+gh attestation verify Nimbus-1.1.0-macos.dmg --repo SklorGalore/nimbus
+```
+
+Found a security problem? Please report it privately, as
+[SECURITY.md](SECURITY.md) describes.
+
 ### Updates
 
 Nimbus never connects to the network unless you ask it to. Run "Check
