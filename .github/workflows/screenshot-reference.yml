@@ -23,13 +23,13 @@ jobs:
     runs-on: macos-latest
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'remake-screenshot'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Render the reference frame
         run: NIMBUS_UPDATE_SCREENSHOT=1 cargo test -p nimbus --test screenshot
       - name: Check the new reference passes
@@ -39,7 +39,7 @@ jobs:
           echo "::group::reference.bmp, gzip then base64"
           gzip -9 -c crates/app/tests/screenshot/reference.bmp | base64
           echo "::endgroup::"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: screenshot-reference
           path: crates/app/tests/screenshot/reference.bmp

@@ -1,7 +1,7 @@
 # M26 — Security
 
 **Status: in progress (built 2026-10-19; waiting on the owner's GitHub
-settings and on pinning the actions, see Results).** Written on 2026-10-18 at the owner's
+settings, see Results).** Written on 2026-10-18 at the owner's
 request: a security milestone for the program and the repository,
 supply chain attacks included. Approved on 2026-10-19 with three
 answers (`DESIGN.md` §9): it runs before the git client (M27–M30) and
@@ -63,7 +63,7 @@ What is missing, found while writing this plan:
       deletion); a tag ruleset lets only the owner create `v*` tags;
       the release workflow runs in a `release` environment that needs
       the owner's approval.
-- [ ] **Workflows cannot be hijacked**: every action is pinned to a
+- [x] **Workflows cannot be hijacked**: every action is pinned to a
       full commit SHA with its version in a comment (Dependabot keeps
       both current); every workflow starts from `permissions:
       contents: read` and grants write per job; downloaded tools are
@@ -294,11 +294,13 @@ each task produced, and what is left:
    `APPIMAGETOOL_SHA256`; the release's first job runs in the `release`
    environment and the rest wait on it; release jobs use no cache;
    `zizmor` runs on every pull request with `--min-severity medium`.
-   **Not done: the SHA pins.** The cloud session that built this could
-   not reach other repositories on GitHub to look up commits, so
-   `scripts/pin-actions.sh` does it (and fills in the appimagetool
-   hash); it has to run once on a machine with access, and `zizmor` and
-   the release's appimagetool step fail until it has. zizmor reports
+   Every action is pinned to a commit SHA with its version in a comment
+   by `scripts/pin-actions.sh` (run for this branch once Skylar allowed
+   the lookup on 2026-10-19), which also filled in the appimagetool
+   hash; Dependabot keeps the tag pins current. `dtolnay/rust-toolchain`
+   has no release tags, so its two pins (`# stable`, `# nightly`) are
+   branch commits that Dependabot does not move; rerun the script to
+   refresh them. zizmor reports
    nothing else, at any severity.
 3. **Dependencies**: `cargo vet` with audits imported from Mozilla,
    Google, the Bytecode Alliance, Embark, ISRG, Zcash and Ariel OS: 73
@@ -359,8 +361,6 @@ each task produced, and what is left:
 
 **Still to do**, all needing the owner:
 
-- [ ] Run `scripts/pin-actions.sh` on the Mac, check `git diff`, commit
-      (or let a session with github.com access do it).
 - [ ] The GitHub settings below (also listed, with what each protects,
       in `docs/security.md`).
 - [ ] Look at a file with hidden characters on the Mac; remake the

@@ -60,7 +60,7 @@ env:
   # run with this job's token in scope. scripts/pin-actions.sh fills in the
   # hash for a new version.
   APPIMAGETOOL_VERSION: "1.9.0"
-  APPIMAGETOOL_SHA256: ""
+  APPIMAGETOOL_SHA256: "46fdd785094c7f6e545b61afcfb0f3d98d8eab243f644b4b17698c01d06083d1"
 
 jobs:
   draft:
@@ -73,7 +73,7 @@ jobs:
     permissions:
       contents: write # create the draft release
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Tag matches Cargo.toml
@@ -122,10 +122,10 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
           targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
@@ -205,7 +205,7 @@ jobs:
       # from this commit and this workflow. Anyone can check a download with
       # `gh attestation verify FILE --repo SklorGalore/nimbus` (README).
       - name: Build provenance
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
           subject-path: attest/*
 
@@ -228,7 +228,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Hash the attached packages
