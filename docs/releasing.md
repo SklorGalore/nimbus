@@ -47,25 +47,27 @@ password (`minisign -G`). Its public half is `minisign.pub` at the
 repository root (key ID `A5DFCD31F80FDD0F`); the secret half never goes
 into GitHub, so a compromised account or workflow cannot sign a release
 (`docs/milestones/m26-security.md`). Keep an offline copy of the secret
-key file. Until M26 adds `scripts/sign-release.sh`, sign each draft by
-hand, after the workflow has attached everything:
+key file.
+
+Once the workflow has attached everything to the draft, sign it from
+a checkout on the Mac:
 
 ```sh
-v=X.Y.Z
-mkdir -p ~/nimbus-release/$v && cd ~/nimbus-release/$v
-gh release download v$v --repo SklorGalore/nimbus --clobber \
-  --pattern '*.zip' --pattern '*.tar.gz' --pattern '*.dmg' \
-  --pattern '*.deb' --pattern '*.AppImage' --pattern '*-setup.exe' \
-  --pattern SHA256SUMS
-shasum -a 256 -c SHA256SUMS                 # every line must say OK
-minisign -S -m SHA256SUMS -t "Nimbus $v SHA256SUMS"   # asks for the password
-minisign -V -p /path/to/nimbus/minisign.pub -m SHA256SUMS
-gh release upload v$v SHA256SUMS.minisig --repo SklorGalore/nimbus
+scripts/sign-release.sh vX.Y.Z            # key in ~/.minisign/minisign.key
+scripts/sign-release.sh vX.Y.Z PATH/TO/minisign.key
 ```
 
+It downloads the packages and `SHA256SUMS`, refuses to sign unless
+every package matches its hash and `SHA256SUMS` lists exactly the
+packages on the release, signs (minisign asks for the password), checks
+the signature against `minisign.pub`, and uploads
+`SHA256SUMS.minisig`. A release that already has a signature is left
+alone. Needs `gh` (signed in) and `minisign` (`brew install minisign`).
+
 The trusted comment must be exactly `Nimbus X.Y.Z SHA256SUMS`: the
-updater (M31) reads the version from it. The same steps sign an already
-published release (1.0.0 and 1.0.1 shipped without signatures).
+updater (M31) reads the version from it. The script also signs an already
+published release: run it for `v1.0.0` and `v1.0.1`, which shipped
+without signatures.
 
 The workflow's own signing step stays off: leave the
 `MINISIGN_SECRET_KEY` secret unset. M26 removes that step.
