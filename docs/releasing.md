@@ -72,6 +72,34 @@ without signatures.
 The workflow's own signing step stays off: leave the
 `MINISIGN_SECRET_KEY` secret unset. M26 removes that step.
 
-The cask and winget manifest are attached for copying on: the cask goes
-in a tap (`Casks/nimbus.rb` in a `homebrew-TAP` repository) and the
-manifest in a pull request to `microsoft/winget-pkgs`.
+## Homebrew and winget
+
+Once the release is signed and published, put it in the package
+managers from the same checkout:
+
+```sh
+scripts/publish-packages.sh vX.Y.Z --dry-run   # print the cask and manifest only
+scripts/publish-packages.sh vX.Y.Z             # publish both, after asking
+scripts/publish-packages.sh vX.Y.Z --only homebrew   # or --only winget
+```
+
+It downloads `SHA256SUMS` and `SHA256SUMS.minisig`, refuses to go on
+unless the signature checks against `minisign.pub` with the trusted
+comment `Nimbus X.Y.Z SHA256SUMS`, and takes the `.dmg` and Windows
+installer hashes from that signed file. It fills in the templates in
+`packaging/`, checks the release is published and its download links
+work, shows the files, and asks before sending anything. Then:
+
+- Homebrew: it writes `Casks/nimbus.rb` in the tap
+  `SklorGalore/homebrew-nimbus` (offering to create the tap the first
+  time; `--tap OWNER/homebrew-NAME` picks another), so people install
+  with `brew install --cask sklorgalore/nimbus/nimbus`. It never moves
+  the tap back to an older version.
+- winget: it forks `microsoft/winget-pkgs` if needed, brings the fork
+  up to date, puts the three manifest files on a branch `nimbus-X.Y.Z`
+  and opens the pull request. The winget bots validate it; the first one
+  asks you to sign Microsoft's CLA in a comment. Nothing is cloned.
+
+Running it again for a version already published changes nothing.
+Needs `gh` (signed in), `minisign` and `curl`. `--dry-run` also works on
+a draft, to look at the files before publishing.

@@ -1,7 +1,8 @@
-# Homebrew cask for Nimbus. The release workflow fills in @VERSION@ and
-# @SHA256@ from the published .dmg and attaches the result to the release
-# as nimbus.rb; copy it into a tap (a repository named homebrew-TAP, under
-# Casks/nimbus.rb) and `brew install --cask TAP/nimbus` installs it.
+# Homebrew cask for Nimbus. The release workflow fills in the version and
+# the published .dmg's SHA-256 and attaches the result to the release as
+# nimbus.rb; scripts/publish-packages.sh puts it in the tap
+# (SklorGalore/homebrew-nimbus, under Casks/nimbus.rb), so
+# `brew install --cask sklorgalore/nimbus/nimbus` installs it.
 #
 # The app is unsigned, so Gatekeeper refuses the first launch; the caveat
 # below says what to do. (Homebrew's `--no-quarantine` flag skips the
