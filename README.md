@@ -186,15 +186,16 @@ reviewers accept it, which can take a few days after the release.
 
 ### Running from a terminal
 
-On macOS, the command-line binary is inside the app bundle. Homebrew
-links it for you; otherwise link it into a folder on your `PATH`:
+Run **Install nimbus Command in PATH** from the command palette
+(`Cmd+Shift+P` on macOS, `Ctrl+Shift+P` elsewhere). On macOS it links
+`/usr/local/bin/nimbus` to the app, asking for your password if that
+folder needs it; on Linux it links `~/.local/bin/nimbus`; on Windows it
+adds Nimbus's folder to your `PATH`. Homebrew and the `.deb` already put
+the command there.
 
-```sh
-ln -s /Applications/Nimbus.app/Contents/MacOS/nimbus /usr/local/bin/nimbus
-```
-
-On Windows and Linux, put `nimbus.exe` or `nimbus` in a folder on your
-`PATH`.
+With Nimbus open, `nimbus FILE` opens the file in that window, and
+`git config --global core.editor "nimbus --wait"` makes Nimbus git's
+editor ([Command line](docs/manual/command-line.md)).
 
 ### Verifying a download
 

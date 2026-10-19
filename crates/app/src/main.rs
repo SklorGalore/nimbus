@@ -25,6 +25,8 @@ mod git;
 mod groups;
 mod indexer;
 mod input;
+mod install;
+mod instance;
 mod io;
 mod keymap;
 mod languages;
@@ -138,6 +140,13 @@ pub struct Options {
     pub no_session: bool,
     /// `--workspace NAME`: open the workspace saved under that name (M19).
     pub workspace: Option<String>,
+    /// `--wait`: return only once the named files' tabs are closed, for
+    /// `git config core.editor "nimbus --wait"` (M25).
+    pub wait: bool,
+    /// Any option other than `--wait` was given. Only a plain `nimbus
+    /// [FILE|FOLDER]... [--wait]` hands its files to a running Nimbus;
+    /// other options say how a window should start, so they start one.
+    pub flagged: bool,
 }
 
 impl Options {
@@ -154,6 +163,15 @@ impl Options {
     #[must_use]
     pub fn remembers(&self) -> bool {
         !self.unattended() && !self.no_session
+    }
+
+    /// Whether this run may be the single Nimbus that later `nimbus`
+    /// commands hand their files to: any run a person sits at, except
+    /// `--merge`, which git starts for one merge and whose exit code
+    /// matters.
+    #[must_use]
+    pub fn serves(&self) -> bool {
+        !self.unattended() && self.merge.is_none()
     }
 }
 
@@ -227,7 +245,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]]] [--debug-overlay] [--preview] [--linear-blend] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]]] [--debug-overlay] [--preview] [--linear-blend] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--wait] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -268,9 +286,14 @@ fn parse_options() -> Options {
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         let flag = arg.to_str().unwrap_or("");
+        if flag == "--wait" {
+            o.wait = true;
+            continue;
+        }
         if run_flag(&mut o, flag, &mut args)
             || file_flag(&mut o, flag, &mut args, (&mut merge, &mut merge_out))
         {
+            o.flagged = true;
             continue;
         }
         if flag.starts_with("--") {
@@ -278,6 +301,10 @@ fn parse_options() -> Options {
             std::process::exit(2);
         }
         o.files.push(PathBuf::from(arg));
+    }
+    if o.wait && merge.is_none() && o.files.iter().all(|f| f.is_dir()) {
+        print_err("nimbus: --wait needs a file to wait for");
+        std::process::exit(2);
     }
     o.merge = merge.map(|(base, local, remote)| MergeArgs {
         out: merge_out.unwrap_or_else(|| local.clone()),
@@ -646,6 +673,140 @@ fn plan_startup(
     }
 }
 
+/// The request a plain run hands to a running Nimbus: its files and
+/// folders made absolute, since the running one has its own current
+/// folder. `None` when other options were given, or a path cannot be made
+/// absolute.
+fn handoff_request(options: &Options) -> Option<instance::Request> {
+    if options.flagged {
+        return None;
+    }
+    let paths = options
+        .files
+        .iter()
+        .map(|p| std::path::absolute(p).ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some(instance::Request {
+        paths,
+        wait: options.wait,
+    })
+}
+
+/// M25: hand the files to the Nimbus already running and exit, or become
+/// the one that later commands hand theirs to. Returns the socket to
+/// listen on once the event loop exists, or `None` to run without one
+/// (another Nimbus serves, or no socket can be made). Runs before the GPU
+/// thread starts, so a hand-off never wakes the GPU.
+fn single_instance(options: &Options) -> Option<instance::Doorbell> {
+    if !options.serves() {
+        return None;
+    }
+    let dir = instance::dir()?;
+    let request = handoff_request(options);
+    match instance::knock(&dir, request.as_ref()) {
+        instance::Knock::Answered(answered) => {
+            let Some(request) = request else {
+                // Another Nimbus runs, and this run's options ask for a
+                // window of its own: it opens one but does not serve.
+                return None;
+            };
+            if request.wait {
+                answered.wait();
+            }
+            std::process::exit(0);
+        }
+        instance::Knock::Nobody => match request {
+            Some(r) if r.wait => std::process::exit(wait_in_new_nimbus(&dir, &r)),
+            _ => instance::claim(&dir),
+        },
+    }
+}
+
+/// `--wait` with no Nimbus running: start one in the background with the
+/// same files, then hand them to it and wait like any `--wait`. The editor
+/// thus outlives the command, so `git commit` returns when the message's
+/// tab closes while the window stays open with any other tabs. Returns the
+/// exit code.
+fn wait_in_new_nimbus(dir: &Path, request: &instance::Request) -> i32 {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            print_err(&format!(
+                "nimbus: cannot find this program to start it: {e}"
+            ));
+            return 1;
+        }
+    };
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(&request.paths)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // git sets GIT_DIR, GIT_INDEX_FILE and others for its editor; an
+    // editor that outlives the commit must not keep them, or its own git
+    // commands (Compare with HEAD) would use that commit's index.
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(|n| n.starts_with("GIT_")) {
+            command.env_remove(name);
+        }
+    }
+    detach(&mut command);
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            print_err(&format!("nimbus: cannot start Nimbus: {e}"));
+            return 1;
+        }
+    };
+    let deadline = Instant::now() + std::time::Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if let instance::Knock::Answered(answered) = instance::knock(dir, Some(request)) {
+            answered.wait();
+            return 0;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            // It stopped before listening: a startup error, already shown.
+            return status.code().unwrap_or(1);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    print_err("nimbus: the new Nimbus did not answer in 30 s");
+    1
+}
+
+/// Start `command` in a process group of its own (Unix) or detached from
+/// this console (Windows), so Ctrl+C in the terminal that ran `nimbus
+/// --wait` stops the waiting, not the editor.
+fn detach(command: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        /// `DETACHED_PROCESS`: no console of its own or ours.
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        /// `CREATE_NEW_PROCESS_GROUP`: Ctrl+C here does not reach it.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+}
+
+/// Answer later `nimbus` commands (M25): their files go to the event loop
+/// as [`AppEvent::Handoff`], like files dropped on the window.
+fn listen(
+    doorbell: instance::Doorbell,
+    proxy: &winit::event_loop::EventLoopProxy<AppEvent>,
+) -> instance::Cleanup {
+    let proxy = proxy.clone();
+    doorbell.listen(move |request, waiter| {
+        let _ = proxy.send_event(AppEvent::Handoff(request.paths, waiter));
+    })
+}
+
 fn main() {
     let started = Instant::now();
     // Logging and argument parsing take microseconds. They come first so the
@@ -655,6 +816,8 @@ fn main() {
         .init();
     crash::install();
     let options = parse_options();
+    // One knock on a local socket (M25); handing files over exits here.
+    let doorbell = single_instance(&options);
     if let Some(backend) = options.backend {
         io::force_backend(backend);
     }
@@ -740,6 +903,7 @@ fn main() {
     // Finder's Open With and Dock drops (open_with.rs).
     #[cfg(target_os = "macos")]
     open_with::install(proxy.clone());
+    let cleanup = doorbell.map(|bell| listen(bell, &proxy));
     let mut app = App::new(
         options,
         started,
@@ -753,6 +917,9 @@ fn main() {
         print_err(&format!("nimbus: event loop error: {e}"));
         std::process::exit(1);
     }
+    // The socket goes before the process does, so the next `nimbus`
+    // starts a Nimbus of its own at once.
+    drop(cleanup);
     if app.exit_code != 0 {
         std::process::exit(app.exit_code);
     }

@@ -41,6 +41,7 @@ download).
 | `state.toml`, named workspaces | Trusted (Nimbus's own) | Restore windows and sessions | Written atomically; a broken file is ignored with a warning. |
 | The update check's answer | Untrusted (the network) | Report a newer version | Only when asked, or when `check_updates` is on; HTTPS with the system's certificates; the answer is capped and only `tag_name` is read, which must be letters, digits, `.` and `-`; the release page URL is built from it, not taken from the answer (`update.rs`). Nothing is downloaded until M31, which checks the signature first. |
 | Files dropped on the window, or passed by Finder's Open With | Untrusted | Open in tabs, like files named on the command line | The same path as opening a file. |
+| A later `nimbus` command, through the single-instance socket (M25) | The user's own (only they can reach it) | Name absolute paths to open in tabs, and ask with `--wait` to be told when they close | The socket is in `run/` beside the config, mode 0700 and owned by the user, checked at every start (`instance::prepare`); on Windows a loopback port whose number and a 128-bit random token sit in `%APPDATA%\nimbus\run`, and a request without the token is dropped. A request is records of `path` and `wait` only, capped at 1 MB and 4,096 paths and read with a 2 s timeout; anything else refuses the whole request (`instance::read_request`, tested). |
 | The clipboard | Untrusted | Be pasted as text | Pasted as text; never interpreted. |
 
 **Hidden text.** Bidirectional controls (U+202A–202E, U+2066–2069,
@@ -223,10 +224,15 @@ each was done.
 
 ## Rules for later milestones
 
-- **M25 (command line)**: the single-instance socket lives in a
-  directory only the user can read (mode 0700; on Windows a pipe whose
-  ACL names only the user), and accepts only file paths and `--wait`,
-  never commands.
+- **M25 (command line)**, done: the single-instance socket lives in a
+  directory only the user can read (mode 0700), and accepts only file
+  paths and `--wait`, never commands. Windows uses a loopback port and a
+  random token in the user's own `%APPDATA%` rather than a named pipe,
+  since a pipe needs `unsafe` or a new crate; the token is what keeps
+  other local users out. Install `nimbus` Command runs a privileged
+  command only through macOS's own password prompt, with the paths
+  passed as arguments and quoted by AppleScript, never pasted into the
+  shell text.
 - **M27–M30 (git client)**: the read-only viewer uses the same git
   settings as `git.rs` (`git()`): no fsmonitor, no hooks, no lazy
   fetch, no repository-defined filter programs. Commands that write

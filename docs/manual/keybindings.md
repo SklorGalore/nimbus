@@ -109,6 +109,8 @@ These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
 | Open Config File | `app.openConfig` | — | — |
 | Check for Updates | `app.checkUpdates` | — | — |
 | Open Latest Release Page | `app.openRelease` | — | — |
+| Install nimbus Command in PATH | `app.installCommand` | — | — |
+| Uninstall nimbus Command | `app.uninstallCommand` | — | — |
 
 ### Compare and merge
 
