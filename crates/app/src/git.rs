@@ -44,8 +44,13 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+// Paths spelled out so the fuzz targets, which compile this file with
+// `#[path]`, find the submodules too.
+#[path = "git/parse.rs"]
 pub mod parse;
+#[path = "git/repo.rs"]
 mod repo;
+#[path = "git/stream.rs"]
 mod stream;
 
 pub use parse::{Commit, FileChange, Kind, Ref, RefKind, Status, ago, date};
