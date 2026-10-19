@@ -61,6 +61,24 @@ section before tagging.
   (`gh attestation verify FILE --repo SklorGalore/nimbus`), and the
   release binaries carry their dependency list (`cargo audit bin`).
 
+- Chinese, Japanese, Korean, Thai, Indic and other scripts are drawn
+  with a font made for their script (M24): a built-in list per platform
+  (PingFang, Hiragino, Microsoft YaHei, Noto Sans CJK and others), with
+  your own picks first from a new `[fallback_fonts]` table
+  (`han = ["Hiragino Sans"]`). Wide characters are scaled to fit their
+  two cells, so mixed lines stay on the grid.
+- `cjk_language = "ja" | "zh-Hans" | "zh-Hant" | "ko"` picks the
+  regional shapes of Han characters (`骨` looks Japanese to a Japanese
+  reader). By default it follows the system language.
+- `font_weight` (100 to 900) sets the weight of a variable font, or picks
+  the nearest weight of a font family; bold text is drawn 300 heavier.
+- A file of 256 MB or more in another known encoding (Windows-1252,
+  UTF-16, Shift_JIS...) opened with **Reopen with Encoding** or
+  `[encodings]` is now editable instead of read-only: Nimbus decodes it
+  into a private temporary copy and saves back in its encoding.
+- Each East Asian encoding (behind the `east-asian` build feature) has a
+  test file that round-trips, and CI tests with the feature on.
+
 ### Changed
 
 - **The update check at startup is now on by default**

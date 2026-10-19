@@ -558,6 +558,7 @@ it.
 | `imara-diff` | 0.2 | line diff (Myers) over our own tokens | M9 |
 | `ureq` | 3 | HTTPS for the update check; rustls with the system's certificate store | M15 |
 | `trash` | 5 | the system trash for Delete in the tree | M12 |
+| `sys-locale` | 0.3 | the system language, the default for `cjk_language` | M24 |
 
 ## 8. Milestones
 
@@ -591,7 +592,7 @@ introduces and points at the code.
 | 21 | Foundations and 1.0 | **Done** | Fuzzing, a soak run, a crash record, version 1.0 (ropey 2 and winit 0.31 wait for stable releases) | [m21](docs/milestones/m21-foundations-and-1-0.md) |
 | 22 | Screen readers | Next | Use Nimbus with VoiceOver, NVDA or Orca | [m22](docs/milestones/m22-screen-readers.md) |
 | 23 | Library upgrades | In progress: compatibility mode built, upgrades waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
-| 24 | International text | Planned | CJK and other scripts in the right fonts, variable fonts, editable huge files in single-byte encodings | [m24](docs/milestones/m24-international-text.md) |
+| 24 | International text | In progress: built; the typing benchmark and checks on the owner's Mac wait | CJK and other scripts in the right fonts, variable fonts, editable huge files in other encodings | [m24](docs/milestones/m24-international-text.md) |
 | 25 | Command line | In progress | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
 | 26 | Security | In progress | Signed releases with the key off GitHub; protected branches and tags; pinned workflows; reviewed dependencies; untrusted files stay data | [m26](docs/milestones/m26-security.md) |
 | 27 | Git window: viewing | Planned | `nimbus --git`: changes, history with a branch graph, any commit's diffs | [m27](docs/milestones/m27-git-viewer.md) |
@@ -685,6 +686,20 @@ raised were answered on 2026-10-18:
   from M25 to M24. The two dictionary questions fell away with it.
 - M24: the East Asian encodings stay behind the `east-asian` cargo
   feature, off by default, though offering them would cost about 1 KB.
+- M24, as built: a huge file in a known other encoding is decoded into a
+  private UTF-8 copy on disk and mapped, instead of the plan's decode
+  step inside the piece table. Positions are UTF-8 byte offsets, and a
+  Windows-1252 byte such as `é` is two bytes in UTF-8, so "one byte, one
+  character" did not keep offsets after all; the copy keeps the piece
+  table untouched and works for every encoding, so multi-byte encodings
+  (UTF-16, Shift_JIS) are editable too. Cost: disk space for the copy
+  and a pause to decode (about a second per GB).
+- M24, as built: Han follows `cjk_language`, else the system language
+  (`sys-locale`); a system in any other language gets Simplified
+  Chinese. Graphemes a fallback font draws are shaped one cell at a
+  time with their script and language, not as whole runs, which keeps
+  the grid rule simple; joining across cells (Arabic) stays out with
+  right-to-left text.
 
 The questions the drafts of M16–M21 raised were answered on
 2026-10-18, when the owner approved the six plans and their order:
@@ -853,4 +868,5 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-19 | M31: updates install on request only; the startup update check becomes on by default (`check_updates = true`), reversing M15's off default; Homebrew and `.deb` installs are handed back to their package manager | §9, m31 |
 | 2026-10-19 | M31 built: the replaced version is kept until the next update (so Roll Back Update has something to restore) instead of being deleted at the new version's first frame; a version that never draws its first frame is rolled back at the next start; Windows restarts into the last session; builds from source are never replaced | §9, m31 |
 | 2026-10-19 | M22: the screen-reader description (AccessKit) is built only while a reader is active and the window is created hidden until the adapter exists; the editor is one text field holding a window of 200 lines or 256 KB either side of the cursor (not of the view, so a reader's place survives scrolling), one text run per visual row, rebuilt near its edges; not yet described: Search results, the Compare panel, compare and merge rows, preview headings, unfocused groups | §9, m22 |
+| 2026-10-19 | M24 built (in progress until the typing benchmark and the owner's Mac checks): fallback fonts per script (`fallback_fonts`, built-in lists per platform, then M8's rule), `cjk_language` defaulting to the system language and else Simplified Chinese, fallback graphemes shaped per cell with script and language, `font_weight` for variable and static fonts; huge files in another encoding are decoded into a private UTF-8 copy and edited mapped, in every encoding rather than single-byte only, saving back in their encoding; new dependency `sys-locale` | §7, §9, m24 |
 | 2026-10-19 | M25 built (in progress until checked on the owner's Mac): the single-instance socket is `run/` beside the config (so `NIMBUS_CONFIG_DIR` isolates it); only a plain `nimbus [FILE\|FOLDER]... [--wait]` hands off, any other option starts its own window; `--wait` with no Nimbus open starts one in the background (git's `GIT_*` variables removed) and waits on it, so the editor outlives the commit; Windows uses a loopback port with a random token in `%APPDATA%` instead of a named pipe (no crate, no `unsafe`), and edits the user `PATH` through PowerShell, which also tells running programs it changed | §2, m25, docs/security.md |

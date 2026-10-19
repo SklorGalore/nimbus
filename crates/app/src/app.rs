@@ -2986,7 +2986,9 @@ impl App {
     fn save_with(&mut self, choice: Choice) {
         let i = self.active;
         let doc = self.doc();
-        if doc.saves_on_worker() && !choice.encoding.is_utf8() {
+        if doc.saves_on_worker() && !choice.encoding.is_utf8() && !doc.is_transcoded() {
+            // A huge file read as bytes may not be text: only a decoded
+            // copy (M24) can be written in another encoding.
             self.say(
                 format!(
                     "Files over {} MB save only as UTF-8",
