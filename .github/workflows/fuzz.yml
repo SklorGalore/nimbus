@@ -20,6 +20,9 @@ on:
         required: false
         default: "3600"
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -44,9 +47,23 @@ jobs:
           - target: theme
             features: app-theme
             seeds: crates/app/themes
+          # M26: every bundled grammar (tree-sitter parsers are C) and the
+          # Markdown outline; encodings; workspace files; git's output.
+          - target: highlight
+            features: syntax
+          - target: encoding
+            features: app-encoding
+          - target: workspace
+            features: app-workspace
+          - target: git_output
+            features: app-git
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
@@ -63,17 +80,21 @@ jobs:
 
       - name: Seed the corpus
         if: matrix.seeds
+        env:
+          TARGET: ${{ matrix.target }}
+          SEEDS: ${{ matrix.seeds }}
         run: |
-          mkdir -p "fuzz/corpus/${{ matrix.target }}"
-          cp ${{ matrix.seeds }}/*.toml "fuzz/corpus/${{ matrix.target }}/"
+          mkdir -p "fuzz/corpus/$TARGET"
+          cp "$SEEDS"/*.toml "fuzz/corpus/$TARGET/"
 
       - name: Fuzz
         working-directory: fuzz
         env:
           SECONDS_PER_TARGET: ${{ inputs.seconds || '3600' }}
           FEATURES: ${{ matrix.features }}
+          TARGET: ${{ matrix.target }}
         run: |
-          cargo +nightly fuzz run "${{ matrix.target }}" ${FEATURES:+--features "$FEATURES"} -- \
+          cargo +nightly fuzz run "$TARGET" ${FEATURES:+--features "$FEATURES"} -- \
             -max_total_time="$SECONDS_PER_TARGET" -timeout=60
 
       - name: Upload the crashing input

@@ -11,6 +11,9 @@ on:
   pull_request:
     types: [labeled]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -21,7 +24,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'remake-screenshot'
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@v2
       - name: Render the reference frame
         run: NIMBUS_UPDATE_SCREENSHOT=1 cargo test -p nimbus --test screenshot

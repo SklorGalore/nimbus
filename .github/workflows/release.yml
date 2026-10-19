@@ -23,14 +23,23 @@
 #                                       icon file, for no installer
 #   nimbus.rb, winget-manifest.zip      Homebrew cask and winget manifest,
 #                                       filled in from the packages above
-#   SHA256SUMS, SHA256SUMS.minisig      each package's SHA-256, made last,
-#                                       and its minisign signature when
-#                                       the MINISIGN_SECRET_KEY secret is set
+#   SHA256SUMS                          each package's SHA-256, made last
+#   SHA256SUMS.minisig                  its signature, added afterwards by
+#                                       scripts/sign-release.sh on the
+#                                       owner's Mac (docs/releasing.md)
+#
+# Hardening (M26, docs/security.md): every token starts read-only and each
+# job asks for what it needs; the first job runs in the `release`
+# environment, which waits for the owner's approval, and everything else
+# waits for it; nothing is restored from a cache, so a poisoned cache from
+# a pull request cannot reach a release; every build uses Cargo.lock as
+# committed (--locked) and records its dependency list in the binary
+# (cargo auditable); every package gets a build provenance attestation.
 #
 # Signing a package (Developer ID, notarisation, Authenticode) is not done:
 # the owner has no Apple Developer account or Windows certificate. If one
 # is bought later, its steps go in the build job behind `if: env.SECRET
-# != ''`, like the minisign step, so forks and test tags keep working.
+# != ''`, so forks and test tags keep working.
 
 name: Release
 
@@ -39,17 +48,34 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # cargo-auditable embeds the dependency list (a compressed copy of
+  # Cargo.lock's names and versions, a few KB) in the binary, so
+  # `cargo audit bin nimbus` can check a shipped copy for advisories.
+  CARGO_AUDITABLE_VERSION: 0.7.7
+  # appimagetool by exact version and hash, never "continuous": the file is
+  # run with this job's token in scope. scripts/pin-actions.sh fills in the
+  # hash for a new version.
+  APPIMAGETOOL_VERSION: "1.9.0"
+  APPIMAGETOOL_SHA256: ""
 
 jobs:
   draft:
     name: draft release
     runs-on: ubuntu-latest
+    # The owner approves each release here (Settings > Environments >
+    # release: required reviewer, tags v* only). The other jobs need this
+    # one, so nothing builds or uploads before that click.
+    environment: release
+    permissions:
+      contents: write # create the draft release
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Tag matches Cargo.toml
         shell: bash
         run: |
@@ -89,21 +115,30 @@ jobs:
             os: ubuntu-22.04
           - name: windows
             os: windows-latest
+    permissions:
+      contents: write # upload packages to the draft
+      id-token: write # sign the provenance attestation (Sigstore)
+      attestations: write # store the attestation with the repository
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: stable
           targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable --locked --version "$CARGO_AUDITABLE_VERSION"
 
       - name: macOS app, zip and dmg
         if: matrix.name == 'macos'
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          cargo build --release -p nimbus --target aarch64-apple-darwin
-          cargo build --release -p nimbus --target x86_64-apple-darwin
+          cargo auditable build --release --locked -p nimbus --target aarch64-apple-darwin
+          cargo auditable build --release --locked -p nimbus --target x86_64-apple-darwin
           mkdir -p dist
           lipo -create -output dist/nimbus \
             target/aarch64-apple-darwin/release/nimbus \
@@ -112,6 +147,7 @@ jobs:
           zip=$(scripts/bundle-macos.sh dist/nimbus "$version" dist)
           dmg=$(scripts/dmg-macos.sh dist/Nimbus.app "$version" dist)
           gh release upload "$GITHUB_REF_NAME" "$zip" "$dmg" --clobber
+          mkdir -p attest && cp "$zip" "$dmg" attest/
 
       - name: Linux tarball, deb and AppImage
         if: matrix.name == 'linux'
@@ -120,7 +156,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwayland-dev libxkbcommon-dev
           version="${GITHUB_REF_NAME#v}"
-          cargo build --release -p nimbus
+          cargo auditable build --release --locked -p nimbus
           name="nimbus-$version-linux-x86_64"
           mkdir -p "dist/$name"
           cp target/release/nimbus "dist/$name/"
@@ -131,18 +167,25 @@ jobs:
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           deb=$(scripts/deb-linux.sh target/release/nimbus "$version" dist)
           dpkg-deb --info "$deb"
-          curl -sSL -o dist/appimagetool \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          if [ -z "$APPIMAGETOOL_SHA256" ]; then
+            echo "APPIMAGETOOL_SHA256 is empty: run scripts/pin-actions.sh and commit the result." >&2
+            exit 1
+          fi
+          curl -fsSL -o dist/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-x86_64.AppImage"
+          echo "$APPIMAGETOOL_SHA256  dist/appimagetool" | sha256sum -c -
           chmod +x dist/appimagetool
           image=$(scripts/appimage-linux.sh target/release/nimbus "$version" dist dist/appimagetool)
           gh release upload "$GITHUB_REF_NAME" "dist/$name.tar.gz" "$deb" "$image" --clobber
+          mkdir -p attest && cp "dist/$name.tar.gz" "$deb" "$image" attest/
 
       - name: Windows zip and installer
         if: matrix.name == 'windows'
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME.Substring(1)
-          cargo build --release -p nimbus
+          cargo auditable build --release --locked -p nimbus
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $name = "nimbus-$version-windows-x86_64"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
           Copy-Item target/release/nimbus.exe "dist/$name/"
@@ -155,6 +198,16 @@ jobs:
           & $iscc "/DVersion=$version" "/DSource=$PWD\dist\$name" "/DOut=$PWD\dist" packaging\windows\nimbus.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           gh release upload $env:GITHUB_REF_NAME "dist/$name.zip" "dist/$name-setup.exe" --clobber
+          New-Item -ItemType Directory -Force attest | Out-Null
+          Copy-Item "dist/$name.zip", "dist/$name-setup.exe" attest/
+
+      # A signed statement, made by GitHub's builder, that these files came
+      # from this commit and this workflow. Anyone can check a download with
+      # `gh attestation verify FILE --repo SklorGalore/nimbus` (README).
+      - name: Build provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: attest/*
 
   # Once every package is attached: a SHA256SUMS file listing each one's
   # SHA-256 hash, so a download can be checked for damage with
@@ -163,20 +216,21 @@ jobs:
   # from the files as uploaded, read back from the release. The package
   # manifests take their hashes from the same files.
   #
-  # When the repository has a MINISIGN_SECRET_KEY secret (the contents of
-  # a key made with `minisign -G -W`, so no password; its public half is
-  # minisign.pub at the repository root), SHA256SUMS is signed with it.
-  # A signature that checks against the published key says the file came
-  # from whoever holds the secret, which a bare hash cannot.
+  # SHA256SUMS is signed afterwards on the owner's Mac by
+  # scripts/sign-release.sh, never here: a key in GitHub would let anyone
+  # who can run a workflow sign an update (M26, docs/security.md).
   checksums:
     name: SHA256SUMS and manifests
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload SHA256SUMS and the manifests
     env:
       GH_TOKEN: ${{ github.token }}
-      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Hash the attached packages
         shell: bash
         run: |
@@ -194,20 +248,3 @@ jobs:
           (cd dist/winget && zip -q ../winget-manifest.zip ./*.yaml)
           gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS dist/nimbus.rb dist/winget-manifest.zip \
             --repo "$GITHUB_REPOSITORY" --clobber
-      - name: Sign SHA256SUMS
-        if: env.MINISIGN_SECRET_KEY != ''
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y minisign
-          umask 077
-          printf '%s\n' "$MINISIGN_SECRET_KEY" > minisign.key
-          minisign -S -s minisign.key -m dist/SHA256SUMS -t "Nimbus ${GITHUB_REF_NAME#v} SHA256SUMS"
-          rm -f minisign.key
-          # The signature must check against the key people will use.
-          test -f minisign.pub
-          minisign -V -p minisign.pub -m dist/SHA256SUMS
-          gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS.minisig --repo "$GITHUB_REPOSITORY" --clobber
-      - name: Signing skipped
-        if: env.MINISIGN_SECRET_KEY == ''
-        run: echo "MINISIGN_SECRET_KEY is not set; SHA256SUMS is not signed."
