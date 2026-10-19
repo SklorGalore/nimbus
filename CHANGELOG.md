@@ -8,6 +8,13 @@ section before tagging.
 
 ### Added
 
+- Screen readers can read Nimbus: VoiceOver, NVDA, Narrator and Orca
+  see the text as a text field they can move through by character, word
+  and line, the tabs as a tab list, the file tree as a tree, the palette
+  and pickers as lists, labelled find fields with their match count, and
+  messages such as "Saved" spoken as they appear. Nothing is built
+  until a screen reader asks. The manual has a new Accessibility
+  chapter.
 - The release signing key, `minisign.pub`, is in the repository and
   printed in the README, so `SHA256SUMS.minisig` can be checked.
 - `scripts/publish-packages.sh` puts a signed, published release in the
@@ -16,6 +23,30 @@ section before tagging.
 - The README and manual say how to install with Homebrew
   (`brew install --cask sklorgalore/nimbus/nimbus`) and winget
   (`winget install SklorGalore.Nimbus`).
+- Bidirectional control characters and zero-width characters are drawn
+  as a red box, even with whitespace rendering off, so text whose
+  display order differs from its bytes ("Trojan Source") cannot hide.
+- `SECURITY.md` says how to report a security problem privately, and
+  `docs/security.md` lists everything Nimbus reads and what each input
+  may do.
+- Each release package has a GitHub build provenance attestation
+  (`gh attestation verify FILE --repo SklorGalore/nimbus`), and the
+  release binaries carry their dependency list (`cargo audit bin`).
+
+### Changed
+
+- Open Project Workspace opens only folders and files inside the
+  project: a `.nimbus/workspace.toml` that names paths elsewhere (an
+  absolute path, `../`, or a link pointing out) has them skipped, and
+  the message line says how many.
+- Compare with HEAD no longer lets a repository's own config run
+  programs: git's filesystem monitor, hooks and lazy fetching are off,
+  and a filter program defined in the repository's `.git/config` is not
+  run (the stored file is compared as it is instead).
+- Preview links with an absolute path are no longer followed.
+- Releases are built from the committed `Cargo.lock` (`--locked`), every
+  workflow action is pinned to a commit, and dependency updates must
+  pass `cargo vet`.
 
 ### Changed
 

@@ -2117,6 +2117,7 @@ impl Painter<'_, '_> {
             );
             self.whitespace(row, (first, width));
         }
+        self.hidden_chars(row, (first, width));
         for i in self.next_sel..self.sels.len() {
             let head = self.sels[i].head;
             if self.sels[i].range().start > row.end() {
@@ -2222,6 +2223,30 @@ impl Painter<'_, '_> {
                 }
             }
             col += w;
+        }
+    }
+
+    /// A box on each bidirectional control and zero-width character in the
+    /// row's visible part (M26), whatever `render_whitespace` says: these
+    /// draw as nothing, and "Trojan Source" code uses them to make text
+    /// read differently from what it is (`column::is_hidden_char`).
+    fn hidden_chars(&mut self, row: &RowGeom<'_>, (first, width): (usize, usize)) {
+        if row.seg.is_ascii() {
+            return;
+        }
+        let tab = self.tab_width;
+        let cell = self.layout.metrics.cell_width;
+        let lh = self.layout.metrics.line_height;
+        let (s, e, sc) = visible_span(row.seg, row.start_col, first, width, tab);
+        let Some(text) = row.seg.get(s..e) else {
+            return;
+        };
+        for (col, w) in column::hidden_cols(text, sc, tab) {
+            let x = row.left + f(col - row.start_col) * cell;
+            if x >= self.layout.text_left {
+                self.gpu
+                    .push_rect([x, row.top], [f(w) * cell, lh], self.deco.ui.hidden_char);
+            }
         }
     }
 
@@ -2448,12 +2473,8 @@ pub fn draw_find_bar(gpu: &mut Gpu, ui: &Ui, bar: &FindBar, layout: &Layout, cur
     );
 
     let label_x = layout.left + layout.margin;
-    let field_x = (label_x + 9.0 * cell).round();
-    // Right side: toggles and the match count.
     let status = bar.status();
-    let right_cols = 8 + status.chars().count().max(10);
-    let field_w =
-        (layout.width - field_x - f(right_cols) * cell - 2.0 * layout.margin).max(10.0 * cell);
+    let [field_x, _, field_w, _] = find_field_rect(layout, &status, 0);
 
     let rows: &[(Field, &str)] = if bar.replace_mode {
         &[(Field::Find, "Find"), (Field::Replace, "Replace")]
@@ -2504,6 +2525,21 @@ pub fn draw_find_bar(gpu: &mut Gpu, ui: &Ui, bar: &FindBar, layout: &Layout, cur
         ui.gutter
     };
     gpu.push_text_line([x.round(), y], &status, color);
+}
+
+/// Where the find bar's field on `row` (0 the pattern, 1 the
+/// replacement) is drawn, `[x, y, width, height]`, when the bar shows
+/// `status` on its right.
+pub(crate) fn find_field_rect(layout: &Layout, status: &str, row: usize) -> [f32; 4] {
+    let (cell, lh) = (layout.metrics.cell_width, layout.metrics.line_height);
+    let label_x = layout.left + layout.margin;
+    let field_x = (label_x + 9.0 * cell).round();
+    // Right side: toggles and the match count.
+    let right_cols = 8 + status.chars().count().max(10);
+    let field_w =
+        (layout.width - field_x - f(right_cols) * cell - 2.0 * layout.margin).max(10.0 * cell);
+    let y = layout.find_top() + layout.margin + f(row) * (lh + layout.margin);
+    [field_x, y, field_w, lh]
 }
 
 /// Which row of the find bar is at window height `y`: 0 for the query,
@@ -2725,6 +2761,22 @@ fn picker_box(layout: &Layout) -> ([f32; 3], f32) {
         [x, y, w],
         layout.metrics.line_height + (layout.margin / 2.0).round(),
     )
+}
+
+/// Where the picker's query text starts and how wide the field is,
+/// `[x, y, width, height]`, and where its row `row` is.
+pub(crate) fn picker_rects(layout: &Layout, row: usize) -> ([f32; 4], [f32; 4]) {
+    let cell = layout.metrics.cell_width;
+    let ([x, y, w], row_h) = picker_box(layout);
+    let pad = (layout.margin / 2.0).round();
+    let field = [
+        x + cell,
+        y + pad,
+        w - 2.0 * cell,
+        layout.metrics.line_height,
+    ];
+    let list_y = y + row_h + layout.margin;
+    (field, [x, list_y + f(row) * row_h, w, row_h])
 }
 
 /// The picker row under window position `(x, y)`, if any.

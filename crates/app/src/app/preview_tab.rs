@@ -213,7 +213,15 @@ impl App {
             .and_then(std::path::Path::parent)
             .map(std::path::Path::to_path_buf);
         match dir.map(|d| d.join(file)) {
-            Some(path) if !file.is_empty() && !file.contains(':') && path.is_file() => {
+            // Relative paths only (M26): no scheme (`file:`, `javascript:`)
+            // and no absolute path, which `join` would put in place of the
+            // document's folder; and only a regular file, never a folder.
+            Some(path)
+                if !file.is_empty()
+                    && !file.contains(':')
+                    && !std::path::Path::new(file).has_root()
+                    && path.is_file() =>
+            {
                 self.open_path(&path);
             }
             _ => self.say(format!("Not a link Nimbus can open: {url}"), false),

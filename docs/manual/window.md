@@ -148,6 +148,11 @@ Nimbus remembers one per project folder by itself (see
   to `.gitignore` unless the project should share it. Opening a folder
   that has one, when this computer has no session for it yet, shows a
   note offering **Open Project Workspace**. It never loads by itself.
+  Because the file comes with whatever you cloned or unpacked, Open
+  Project Workspace opens only what is inside that project: folders and
+  files elsewhere (an absolute path, `../`, or a link pointing out of the
+  project) are skipped, and the message line says how many. Use **Save
+  Workspace As…** for a workspace whose folders are in several places.
 
 A workspace file holds the folders, the sidebar's mode, the folders open
 in the tree, the editor groups and the tabs. Settings stay in
@@ -155,7 +160,7 @@ in the tree, the editor groups and the tabs. Settings stay in
 
 ```toml
 # A Nimbus workspace: its folders and the files it had open.
-roots = [".", "/Users/me/src/shared-lib"]
+roots = [".", "vendor/shared-lib"]
 mode = "files"
 expanded = ["src"]
 
@@ -234,6 +239,17 @@ Render Whitespace in the palette cycles between selection, everywhere and
 never. Toggle Indent Guides draws a thin line at each indentation level,
 brighter for the level around the cursor. Both start from
 `render_whitespace` and `indent_guides` in the [settings](settings.md).
+
+Characters that would otherwise draw as nothing are always shown as a
+red box in their cell, whatever the whitespace setting: the controls
+that reorder right-to-left and left-to-right text (U+202A–202E,
+U+2066–2069, U+200E, U+200F, U+061C) and zero-width characters such as
+the zero-width space (U+200B), word joiner (U+2060), a byte order mark
+inside the text (U+FEFF) and the soft hyphen (U+00AD). Code can use them
+to read differently from what it does (the "Trojan Source" trick), or
+to make two names that look the same differ. The zero-width joiner and
+non-joiner are not marked, since emoji and many scripts need them. The
+colour is the theme's `hidden_char`.
 
 The scrollbar fades out a second after you stop scrolling, and comes back
 when you scroll or point at it.

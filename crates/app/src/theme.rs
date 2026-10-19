@@ -138,6 +138,9 @@ ui_colors! {
     guide,
     /// The indent guide enclosing the cursor.
     guide_active,
+    /// The box marking a character that would otherwise be invisible: a
+    /// bidirectional control or a zero-width character (M26).
+    hidden_char,
 }
 
 /// A loaded theme.

@@ -227,6 +227,17 @@ RWQP3Q/4Mc3fpXtWGJHvMnuFQsX7WPR3tW8cPRKRzPeF+B8DlSwzqodi
 so `minisign -V -P RWQP3Q/4Mc3fpXtWGJHvMnuFQsX7WPR3tW8cPRKRzPeF+B8DlSwzqodi -m SHA256SUMS`
 works without a copy of the repository.
 
+Releases from 1.1.0 on also carry a build provenance attestation for
+each package: GitHub's own record of the commit and workflow that built
+it. With the [GitHub CLI](https://cli.github.com):
+
+```sh
+gh attestation verify Nimbus-1.1.0-macos.dmg --repo SklorGalore/nimbus
+```
+
+Found a security problem? Please report it privately, as
+[SECURITY.md](SECURITY.md) describes.
+
 ### Updates
 
 Nimbus never connects to the network unless you ask it to. Run "Check
@@ -399,10 +410,10 @@ milestone lands on development, move its line up to "Available now". -->
   interface font
 - Languages, second pass: better Markdown and embedded code
 - Foundations for 1.0: fuzzing, a soak test and a crash record
+- Screen-reader support: VoiceOver, NVDA, Narrator and Orca
 
 **After 1.0**
 
-- Screen-reader support
 - Newer versions of the text and window libraries (ropey 2, winit 0.31)
   once they are stable
 - Compatibility mode: Nimbus keeps working on machines without a usable

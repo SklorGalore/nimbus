@@ -87,6 +87,62 @@ pub fn byte_at_col(line: &str, col: usize, tab_width: usize) -> usize {
     byte_at_half_col(line, (2 * col).saturating_sub(1), tab_width)
 }
 
+/// Whether `c` draws as nothing yet can change what text means: a
+/// bidirectional control or a zero-width character (M26).
+///
+/// Bidirectional controls (U+202A–202E, U+2066–2069, and the marks U+200E,
+/// U+200F and U+061C) tell a bidi-aware viewer to show text in another
+/// order than its bytes. "Trojan Source" code uses them so a reviewer
+/// reads one thing while the compiler sees another; a zero-width space,
+/// word joiner or byte-order mark inside a word makes two identifiers
+/// that look the same differ. The editor draws a box on each one so it
+/// cannot hide in plain sight.
+///
+/// The zero-width joiner and non-joiner (U+200D, U+200C) are left out on
+/// purpose: emoji sequences and scripts such as Persian and Devanagari
+/// need them, and they sit inside a grapheme with the characters they
+/// join rather than alone.
+#[must_use]
+pub fn is_hidden_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{061C}'
+            | '\u{200B}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{FEFF}'
+            | '\u{00AD}'
+            | '\u{180E}'
+    )
+}
+
+/// The columns of the hidden characters ([`is_hidden_char`]) in `seg`, a
+/// piece of a line starting at column `start_col`: one `(column, width)`
+/// per grapheme that holds one. Each is its own grapheme (Unicode puts a
+/// break around format characters), and [`grapheme_cols`] gives it one
+/// column, so there is a cell to draw the mark in.
+pub fn hidden_cols(
+    seg: &str,
+    start_col: usize,
+    tab_width: usize,
+) -> impl Iterator<Item = (usize, usize)> + '_ {
+    // Plain ASCII, by far the common case, cannot hold one: skip the
+    // grapheme walk.
+    let any = !seg.is_ascii() && seg.chars().any(is_hidden_char);
+    let mut col = start_col;
+    seg.graphemes(true)
+        .take_while(move |_| any)
+        .filter_map(move |g| {
+            let at = col;
+            let w = grapheme_cols(g, col, tab_width);
+            col += w;
+            g.chars().any(is_hidden_char).then_some((at, w))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +176,31 @@ mod tests {
         for (half, byte) in [(0, 0), (1, 0), (2, 3), (3, 3), (4, 3), (5, 4), (50, 4)] {
             assert_eq!(byte_at_half_col("日x", half, 4), byte, "half {half}");
         }
+    }
+
+    #[test]
+    fn hidden_characters_get_a_cell_each() {
+        // Trojan Source: an RLO and a PDI around a comment's end.
+        let line = "x = 1; /* \u{202E} } \u{2066}if admin\u{2069} */";
+        let cols: Vec<_> = hidden_cols(line, 0, 4).collect();
+        assert_eq!(cols, [(10, 1), (14, 1), (23, 1)]);
+        // A zero-width space inside an identifier, after a tab.
+        assert_eq!(
+            hidden_cols("\tab\u{200B}c", 0, 4).collect::<Vec<_>>(),
+            [(6, 1)]
+        );
+        // Columns count from the segment's start column.
+        assert_eq!(hidden_cols("\u{FEFF}", 7, 4).collect::<Vec<_>>(), [(7, 1)]);
+        assert_eq!(hidden_cols("plain ascii", 0, 4).count(), 0);
+        assert_eq!(hidden_cols("日本語 é", 0, 4).count(), 0);
+    }
+
+    #[test]
+    fn joiners_in_emoji_and_scripts_are_not_hidden() {
+        assert!(is_hidden_char('\u{202E}'));
+        assert!(is_hidden_char('\u{00AD}'));
+        assert!(!is_hidden_char('\u{200D}'));
+        assert!(!is_hidden_char('\u{200C}'));
+        assert_eq!(hidden_cols("a👨‍👩‍👧b می‌خواهم", 0, 4).count(), 0);
     }
 }

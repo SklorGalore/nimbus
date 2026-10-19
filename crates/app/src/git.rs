@@ -12,6 +12,18 @@
 //! enforces a [`TIMEOUT`] and an output cap ([`MAX_OUTPUT`]) and kills git
 //! when either is exceeded. These calls block for up to [`TIMEOUT`], so the
 //! app runs them on a worker thread, never on the event loop.
+//!
+//! # Untrusted repositories (M26)
+//!
+//! The folder may be a repository the user cloned or unpacked, and a
+//! repository's own `.git/config` can name programs for git to run: a
+//! filesystem monitor (`core.fsmonitor`), hooks, and filters that rewrite
+//! a file on checkout (`filter.NAME.smudge`). Running those would let
+//! opening a file in Nimbus run code. So every call turns the monitor and
+//! hooks off ([`git`]), never fetches missing objects from a remote, and
+//! [`show`] applies checkout filters only when no filter program comes
+//! from the repository's own config ([`repo_filters`]); filters the user
+//! installed themselves, such as Git LFS in `~/.gitconfig`, still apply.
 
 use std::fmt;
 use std::io::{ErrorKind, Read};
@@ -35,6 +47,10 @@ pub const MAX_OUTPUT: usize = 256 << 20;
 /// How much of git's error output is kept. Only the first lines are shown,
 /// and a misbehaving child must not grow this without bound either.
 const MAX_STDERR: usize = 64 << 10;
+
+/// The most config text [`repo_filters`] reads. Real configs are a few
+/// kilobytes; a larger one counts as unknown, so filters stay off.
+const MAX_CONFIG: usize = 1 << 20;
 
 /// How often [`run`] checks whether git has exited.
 const POLL: Duration = Duration::from_millis(10);
@@ -186,12 +202,58 @@ fn show_with(file: &Path, rev: &str, timeout: Duration, cap: usize) -> Result<Ve
         )));
     }
     let (top, rel) = locate_with(file, timeout)?;
+    // `--filters` runs the filter programs `.gitattributes` asks for; when
+    // the repository defines one itself, read the stored blob as it is
+    // instead (no line-ending conversion either, which is the cost).
+    let filters = if repo_filters(&top, timeout) {
+        log::info!(
+            "{}: the repository's own config names a filter program; reading {rev}:{rel} unfiltered",
+            top.display()
+        );
+        "blob"
+    } else {
+        "--filters"
+    };
     let mut cmd = git();
     cmd.arg("-C")
         .arg(&top)
-        .args(["cat-file", "--filters"])
+        .args(["cat-file", filters])
         .arg(format!("{rev}:{rel}"));
     run(cmd, timeout, cap)
+}
+
+/// Whether the repository at `top` names a filter program in its own
+/// config (`.git/config`, a worktree's config, or a file either includes)
+/// rather than the user's or the system's: `filter.NAME.smudge` or
+/// `filter.NAME.process`. Those come with the repository, so running them
+/// could run code someone else wrote. Also `true` when git cannot say,
+/// such as a git older than 2.26 without `--show-scope`.
+fn repo_filters(top: &Path, timeout: Duration) -> bool {
+    let mut cmd = git();
+    cmd.arg("-C")
+        .arg(top)
+        .args(["config", "--show-scope", "--list"]);
+    let Ok(out) = run(cmd, timeout, MAX_CONFIG) else {
+        return true;
+    };
+    names_repo_filter(&out)
+}
+
+/// Whether `config`, the output of `git config --show-scope --list`, has a
+/// filter program from the repository's own config (see
+/// [`repo_filters`]). Lines are `SCOPE<tab>KEY=VALUE`; a value may hold
+/// anything, `=` and tabs included, so only the part before the first
+/// `=` is the key.
+pub(crate) fn names_repo_filter(config: &[u8]) -> bool {
+    String::from_utf8_lossy(config).lines().any(|line| {
+        let Some((scope, entry)) = line.split_once('\t') else {
+            return false;
+        };
+        let key = entry.split_once('=').map_or(entry, |(k, _)| k);
+        matches!(scope, "local" | "worktree")
+            && key.starts_with("filter.")
+            && (key.ends_with(".smudge") || key.ends_with(".process"))
+    })
 }
 
 /// A `git` command with the environment every call needs.
@@ -199,10 +261,25 @@ fn show_with(file: &Path, rev: &str, timeout: Duration, cap: usize) -> Result<Ve
 /// `GIT_TERMINAL_PROMPT=0` makes git fail instead of asking for a password
 /// on a terminal nobody is looking at, and `GIT_OPTIONAL_LOCKS=0` stops a
 /// read from taking the index lock, so we never block the user's own git.
+///
+/// The rest keeps a repository's own config from running programs (M26,
+/// see the module notes): `core.fsmonitor=false` turns off the filesystem
+/// monitor a config can name; `core.hooksPath` points at a folder that does
+/// not exist, so no hook can run (none of our commands runs hooks today;
+/// this keeps it so as commands are added); and `GIT_NO_LAZY_FETCH=1`
+/// stops a partial clone fetching a missing object from whatever remote
+/// its config names (git 2.45 and later; older ones ignore it).
 fn git() -> Command {
     let mut cmd = Command::new("git");
-    cmd.env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0");
+    cmd.args([
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+    ])
+    .env("GIT_TERMINAL_PROMPT", "0")
+    .env("GIT_OPTIONAL_LOCKS", "0")
+    .env("GIT_NO_LAZY_FETCH", "1");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -340,7 +417,7 @@ fn stop(child: &mut Child) {
 /// The first lines of git's error output, without git's `fatal: ` or
 /// `error: ` prefix, for the message line. Falls back to the exit status
 /// when git printed nothing.
-fn first_lines(stderr: &[u8], status: std::process::ExitStatus) -> String {
+pub(crate) fn first_lines(stderr: &[u8], status: std::process::ExitStatus) -> String {
     let text = String::from_utf8_lossy(stderr);
     let lines: Vec<&str> = text
         .lines()
@@ -471,6 +548,36 @@ mod tests {
         g(dir.path(), &["config", "core.autocrlf", "true"]);
         let file = dir.path().join("sub/a.txt");
         assert_eq!(show(&file, "HEAD").unwrap(), b"two\r\n");
+    }
+
+    #[test]
+    fn a_repositorys_own_filter_program_never_runs() {
+        let Some(dir) = repo("git-filter") else {
+            return;
+        };
+        let p = dir.path();
+        dir.write(".gitattributes", "*.txt filter=evil\n");
+        g(p, &["add", ".gitattributes"]);
+        g(p, &["commit", "-q", "-m", "attributes"]);
+        // What a hostile clone's .git/config could say.
+        g(
+            p,
+            &["config", "filter.evil.smudge", "touch ran-smudge; cat"],
+        );
+        g(p, &["config", "filter.evil.process", "touch ran-process"]);
+        g(
+            p,
+            &["config", "core.fsmonitor", "touch ran-fsmonitor; false"],
+        );
+        g(p, &["config", "core.autocrlf", "true"]);
+        let file = p.join("sub/a.txt");
+        assert!(repo_filters(&canonical(p).unwrap(), TIMEOUT));
+        // The stored blob, unconverted: no filter, so no CRLF either.
+        assert_eq!(show(&file, "HEAD").unwrap(), b"two\n");
+        for marker in ["ran-smudge", "ran-process", "ran-fsmonitor"] {
+            assert!(!p.join(marker).exists(), "{marker} ran");
+            assert!(!p.join("sub").join(marker).exists(), "{marker} ran");
+        }
     }
 
     #[test]
