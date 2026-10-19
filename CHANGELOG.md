@@ -8,6 +8,13 @@ section before tagging.
 
 ### Added
 
+- Screen readers can read Nimbus: VoiceOver, NVDA, Narrator and Orca
+  see the text as a text field they can move through by character, word
+  and line, the tabs as a tab list, the file tree as a tree, the palette
+  and pickers as lists, labelled find fields with their match count, and
+  messages such as "Saved" spoken as they appear. Nothing is built
+  until a screen reader asks. The manual has a new Accessibility
+  chapter.
 - The release signing key, `minisign.pub`, is in the repository and
   printed in the README, so `SHA256SUMS.minisig` can be checked.
 - `scripts/publish-packages.sh` puts a signed, published release in the

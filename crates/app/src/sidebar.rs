@@ -214,6 +214,18 @@ impl Sidebar {
         rows
     }
 
+    /// Where tree row `row` is drawn, `[x, y, width, height]`, while it
+    /// is on screen (the accessibility tree's bounds, M22).
+    pub(crate) fn row_rect(&self, layout: &Layout, row: usize) -> Option<[f32; 4]> {
+        let shown = row.checked_sub(self.scroll)?;
+        if shown >= Self::visible_rows(layout) {
+            return None;
+        }
+        let lh = layout.metrics.line_height;
+        let y = Self::header_h(layout) + crate::to_f32(f64::from(u32::try_from(shown).ok()?)) * lh;
+        Some([0.0, y, layout.left, lh])
+    }
+
     /// Scroll so row `row` is on screen.
     fn show_row(&mut self, row: usize, layout: &Layout) {
         let rows = Self::visible_rows(layout);

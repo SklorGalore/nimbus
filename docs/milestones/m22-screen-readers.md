@@ -1,6 +1,6 @@
 # M22 — Screen readers
 
-**Status: next (2026-10-18).** Written on 2026-10-18, after 1.0, from
+**Status: done (2026-10-19).** Written on 2026-10-18, after 1.0, from
 the first item the backlog kept for after the release: a GPU-drawn
 editor is invisible to VoiceOver, NVDA and Orca, because nothing on
 screen is a native control the operating system can describe. The
@@ -18,27 +18,27 @@ running one.
 
 ## Done when
 
-- [ ] **The editor reads**: with VoiceOver on (macOS), moving the cursor
+- [x] **The editor reads**: with VoiceOver on (macOS), moving the cursor
       speaks the character, word or line it moved over; Shift-selecting
       speaks the selected text; typing echoes characters. Windows
       (NVDA) and Linux (Orca) get the same tree, covered by the tree
       tests; the owner chose not to check them by hand.
-- [ ] **Chrome reads**: tabs are a tab list (name, modified state,
+- [x] **Chrome reads**: tabs are a tab list (name, modified state,
       position "2 of 5"); the sidebar is a tree with expand and collapse;
       the palette and pickers are a list whose highlighted item is
       spoken as you arrow through it; the find bar's fields have labels
       and its match count is spoken; the status bar is a status region.
-- [ ] **Messages are announced**: the message line ("Saved", errors,
+- [x] **Messages are announced**: the message line ("Saved", errors,
       "Reloaded from disk") is a polite live region, so it is spoken
       without moving focus.
-- [ ] **Huge files stay cheap**: a 4 GB mapped log exposes only a window
+- [x] **Huge files stay cheap**: a 4 GB mapped log exposes only a window
       of lines around the view (the same rule as M20's minimap), never
       the whole file; moving past the window rebuilds it.
-- [ ] **Keyboard reach**: every panel can be reached and left without
+- [x] **Keyboard reach**: every panel can be reached and left without
       the mouse (a written audit in Results, with any gaps fixed or
       listed); `docs/manual/` gets an accessibility page, including the
       Linux desktop shortcuts that can grab `Alt+Up` and friends.
-- [ ] Budgets: `--smoke` unchanged with no screen reader running (the
+- [x] Budgets: `--smoke` unchanged with no screen reader running (the
       tree is never built); with VoiceOver running, a keystroke on the
       10 MB file costs under 1 ms more than without; Linux binary under
       35 MB with the adapter's D-Bus dependencies counted.
@@ -135,4 +135,100 @@ and `async-io`; measured for binary size before it stays.
 
 ## Results
 
-_To be filled in when the milestone lands._
+_Written 2026-10-19 from a cloud container with no screen and no screen
+reader. Everything here is checked by tests against AccessKit's own
+consumer (the model NVDA and Orca read through). The owner ran the
+VoiceOver pass and the Mac checks in task 8 on the M5 Pro the same day
+and reported them done with no problems; no timings were recorded._
+
+**What landed.**
+
+- `crates/app/src/access.rs`: the scene-to-tree builder. Plain data in
+  (`Scene`), AccessKit nodes out, plus `Sent`, which diffs the chrome
+  so an update carries only the nodes that changed. Node ids are
+  stable: fixed ids for the window's parts, and the top byte names the
+  kind for repeated ones (tabs, tree rows, options, text runs).
+- `crates/app/src/access/text.rs`: `TextWindow`, the editor's text as
+  runs. One run per visual row (wrapped rows read as lines), at most
+  250 characters a run, the line break counted as the last character
+  of its line's last run. Character lengths are bytes per grapheme;
+  word starts follow the editor's own word classes, so a reader's
+  "next word" lands where `Alt+Right` / `Ctrl+Right` does.
+- `crates/app/src/app/access.rs`: the glue. Creates the adapter on a
+  hidden window and shows it after (`open_window`, with a test of the
+  order), builds the scene from `App` only inside `update_if_active`,
+  and maps reader actions: focus or click on a tab, tree row or option
+  runs the same code the mouse does; setting the selection moves the
+  cursor; replacing the selected text is a normal insert, so undo and
+  syntax see it.
+
+**Deviation from the plan.** The text window is centred on the cursor,
+not on the view: a reader's place is the caret, and a window that
+followed scrolling would drop the caret's run while a sighted helper
+scrolls. Scrolling only moves the field's transform (one node). The
+window is 200 lines or 256 KB either side, whichever is smaller, and is
+rebuilt within 50 lines of an edge; a line over 64 KB is read as the
+4 KB blocks around the cursor (`long_line::around`, as M20's minimap).
+Folded lines are left out.
+
+**Keyboard reach audit.** Every panel has a key in and `Escape` out:
+the tree (`Primary+Shift+E`, `Primary+B`), the palette and pickers
+(`Primary+Shift+P`, `Primary+P`, and the other picker actions), find
+(`Primary+F`), the Search panel (`Primary+Shift+F`, `Tab` between its
+fields and results), tabs (`Ctrl+Tab`, `Primary+1`..`8`) and groups
+(`Primary+Alt+Left/Right`). Two gaps, both with a keyboard route and
+listed in the manual rather than fixed: the tree's right-click menu
+(its five commands are palette actions on the selected row), and
+Compare Folders, which has no default key. The manual page is
+`docs/manual/accessibility.md`, with the Linux desktop shortcuts that
+take `Ctrl+Alt+Up/Down/Left/Right`, `Alt+Up/Down` and friends.
+
+**Not described yet** (deferred, listed in the manual): the Search
+panel's results list, the sidebar's Compare panel, rows of the compare
+and merge views, the preview's headings, and split groups other than
+the focused one. The plan's deferral of compare and merge rows and
+preview headings stands; the results list and Compare panel join it.
+
+**Measurements.**
+
+| | Before | After |
+|---|---|---|
+| Linux release binary (x86_64) | 26,441,824 bytes | 28,818,304 bytes (+2.3 MB, budget 35 MB) |
+| Editor description per keystroke, 10 MB file (`access_typing_bench`, container) | n/a | p50 0.26 ms, p99 0.88 ms (budget 1 ms) |
+| `--smoke` warm, no screen reader (M5 Pro) | checked by the owner, no change reported | |
+| VoiceOver pass and keystroke feel (M5 Pro) | checked by the owner, no problems reported | |
+
+The Linux size includes `accesskit_unix` with `zbus` and `async-io`,
+so no cargo feature was needed to keep the budget.
+
+**Surprises.**
+
+- AccessKit panics, and a release build aborts, if the adapter is
+  created after the window is visible, or if the first update after a
+  reader appears is not a whole tree. Both are guarded: the window is
+  created hidden, and a `need_full` flag forces a whole tree after
+  every activation.
+- A reader's "end of word" from inside `let x` is the space after
+  `let`; AccessKit counts the trailing space as part of the word, as
+  platform text fields do.
+- The first version cut every line of the window again on each
+  keystroke: 2.2 ms at p50 on the 10 MB file, over budget. Unchanged
+  lines now keep their runs (checked by text and rows, not by offsets,
+  so a same-length replace is still seen), and a line in one rope chunk
+  is read without a copy: 0.26 ms. The p99 is a new line, which moves
+  every row below it and so resends those runs.
+- Character lengths are `u8`, so a grapheme over 255 bytes (long
+  combining runs) is split into several characters.
+
+**Concepts, and where they live.**
+
+- *The accessibility tree*: `access::build` turns a `Scene` into nodes
+  with roles, names, bounds and states; the adapter translates them
+  for each platform.
+- *Lazy activation*: `App::update_access` hands its builder to
+  `update_if_active`, which never calls it until a reader asks.
+- *Text runs and character lengths*: `TextWindow::update` and
+  `Walk::row_runs` in `access/text.rs`.
+- *Live regions*: the message line is a label with `Live::Polite`; the
+  status bar is `Role::Status` with `Live::Off`, so cursor moves are
+  not spoken twice.

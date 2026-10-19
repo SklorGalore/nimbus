@@ -41,6 +41,8 @@ the repository instead.
 13. [Command line](command-line.md): every option `nimbus` accepts.
 14. [Updates and troubleshooting](troubleshooting.md): checking for new
     versions, files changing on disk, logs and environment variables.
+15. [Accessibility](accessibility.md): screen readers, reaching every
+    panel from the keyboard, and keys your system may take first.
 
 ## A note on keys
 

@@ -3,3 +3,5 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-print-in-tests = true
+# Product names the docs mention, not code (`..` keeps clippy's own list).
+doc-valid-idents = ["VoiceOver", "NSAccessibility", ".."]

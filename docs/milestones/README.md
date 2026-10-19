@@ -52,7 +52,7 @@ repeated in each file:
 | 19 | [Workspace and search, second pass](m19-workspace-and-search-second-pass.md) | Done |
 | 20 | [Reading aids](m20-reading-aids.md) | Done |
 | 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | Done |
-| 22 | [Screen readers](m22-screen-readers.md) | Next |
+| 22 | [Screen readers](m22-screen-readers.md) | Done |
 | 23 | [Library upgrades](m23-library-upgrades.md) | Planned, waiting on stable releases |
 | 24 | [International text](m24-international-text.md) | Planned |
 | 25 | [Command line](m25-command-line.md) | Planned |
