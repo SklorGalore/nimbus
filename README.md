@@ -379,6 +379,8 @@ milestone lands on development, move its line up to "Available now". -->
   reviewed dependencies
 - A git window (`nimbus --git`): your changes, history and branches,
   staging, commits and merges, built on Nimbus's compare and merge views
+- Updates from inside Nimbus: install a newer release in one step,
+  checked against the release signature first
 
 Some things are out of scope for now, including a Vim mode, plugins,
 LSP, a built-in terminal, collaborative editing and right-to-left text.

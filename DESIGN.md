@@ -597,6 +597,7 @@ introduces and points at the code.
 | 28 | Git window: staging and committing | Planned | Stage files, hunks or lines; discard safely; commit and amend | [m28](docs/milestones/m28-git-staging.md) |
 | 29 | Git window: branches and remotes | Planned | Branches, tags, stashes; fetch, pull and push with your own credentials | [m29](docs/milestones/m29-git-branches-remotes.md) |
 | 30 | Git window: history tools and merging | Planned | Blame, file history, search; merge, rebase, cherry-pick and revert with the merge view | [m30](docs/milestones/m30-git-history-merging.md) |
+| 31 | Updates | Planned | Install a newer release from inside Nimbus, verified against the signed `SHA256SUMS`, and restart into it | [m31](docs/milestones/m31-updates.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
@@ -622,7 +623,15 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-None open. The questions the M26 (security) draft raised were answered
+None open. The questions the M31 (updates) draft raised were answered
+on 2026-10-19: updates install on request only (nothing downloads until
+the person runs Install Update); background download and install on
+quit were declined for now. The startup check becomes on by default
+(`check_updates = true`), reversing M15's default; unattended runs
+never check. Installs owned by Homebrew or a `.deb` are handed back to
+`brew` and `apt` with the command to run, not replaced.
+
+The questions the M26 (security) draft raised were answered
 on 2026-10-19:
 
 - Order: security goes first, as M26, before the git client (M27–M30)
@@ -838,3 +847,5 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-19 | The git window plans move from M26–M29 to M27–M30: the owner put the security milestone (M26) first | §8, m27–m30 |
 | 2026-10-19 | Compatibility mode keeps up with the renderer: any new GPU primitive (first, the git client's commit-graph curves in M27) is added to the CPU painter in the same change; a standing requirement in docs/milestones/README.md | m23, milestones README |
 | 2026-10-19 | M26 Security drafted at the owner's request and put before the git client (M27–M30) and updates (M31): no release has been signed yet (`minisign.pub` never committed), so the key comes first, kept on the owner's Mac and used by `scripts/sign-release.sh`, never an Actions secret; actions pinned by SHA, protected branches and `v*` tags, `cargo vet` (chosen over `cargo deny` alone), provenance, a threat model; M31 owns the update check itself | §9, m26 |
+| 2026-10-18 | M31 Updates drafted at the owner's request: Install Update downloads the release package, checks it against the `minisign`-signed `SHA256SUMS` with the key compiled in (version pinned in the trusted comment), swaps it in and restarts with the session; no new trust beyond the release key; needs `minisign.pub` committed first | §8, §9, m31 |
+| 2026-10-19 | M31: updates install on request only; the startup update check becomes on by default (`check_updates = true`), reversing M15's off default; Homebrew and `.deb` installs are handed back to their package manager | §9, m31 |
