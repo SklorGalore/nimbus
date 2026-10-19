@@ -874,6 +874,7 @@ impl App {
     fn gpu_ready(&mut self, mut gpu: Gpu) {
         gpu.set_tab_width(self.tab_width());
         gpu.set_ligatures(self.config.ligatures);
+        gpu.set_fallback_prefs(fallback_prefs(&self.config));
         let proxy = self.proxy.clone();
         gpu.set_font_notify(Arc::new(move || {
             let _ = proxy.send_event(AppEvent::FontLoaded);
@@ -921,7 +922,7 @@ impl App {
     /// Look up the configured editor and interface fonts again, for a new
     /// painter: the old one's fonts went with it.
     fn reload_fonts(&mut self) {
-        if !self.config.font.is_empty() {
+        if !self.config.font.is_empty() || self.config.font_weight.is_some() {
             self.load_editor_font();
         }
         if !self.config.ui_font.is_empty() {
@@ -955,12 +956,13 @@ impl App {
     /// swaps it in. An empty setting goes back to the bundled font at once.
     fn load_editor_font(&mut self) {
         let name = self.config.font.clone();
+        let weight = self.config.font_weight;
         if name.is_empty() {
-            if let (Some(gpu), Ok(regular)) = (self.gpu.as_mut(), Font::bundled()) {
-                gpu.set_font(nimbus_render::EditorFont {
-                    regular,
-                    bold: Font::bundled_bold().ok(),
-                });
+            if let (Some(gpu), Ok(font)) = (
+                self.gpu.as_mut(),
+                nimbus_render::bundled_editor_font(weight),
+            ) {
+                gpu.set_font(font);
             }
             return;
         }
@@ -968,7 +970,7 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("nimbus-font".to_owned())
             .spawn(move || {
-                let found = nimbus_render::find_editor_font(&name);
+                let found = nimbus_render::find_editor_font(&name, weight);
                 let _ = proxy.send_event(AppEvent::EditorFont(name, found));
             });
         if let Err(e) = spawned {
@@ -991,7 +993,7 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("nimbus-ui-font".to_owned())
             .spawn(move || {
-                let found = nimbus_render::find_editor_font(&name);
+                let found = nimbus_render::find_editor_font(&name, None);
                 let _ = proxy.send_event(AppEvent::UiFont(name, found));
             });
         if let Err(e) = spawned {
@@ -3756,8 +3758,9 @@ impl App {
             ));
             gpu.set_tab_width(self.config.tab_width);
             gpu.set_ligatures(self.config.ligatures);
+            gpu.set_fallback_prefs(fallback_prefs(&self.config));
         }
-        if old.font != self.config.font {
+        if old.font != self.config.font || old.font_weight != self.config.font_weight {
             self.load_editor_font();
         }
         if old.ui_font != self.config.ui_font {
@@ -6252,20 +6255,45 @@ fn headless_preview(
     Some(p)
 }
 
+/// The fallback fonts the config prefers per script, and the regional
+/// forms for Han: the config's `cjk_language`, else the system's first
+/// preferred language (M24). Reading the system language is one call to
+/// the OS, fast enough for startup.
+fn fallback_prefs(config: &Config) -> nimbus_render::FallbackPrefs {
+    let system = config
+        .cjk_language
+        .is_empty()
+        .then(sys_locale::get_locale)
+        .flatten();
+    nimbus_render::FallbackPrefs {
+        fonts: config
+            .fallback_fonts
+            .iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+            .collect(),
+        cjk: config.cjk_language(system.as_deref()),
+    }
+}
+
 /// The config's tab width, ligatures and font for a headless render. With
 /// no later frame to swap a font into, a configured font is looked up
 /// before drawing.
 fn headless_fonts(gpu: &mut Gpu, config: &Config) {
     gpu.set_tab_width(config.tab_width);
     gpu.set_ligatures(config.ligatures);
+    gpu.set_fallback_prefs(fallback_prefs(config));
     if !config.font.is_empty() {
-        match nimbus_render::find_editor_font(&config.font) {
+        match nimbus_render::find_editor_font(&config.font, config.font_weight) {
             Some(f) => gpu.set_font(f),
             None => log::warn!("font {:?} not found; using the bundled font", config.font),
         }
+    } else if config.font_weight.is_some()
+        && let Ok(f) = nimbus_render::bundled_editor_font(config.font_weight)
+    {
+        gpu.set_font(f);
     }
     if !config.ui_font.is_empty() {
-        match nimbus_render::find_editor_font(&config.ui_font) {
+        match nimbus_render::find_editor_font(&config.ui_font, None) {
             Some(f) => gpu.set_ui_font(Some(f)),
             None => log::warn!(
                 "interface font {:?} not found; using the editor font",
@@ -7296,7 +7324,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.sync_watch();
             self.update_started();
             // A configured font, looked up once the first frame is up.
-            if !self.config.font.is_empty() {
+            if !self.config.font.is_empty() || self.config.font_weight.is_some() {
                 self.load_editor_font();
             }
             if !self.config.ui_font.is_empty() {

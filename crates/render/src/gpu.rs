@@ -743,6 +743,13 @@ impl Gpu {
         self.text.set_font(font.regular, font.bold, &mut self.atlas);
     }
 
+    /// Prefer these fallback fonts per script and draw Han ideographs in
+    /// `prefs.cjk`'s regional forms (M24: the config's `fallback_fonts`
+    /// and `cjk_language`). Characters already found are looked up again.
+    pub fn set_fallback_prefs(&mut self, prefs: crate::FallbackPrefs) {
+        self.text.set_fallback_prefs(prefs);
+    }
+
     /// Let the font draw ligatures (`ligatures = true` in the config). Off
     /// by default. Changing it needs no atlas reset: a ligature is just
     /// another glyph id.

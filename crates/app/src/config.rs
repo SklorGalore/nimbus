@@ -53,6 +53,22 @@ pub struct Config {
     /// Let the font join characters such as `->` and `!=` into ligatures,
     /// for fonts that have them (Hack has none).
     pub ligatures: bool,
+    /// The weight to draw the editor font at (M24), 100 to 900, or `None`
+    /// for its regular weight. A variable font draws at exactly this
+    /// weight; a family of separate files uses the nearest one it has.
+    /// The config takes a number or a name (`"light"`, `"medium"`,
+    /// `"semibold"`, ...).
+    #[serde(skip)]
+    pub font_weight: Option<u16>,
+    /// Fonts to try first for characters the editor font lacks, by script
+    /// (M24): `han = ["Hiragino Sans"]`, `cyrillic = [...]`. Keys are
+    /// `han`, `kana`, `hangul`, `emoji`, `symbols` or a Unicode script
+    /// name in lower case. Tried before the built-in list per platform.
+    pub fallback_fonts: HashMap<String, Vec<String>>,
+    /// Which regional shapes Han ideographs take (M24): `"ja"`,
+    /// `"zh-Hans"`, `"zh-Hant"` or `"ko"`; empty follows the system
+    /// language. Checked by [`Config::cjk_language`].
+    pub cjk_language: String,
     /// Start with the zoom the last session ended with (kept in
     /// `state.toml`); `false` starts every session at `font_size`.
     pub remember_zoom: bool,
@@ -245,6 +261,9 @@ impl Default for Config {
             indent: IndentSettings::default(),
             font: String::new(),
             ligatures: false,
+            font_weight: None,
+            fallback_fonts: HashMap::new(),
+            cjk_language: String::new(),
             remember_zoom: true,
             remember_workspace: true,
             render_whitespace: Whitespace::Selection,
@@ -274,6 +293,86 @@ fn take<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Read the international text settings (M24): `font_weight`,
+/// `fallback_fonts` and `cjk_language`, checking each.
+fn take_international(table: &toml::Table, config: &mut Config, warnings: &mut Vec<String>) {
+    config.font_weight = table.get("font_weight").and_then(|v| match font_weight(v) {
+        Ok(w) => Some(w),
+        Err(why) => {
+            warnings.push(format!("config: font_weight: {why}; using the default"));
+            None
+        }
+    });
+    take(
+        table,
+        "fallback_fonts",
+        &mut config.fallback_fonts,
+        warnings,
+    );
+    for key in config.fallback_fonts.keys() {
+        if !nimbus_render::script::KNOWN_KEYS.contains(&key.as_str()) {
+            warnings.push(format!(
+                "config: fallback_fonts: unknown script {key:?} (han, kana, hangul, \
+                     emoji, symbols or a script name such as cyrillic)"
+            ));
+        }
+    }
+    take(table, "cjk_language", &mut config.cjk_language, warnings);
+    if !config.cjk_language.is_empty()
+        && nimbus_render::CjkLanguage::parse(&config.cjk_language).is_none()
+    {
+        warnings.push(format!(
+            "config: cjk_language {:?} is not ja, zh-Hans, zh-Hant or ko; \
+                 following the system language",
+            config.cjk_language
+        ));
+        config.cjk_language.clear();
+    }
+}
+
+/// Read `font_weight`: a number from 100 to 900, or a weight's name.
+fn font_weight(v: &toml::Value) -> Result<u16, String> {
+    if let Some(n) = v.as_integer() {
+        return u16::try_from(n)
+            .ok()
+            .filter(|n| (100..=900).contains(n))
+            .ok_or_else(|| format!("{n} out of range 100–900"));
+    }
+    let Some(name) = v.as_str() else {
+        return Err("expected a number or a name such as \"bold\"".to_owned());
+    };
+    let w = match name
+        .to_ascii_lowercase()
+        .replace(['-', ' ', '_'], "")
+        .as_str()
+    {
+        "thin" | "hairline" => 100,
+        "extralight" | "ultralight" => 200,
+        "light" => 300,
+        "regular" | "normal" | "book" => 400,
+        "medium" => 500,
+        "semibold" | "demibold" => 600,
+        "bold" => 700,
+        "extrabold" | "ultrabold" => 800,
+        "black" | "heavy" => 900,
+        _ => return Err(format!("unknown weight {name:?}")),
+    };
+    Ok(w)
+}
+
+impl Config {
+    /// The language Han ideographs are drawn for: the configured one, or
+    /// the system's from `system_locale` (a BCP 47 tag such as `ja-JP`).
+    #[must_use]
+    pub fn cjk_language(&self, system_locale: Option<&str>) -> nimbus_render::CjkLanguage {
+        nimbus_render::CjkLanguage::parse(&self.cjk_language).unwrap_or_else(|| {
+            system_locale
+                .map(nimbus_render::CjkLanguage::from_locale)
+                .unwrap_or_default()
+        })
+    }
+}
+
 const KNOWN: &[&str] = &[
     "font_size",
     "tab_width",
@@ -287,6 +386,9 @@ const KNOWN: &[&str] = &[
     "indent",
     "font",
     "ligatures",
+    "font_weight",
+    "fallback_fonts",
+    "cjk_language",
     "remember_zoom",
     "remember_workspace",
     "render_whitespace",
@@ -313,6 +415,13 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # fonts that have them (Fira Code, JetBrains Mono, Cascadia Code).
 # font = "JetBrains Mono"
 # ligatures = false
+# The weight to draw it at: 100 to 900 or a name ("light", "regular",
+# "medium", "semibold", "bold"). A variable font takes any weight; a family
+# of separate files uses its nearest. Unset is the font's regular weight.
+# font_weight = 450
+# Which regional shapes Chinese characters take: "ja", "zh-Hans",
+# "zh-Hant" or "ko". Empty follows the system language.
+# cjk_language = ""
 # Zoom (View > Zoom In/Out, Primary+= and Primary+-) is remembered between
 # sessions; false starts every session at font_size.
 # remember_zoom = true
@@ -340,6 +449,14 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # [keys]
 # "view.toggleWrap" = ["Alt+W"]
 # "file.quickOpen" = ["Primary+P", "Primary+E"]
+
+# Fonts for characters the editor font lacks, tried before the built-in
+# list for each script. Keys: han, kana, hangul, emoji, symbols, or a script
+# name such as cyrillic, greek, devanagari, thai. A font that is not
+# installed is skipped.
+# [fallback_fonts]
+# han = ["Hiragino Sans"]
+# hangul = ["Apple SD Gothic Neo"]
 
 # Languages: a file name or "*.ext" pattern = language. Built-in languages
 # are rust, markdown, json, toml, yaml, python, javascript, typescript,
@@ -423,6 +540,7 @@ impl Config {
         take(&table, "indent", &mut config.indent, &mut warnings);
         take(&table, "font", &mut config.font, &mut warnings);
         take(&table, "ligatures", &mut config.ligatures, &mut warnings);
+        take_international(&table, &mut config, &mut warnings);
         take(
             &table,
             "remember_zoom",
@@ -636,6 +754,41 @@ mod tests {
         assert_eq!(c.ui_font, "Inter");
         let (c, w) = Config::parse("minimap_width = 5\n");
         assert!((c.minimap_width - 100.0).abs() < f64::EPSILON);
+        assert_eq!(w.len(), 1, "{w:?}");
+    }
+
+    #[test]
+    fn international_text_settings_parse() {
+        let (c, w) = Config::parse(
+            "font_weight = 450\ncjk_language = \"ja\"\n\
+             [fallback_fonts]\nhan = [\"Hiragino Sans\"]\ncyrillic = [\"PT Mono\"]\n",
+        );
+        assert_eq!(w, Vec::<String>::new());
+        assert_eq!(c.font_weight, Some(450));
+        assert_eq!(c.cjk_language(None), nimbus_render::CjkLanguage::Japanese);
+        assert_eq!(c.fallback_fonts["han"], ["Hiragino Sans"]);
+        let (c, w) = Config::parse("font_weight = \"semi-bold\"\n");
+        assert_eq!((c.font_weight, w.len()), (Some(600), 0));
+    }
+
+    #[test]
+    fn international_text_mistakes_warn_and_fall_back() {
+        let (c, w) = Config::parse(
+            "font_weight = 1000\ncjk_language = \"klingon\"\n[fallback_fonts]\nhna = [\"X\"]\n",
+        );
+        assert_eq!(w.len(), 3, "{w:?}");
+        assert_eq!(c.font_weight, None);
+        assert_eq!(c.cjk_language, "");
+        // Empty follows the system, and any other system gets the default.
+        assert_eq!(
+            c.cjk_language(Some("ko-KR")),
+            nimbus_render::CjkLanguage::Korean
+        );
+        assert_eq!(
+            c.cjk_language(Some("en-GB")),
+            nimbus_render::CjkLanguage::SimplifiedChinese
+        );
+        let (_, w) = Config::parse("font_weight = \"wobbly\"\n");
         assert_eq!(w.len(), 1, "{w:?}");
     }
 

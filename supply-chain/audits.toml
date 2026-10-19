@@ -1,4 +1,8 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.sys-locale]]
+who = "Claude Code, reviewing for Skylar (SklorGalore)"
+criteria = "safe-to-deploy"
+version = "0.3.2"
+notes = "Read all of src/ (777 lines). No build script, proc macro or dependencies on our targets. FFI only to read the user's preferred languages: CFLocaleCopyPreferredLanguages on Apple (array released on drop), GetUserPreferredUILanguages on Windows (two-call buffer sizing), LANG/LC_* environment variables on other Unix. No file, network or process access."
