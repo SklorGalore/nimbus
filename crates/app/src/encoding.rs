@@ -554,7 +554,10 @@ mod tests {
         let jis = Encoding::Other(encoding_rs::ISO_2022_JP);
         assert_eq!(
             encode(jis, "m\u{1b}\u{1b}").unwrap_err(),
-            Unmappable { ch: '\u{1b}', at: 1 }
+            Unmappable {
+                ch: '\u{1b}',
+                at: 1
+            }
         );
     }
 
