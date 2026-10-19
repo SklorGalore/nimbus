@@ -3056,6 +3056,92 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"\x80 caf\xe9\n");
     }
 
+    /// M24: each East Asian encoding, built with `--features east-asian`,
+    /// round-trips through "Reopen with Encoding" (`Document::open_as`, as
+    /// `--encoding` and the `[encodings]` table also open), saving
+    /// unchanged and edited, and "Save with Encoding" from UTF-8. The
+    /// fixtures are in `tests/fixtures/east-asian`.
+    #[cfg(feature = "east-asian")]
+    #[test]
+    fn east_asian_fixtures_round_trip() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/east-asian");
+        let cases = [
+            (
+                "shift_jis.txt",
+                "shift_jis",
+                "日本語のテキスト、カタカナとひらがな。\n半角ｶﾅ ①\n",
+                "追記：",
+            ),
+            (
+                "euc-jp.txt",
+                "euc-jp",
+                "日本語のテキスト、カタカナとひらがな。\n漢字かな交じり文\n",
+                "追記：",
+            ),
+            (
+                "gbk.txt",
+                "gbk",
+                "简体中文文本，用于测试。\n编码：GBK\n",
+                "新增：",
+            ),
+            (
+                "gb18030.txt",
+                "gb18030",
+                "简体中文文本，用于测试。\n四字节字符：𠀀 😀\n",
+                "新增：",
+            ),
+            (
+                "big5.txt",
+                "big5",
+                "繁體中文文字，用於測試。\n編碼：Big5\n",
+                "新增：",
+            ),
+            (
+                "euc-kr.txt",
+                "euc-kr",
+                "한국어 텍스트입니다.\n인코딩: EUC-KR\n",
+                "추가: ",
+            ),
+        ];
+        for (file, label, text, more) in cases {
+            let encoding = Encoding::from_label(label).unwrap();
+            assert!(Encoding::all().contains(&encoding), "{label} not offered");
+            let rs = encoding_rs::Encoding::for_label(label.as_bytes()).unwrap();
+            let original = std::fs::read(fixtures.join(file)).unwrap();
+            let dir = TempDir::new("east-asian");
+            let path = dir.0.join(file);
+            std::fs::write(&path, &original).unwrap();
+
+            // Reopen with Encoding: the exact text, nothing lost.
+            let mut d = Solo::of(Document::open_as(&path, encoding).unwrap());
+            let len = d.buffer.len_bytes();
+            assert_eq!(d.buffer.slice(0..len), text, "{file}");
+            assert!(!d.lossy, "{file}");
+            assert_eq!(d.encoding_label(), Some(encoding.name()));
+            // Saved unchanged: the same bytes.
+            d.save().unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), original, "{file}");
+            // Edited and saved: the new text in the same encoding.
+            d.ed().click(0, false);
+            d.ed().insert(more).unwrap();
+            d.save().unwrap();
+            let edited = format!("{more}{text}");
+            let (expected, _, unmappable) = rs.encode(&edited);
+            assert!(!unmappable);
+            assert_eq!(std::fs::read(&path).unwrap(), expected.as_ref(), "{file}");
+
+            // Save with Encoding: a UTF-8 file saved in this encoding is
+            // the fixture's bytes.
+            let utf8 = dir.0.join("utf8.txt");
+            std::fs::write(&utf8, text).unwrap();
+            let mut d = Solo::of(Document::open(&utf8).unwrap());
+            assert!(d.encoding.is_utf8());
+            d.doc.encoding = encoding;
+            d.save().unwrap();
+            assert_eq!(std::fs::read(&utf8).unwrap(), original, "{file}");
+        }
+    }
+
     fn cursors(d: &mut Solo, at: &[usize]) {
         let sels = at.iter().map(|&p| Selection::cursor(p)).collect();
         d.carets.selections = Selections::from_vec(sels, 0);
