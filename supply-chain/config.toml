@@ -281,6 +281,10 @@ criteria = "safe-to-deploy"
 version = "0.8.23"
 criteria = "safe-to-deploy"
 
+[[exemptions.ctor]]
+version = "0.10.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.cursor-icon]]
 version = "1.2.0"
 criteria = "safe-to-deploy"
@@ -323,6 +327,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.dpi]]
 version = "0.1.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.dtor]]
+version = "0.8.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.either]]
@@ -1049,6 +1057,10 @@ criteria = "safe-to-deploy"
 version = "0.2.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.softbuffer]]
+version = "0.4.8"
+criteria = "safe-to-deploy"
+
 [[exemptions.spirv]]
 version = "0.4.0+sdk-1.4.341.0"
 criteria = "safe-to-deploy"
@@ -1099,6 +1111,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tiny-skia-path]]
 version = "0.11.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.tiny-xlib]]
+version = "0.2.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.tinyvec]]

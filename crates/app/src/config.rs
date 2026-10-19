@@ -76,6 +76,11 @@ pub struct Config {
     /// a font file's path; empty uses the bundled editor font, so the
     /// first frame needs no font lookup. The editor text stays monospace.
     pub ui_font: String,
+    /// Draw on the CPU (compatibility mode, M23) even when a GPU is
+    /// there, as `--compat` does. Without it, Nimbus switches to
+    /// compatibility mode by itself only when the GPU cannot be used.
+    /// Read once at startup.
+    pub compat: bool,
 }
 
 /// Which spaces and tabs are drawn visibly (`render_whitespace`).
@@ -246,6 +251,7 @@ impl Default for Config {
             minimap: false,
             minimap_width: 100.0,
             ui_font: String::new(),
+            compat: false,
         }
     }
 }
@@ -287,6 +293,7 @@ const KNOWN: &[&str] = &[
     "minimap",
     "minimap_width",
     "ui_font",
+    "compat",
 ];
 
 /// A commented starting point written by "Open Config File" when there is
@@ -320,6 +327,10 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # Markdown preview, by name or path. Empty uses the editor font. The text
 # stays monospace.
 # ui_font = "Inter"
+# Draw on the CPU instead of the GPU (compatibility mode), for a GPU or
+# driver that misdraws. Nimbus does this by itself when there is no usable
+# GPU. Restart to apply.
+# compat = false
 
 # Key bindings: action id = list of chords. "Primary" is Cmd on macOS and
 # Ctrl elsewhere. An empty list unbinds the action. The command palette
@@ -448,6 +459,7 @@ impl Config {
             &mut warnings,
         );
         take(&table, "ui_font", &mut config.ui_font, &mut warnings);
+        take(&table, "compat", &mut config.compat, &mut warnings);
         if !(40.0..=400.0).contains(&config.minimap_width) {
             warnings.push(format!(
                 "config: minimap_width {} out of range 40–400",
