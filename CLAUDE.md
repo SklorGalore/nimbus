@@ -33,6 +33,7 @@ cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp   # render with n
 scripts/screenshots.sh [NAME...]                             # remake assets/screenshots/ for the README and manual (headless, own config); look before committing
 cargo run -- FILE --wrap --find PATTERN                     # start with soft wrap on and the find bar searching
 cargo run -- FILE --theme light --headless 1600x1000 --screenshot /tmp/l.bmp   # override the config's theme
+cargo run -- FILE --theme light --headless 1400x800 --prompt --screenshot /tmp/q.bmp   # the in-app "Save changes?" prompt over the frame
 NIMBUS_CONFIG_DIR=/tmp/cfg cargo run -- FILE --headless 1600x1000 --screenshot /tmp/c.bmp   # use another config folder (themes/, languages/, queries/); never write to the owner's real one
 cargo run -- FOLDER a.rs b.rs                              # several tabs; a folder sets the file opener's root
 cargo run -- . --headless 1600x900 --picker files:main --screenshot /tmp/p.bmp   # render a picker (palette|files|line|symbols[:query])

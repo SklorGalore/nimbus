@@ -21,8 +21,12 @@ section before tagging.
 
 - The window's title bar follows the Nimbus theme instead of the system
   appearance, so a light theme no longer sits under a dark title bar or
-  the other way round. On macOS the prompts (such as "close without
-  saving") follow it too.
+  the other way round.
+- Questions and messages ("Save changes before closing?", "Could not
+  save", replacing a file in the tree and the rest) open inside the
+  window in the theme's colours, on every system, instead of as system
+  dialogs. `Enter`, `Esc`, `Tab`, the arrow keys and each button's first
+  letter answer them. File pickers stay the system's.
 
 ## 1.1.0
 

@@ -131,7 +131,11 @@ Sessions, recent files and the window's position are kept in
   unsaved changes.
 - **Close**: `Cmd+W` / `Ctrl+W` closes a tab, asking first if it has
   unsaved changes (Save, Don't Save, Cancel). Closing the last tab quits.
-  `Cmd+Q` / `Ctrl+Q` quits, asking about each unsaved tab.
+  `Cmd+Q` / `Ctrl+Q` quits, asking about each unsaved tab. Questions like
+  this one open inside the window, in the theme's colours: `Enter` presses
+  the highlighted button, `Esc` cancels, `Tab` or the arrow keys move
+  between buttons, and a button's first letter presses it (`D` for Don't
+  Save).
 - **Settings**: run "Open Config File" from the palette. See
   [Settings](settings.md).
 

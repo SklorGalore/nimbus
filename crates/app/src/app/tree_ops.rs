@@ -2,12 +2,10 @@
 //! field's keys, starting each operation on a worker, and what follows
 //! when it is done (tabs follow a rename, a new file opens).
 
-use std::path::Path;
-
-use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+use std::path::{Path, PathBuf};
 
 use super::workspace::{MAX_UNDO_MOVES, UndoMove};
-use super::{App, AppEvent, edit_field};
+use super::{App, AppEvent, Asked, cancel_or, edit_field};
 use crate::input::{Command, Motion};
 use crate::io;
 use crate::tree_ops::{self, EditKind, Op};
@@ -145,8 +143,19 @@ impl App {
                 // A rename that only changes case finds itself on a
                 // case-insensitive disk: that is not a clash.
                 let clash = to.exists() && io::canonical(&to) != io::canonical(&from);
-                if clash && !self.confirm_replace(&name) {
+                if clash {
+                    // The field stays open under the question: Cancel goes
+                    // back to editing the name.
                     self.sidebar.edit = Some(edit);
+                    self.ask(
+                        "Replace?",
+                        format!(
+                            "{name} already exists in this folder. \
+                             Replace it with the one you are renaming?"
+                        ),
+                        &cancel_or("Replace"),
+                        Asked::Replace { from, to },
+                    );
                     return;
                 }
                 self.ws.moving.push(from.clone());
@@ -157,27 +166,16 @@ impl App {
         spawn_op(&self.proxy, op);
     }
 
-    /// Ask whether a rename may replace the existing `name`.
-    fn confirm_replace(&self, name: &str) -> bool {
-        let mut dialog = MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title("Replace?")
-            .set_description(format!(
-                "{name} already exists in this folder. Replace it with the one you are renaming?"
-            ))
-            .set_buttons(MessageButtons::OkCancelCustom(
-                "Replace".into(),
-                "Cancel".into(),
-            ));
-        if let Some(window) = &self.window {
-            dialog = dialog.set_parent(window.as_ref());
+    /// The answer to "Replace?" for a rename from `from` onto the
+    /// existing `to`: go ahead, or leave the name field open to change it.
+    pub(super) fn replace_answered(&mut self, replace: bool, from: PathBuf, to: PathBuf) {
+        if !replace {
+            return;
         }
-        // Some platforms report a custom button by its label.
-        match dialog.show() {
-            MessageDialogResult::Ok => true,
-            MessageDialogResult::Custom(label) => label == "Replace",
-            _ => false,
-        }
+        self.sidebar.edit = None;
+        self.ws.moving.push(from.clone());
+        self.sidebar.focused = true;
+        spawn_op(&self.proxy, Op::Rename { from, to });
     }
 
     /// A file operation finished on its worker.
@@ -301,9 +299,19 @@ impl App {
                 self.say(format!("{shown} already exists there"), true);
                 return;
             }
-            if !self.confirm_replace(&shown) {
-                return;
-            }
+            self.ask(
+                "Replace?",
+                format!(
+                    "{shown} already exists in this folder. \
+                     Replace it with the one you are moving?"
+                ),
+                &cancel_or("Replace"),
+                Asked::Replace {
+                    from: from.to_path_buf(),
+                    to,
+                },
+            );
+            return;
         }
         let op = if copy {
             Op::Copy {
@@ -361,34 +369,26 @@ impl App {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        if !dirty.is_empty() && !self.confirm_trash_unsaved(&dirty) {
+        if !dirty.is_empty() {
+            // Asked in the window; the answer trashes it (App::trash).
+            self.ask(
+                "Unsaved changes",
+                format!(
+                    "{} has unsaved changes. Move it to the trash and lose them?",
+                    dirty.join(", ")
+                ),
+                &cancel_or("Move to Trash"),
+                Asked::Trash(path),
+            );
             return;
         }
-        self.ws.moving.push(path.clone());
-        spawn_op(&self.proxy, Op::Trash(path));
+        self.trash(path);
     }
 
-    /// Ask whether to trash a file whose tab has unsaved edits.
-    fn confirm_trash_unsaved(&self, names: &[String]) -> bool {
-        let mut dialog = MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title("Unsaved changes")
-            .set_description(format!(
-                "{} has unsaved changes. Move it to the trash and lose them?",
-                names.join(", ")
-            ))
-            .set_buttons(MessageButtons::OkCancelCustom(
-                "Move to Trash".into(),
-                "Cancel".into(),
-            ));
-        if let Some(window) = &self.window {
-            dialog = dialog.set_parent(window.as_ref());
-        }
-        match dialog.show() {
-            MessageDialogResult::Ok => true,
-            MessageDialogResult::Custom(label) => label == "Move to Trash",
-            _ => false,
-        }
+    /// Move `path` to the trash on a worker.
+    pub(super) fn trash(&mut self, path: PathBuf) {
+        self.ws.moving.push(path.clone());
+        spawn_op(&self.proxy, Op::Trash(path));
     }
 
     /// Close the tabs of `path` and anything inside it, which are gone,

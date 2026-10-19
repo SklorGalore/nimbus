@@ -6,7 +6,7 @@
 //! not in `main`. Nothing redraws on a timer except the cursor blink (and
 //! short retries), so an idle editor uses no CPU.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+use rfd::FileDialog;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
@@ -50,6 +50,7 @@ use crate::menu::{self, MenuBar};
 use crate::merge_view::{Inputs, MergeView, Merged, Shape, Take};
 use crate::minimap;
 use crate::picker::{self, EncodingFor, Item, Kind, Picker};
+use crate::prompt::{self, Answer, Button, Prompt};
 use crate::replace_files::{self, Replacement};
 use crate::saver::{self, ReplacePolicy, SaveEvent, SaveStep};
 use crate::search_panel::{Focus, Reply};
@@ -296,6 +297,13 @@ pub struct Tab {
     /// tab's save: the history's top id then, so the question is not asked
     /// again when the quit goes on, unless the text changed since.
     discard_at: Option<u64>,
+    /// The answer "Save" to "save changes before closing?", as the
+    /// history's top id then: the close or quit that asked goes on by
+    /// saving, without asking again, unless the text changed since.
+    save_at: Option<u64>,
+    /// Questions about the next save already answered "go ahead": it runs
+    /// again after each answer, and must not ask the same thing twice.
+    approved: Approved,
     /// A compare view on this tab (M9): the other side and the diff.
     pub compare: Option<Box<Compare>>,
     /// A merge view on this tab (M9): the inputs and the regions of the
@@ -341,6 +349,8 @@ impl Tab {
             noted_size: false,
             after_save: AfterSave::default(),
             discard_at: None,
+            save_at: None,
+            approved: Approved::default(),
             compare: None,
             merge: None,
             preview: None,
@@ -421,6 +431,8 @@ enum Saved {
     Started,
     /// Not saved: failed, or the user cancelled the dialog.
     No,
+    /// A prompt is open; the save runs again once it is answered.
+    Asking,
 }
 
 /// The answer to "save changes before closing?".
@@ -432,6 +444,84 @@ enum Discard {
     Cancel,
     /// A save is under way; go ahead once it has finished.
     Wait,
+    /// A prompt is open; whatever asked runs again once it is answered.
+    Asking,
+}
+
+/// Questions about a save the user has said yes to (see [`Tab::approved`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct Approved {
+    /// Save a merge with conflicts left in it.
+    conflicts: bool,
+    /// Write U+FFFD where unreadable bytes were.
+    lossy: bool,
+}
+
+/// What asked a question that interrupts it: run again once the question
+/// is answered, so the answer takes effect where the question came from.
+/// The outermost operation wins: a close that saves resumes the close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resume {
+    /// Save the tab showing this document.
+    Save(DocId),
+    /// Close the tab showing this document.
+    CloseTab(DocId),
+    /// Close the focused group's tabs.
+    CloseGroup,
+    /// Quit.
+    Quit,
+}
+
+/// What an open prompt's answer goes on to do (the `then` of its
+/// [`Prompt`]).
+#[derive(Debug, Clone)]
+enum Asked {
+    /// A message: nothing follows.
+    Notice,
+    /// "Save changes before closing?" about this document.
+    Discard(DocId, Resume),
+    /// "Save a merge with conflicts left?"
+    Conflicts(DocId, Resume),
+    /// "Write U+FFFD for the unreadable bytes?"
+    Lossy(DocId, Resume),
+    /// "Save as UTF-8 instead?"
+    Utf8(DocId, Resume),
+    /// "Reopen in this encoding and lose the unsaved changes?"
+    Reopen(DocId, Encoding),
+    /// "Replace the file this rename lands on?"
+    Replace { from: PathBuf, to: PathBuf },
+    /// "Move this to the trash, losing unsaved changes in its tabs?"
+    Trash(PathBuf),
+}
+
+/// The buttons of "Save changes before closing?".
+const SAVE_DONT_CANCEL: [Button; 3] = [
+    Button {
+        label: "Don't Save",
+        answer: Answer::No,
+    },
+    Button {
+        label: "Cancel",
+        answer: Answer::Cancel,
+    },
+    Button {
+        label: "Save",
+        answer: Answer::Yes,
+    },
+];
+
+/// Two buttons: Cancel and a default that goes ahead.
+const fn cancel_or(label: &'static str) -> [Button; 2] {
+    [
+        Button {
+            label: "Cancel",
+            answer: Answer::Cancel,
+        },
+        Button {
+            label,
+            answer: Answer::Yes,
+        },
+    ]
 }
 
 /// Cursor blink timing.
@@ -561,6 +651,14 @@ pub struct App {
     /// Jump to the first match once background results arrive.
     find_pending_jump: bool,
     picker: Option<Picker>,
+    /// Prompts drawn in the window (see `prompt.rs`), the front one shown
+    /// and answered first. While any is open, keys and clicks go to it.
+    prompts: VecDeque<Prompt<Asked>>,
+    /// The operation running now that a prompt would interrupt, to run
+    /// again once it is answered.
+    resume: Option<Resume>,
+    /// A prompt button clicked, answered once the click is handled.
+    prompt_click: Option<Answer>,
     message: Option<Message>,
     proxy: EventLoopProxy<AppEvent>,
     /// Search again at this time: edits happened while the find bar was
@@ -749,6 +847,9 @@ impl App {
             find_origin: 0,
             find_pending_jump: false,
             picker: None,
+            prompts: VecDeque::new(),
+            resume: None,
+            prompt_click: None,
             message,
             proxy,
             research_at: None,
@@ -1190,6 +1291,11 @@ impl App {
         // Edits made from another group since the last frame move this
         // tab's cursors and folds first.
         self.sync_panes();
+        if !self.prompts.is_empty() {
+            self.run_prompt(cmd, event_loop);
+            self.changed(false);
+            return;
+        }
         if self.picker.is_some() && self.run_picker(cmd, event_loop) {
             self.changed(false);
             return;
@@ -2702,12 +2808,24 @@ impl App {
     /// saves on a worker: this starts it and returns [`Saved::Started`],
     /// and [`App::save_ended`] finishes.
     fn save(&mut self, i: usize) -> Saved {
+        let saved = self.save_asking(i);
+        if saved != Saved::Asking
+            && let Some(tab) = self.tabs.get_mut(i)
+        {
+            // This save is over: its answers do not carry to the next one.
+            tab.approved = Approved::default();
+        }
+        saved
+    }
+
+    /// [`App::save`], whose questions may leave it [`Saved::Asking`].
+    fn save_asking(&mut self, i: usize) -> Saved {
         if self.tabs[i].merge.as_ref().is_some_and(|m| m.is_pending()) {
             self.say("Still merging; save once the result is in", false);
             return Saved::No;
         }
         if !self.confirm_conflicts(i) {
-            return Saved::No;
+            return Saved::Asking;
         }
         if self.docs[self.tabs[i].doc].path.is_none() {
             return self.save_as(i);
@@ -2717,11 +2835,11 @@ impl App {
             return Saved::Started;
         }
         if let Some(why) = self.docs[self.tabs[i].doc].read_only.clone() {
-            self.dialog(MessageLevel::Error, "Could not save", &why);
+            self.notice("Could not save", why);
             return Saved::No;
         }
         if !self.confirm_lossy(i) {
-            return Saved::No;
+            return Saved::Asking;
         }
         if self.docs[self.tabs[i].doc].saves_on_worker() {
             return self.start_save(i);
@@ -2752,7 +2870,7 @@ impl App {
                 if let Some(u) = e.unencodable().copied() {
                     return self.offer_utf8(i, u);
                 }
-                self.dialog(MessageLevel::Error, "Could not save", &e.to_string());
+                self.notice("Could not save", e.to_string());
                 Saved::No
             }
         }
@@ -2785,38 +2903,28 @@ impl App {
         if self.options.smoke || self.options.screenshot.is_some() {
             return Saved::No;
         }
-        let mut dialog = MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title("Character not in the encoding")
-            .set_description(text)
-            .set_buttons(MessageButtons::OkCancelCustom(
-                "Save as UTF-8".into(),
-                "Cancel".into(),
-            ));
-        if let Some(window) = &self.window {
-            dialog = dialog.set_parent(window.as_ref());
-        }
-        let utf8 = match dialog.show() {
-            MessageDialogResult::Ok => true,
-            MessageDialogResult::Custom(label) => label == "Save as UTF-8",
-            _ => false,
-        };
-        if !utf8 {
-            return Saved::No;
-        }
-        let doc = &mut self.docs[self.tabs[i].doc];
-        doc.encoding = Encoding::Utf8;
-        doc.bom = false;
-        doc.chosen_encoding = Some(Encoding::Utf8);
-        self.save(i)
+        let doc = self.tabs[i].doc;
+        let resume = self.resume.unwrap_or(Resume::Save(doc));
+        self.ask(
+            "Character not in the encoding",
+            text,
+            &cancel_or("Save as UTF-8"),
+            Asked::Utf8(doc, resume),
+        );
+        Saved::Asking
     }
 
     /// A file opened with bytes its encoding could not read (shown as
     /// U+FFFD) asks before its first save, which writes U+FFFD in their
-    /// place. `true` to go on.
+    /// place. `true` to go on; `false` when it asked, and the save runs
+    /// again once the answer is in.
     fn confirm_lossy(&mut self, i: usize) -> bool {
         let doc = &self.docs[self.tabs[i].doc];
-        if !doc.lossy || self.options.smoke || self.options.screenshot.is_some() {
+        if !doc.lossy
+            || self.tabs[i].approved.lossy
+            || self.options.smoke
+            || self.options.screenshot.is_some()
+        {
             return true;
         }
         let text = format!(
@@ -2825,22 +2933,22 @@ impl App {
             doc.display_name(),
             doc.encoding.name()
         );
-        let mut dialog = MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title("Replace unreadable bytes?")
-            .set_description(text)
-            .set_buttons(MessageButtons::YesNo);
-        if let Some(window) = &self.window {
-            dialog = dialog.set_parent(window.as_ref());
-        }
-        matches!(dialog.show(), MessageDialogResult::Yes)
+        let doc = self.tabs[i].doc;
+        let resume = self.resume.unwrap_or(Resume::Save(doc));
+        self.ask(
+            "Replace unreadable bytes?",
+            text,
+            &cancel_or("Save Anyway"),
+            Asked::Lossy(doc, resume),
+        );
+        false
     }
 
     /// An encoding was picked for the active document: read the file again
     /// in it, or save it in it.
     fn encoding_chosen(&mut self, purpose: EncodingFor, choice: Choice) {
         match purpose {
-            EncodingFor::Reopen => self.reopen_with(choice.encoding),
+            EncodingFor::Reopen => self.reopen_with(choice.encoding, false),
             EncodingFor::Save => self.save_with(choice),
         }
     }
@@ -2848,7 +2956,7 @@ impl App {
     /// Read the active file again in `encoding`, asking first if that loses
     /// unsaved changes. The choice sticks: reloading after a change on
     /// disk keeps it.
-    fn reopen_with(&mut self, encoding: Encoding) {
+    fn reopen_with(&mut self, encoding: Encoding, confirmed: bool) {
         if self.doc().path.is_none() {
             self.say("Not saved yet: nothing to reopen", false);
             return;
@@ -2856,23 +2964,24 @@ impl App {
         if self.waits_for_save() {
             return;
         }
-        if self.doc().is_dirty() && !self.options.smoke && self.options.screenshot.is_none() {
+        if self.doc().is_dirty()
+            && !confirmed
+            && !self.options.smoke
+            && self.options.screenshot.is_none()
+        {
             let text = format!(
                 "Reopening {} as {} discards its unsaved changes. Reopen?",
                 self.doc().display_name(),
                 encoding.name()
             );
-            let mut dialog = MessageDialog::new()
-                .set_level(MessageLevel::Warning)
-                .set_title("Unsaved changes")
-                .set_description(text)
-                .set_buttons(MessageButtons::YesNo);
-            if let Some(window) = &self.window {
-                dialog = dialog.set_parent(window.as_ref());
-            }
-            if !matches!(dialog.show(), MessageDialogResult::Yes) {
-                return;
-            }
+            let doc = self.tabs[self.active].doc;
+            self.ask(
+                "Unsaved changes",
+                text,
+                &cancel_or("Reopen"),
+                Asked::Reopen(doc, encoding),
+            );
+            return;
         }
         let id = self.tabs[self.active].doc;
         let before = self.docs[id].chosen_encoding.replace(encoding);
@@ -2921,7 +3030,9 @@ impl App {
             Saved::No if (doc.encoding, doc.bom) == (choice.encoding, choice.bom) => {
                 (doc.encoding, doc.bom, doc.chosen_encoding) = before;
             }
-            Saved::No => {}
+            // Asking: a question about the save, which runs again in the
+            // new encoding once answered.
+            Saved::No | Saved::Asking => {}
             Saved::Yes | Saved::Started => doc.chosen_encoding = Some(doc.encoding),
         }
     }
@@ -2946,26 +3057,30 @@ impl App {
         false
     }
 
-    /// Saving a merge with conflicts left asks first. `true` to go on.
+    /// Saving a merge with conflicts left asks first. `true` to go on;
+    /// `false` when it asked, and the save runs again once the answer is
+    /// in.
     fn confirm_conflicts(&mut self, i: usize) -> bool {
         let Some(open) = self.tabs[i].merge.as_ref().map(|m| m.open_conflicts()) else {
             return true;
         };
-        if open == 0 || self.options.smoke || self.options.screenshot.is_some() {
+        if open == 0
+            || self.tabs[i].approved.conflicts
+            || self.options.smoke
+            || self.options.screenshot.is_some()
+        {
             return true;
         }
         let noun = if open == 1 { "conflict" } else { "conflicts" };
-        let mut dialog = MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title("Conflicts left")
-            .set_description(format!(
-                "{open} {noun} not resolved. Save anyway, with conflict markers?"
-            ))
-            .set_buttons(MessageButtons::YesNo);
-        if let Some(window) = &self.window {
-            dialog = dialog.set_parent(window.as_ref());
-        }
-        matches!(dialog.show(), MessageDialogResult::Yes)
+        let doc = self.tabs[i].doc;
+        let resume = self.resume.unwrap_or(Resume::Save(doc));
+        self.ask(
+            "Conflicts left",
+            format!("{open} {noun} not resolved. Save anyway, with conflict markers?"),
+            &cancel_or("Save Anyway"),
+            Asked::Conflicts(doc, resume),
+        );
+        false
     }
 
     /// A `--merge` tab was saved: the exit code follows its conflicts.
@@ -2985,7 +3100,7 @@ impl App {
             Ok(job) => job,
             Err(e) => {
                 log::error!("{e}");
-                self.dialog(MessageLevel::Error, "Could not save", &e.to_string());
+                self.notice("Could not save", e.to_string());
                 return Saved::No;
             }
         };
@@ -3000,10 +3115,9 @@ impl App {
             });
             let step = self.docs[self.tabs[i].doc].save_written(token, failed, Instant::now());
             log::debug!("save of {name} ended before it began: {step:?}");
-            self.dialog(
-                MessageLevel::Error,
+            self.notice(
                 "Could not save",
-                "Could not start saving; nothing was written",
+                "Could not start saving; nothing was written".to_owned(),
             );
             return Saved::No;
         }
@@ -3107,7 +3221,7 @@ impl App {
                 tab.discard_at = None;
             }
             self.say(message.clone(), true);
-            self.dialog(MessageLevel::Error, "Could not save", &message);
+            self.notice("Could not save", message);
         } else {
             log::info!("saved {name}");
             self.say(format!("Saved {name}"), false);
@@ -3194,6 +3308,10 @@ impl App {
             // A huge file: App::save_ended does the above, or goes back to
             // the old name.
             Saved::Started => self.tabs[i].after_save.save_as = Some(SaveAs { old_path: old }),
+            // A question about the save (unreadable bytes, an encoding
+            // that cannot hold the text): it runs again under the new
+            // name once answered.
+            Saved::Asking => {}
             Saved::No => {
                 // Keep pointing at the old file, so the next save does not
                 // silently retry the path that failed.
@@ -3203,16 +3321,155 @@ impl App {
         saved
     }
 
-    fn dialog(&self, level: MessageLevel, title: &str, text: &str) {
-        let mut dialog = MessageDialog::new()
-            .set_level(level)
-            .set_title(title)
-            .set_description(text)
-            .set_buttons(MessageButtons::Ok);
-        if let Some(window) = &self.window {
-            dialog = dialog.set_parent(window.as_ref());
+    /// Show a message with an OK button, such as why a save failed.
+    fn notice(&mut self, title: &str, text: String) {
+        let ok = [Button {
+            label: "OK",
+            answer: Answer::Yes,
+        }];
+        self.ask(title, text, &ok, Asked::Notice);
+    }
+
+    /// Open a prompt in the window. It is answered later, by a key or a
+    /// click, in [`App::prompt_answered`]; until then it takes every key
+    /// and click. A prompt opened while another is showing waits its turn.
+    fn ask(&mut self, title: &str, text: String, buttons: &[Button], then: Asked) {
+        self.prompts
+            .push_back(Prompt::new(title, text, buttons, then));
+        // A half-typed chord or a drag must not carry on underneath.
+        self.pending_chord = None;
+        self.changed(false);
+    }
+
+    /// A command while a prompt is open: the keys that answer it or move
+    /// its focus. Everything else waits until it is answered.
+    fn run_prompt(&mut self, cmd: Command<'_>, event_loop: &ActiveEventLoop) {
+        let key = match cmd {
+            Command::Newline | Command::Insert(" ") => prompt::Key::Press,
+            Command::Escape => prompt::Key::Escape,
+            Command::Tab | Command::Move(Motion::Right, _) => prompt::Key::Next,
+            Command::Outdent | Command::Move(Motion::Left, _) => prompt::Key::Prev,
+            Command::Insert(text) => match text.chars().next() {
+                Some(c) if text.chars().count() == 1 && c.is_alphabetic() => prompt::Key::Letter(c),
+                _ => return,
+            },
+            _ => return,
+        };
+        let Some(p) = self.prompts.front_mut() else {
+            return;
+        };
+        if let Some(answer) = p.key(key) {
+            self.prompt_answered(answer, event_loop);
         }
-        dialog.show();
+    }
+
+    /// The front prompt was answered: close it and do what its answer
+    /// means.
+    fn prompt_answered(&mut self, answer: Answer, event_loop: &ActiveEventLoop) {
+        let Some(p) = self.prompts.pop_front() else {
+            return;
+        };
+        self.changed(false);
+        let go = answer == Answer::Yes;
+        match p.then {
+            Asked::Notice => {}
+            Asked::Discard(doc, resume) => {
+                let Some(i) = self.tab_of(doc) else {
+                    return;
+                };
+                let top = Some(self.docs[doc].history.top_id());
+                match answer {
+                    Answer::Yes => self.tabs[i].save_at = top,
+                    Answer::No => self.tabs[i].discard_at = top,
+                    Answer::Cancel => return self.resume_cancelled(),
+                }
+                self.resume_after(resume, event_loop);
+            }
+            Asked::Conflicts(..) | Asked::Lossy(..) | Asked::Utf8(..) if !go => {
+                self.resume_cancelled();
+            }
+            Asked::Conflicts(doc, resume) => {
+                if let Some(i) = self.tab_of(doc) {
+                    self.tabs[i].approved.conflicts = true;
+                    self.resume_after(resume, event_loop);
+                }
+            }
+            Asked::Lossy(doc, resume) => {
+                if let Some(i) = self.tab_of(doc) {
+                    self.tabs[i].approved.lossy = true;
+                    self.resume_after(resume, event_loop);
+                }
+            }
+            Asked::Utf8(doc, resume) => {
+                if self.tab_of(doc).is_some() {
+                    let d = &mut self.docs[doc];
+                    d.encoding = Encoding::Utf8;
+                    d.bom = false;
+                    d.chosen_encoding = Some(Encoding::Utf8);
+                    self.resume_after(resume, event_loop);
+                }
+            }
+            Asked::Reopen(doc, encoding) => {
+                if go && self.tabs[self.active].doc == doc {
+                    self.reopen_with(encoding, true);
+                }
+            }
+            Asked::Replace { from, to } => self.replace_answered(go, from, to),
+            Asked::Trash(path) => {
+                if go {
+                    self.trash(path);
+                }
+            }
+        }
+    }
+
+    /// The tab showing document `doc`, if one still does.
+    fn tab_of(&self, doc: DocId) -> Option<usize> {
+        self.tabs.iter().position(|t| t.doc == doc)
+    }
+
+    /// A question was answered "go ahead": run what asked it again.
+    fn resume_after(&mut self, resume: Resume, event_loop: &ActiveEventLoop) {
+        match resume {
+            Resume::Save(doc) => {
+                if let Some(i) = self.tab_of(doc) {
+                    self.save(i);
+                }
+            }
+            Resume::CloseTab(doc) => {
+                if let Some(i) = self.tab_of(doc) {
+                    self.close_tab(i, event_loop);
+                }
+            }
+            Resume::CloseGroup => self.close_group(event_loop),
+            Resume::Quit => self.quit(event_loop),
+        }
+    }
+
+    /// A question was cancelled: whatever asked it stops, and answers
+    /// given on the way ("Don't Save" to an earlier tab of a quit) are
+    /// forgotten, so trying again asks again.
+    fn resume_cancelled(&mut self) {
+        self.saves.quit_after = false;
+        for tab in &mut self.tabs {
+            tab.discard_at = None;
+            tab.save_at = None;
+            tab.approved = Approved::default();
+        }
+    }
+
+    /// Run `f` as operation `resume` unless an outer operation is already
+    /// running, so a prompt opened inside it resumes the outermost one.
+    fn as_resumable<R>(&mut self, resume: Resume, f: impl FnOnce(&mut Self) -> R) -> R {
+        let outer = self.resume.is_none();
+        if outer {
+            self.resume = Some(resume);
+        }
+        let out = f(self);
+        if outer {
+            self.resume = None;
+        }
+        out
     }
 
     /// Offer to save tab `i` if it has unsaved changes. Returns
@@ -3228,50 +3485,53 @@ impl App {
         if !(doc.is_dirty() || doc.deleted) || unattended {
             return Discard::Yes;
         }
-        if self.tabs[i].discard_at == Some(doc.history.top_id()) {
-            return Discard::Yes; // answered earlier in this quit
+        let top = Some(doc.history.top_id());
+        if self.tabs[i].discard_at == top {
+            return Discard::Yes; // "Don't Save", answered earlier
+        }
+        if self.tabs[i].save_at == top {
+            // "Save", answered earlier.
+            let saved = self.save(i);
+            if saved != Saved::Asking {
+                self.tabs[i].save_at = None;
+            }
+            return match saved {
+                Saved::Yes => Discard::Yes,
+                Saved::Started => Discard::Wait,
+                Saved::No => Discard::Cancel,
+                Saved::Asking => Discard::Asking,
+            };
         }
         self.switch_to(i);
-        let doc = &self.docs[self.tabs[i].doc];
+        let id = self.tabs[i].doc;
+        let doc = &self.docs[id];
         let name = doc.display_name();
         let question = if doc.deleted {
             format!("{name} was deleted on disk. Save it before closing?")
         } else {
             format!("Save changes to {name} before closing?")
         };
-        let mut dialog = MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title("Unsaved changes")
-            .set_description(question)
-            .set_buttons(MessageButtons::YesNoCancelCustom(
-                "Save".into(),
-                "Don't Save".into(),
-                "Cancel".into(),
-            ));
-        if let Some(window) = &self.window {
-            dialog = dialog.set_parent(window.as_ref());
-        }
-        let save = match dialog.show() {
-            MessageDialogResult::Yes => true,
-            MessageDialogResult::Custom(label) if label == "Save" => true,
-            MessageDialogResult::No => false,
-            MessageDialogResult::Custom(label) if label == "Don't Save" => false,
-            _ => return Discard::Cancel, // Cancel or dismissed: keep editing.
-        };
-        if !save {
-            self.tabs[i].discard_at = Some(self.docs[self.tabs[i].doc].history.top_id());
-            return Discard::Yes;
-        }
-        match self.save(i) {
-            Saved::Yes => Discard::Yes,
-            Saved::Started => Discard::Wait,
-            Saved::No => Discard::Cancel,
-        }
+        let resume = self.resume.unwrap_or(Resume::CloseTab(id));
+        self.ask(
+            "Unsaved changes",
+            question,
+            &SAVE_DONT_CANCEL,
+            Asked::Discard(id, resume),
+        );
+        Discard::Asking
     }
 
     /// Close tab `i`, offering to save it. Closing the last tab quits. A
     /// tab whose huge file is being saved closes once that is done.
     fn close_tab(&mut self, i: usize, event_loop: &ActiveEventLoop) {
+        let doc = self.tabs[i].doc;
+        self.as_resumable(Resume::CloseTab(doc), |app| {
+            app.close_tab_now(i, event_loop);
+        });
+    }
+
+    /// [`App::close_tab`], as the operation a prompt resumes.
+    fn close_tab_now(&mut self, i: usize, event_loop: &ActiveEventLoop) {
         // Another tab still shows the document: nothing to ask.
         let discard = if self.shown_elsewhere(i) {
             Discard::Yes
@@ -3280,7 +3540,7 @@ impl App {
         };
         match discard {
             Discard::Yes => {}
-            Discard::Cancel => return,
+            Discard::Cancel | Discard::Asking => return,
             Discard::Wait => {
                 self.tabs[i].after_save.close = true;
                 let name = self.docs[self.tabs[i].doc].display_name();
@@ -3520,6 +3780,11 @@ impl App {
     /// changes as Close Tab does; the group goes with its last tab. The
     /// last group stays.
     fn close_group(&mut self, event_loop: &ActiveEventLoop) {
+        self.as_resumable(Resume::CloseGroup, |app| app.close_group_now(event_loop));
+    }
+
+    /// [`App::close_group`], as the operation a prompt resumes.
+    fn close_group_now(&mut self, event_loop: &ActiveEventLoop) {
         if self.groups.len() == 1 {
             return;
         }
@@ -3528,7 +3793,7 @@ impl App {
             let before = self.tabs.len();
             self.close_tab(i, event_loop);
             if self.tabs.len() == before {
-                return; // cancelled, or waiting on a save
+                return; // cancelled, asking, or waiting on a save
             }
         }
     }
@@ -3588,6 +3853,11 @@ impl App {
     /// ([`App::save_ended`]), without asking again about tabs already
     /// answered.
     fn quit(&mut self, event_loop: &ActiveEventLoop) {
+        self.as_resumable(Resume::Quit, |app| app.quit_now(event_loop));
+    }
+
+    /// [`App::quit`], as the operation a prompt resumes.
+    fn quit_now(&mut self, event_loop: &ActiveEventLoop) {
         for i in 0..self.tabs.len() {
             // A document in two tabs is asked about once.
             if (0..i).any(|j| self.tabs[j].doc == self.tabs[i].doc) {
@@ -3596,12 +3866,11 @@ impl App {
             match self.confirm_discard(i) {
                 Discard::Yes => {}
                 Discard::Cancel => {
-                    self.saves.quit_after = false;
-                    for tab in &mut self.tabs {
-                        tab.discard_at = None;
-                    }
+                    self.resume_cancelled();
                     return;
                 }
+                // Answering the question quits again.
+                Discard::Asking => return,
                 Discard::Wait => {
                     self.saves.quit_after = true;
                     let name = self.docs[self.tabs[i].doc].display_name();
@@ -4217,6 +4486,11 @@ impl App {
             return;
         };
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        if let Some(p) = self.prompts.front() {
+            // Modal: a click outside its buttons does nothing.
+            self.prompt_click = p.click(&window, x, y);
+            return;
+        }
         if self.picker.is_some() {
             self.picker_click(&window, x, y);
             return;
@@ -5028,6 +5302,9 @@ impl App {
         if let Some(p) = &self.picker {
             let ui = &self.theme.ui;
             draw_picker_overlay(gpu, ui, layout, p, &self.keymap, self.blink.visible);
+        }
+        if let Some(p) = self.prompts.front() {
+            p.draw(gpu, &self.theme.ui, layout);
         }
     }
 
@@ -6427,6 +6704,9 @@ pub fn run_headless(
         if let Some(spec) = &options.picker {
             draw_headless_picker(&mut gpu, ui, &layout, (spec, &root), &doc, config);
         }
+        if options.prompt {
+            draw_headless_prompt(&mut gpu, ui, &layout, &doc);
+        }
         // Nested languages are parsed a few per frame; keep painting
         // until none is left over, as the window would on redraws.
         if doc.syntax.injections_pending() {
@@ -6443,6 +6723,13 @@ pub fn run_headless(
         return 1;
     }
     i32::from(!save_screenshot(path, gpu.take_capture().as_ref()))
+}
+
+/// `--prompt` with `--headless`: the question closing `doc` would ask,
+/// for checking how prompts look in a theme.
+fn draw_headless_prompt(gpu: &mut Gpu, ui: &Ui, layout: &Layout, doc: &Document) {
+    let question = format!("Save changes to {} before closing?", doc.display_name());
+    Prompt::new("Unsaved changes", question, &SAVE_DONT_CANCEL, ()).draw(gpu, ui, layout);
 }
 
 /// Warnings on stderr, for headless runs with no message line to show them.
@@ -7227,6 +7514,9 @@ impl ApplicationHandler<AppEvent> for App {
             log::trace!("window event: {event:?}");
         }
         match event {
+            // A prompt is open: it is answered first (it may be this
+            // quit's own question).
+            WindowEvent::CloseRequested if !self.prompts.is_empty() => {}
             WindowEvent::CloseRequested => self.quit(event_loop),
 
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
@@ -7250,6 +7540,9 @@ impl ApplicationHandler<AppEvent> for App {
             } => {
                 if state == ElementState::Pressed {
                     self.mouse_down(now);
+                    if let Some(answer) = self.prompt_click.take() {
+                        self.prompt_answered(answer, event_loop);
+                    }
                     if let Some(cmd) = self.pending_action.take() {
                         self.run(cmd, event_loop);
                     }
@@ -7262,13 +7555,17 @@ impl ApplicationHandler<AppEvent> for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
                 ..
-            } => self.tree_context_menu(),
+            } if self.prompts.is_empty() => self.tree_context_menu(),
 
-            WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
+            WindowEvent::MouseWheel { delta, .. } if self.prompts.is_empty() => {
+                self.mouse_wheel(delta);
+            }
 
             // A file dragged in from the desktop opens; a folder joins the
             // workspace (M19).
-            WindowEvent::DroppedFile(path) => self.open_from_system(&[path]),
+            WindowEvent::DroppedFile(path) if self.prompts.is_empty() => {
+                self.open_from_system(&[path]);
+            }
 
             WindowEvent::Focused(false) => {
                 // Show the cursor solid in the background; it may have been

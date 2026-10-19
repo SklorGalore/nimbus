@@ -82,6 +82,7 @@ need them for everyday use.
 | `--cursors N,N,…` | With `--headless`: put a cursor at each byte offset; the last is the main one. |
 | `--preview` | With `--headless`: draw the file's Markdown preview instead of its text. |
 | `--picker KIND[:QUERY]` | With `--headless`: draw an open picker, `palette`, `files`, `line` or `symbols`, optionally with a query. |
+| `--prompt` | With `--headless`: draw the "Save changes before closing?" question over the frame. |
 
 ## Exit codes
 
