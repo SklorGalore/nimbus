@@ -24,6 +24,9 @@ repeated in each file:
 - Release binary size recorded in Results.
 - `DESIGN.md` updated, with a decision-log line, for any decision that changed.
 - No new `unsafe`, `unwrap` or crate-wide lint allows unless the plan says so.
+- Once compatibility mode exists (M23), anything new the GPU renderer
+  draws (a new primitive or pipeline) is drawn by the CPU painter too,
+  in the same change, and the screenshot test passes in both modes.
 
 | # | Plan | Status |
 |---|---|---|
@@ -53,6 +56,7 @@ repeated in each file:
 | 23 | [Library upgrades](m23-library-upgrades.md) | Planned, waiting on stable releases |
 | 24 | [International text](m24-international-text.md) | Planned |
 | 25 | [Command line](m25-command-line.md) | Planned |
+| 26 | [Security](m26-security.md) | Planned |
 | 27 | [Git window: viewing](m27-git-viewer.md) | Planned |
 | 28 | [Git window: staging and committing](m28-git-staging.md) | Planned |
 | 29 | [Git window: branches and remotes](m29-git-branches-remotes.md) | Planned |

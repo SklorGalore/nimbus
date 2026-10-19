@@ -114,8 +114,9 @@ a quad around the segment whose fragment shader works out the distance
 to the curve and turns it into anti-aliased coverage. Only the rows on
 screen produce segments, so the instance count stays in the hundreds.
 Compatibility mode (M23) draws the same segment list on the CPU by
-flattening each curve into short lines and filling them with coverage;
-if M23 has not landed, that routine joins its plan instead.
+flattening each curve into short lines and filling them with coverage,
+added in the same change as the GPU pipeline, as the standing
+requirement in `docs/milestones/README.md` asks.
 
 **Commit details reuse folder compare and the compare view.** The file
 list is `diff-tree` output; a selected file's two sides are read with

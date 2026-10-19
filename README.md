@@ -375,6 +375,8 @@ milestone lands on development, move its line up to "Available now". -->
   once they are stable
 - Compatibility mode: Nimbus keeps working on machines without a usable
   GPU, drawing on the CPU instead
+- Security: signed releases you can check, a hardened build pipeline and
+  reviewed dependencies
 - A git window (`nimbus --git`): your changes, history and branches,
   staging, commits and merges, built on Nimbus's compare and merge views
 
