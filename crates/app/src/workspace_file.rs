@@ -105,7 +105,10 @@ pub fn named(name: &str) -> Result<PathBuf, WorkspaceError> {
         (parts.next(), parts.next()),
         (Some(Component::Normal(_)), None)
     );
-    if name.is_empty() || !plain || name.starts_with('.') {
+    // Slashes are checked as text too: `Path` drops a trailing one, so
+    // `a/` looks like the plain name `a` yet `a/.toml` is a file in a
+    // folder `a` (found by the `workspace` fuzz target, M26).
+    if name.is_empty() || !plain || name.starts_with('.') || name.contains(['/', '\\']) {
         return Err(WorkspaceError(format!(
             "{name:?} cannot be a workspace name: use a plain name, no slashes"
         )));
@@ -262,6 +265,69 @@ pub fn load(path: &Path, base: Option<&Path>) -> Result<Session, WorkspaceError>
     Ok(session)
 }
 
+/// Read a project's own `.nimbus/workspace.toml` at `path`, whose
+/// relative paths start at `root`, keeping only what is inside `root`
+/// (M26). Returns the session and how many paths were dropped.
+///
+/// A project-local file arrives with whatever the user cloned or
+/// unpacked, so it is untrusted: without this, a repository could list
+/// `~/.ssh/id_ed25519` as a tab, or `/` as a root, and opening its
+/// workspace would show that file or list that folder. Paths are
+/// resolved first (symlinks and `..` included), so `../../.ssh` and a
+/// symlink pointing out of the project are dropped too. A workspace with
+/// roots outside its folder is a named workspace's job: those keep
+/// absolute paths and live in the user's own config folder.
+///
+/// # Errors
+///
+/// The errors of [`load`], and an error when the first root itself is
+/// outside `root`.
+pub fn load_local(path: &Path, root: &Path) -> Result<(Session, usize), WorkspaceError> {
+    let mut session = load(path, Some(root))?;
+    let dropped = confine(&mut session, &crate::io::canonical(root));
+    if !session.root.starts_with(crate::io::canonical(root)) {
+        return Err(WorkspaceError(format!(
+            "{}: its first folder is outside the project",
+            path.display()
+        )));
+    }
+    Ok((session, dropped))
+}
+
+/// Drop every root, expanded folder and tab of `session` that is not
+/// inside `base` (canonical), once resolved. Returns how many went.
+fn confine(session: &mut Session, base: &Path) -> usize {
+    let inside = |p: &Path| crate::io::canonical(&lexical(p)).starts_with(base);
+    let mut dropped = 0;
+    let before = session.roots.len();
+    session.roots.retain(|r| inside(r));
+    dropped += before - session.roots.len();
+    let root = session.root.clone();
+    let before = session.expanded.len();
+    session.expanded.retain(|e| inside(&root.join(e)));
+    dropped += before - session.expanded.len();
+    let before = session.tabs.len();
+    session.tabs.retain(|t| inside(&t.path));
+    dropped += before - session.tabs.len();
+    dropped
+}
+
+/// `path` with `.` and `..` worked out on the text alone, for a path that
+/// may not exist (so cannot be canonicalised): `a/b/../c` is `a/c`.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,7 +391,7 @@ mod tests {
         let partial = from_text("roots = [\"/a\"]\n", None).unwrap();
         assert_eq!(partial.root, PathBuf::from("/a"));
         assert_eq!(partial.tabs, Vec::new());
-        for bad in ["", "  ", "a/b", "../x", ".hidden", "/abs"] {
+        for bad in ["", "  ", "a/b", "../x", ".hidden", "/abs", "+/", "a\\b"] {
             assert!(named(bad).is_err(), "{bad:?}");
         }
     }
@@ -342,6 +408,46 @@ mod tests {
         let back = load(&dir.join("alpha.toml"), None).unwrap();
         assert_eq!(back.tabs, s.tabs);
         assert!(load(&dir.join("none.toml"), None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_projects_own_file_opens_only_what_is_inside_it() {
+        let dir = std::env::temp_dir().join(format!("nimbus-local-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let project = dir.join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("secret")).unwrap();
+        std::fs::write(project.join("src/main.rs"), "").unwrap();
+        std::fs::write(dir.join("secret/key"), "").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("secret/key"), project.join("link")).unwrap();
+        // TOML literal strings ('...') need no escaping of Windows paths.
+        let text = format!(
+            "roots = ['.', '{secret}', 'src/..']\nexpanded = ['src', '../secret']\n\
+             [[tabs]]\npath = 'src/main.rs'\n[[tabs]]\npath = '../secret/key'\n\
+             [[tabs]]\npath = '{key}'\n[[tabs]]\npath = 'link'\n",
+            secret = dir.join("secret").display(),
+            key = dir.join("secret").join("key").display(),
+        );
+        let file = local(&project);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, text).unwrap();
+        let (session, dropped) = load_local(&file, &project).unwrap();
+        let canonical = crate::io::canonical(&project);
+        assert_eq!(session.root, canonical);
+        assert_eq!(session.roots, vec![canonical]);
+        assert_eq!(session.expanded, vec![PathBuf::from("src")]);
+        let tabs: Vec<_> = session.tabs.iter().map(|t| t.path.clone()).collect();
+        assert_eq!(tabs, vec![project.join("src").join("main.rs")]);
+        // The outside root, folder and two tabs, and on Unix the symlink.
+        let symlink = usize::from(cfg!(unix));
+        assert_eq!(dropped, 1 + 1 + 2 + symlink, "{tabs:?}");
+
+        // A file whose first folder is elsewhere is refused outright.
+        let elsewhere = format!("roots = ['{}']\n", dir.join("secret").display());
+        std::fs::write(&file, elsewhere).unwrap();
+        assert!(load_local(&file, &project).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
