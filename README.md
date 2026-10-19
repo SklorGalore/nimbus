@@ -377,6 +377,8 @@ milestone lands on development, move its line up to "Available now". -->
   GPU, drawing on the CPU instead
 - Security: signed releases you can check, a hardened build pipeline and
   reviewed dependencies
+- A git window (`nimbus --git`): your changes, history and branches,
+  staging, commits and merges, built on Nimbus's compare and merge views
 
 Some things are out of scope for now, including a Vim mode, plugins,
 LSP, a built-in terminal, collaborative editing and right-to-left text.
