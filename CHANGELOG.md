@@ -13,6 +13,9 @@ section before tagging.
 - `scripts/publish-packages.sh` puts a signed, published release in the
   Homebrew tap and opens its winget pull request, with the hashes taken
   from the signed `SHA256SUMS`.
+- The README and manual say how to install with Homebrew
+  (`brew install --cask sklorgalore/nimbus/nimbus`) and winget
+  (`winget install SklorGalore.Nimbus`).
 
 ## 1.1.0
 

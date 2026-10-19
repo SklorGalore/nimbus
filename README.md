@@ -161,10 +161,33 @@ On Windows, when SmartScreen says "Windows protected your PC", click
 [installation guide](docs/manual/getting-started.md#installing) covers
 each package in detail.
 
+### With Homebrew or winget
+
+On macOS with [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask sklorgalore/nimbus/nimbus
+```
+
+This also puts the `nimbus` command on your `PATH`. The app is not
+signed, so the first launch still needs right-click > Open or the
+`xattr` command above.
+
+On Windows with winget:
+
+```powershell
+winget install SklorGalore.Nimbus
+```
+
+`brew upgrade --cask nimbus` and `winget upgrade SklorGalore.Nimbus`
+install newer releases. Both package managers carry releases from
+v1.1.0 on, and a winget release appears there once Microsoft's
+reviewers accept it, which can take a few days after the release.
+
 ### Running from a terminal
 
-On macOS, the command-line binary is inside the app bundle. Link it into
-a folder on your `PATH`:
+On macOS, the command-line binary is inside the app bundle. Homebrew
+links it for you; otherwise link it into a folder on your `PATH`:
 
 ```sh
 ln -s /Applications/Nimbus.app/Contents/MacOS/nimbus /usr/local/bin/nimbus
