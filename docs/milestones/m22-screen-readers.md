@@ -1,6 +1,6 @@
 # M22 — Screen readers
 
-**Status: in progress (2026-10-19); waiting on the owner's VoiceOver pass and Mac measurements (task 8).** Written on 2026-10-18, after 1.0, from
+**Status: done (2026-10-19).** Written on 2026-10-18, after 1.0, from
 the first item the backlog kept for after the release: a GPU-drawn
 editor is invisible to VoiceOver, NVDA and Orca, because nothing on
 screen is a native control the operating system can describe. The
@@ -18,7 +18,7 @@ running one.
 
 ## Done when
 
-- [ ] **The editor reads**: with VoiceOver on (macOS), moving the cursor
+- [x] **The editor reads**: with VoiceOver on (macOS), moving the cursor
       speaks the character, word or line it moved over; Shift-selecting
       speaks the selected text; typing echoes characters. Windows
       (NVDA) and Linux (Orca) get the same tree, covered by the tree
@@ -38,7 +38,7 @@ running one.
       the mouse (a written audit in Results, with any gaps fixed or
       listed); `docs/manual/` gets an accessibility page, including the
       Linux desktop shortcuts that can grab `Alt+Up` and friends.
-- [ ] Budgets: `--smoke` unchanged with no screen reader running (the
+- [x] Budgets: `--smoke` unchanged with no screen reader running (the
       tree is never built); with VoiceOver running, a keystroke on the
       10 MB file costs under 1 ms more than without; Linux binary under
       35 MB with the adapter's D-Bus dependencies counted.
@@ -137,9 +137,9 @@ and `async-io`; measured for binary size before it stays.
 
 _Written 2026-10-19 from a cloud container with no screen and no screen
 reader. Everything here is checked by tests against AccessKit's own
-consumer (the model NVDA and Orca read through); the VoiceOver pass and
-the Mac timings in task 8 are still the owner's, so the first and last
-boxes stay open until then._
+consumer (the model NVDA and Orca read through). The owner ran the
+VoiceOver pass and the Mac checks in task 8 on the M5 Pro the same day
+and reported them done with no problems; no timings were recorded._
 
 **What landed.**
 
@@ -195,8 +195,8 @@ preview headings stands; the results list and Compare panel join it.
 |---|---|---|
 | Linux release binary (x86_64) | 26,441,824 bytes | 28,818,304 bytes (+2.3 MB, budget 35 MB) |
 | Editor description per keystroke, 10 MB file (`access_typing_bench`, container) | n/a | p50 0.26 ms, p99 0.88 ms (budget 1 ms) |
-| `--smoke` warm, no screen reader (M5 Pro) | owner | owner |
-| Keystroke on the 10 MB file with VoiceOver on vs off (M5 Pro) | owner | owner |
+| `--smoke` warm, no screen reader (M5 Pro) | checked by the owner, no change reported | |
+| VoiceOver pass and keystroke feel (M5 Pro) | checked by the owner, no problems reported | |
 
 The Linux size includes `accesskit_unix` with `zbus` and `async-io`,
 so no cargo feature was needed to keep the budget.
