@@ -473,8 +473,11 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
 - **Find / replace** (`Primary+F`, `Primary+H` on Windows and Linux,
   `Primary+Alt+F` on macOS where `Cmd+H` hides the app): an inline bar at the
   top of the view, incremental, with match count and regex and case toggles.
-- **Menus**: native menu bar with `muda` on macOS and Windows. On Linux,
-  `muda` needs GTK, which we avoid, so Linux relies on the command palette.
+- **Menus**: the system menu bar with `muda` on macOS, where it sits at the
+  top of the screen. On Windows Nimbus draws the menu bar and its
+  drop-downs itself, in the theme's colours, and right-click menus are
+  drawn by Nimbus everywhere (`menu/drawn.rs`). On Linux, `muda` needs GTK,
+  which we avoid, so Linux relies on the command palette.
 - **Clipboard**: `arboard`. **File dialogs**: `rfd`.
 - **Config**: one TOML file in the platform config directory (from `dirs`):
   `~/Library/Application Support/nimbus/config.toml` on macOS,
@@ -548,7 +551,7 @@ it.
 | `regex` | 1 | search | M3 |
 | `crossbeam-channel` | 0.5 | background to main thread | M3 |
 | `serde`, `toml`, `dirs` | 1, 1, 7 | config | M4 |
-| `muda` | 0.21 | native menus (macOS, Windows) | M4 |
+| `muda` | 0.21 | the macOS menu bar | M4 |
 | `rfd` | 0.17 | file dialogs | M4 |
 | `ignore`, `nucleo` | 0.4, 0.5 | project walking, fuzzy matching | M4 |
 | `tree-sitter` + grammar crates | 0.27 | syntax | M5 |

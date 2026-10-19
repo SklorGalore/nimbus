@@ -4,11 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
-
-use super::{App, AppEvent};
+use super::{App, AppEvent, Asked, cancel_or};
 use crate::instance::Waiter;
-use crate::path_command::{self, Plan};
+use crate::path_command::{self, Plan, Step};
 
 /// One `nimbus --wait` command: the files it is waiting on and the
 /// connection to answer when none of them is open any more.
@@ -73,29 +71,21 @@ impl App {
             Plan::Refused(why) => return self.say(why, true),
             Plan::Run(step) => step,
             Plan::Ask(question, step) => {
-                let mut dialog = MessageDialog::new()
-                    .set_level(MessageLevel::Warning)
-                    .set_title("Replace?")
-                    .set_description(question)
-                    .set_buttons(MessageButtons::OkCancelCustom(
-                        "Replace".into(),
-                        "Cancel".into(),
-                    ));
-                if let Some(window) = &self.window {
-                    dialog = dialog.set_parent(window.as_ref());
-                }
-                // Some platforms report the custom OK button as plain Ok.
-                let replace = match dialog.show() {
-                    MessageDialogResult::Ok => true,
-                    MessageDialogResult::Custom(label) => label == "Replace",
-                    _ => false,
-                };
-                if !replace {
-                    return self.say("Left as it is", false);
-                }
-                step
+                // Answered in `prompt_answered`, which runs the step.
+                return self.ask(
+                    "Replace?",
+                    question,
+                    &cancel_or("Replace"),
+                    Asked::InstallCommand(install, step),
+                );
             }
         };
+        self.run_install(install, step);
+    }
+
+    /// Make the change `step` on a worker; the result arrives as
+    /// [`AppEvent::Installed`].
+    pub(super) fn run_install(&mut self, install: bool, step: Step) {
         self.say(
             if install {
                 "Installing the nimbus command…"

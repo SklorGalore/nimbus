@@ -81,6 +81,19 @@ section before tagging.
 - Releases are built from the committed `Cargo.lock` (`--locked`), every
   workflow action is pinned to a commit, and dependency updates must
   pass `cargo vet`.
+- The title bar takes the theme's colours. On macOS Nimbus draws it,
+  in the tab bar's colour with the title centred, and the system keeps
+  only its window buttons; on Windows 11 the system bar is coloured to
+  match; elsewhere it follows the theme's light or dark.
+- Nimbus draws the Windows menu bar (File, Edit, ...) and its drop-down
+  menus itself, in the theme's colours; `F10` opens it from the keyboard.
+  Right-click menus in the file tree are drawn by Nimbus on every
+  system, so Linux has them now too.
+- Questions and messages ("Save changes before closing?", "Could not
+  save", replacing a file in the tree and the rest) open inside the
+  window in the theme's colours, on every system, instead of as system
+  dialogs. `Enter`, `Esc`, `Tab`, the arrow keys and each button's first
+  letter answer them. File pickers stay the system's.
 
 ## 1.1.0
 
