@@ -423,13 +423,17 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(dir.join("secret/key"), project.join("link")).unwrap();
         // TOML literal strings ('...') need no escaping of Windows paths.
-        let text = format!(
+        let mut text = format!(
             "roots = ['.', '{secret}', 'src/..']\nexpanded = ['src', '../secret']\n\
              [[tabs]]\npath = 'src/main.rs'\n[[tabs]]\npath = '../secret/key'\n\
-             [[tabs]]\npath = '{key}'\n[[tabs]]\npath = 'link'\n",
+             [[tabs]]\npath = '{key}'\n",
             secret = dir.join("secret").display(),
             key = dir.join("secret").join("key").display(),
         );
+        // The symlink pointing out of the project (made above on Unix only).
+        if cfg!(unix) {
+            text.push_str("[[tabs]]\npath = 'link'\n");
+        }
         let file = local(&project);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, text).unwrap();
