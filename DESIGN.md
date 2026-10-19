@@ -588,7 +588,7 @@ introduces and points at the code.
 | 23 | Library upgrades | Planned, waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
 | 24 | International text | Planned | CJK and other scripts in the right fonts, variable fonts, editable huge files in single-byte encodings | [m24](docs/milestones/m24-international-text.md) |
 | 25 | Command line | Planned | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
-| 31 | Updates | Draft | Install a newer release from inside Nimbus, verified against the signed `SHA256SUMS`, and restart into it | [m31](docs/milestones/m31-updates.md) |
+| 31 | Updates | Planned | Install a newer release from inside Nimbus, verified against the signed `SHA256SUMS`, and restart into it | [m31](docs/milestones/m31-updates.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
@@ -608,16 +608,13 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-Open for M31 (updates), drafted on 2026-10-18; the plan's **Proposed**
-items are the defaults until they are answered. Answered on
-2026-10-19: updates install on request only (nothing downloads until
+None open. The questions the M31 (updates) draft raised were answered
+on 2026-10-19: updates install on request only (nothing downloads until
 the person runs Install Update); background download and install on
 quit were declined for now. The startup check becomes on by default
 (`check_updates = true`), reversing M15's default; unattended runs
-never check. Still open:
-
-- Installs owned by Homebrew or a `.deb`: hand them back to `brew` and
-  `apt` with the command to run (proposed), or replace them anyway.
+never check. Installs owned by Homebrew or a `.deb` are handed back to
+`brew` and `apt` with the command to run, not replaced.
 
 The questions the drafts of M22–M25, the plans after 1.0,
 raised were answered on 2026-10-18:
@@ -801,4 +798,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | M25 Command line added at the owner's request: an "Install `nimbus` Command" palette action (macOS via the system administrator prompt, no `unsafe`), opening files in the running window, `--wait` | m25, backlog |
 | 2026-10-18 | Compatibility mode (Cumulus) joins M23: an automatic CPU painter over `FrameBuilder`'s rects and glyphs, presented with `softbuffer`, with a one-time notice and `--compat`; no wgpu CPU-driver step, no separate app or terminal editor | §9, m23 |
 | 2026-10-18 | M31 Updates drafted at the owner's request: Install Update downloads the release package, checks it against the `minisign`-signed `SHA256SUMS` with the key compiled in (version pinned in the trusted comment), swaps it in and restarts with the session; no new trust beyond the release key; needs `minisign.pub` committed first | §8, §9, m31 |
-| 2026-10-19 | M31: updates install on request only; the startup update check becomes on by default (`check_updates = true`), reversing M15's off default | §9, m31 |
+| 2026-10-19 | M31: updates install on request only; the startup update check becomes on by default (`check_updates = true`), reversing M15's off default; Homebrew and `.deb` installs are handed back to their package manager | §9, m31 |

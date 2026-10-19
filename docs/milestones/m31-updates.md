@@ -1,13 +1,12 @@
 # M31 — Updates
 
-**Status: draft (2026-10-18), awaiting the owner's answers.** Written on
-2026-10-18 at the owner's request, from what M15 deferred: "automatic
-in-place updates (downloading and replacing the binary)". Numbered after
-security (M26) and the git client plans (M27–M30). Items marked
-**Proposed** are the drafter's defaults until the owner answers them.
-Wider hardening of the program, the repository and the supply chain is
-M26's; this plan covers only getting a release onto the machine and
-checking it before it runs.
+**Status: planned (2026-10-19).** Written on 2026-10-18 at the owner's
+request, from what M15 deferred: "automatic in-place updates
+(downloading and replacing the binary)"; the owner answered its three
+questions on 2026-10-19 (`DESIGN.md` §9). Numbered after security (M26)
+and the git client plans (M27–M30). Wider hardening of the program, the
+repository and the supply chain is M26's; this plan covers only getting
+a release onto the machine and checking it before it runs.
 
 ## What exists today
 
@@ -86,7 +85,7 @@ a password prompt or a Gatekeeper or SmartScreen warning.
         gets no SmartScreen prompt.
       - Linux: an AppImage replaces its own file (`$APPIMAGE`); a
         tarball install replaces the binary when its folder is writable.
-- [ ] **Proposed: package managers keep their installs.** When Nimbus
+- [ ] **Package managers keep their installs** (owner, 2026-10-19). When Nimbus
       was installed by Homebrew (the app lives under Homebrew's
       `Caskroom`), as a `.deb` (`/usr/bin/nimbus`), or anywhere Nimbus
       cannot write, Install Update is replaced by the command to run

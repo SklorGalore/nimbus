@@ -53,7 +53,7 @@ repeated in each file:
 | 23 | [Library upgrades](m23-library-upgrades.md) | Planned, waiting on stable releases |
 | 24 | [International text](m24-international-text.md) | Planned |
 | 25 | [Command line](m25-command-line.md) | Planned |
-| 31 | [Updates](m31-updates.md) | Draft, awaiting the owner's answers |
+| 31 | [Updates](m31-updates.md) | Planned |
 
 **Next** is the milestone to start; **Planned** plans are approved and
 queued in table order. M10–M15 were drafted after M8 and approved, with
