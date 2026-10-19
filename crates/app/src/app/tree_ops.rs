@@ -441,7 +441,7 @@ impl App {
     }
 
     /// A right-click in the sidebar: select the row under the pointer and
-    /// show the tree's context menu (macOS and Windows).
+    /// open the tree's context menu there, drawn by Nimbus.
     pub(super) fn tree_context_menu(&mut self) {
         let Some(layout) = self.layout() else { return };
         let (x, y) = (crate::to_f32(self.mouse.x), crate::to_f32(self.mouse.y));
@@ -450,9 +450,8 @@ impl App {
         }
         self.find.focused = false;
         self.changed(false);
-        if let Some(window) = self.window.clone() {
-            crate::menu::show_tree_menu(&window, &self.keymap);
-        }
+        self.menus
+            .open_context(crate::menu::TREE_MENU, [x, y], &self.keymap);
     }
 
     /// `from` was renamed to `to`: tabs, recent files and closed tabs

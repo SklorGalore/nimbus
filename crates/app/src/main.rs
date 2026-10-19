@@ -114,6 +114,9 @@ pub struct Options {
     /// With `--headless`: keep room for, and draw, the title bar Nimbus
     /// draws on macOS, whatever system this runs on.
     pub title_bar: bool,
+    /// With `--headless`: draw the menu bar Nimbus draws on Windows, with
+    /// this menu (`File`, `Edit`, ...) open, whatever system this runs on.
+    pub menu: Option<String>,
     /// Use this theme instead of the config's.
     pub theme: Option<String>,
     /// Open every file in this backend, whatever its size (`--backend
@@ -256,7 +259,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]] [--prompt] [--title-bar]] [--debug-overlay] [--preview] [--linear-blend] [--compat] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--wait] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]] [--prompt] [--title-bar] [--menu NAME]] [--debug-overlay] [--preview] [--linear-blend] [--compat] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--wait] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -364,6 +367,7 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
         "--picker" => o.picker = args.next().and_then(|p| p.into_string().ok()),
         "--prompt" => o.prompt = true,
         "--title-bar" => o.title_bar = true,
+        "--menu" => o.menu = args.next().and_then(|m| m.into_string().ok()),
         "--theme" => o.theme = args.next().and_then(|t| t.into_string().ok()),
         "--workspace" => {
             let Ok(name) = value(args, flag, "a workspace name").into_string() else {

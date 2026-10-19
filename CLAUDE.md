@@ -34,6 +34,7 @@ scripts/screenshots.sh [NAME...]                             # remake assets/scr
 cargo run -- FILE --wrap --find PATTERN                     # start with soft wrap on and the find bar searching
 cargo run -- FILE --theme light --headless 1600x1000 --screenshot /tmp/l.bmp   # override the config's theme
 cargo run -- FILE --theme light --headless 1400x800 --prompt --title-bar --screenshot /tmp/q.bmp   # the in-app "Save changes?" prompt and the macOS title bar Nimbus draws
+cargo run -- FILE --headless 1400x800 --menu Edit --screenshot /tmp/m.bmp   # the Windows menu bar Nimbus draws, with a menu open
 NIMBUS_CONFIG_DIR=/tmp/cfg cargo run -- FILE --headless 1600x1000 --screenshot /tmp/c.bmp   # use another config folder (themes/, languages/, queries/); never write to the owner's real one
 cargo run -- FOLDER a.rs b.rs                              # several tabs; a folder sets the file opener's root
 cargo run -- . --headless 1600x900 --picker files:main --screenshot /tmp/p.bmp   # render a picker (palette|files|line|symbols[:query])
@@ -90,7 +91,7 @@ Rules behind those lints:
 - **No panics in normal paths.** No `unwrap`, `expect`, `panic!`, `todo!`, or `unimplemented!` outside tests. Return errors, or log and degrade, as `app` does for GPU and window failures. Release builds use `panic = "abort"`, so a panic loses the user's unsaved work.
 - **Silencing a lint needs a reason.** Use `#[expect(clippy::lint_name, reason = "...")]` on the narrowest item, never a crate-wide allow. `expect` fails once the lint stops firing, so stale suppressions get cleaned up. The `print_out` and `print_err` helpers in `crates/app/src/main.rs` are the model: all intended terminal output goes through them.
 - **Document every public item.** Public functions that return `Result` need a `# Errors` section, and ones that can panic need `# Panics`. Doc comments should explain *why* and the concept involved, because the owner is learning the stack from them.
-- **`unsafe` is a last resort.** It is expected only in `render`, the mmap buffer, the Windows menu handles and the macOS open-files delegate (`app`'s `open_with.rs`, 1.0.1). Each block needs a `// SAFETY:` comment stating the invariant that makes it sound, and the module needs `#[expect(unsafe_code, reason = "...")]` to lift the workspace deny.
+- **`unsafe` is a last resort.** It is expected only in `render`, the mmap buffer and the macOS open-files delegate (`app`'s `open_with.rs`, 1.0.1). Each block needs a `// SAFETY:` comment stating the invariant that makes it sound, and the module needs `#[expect(unsafe_code, reason = "...")]` to lift the workspace deny.
 - **Errors are typed per crate.** Library crates (`core`, `syntax`, `render`) expose their own error enums that implement `Display` and `Error`, like `GpuError`. No `anyhow` or `Box<dyn Error>` in library APIs. `app` may flatten errors for logging.
 - **No `dbg!` or stray `println!`.** Use `log::debug!` or `log::trace!` instead; they cost nothing when filtered out.
 - **Hot paths do not allocate per frame or per keystroke.** Reuse buffers such as instance `Vec`s with `clear()` rather than building new ones. Prefer borrowing (`&str`, `Cow`) over cloning `String`s out of the buffer.

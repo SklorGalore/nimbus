@@ -46,6 +46,7 @@ use crate::input::{self, Command, Motion, Resolved};
 use crate::io;
 use crate::keymap::{Chord, Keymap, chord_label};
 use crate::languages::Languages;
+use crate::menu::drawn::{DRAWS_MENU_BAR, Menus};
 use crate::menu::{self, MenuBar};
 use crate::merge_view::{Inputs, MergeView, Merged, Shape, Take};
 use crate::minimap;
@@ -678,6 +679,9 @@ pub struct App {
     resume: Option<Resume>,
     /// A prompt button clicked, answered once the click is handled.
     prompt_click: Option<Answer>,
+    /// The menus Nimbus draws: the Windows menu bar's drop-downs and
+    /// right-click menus.
+    menus: Menus,
     /// The window title, as given to the system and drawn in the title
     /// bar Nimbus draws on macOS.
     title: String,
@@ -879,6 +883,7 @@ impl App {
             prompts: VecDeque::new(),
             resume: None,
             prompt_click: None,
+            menus: Menus::default(),
             title: String::new(),
             window_focused: true,
             message,
@@ -1000,6 +1005,8 @@ impl App {
         let scale = to_f32(effective_scale(window.scale_factor()));
         let px = if DRAWS_TITLE_BAR && window.fullscreen().is_none() {
             TITLE_BAR_PT * scale
+        } else if DRAWS_MENU_BAR {
+            menu::drawn::bar_height(gpu.metrics().line_height)
         } else {
             0.0
         };
@@ -1350,7 +1357,7 @@ impl App {
     /// its title bar and menus the theme's colours.
     fn window_ready(&mut self, window: Arc<Window>) {
         let proxy = self.proxy.clone();
-        self.menu_bar = menu::install(&window, &self.keymap, move |id| {
+        self.menu_bar = menu::install(&self.keymap, move |id| {
             let _ = proxy.send_event(AppEvent::Menu(id));
         });
         log::debug!("startup: menus at {:?}", self.started.elapsed());
@@ -1390,9 +1397,6 @@ impl App {
                 window.set_title_background_color(Some(rgb(ui.tab_bar)));
                 window.set_title_text_color(rgb(ui.text));
                 window.set_border_color(Some(rgb(ui.picker_border)));
-            }
-            if let Some(menu) = &self.menu_bar {
-                menu.set_colours(window, &self.theme);
             }
         }
     }
@@ -1455,6 +1459,18 @@ impl App {
         if !self.prompts.is_empty() {
             self.run_prompt(cmd, event_loop);
             self.changed(false);
+            return;
+        }
+        if self.menus.is_open() {
+            self.run_menu(cmd, event_loop);
+            self.changed(false);
+            return;
+        }
+        if matches!(cmd, Command::OpenMenuBar) {
+            if DRAWS_MENU_BAR && let Some(layout) = self.window_layout() {
+                self.menus.open_bar(0, &layout, &self.keymap, true);
+                self.changed(false);
+            }
             return;
         }
         if self.picker.is_some() && self.run_picker(cmd, event_loop) {
@@ -3501,8 +3517,10 @@ impl App {
     fn ask(&mut self, title: &str, text: String, buttons: &[Button], then: Asked) {
         self.prompts
             .push_back(Prompt::new(title, text, buttons, then));
-        // A half-typed chord or a drag must not carry on underneath.
+        // A half-typed chord, a drag or an open menu must not carry on
+        // underneath.
         self.pending_chord = None;
+        self.menus.close();
         self.changed(false);
     }
 
@@ -3525,6 +3543,43 @@ impl App {
         };
         if let Some(answer) = p.key(key) {
             self.prompt_answered(answer, event_loop);
+        }
+    }
+
+    /// A command while a menu is open: the keys that move in it or choose
+    /// from it. Everything else closes it (Windows menus do the same), and
+    /// a chosen item runs its action.
+    fn run_menu(&mut self, cmd: Command<'_>, event_loop: &ActiveEventLoop) {
+        let key = match cmd {
+            Command::Newline | Command::Insert(" ") => menu::drawn::Key::Press,
+            Command::Escape | Command::OpenMenuBar => menu::drawn::Key::Escape,
+            Command::Move(Motion::Up, _) => menu::drawn::Key::Up,
+            Command::Move(Motion::Down, _) => menu::drawn::Key::Down,
+            Command::Move(Motion::Left, _) => menu::drawn::Key::Left,
+            Command::Move(Motion::Right, _) => menu::drawn::Key::Right,
+            Command::Insert(text) => match text.chars().next() {
+                Some(c) if text.chars().count() == 1 && c.is_alphabetic() => {
+                    menu::drawn::Key::Letter(c)
+                }
+                _ => return,
+            },
+            _ => {
+                self.menus.close();
+                return;
+            }
+        };
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
+        if let Some(id) = self.menus.key(key, &layout, &self.keymap) {
+            self.run_menu_item(id, event_loop);
+        }
+    }
+
+    /// Run the action of a menu item Nimbus drew.
+    fn run_menu_item(&mut self, id: &str, event_loop: &ActiveEventLoop) {
+        if let Some(action) = crate::action::by_id(id) {
+            self.run(action.command, event_loop);
         }
     }
 
@@ -4665,13 +4720,25 @@ impl App {
             return;
         };
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
-        if y < 0.0 {
-            return; // the title bar: the system drags and zooms the window
-        }
         if let Some(p) = self.prompts.front() {
             // Modal: a click outside its buttons does nothing.
             self.prompt_click = p.click(&window, x, y);
             return;
+        }
+        match self.menus.click(&window, (x, y), &self.keymap) {
+            menu::drawn::Click::Chose(id) => {
+                self.menus.clicked = Some(id);
+                self.changed(false);
+                return;
+            }
+            menu::drawn::Click::Handled | menu::drawn::Click::Closed => {
+                self.changed(false);
+                return;
+            }
+            menu::drawn::Click::Ignored => {}
+        }
+        if y < 0.0 {
+            return; // the title bar: the system drags and zooms the window
         }
         if self.picker.is_some() {
             self.picker_click(&window, x, y);
@@ -5496,13 +5563,13 @@ impl App {
             let ui = &self.theme.ui;
             draw_picker_overlay(gpu, ui, layout, p, &self.keymap, self.blink.visible);
         }
-        view::draw_title_bar(
-            gpu,
-            &self.theme.ui,
-            layout,
-            &self.title,
-            self.window_focused,
-        );
+        let ui = &self.theme.ui;
+        if DRAWS_MENU_BAR {
+            self.menus.draw_bar(gpu, ui, layout, self.window_focused);
+        } else {
+            view::draw_title_bar(gpu, ui, layout, &self.title, self.window_focused);
+        }
+        self.menus.draw_popup(gpu, &self.theme.ui, layout);
         if let Some(p) = self.prompts.front() {
             p.draw(gpu, &self.theme.ui, layout);
         }
@@ -6708,7 +6775,10 @@ fn headless_gpu(
         None => Gpu::compat_headless(font, px, size),
     };
     headless_fonts(&mut gpu, config);
-    if options.title_bar {
+    if options.menu.is_some() {
+        let bar = menu::drawn::bar_height(gpu.metrics().line_height);
+        gpu.set_inset_top(bar);
+    } else if options.title_bar {
         gpu.set_inset_top(TITLE_BAR_PT * to_f32(scale));
     }
     Some(gpu)
@@ -6940,7 +7010,7 @@ pub fn run_headless(
         if let Some(spec) = &options.picker {
             draw_headless_picker(&mut gpu, ui, &layout, (spec, &root), &doc, config);
         }
-        draw_headless_chrome(&mut gpu, ui, &layout, &doc, options);
+        draw_headless_chrome(&mut gpu, (ui, &config.keys), &layout, &doc, options);
         // Nested languages are parsed a few per frame; keep painting
         // until none is left over, as the window would on redraws.
         if doc.syntax.injections_pending() {
@@ -6959,18 +7029,32 @@ pub fn run_headless(
     i32::from(!save_screenshot(path, gpu.take_capture().as_ref()))
 }
 
-/// With `--headless`: the title bar Nimbus draws on macOS (`--title-bar`)
+/// With `--headless`: the title bar Nimbus draws on macOS (`--title-bar`),
+/// or the menu bar it draws on Windows with a menu open (`--menu NAME`),
 /// and the question closing `doc` would ask (`--prompt`), for checking how
 /// they look in a theme.
 fn draw_headless_chrome(
     gpu: &mut Gpu,
-    ui: &Ui,
+    (ui, keys): (&Ui, &std::collections::HashMap<String, Vec<String>>),
     layout: &Layout,
     doc: &Document,
     options: &Options,
 ) {
     let name = doc.display_name();
-    view::draw_title_bar(gpu, ui, layout, &format!("{name} — Nimbus"), true);
+    if let Some(open) = &options.menu {
+        let keymap = Keymap::new(keys).0;
+        let mut menus = Menus::default();
+        let found = menu::LAYOUT
+            .iter()
+            .position(|(title, _)| title.eq_ignore_ascii_case(open));
+        if let Some(i) = found {
+            menus.open_bar(i, layout, &keymap, true);
+        }
+        menus.draw_bar(gpu, ui, layout, true);
+        menus.draw_popup(gpu, ui, layout);
+    } else {
+        view::draw_title_bar(gpu, ui, layout, &format!("{name} — Nimbus"), true);
+    }
     if options.prompt {
         let question = format!("Save changes to {name} before closing?");
         Prompt::new("Unsaved changes", question, &SAVE_DONT_CANCEL, ()).draw(gpu, ui, layout);
@@ -7366,6 +7450,15 @@ impl App {
         // of the content, below the title bar Nimbus draws on macOS.
         position.y -= f64::from(self.gpu.as_ref().map_or(0.0, Gpu::inset_top));
         self.mouse = position;
+        if self.menus.is_open() {
+            if let Some(layout) = self.window_layout() {
+                let at = (to_f32(position.x), to_f32(position.y));
+                if self.menus.hover(&layout, at, &self.keymap) {
+                    self.changed(false);
+                }
+            }
+            return;
+        }
         if self.sidebar.resizing {
             if let Some(layout) = self.window_layout() {
                 self.sidebar.drag_to(&layout, to_f32(position.x));
@@ -7831,6 +7924,9 @@ impl ApplicationHandler<AppEvent> for App {
                     if let Some(answer) = self.prompt_click.take() {
                         self.prompt_answered(answer, event_loop);
                     }
+                    if let Some(id) = self.menus.clicked.take() {
+                        self.run_menu_item(id, event_loop);
+                    }
                     if let Some(cmd) = self.pending_action.take() {
                         self.run(cmd, event_loop);
                     }
@@ -7857,6 +7953,9 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::Focused(false) => {
                 self.window_focused = false;
+                // As system menus do, an open menu closes with the window
+                // in the background.
+                self.menus.close();
                 // Show the cursor solid in the background; it may have been
                 // in the off phase of a blink.
                 self.blink.stop();

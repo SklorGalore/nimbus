@@ -1,189 +1,170 @@
-//! Native menu bar on macOS and Windows (DESIGN.md §4.4). Linux has none:
-//! `muda` needs GTK there, which Nimbus avoids; the command palette covers
-//! every action instead.
+//! Menus (DESIGN.md §4.4): the lists of actions they show, and on macOS
+//! the system menu bar at the top of the screen.
 //!
 //! Menu items are actions from the registry. Their shortcuts come from the
-//! keymap, so a rebinding in the config file shows in the menus too. On
-//! macOS a menu shortcut takes the key press before the window sees it, and
-//! the action arrives as a menu event instead; either way it runs the same
-//! command.
+//! keymap, so a rebinding in the config file shows in the menus too.
+//!
+//! Everywhere a menu belongs to the window, Nimbus draws it itself, in the
+//! theme's colours ([`drawn`]): the menu bar and its drop-downs on Windows
+//! and right-click menus on every system. Only macOS keeps a system menu
+//! bar, because it lives at the top of the screen rather than in the
+//! window; there a menu shortcut takes the key press before the window sees
+//! it, and the action arrives as a menu event instead. Either way it runs
+//! the same command. Linux has no menu bar: `muda` needs GTK there, which
+//! Nimbus avoids, and the command palette covers every action.
 
-#[cfg(target_os = "windows")]
-mod paint;
+pub mod drawn;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// Menus by title, each a list of action ids; `"-"` is a separator.
+pub const LAYOUT: &[(&str, &[&str])] = &[
+    (
+        "File",
+        &[
+            "file.new",
+            "file.open",
+            "file.openRecent",
+            "file.quickOpen",
+            "-",
+            "file.reopenClosed",
+            "session.reopenLast",
+            "-",
+            "workspace.addFolder",
+            "workspace.open",
+            "workspace.saveAs",
+            "workspace.saveHere",
+            "-",
+            "file.save",
+            "file.saveAs",
+            "file.saveWithEncoding",
+            "file.reopenWithEncoding",
+            "-",
+            "file.close",
+        ],
+    ),
+    (
+        "Edit",
+        &[
+            "edit.undo",
+            "edit.redo",
+            "-",
+            "edit.cut",
+            "edit.copy",
+            "edit.paste",
+            "edit.selectAll",
+            "-",
+            "edit.toggleLineComment",
+            "edit.toggleBlockComment",
+            "-",
+            "edit.duplicate",
+            "edit.moveLineUp",
+            "edit.moveLineDown",
+            "edit.deleteLine",
+            "edit.joinLines",
+            "edit.insertLineBelow",
+            "edit.insertLineAbove",
+            "-",
+            "edit.upperCase",
+            "edit.lowerCase",
+            "edit.titleCase",
+            "edit.sortLines",
+            "edit.removeDuplicateLines",
+            "edit.trimWhitespace",
+            "-",
+            "find.open",
+            "find.replace",
+            "search.inFiles",
+            "search.replaceInFiles",
+        ],
+    ),
+    (
+        "Selection",
+        &[
+            "select.line",
+            "select.expand",
+            "select.shrink",
+            "-",
+            "cursor.matchingBracket",
+            "select.toMatchingBracket",
+            "-",
+            "selection.addNextOccurrence",
+            "selection.addCursorAbove",
+            "selection.addCursorBelow",
+        ],
+    ),
+    (
+        "View",
+        &[
+            "app.palette",
+            "view.toggleSidebar",
+            "view.toggleWrap",
+            "view.toggleTheme",
+            "view.toggleWhitespace",
+            "view.toggleIndentGuides",
+            "view.toggleStickyScroll",
+            "view.toggleMinimap",
+            "view.openPreview",
+            "-",
+            "view.zoomIn",
+            "view.zoomOut",
+            "view.resetZoom",
+            "-",
+            "view.splitRight",
+            "view.focusLeftGroup",
+            "view.focusRightGroup",
+            "tab.moveToNextGroup",
+            "view.closeGroup",
+            "-",
+            "fold.fold",
+            "fold.unfold",
+            "fold.foldAll",
+            "fold.unfoldAll",
+            "-",
+            "tab.next",
+            "tab.previous",
+        ],
+    ),
+    (
+        "Help",
+        &[
+            "app.checkUpdates",
+            "app.installUpdate",
+            "app.restartToUpdate",
+            "app.openRelease",
+        ],
+    ),
+];
+
+/// The tree's context menu (M12), by action id.
+pub const TREE_MENU: &[&str] = &[
+    "tree.newFile",
+    "tree.newFolder",
+    "-",
+    "tree.rename",
+    "tree.delete",
+    "tree.undoMove",
+    "-",
+    "tree.searchInFolder",
+    "tree.reveal",
+    "-",
+    "workspace.addFolder",
+    "workspace.removeFolder",
+];
+
+#[cfg(target_os = "macos")]
 mod native {
-    use muda::{ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
-    use winit::window::Window;
+    use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 
-    #[cfg(target_os = "windows")]
-    use super::paint;
+    use super::LAYOUT;
     use crate::action;
     use crate::keymap::Keymap;
 
-    /// Menus by title, each a list of action ids; `"-"` is a separator.
-    const LAYOUT: &[(&str, &[&str])] = &[
-        (
-            "File",
-            &[
-                "file.new",
-                "file.open",
-                "file.openRecent",
-                "file.quickOpen",
-                "-",
-                "file.reopenClosed",
-                "session.reopenLast",
-                "-",
-                "workspace.addFolder",
-                "workspace.open",
-                "workspace.saveAs",
-                "workspace.saveHere",
-                "-",
-                "file.save",
-                "file.saveAs",
-                "file.saveWithEncoding",
-                "file.reopenWithEncoding",
-                "-",
-                "file.close",
-            ],
-        ),
-        (
-            "Edit",
-            &[
-                "edit.undo",
-                "edit.redo",
-                "-",
-                "edit.cut",
-                "edit.copy",
-                "edit.paste",
-                "edit.selectAll",
-                "-",
-                "edit.toggleLineComment",
-                "edit.toggleBlockComment",
-                "-",
-                "edit.duplicate",
-                "edit.moveLineUp",
-                "edit.moveLineDown",
-                "edit.deleteLine",
-                "edit.joinLines",
-                "edit.insertLineBelow",
-                "edit.insertLineAbove",
-                "-",
-                "edit.upperCase",
-                "edit.lowerCase",
-                "edit.titleCase",
-                "edit.sortLines",
-                "edit.removeDuplicateLines",
-                "edit.trimWhitespace",
-                "-",
-                "find.open",
-                "find.replace",
-                "search.inFiles",
-                "search.replaceInFiles",
-            ],
-        ),
-        (
-            "Selection",
-            &[
-                "select.line",
-                "select.expand",
-                "select.shrink",
-                "-",
-                "cursor.matchingBracket",
-                "select.toMatchingBracket",
-                "-",
-                "selection.addNextOccurrence",
-                "selection.addCursorAbove",
-                "selection.addCursorBelow",
-            ],
-        ),
-        (
-            "View",
-            &[
-                "app.palette",
-                "view.toggleSidebar",
-                "view.toggleWrap",
-                "view.toggleTheme",
-                "view.toggleWhitespace",
-                "view.toggleIndentGuides",
-                "view.toggleStickyScroll",
-                "view.toggleMinimap",
-                "view.openPreview",
-                "-",
-                "view.zoomIn",
-                "view.zoomOut",
-                "view.resetZoom",
-                "-",
-                "view.splitRight",
-                "view.focusLeftGroup",
-                "view.focusRightGroup",
-                "tab.moveToNextGroup",
-                "view.closeGroup",
-                "-",
-                "fold.fold",
-                "fold.unfold",
-                "fold.foldAll",
-                "fold.unfoldAll",
-                "-",
-                "tab.next",
-                "tab.previous",
-            ],
-        ),
-        (
-            "Help",
-            &[
-                "app.checkUpdates",
-                "app.installUpdate",
-                "app.restartToUpdate",
-                "app.openRelease",
-            ],
-        ),
-    ];
-
-    /// The built menu bar. Keep it alive for as long as the window, and
-    /// drop it before the window: it is attached to the window's handle.
+    /// The built menu bar. Keep it alive for as long as the app runs.
     pub struct MenuBar {
-        #[cfg_attr(
-            target_os = "macos",
-            expect(dead_code, reason = "kept alive only; macOS never repaints it")
-        )]
-        menu: Menu,
+        _menu: Menu,
         items: Vec<(&'static str, MenuItem)>,
     }
 
     impl MenuBar {
-        /// Paint the menu bar in the theme's colours (Windows draws it
-        /// inside the window; see `paint`). The drop-down menus stay the
-        /// system's. muda's own light or dark bar is set too, for when our
-        /// painter could not be installed or high contrast is on.
-        #[cfg(target_os = "windows")]
-        #[expect(
-            unsafe_code,
-            reason = "muda themes a window's menu bar through its raw HWND"
-        )]
-        pub fn set_colours(&self, window: &Window, theme: &crate::theme::Theme) {
-            let Some(hwnd) = hwnd(window) else {
-                return;
-            };
-            let menu_theme = if theme.is_dark() {
-                muda::MenuTheme::Dark
-            } else {
-                muda::MenuTheme::Light
-            };
-            // SAFETY: the handle comes from the live winit window borrowed
-            // for this call, the same window `attach` gave the menu, so it
-            // is the valid HWND `set_theme_for_hwnd` requires.
-            if let Err(e) = unsafe { self.menu.set_theme_for_hwnd(hwnd as isize, menu_theme) } {
-                log::warn!("menu bar theme: {e}");
-            }
-            paint::set_colours(hwnd, paint::Colours::from_theme(&theme.ui));
-        }
-
-        /// Nothing to paint: the macOS menu bar belongs to the system.
-        #[cfg(target_os = "macos")]
-        #[expect(clippy::unused_self, reason = "same signature as the Windows version")]
-        pub fn set_colours(&self, _window: &Window, _theme: &crate::theme::Theme) {}
-
         /// Show the keymap's current shortcuts, after the config changed.
         pub fn update(&self, keymap: &Keymap) {
             for (id, item) in &self.items {
@@ -213,31 +194,27 @@ mod native {
         Some(it)
     }
 
-    /// Build the menu bar and attach it. `on_action` receives the action id
-    /// of each chosen item, on muda's thread.
+    /// Build the menu bar and give it to the app. `on_action` receives the
+    /// action id of each chosen item, on muda's thread.
     pub fn install(
-        window: &Window,
         keymap: &Keymap,
         on_action: impl Fn(String) + Send + Sync + 'static,
     ) -> Option<MenuBar> {
         let menu = Menu::new();
         let mut items = Vec::new();
-        #[cfg(target_os = "macos")]
-        {
-            let quit = item("app.quit", keymap, &mut items)?;
-            let app = Submenu::with_items(
-                "Nimbus",
-                true,
-                &[
-                    &PredefinedMenuItem::hide(None),
-                    &PredefinedMenuItem::hide_others(None),
-                    &PredefinedMenuItem::separator(),
-                    &quit,
-                ],
-            )
-            .ok()?;
-            menu.append(&app).ok()?;
-        }
+        let quit = item("app.quit", keymap, &mut items)?;
+        let app = Submenu::with_items(
+            "Nimbus",
+            true,
+            &[
+                &PredefinedMenuItem::hide(None),
+                &PredefinedMenuItem::hide_others(None),
+                &PredefinedMenuItem::separator(),
+                &quit,
+            ],
+        )
+        .ok()?;
+        menu.append(&app).ok()?;
         for (title, ids) in LAYOUT {
             let sub = Submenu::new(*title, true);
             for id in *ids {
@@ -255,159 +232,32 @@ mod native {
             menu.append(&sub).ok()?;
         }
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| on_action(e.id.0)));
-        attach(&menu, window)?;
-        Some(MenuBar { menu, items })
-    }
-
-    /// The tree's context menu (M12), by action id.
-    const TREE_MENU: &[&str] = &[
-        "tree.newFile",
-        "tree.newFolder",
-        "-",
-        "tree.rename",
-        "tree.delete",
-        "tree.undoMove",
-        "-",
-        "tree.searchInFolder",
-        "tree.reveal",
-        "-",
-        "workspace.addFolder",
-        "workspace.removeFolder",
-    ];
-
-    /// Show the tree's context menu at the pointer. A chosen item arrives
-    /// as a menu event with its action id, like the menu bar's, so it runs
-    /// through the same path.
-    pub fn show_tree_menu(window: &Window, keymap: &Keymap) {
-        let menu = Menu::new();
-        let mut items = Vec::new();
-        for id in TREE_MENU {
-            let result = if *id == "-" {
-                menu.append(&PredefinedMenuItem::separator())
-            } else if let Some(it) = item(id, keymap, &mut items) {
-                menu.append(&it)
-            } else {
-                Ok(())
-            };
-            if let Err(e) = result {
-                log::warn!("context menu item {id}: {e}");
-            }
-        }
-        popup(&menu, window);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[expect(
-        unsafe_code,
-        reason = "muda shows a context menu through the raw NSView"
-    )]
-    fn popup(menu: &Menu, window: &Window) {
-        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let Ok(handle) = window.window_handle() else {
-            return;
-        };
-        let RawWindowHandle::AppKit(h) = handle.as_raw() else {
-            return;
-        };
-        // SAFETY: the view comes from the live winit window borrowed for
-        // this call, so it is a valid NSView for as long as the menu is
-        // shown, which is what `show_context_menu_for_nsview` requires.
-        // The call returns when the menu closes.
-        unsafe {
-            menu.show_context_menu_for_nsview(h.ns_view.as_ptr().cast_const(), None);
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    #[expect(unsafe_code, reason = "muda shows a context menu through the raw HWND")]
-    fn popup(menu: &Menu, window: &Window) {
-        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let Ok(handle) = window.window_handle() else {
-            return;
-        };
-        let RawWindowHandle::Win32(h) = handle.as_raw() else {
-            return;
-        };
-        // SAFETY: the HWND comes from the live winit window borrowed for
-        // this call, so it is valid while the menu is shown, which is what
-        // `show_context_menu_for_hwnd` requires. The call returns when the
-        // menu closes.
-        unsafe {
-            menu.show_context_menu_for_hwnd(h.hwnd.get(), None);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "same signature as the Windows version, which can fail"
-    )]
-    fn attach(menu: &Menu, _window: &Window) -> Option<()> {
         menu.init_for_nsapp();
-        Some(())
-    }
-
-    /// The window's Win32 handle.
-    #[cfg(target_os = "windows")]
-    fn hwnd(window: &Window) -> Option<windows_sys::Win32::Foundation::HWND> {
-        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let RawWindowHandle::Win32(handle) = window.window_handle().ok()?.as_raw() else {
-            return None;
-        };
-        Some(handle.hwnd.get() as windows_sys::Win32::Foundation::HWND)
-    }
-
-    #[cfg(target_os = "windows")]
-    #[expect(unsafe_code, reason = "muda attaches to a window through its raw HWND")]
-    fn attach(menu: &Menu, window: &Window) -> Option<()> {
-        let hwnd = hwnd(window)?;
-        // SAFETY: the handle comes from a live winit window. The app owns
-        // both and declares the menu bar before the window, so the menu is
-        // dropped (and detached) first and never outlives the HWND, which is
-        // what `init_for_hwnd` requires.
-        unsafe { menu.init_for_hwnd(hwnd as isize) }.ok()?;
-        // After muda's, so our painter sees the bar's messages first.
-        if !paint::install(hwnd) {
-            log::warn!("menu bar: could not install the theme painter");
-        }
-        Some(())
+        Some(MenuBar { _menu: menu, items })
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-pub use native::{MenuBar, install, show_tree_menu};
+#[cfg(target_os = "macos")]
+pub use native::{MenuBar, install};
 
-/// No context menus without native menus; the palette lists the tree's
-/// actions instead.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn show_tree_menu(_window: &winit::window::Window, _keymap: &crate::keymap::Keymap) {}
-
-/// No native menus on this platform.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// No system menu bar here: Windows gets the one Nimbus draws.
+#[cfg(not(target_os = "macos"))]
 #[derive(Debug)]
 pub struct MenuBar;
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(target_os = "macos"))]
 impl MenuBar {
-    /// Nothing to update without menus.
+    /// Nothing to update without a system menu bar.
     #[expect(
         clippy::unused_self,
-        reason = "same signature as the native menu bar's update"
+        reason = "same signature as the system menu bar's update"
     )]
     pub fn update(&self, _keymap: &crate::keymap::Keymap) {}
-
-    /// Nothing to paint without menus.
-    #[expect(
-        clippy::unused_self,
-        reason = "same signature as the native menu bar's"
-    )]
-    pub fn set_colours(&self, _window: &winit::window::Window, _theme: &crate::theme::Theme) {}
 }
 
-/// No native menus on this platform; the command palette covers them.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// No system menu bar on this platform.
+#[cfg(not(target_os = "macos"))]
 pub fn install(
-    _window: &winit::window::Window,
     _keymap: &crate::keymap::Keymap,
     _on_action: impl Fn(String) + Send + Sync + 'static,
 ) -> Option<MenuBar> {
