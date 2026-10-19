@@ -69,9 +69,11 @@ mod handoff;
 mod preview_tab;
 mod tail;
 mod tree_ops;
+mod updates;
 mod workspace;
 mod workspaces;
 
+pub use updates::UpdateOnQuit;
 pub use workspace::Startup;
 use workspace::{Pending, Workspace, configure_tabs, startup_message};
 
@@ -124,6 +126,8 @@ pub enum AppEvent {
     /// A check for updates finished; `true` when it was the startup
     /// check, which stays quiet unless a newer release exists.
     Update(Result<update::Outcome, UpdateError>, bool),
+    /// Progress or the end of preparing an update (M31).
+    Installing(updates::UpdateEvent),
     /// A Fold All or Fold Level N scan finished on a worker (M13).
     Folded(folding::FoldResult),
     /// `git` read a file at a revision for Compare with HEAD (M18).
@@ -144,7 +148,7 @@ pub enum AppEvent {
     /// `instance.rs`).
     Handoff(Vec<PathBuf>, Option<crate::instance::Waiter>),
     /// Install or Uninstall `nimbus` Command finished on its worker: what
-    /// to say, and whether it is an error (M25, `install.rs`).
+    /// to say, and whether it is an error (M25, `path_command.rs`).
     Installed(Result<String, String>),
     /// A screen reader asked for the accessibility tree, asked the app to
     /// do something, or stopped (M22, `app/access.rs`).
@@ -610,6 +614,8 @@ pub struct App {
     zoom_started: Option<Instant>,
     /// What is remembered between runs, and the session's bookkeeping.
     ws: Workspace,
+    /// A newer release found, an update downloading or ready (M31).
+    updater: updates::Updater,
     /// The pointer shows the resize cursor.
     resize_cursor: bool,
     /// The pointer is over a link in a Markdown preview (M20).
@@ -777,6 +783,7 @@ impl App {
             watch,
             zoom_started: None,
             ws: Workspace::new(state, session_root),
+            updater: updates::Updater::default(),
             resize_cursor: false,
             link_cursor: false,
             watching: false,
@@ -1401,6 +1408,10 @@ impl App {
                     "Keeping your version; saving overwrites the file on disk",
                     false,
                 );
+            }
+            Command::RestartToUpdate => {
+                self.restart_to_update(event_loop);
+                return true;
             }
             _ if cmd.is_setup() => self.run_setup(cmd),
             Command::Close => {
@@ -3674,6 +3685,7 @@ impl App {
                 Discard::Yes => {}
                 Discard::Cancel => {
                     self.saves.quit_after = false;
+                    self.quit_cancelled();
                     for tab in &mut self.tabs {
                         tab.discard_at = None;
                     }
@@ -3773,6 +3785,9 @@ impl App {
             Command::OpenRelease => self.open_release(),
             Command::InstallOnPath => self.install_command(true),
             Command::RemoveFromPath => self.install_command(false),
+            Command::InstallUpdate => self.install_update(),
+            Command::CancelUpdate => self.cancel_update(),
+            Command::RollBackUpdate => self.roll_back_update(),
             _ => {}
         }
     }
@@ -3795,13 +3810,18 @@ impl App {
         let current = env!("CARGO_PKG_VERSION");
         match result {
             Ok(update::Outcome::Newer(release)) => {
+                let how = match update::install::detect().refusal(&release.version) {
+                    None => "run Install Update to get it".to_owned(),
+                    Some(_) => "run Open Latest Release Page to get it".to_owned(),
+                };
                 self.say(
                     format!(
-                        "Nimbus {} is available (you have {current}); run Open Latest Release Page to get it",
+                        "Nimbus {} is available (you have {current}); {how}",
                         release.version
                     ),
                     false,
                 );
+                self.updater.available = Some(release);
             }
             Ok(update::Outcome::UpToDate(release)) => {
                 if !at_startup {
@@ -4103,10 +4123,7 @@ impl App {
             | Command::PrevConflict
             | Command::ResolveMarkers
             | Command::MergeWithDisk => return false,
-            _ if cmd.is_setup() => return false,
-            _ if cmd.is_find_in_files() || cmd.is_layout() || cmd.is_compare_extra() => {
-                return false;
-            }
+            _ if cmd.leaves_find_field() => return false,
             _ => {
                 let paste = (cmd == Command::Paste)
                     .then(|| self.clipboard_get())
@@ -7057,6 +7074,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.changed(false);
             }
             AppEvent::Update(result, at_startup) => self.update_checked(result, at_startup),
+            AppEvent::Installing(event) => self.update_event(event),
             AppEvent::Search(batch) => {
                 if !self.find.receive(batch) {
                     return;
@@ -7276,6 +7294,7 @@ impl ApplicationHandler<AppEvent> for App {
             // event stream for each folder), so not before the first frame.
             self.watching = true;
             self.sync_watch();
+            self.update_started();
             // A configured font, looked up once the first frame is up.
             if !self.config.font.is_empty() {
                 self.load_editor_font();

@@ -3,3 +3,7 @@
 # status bar's line-ending label, so the frame no longer matches.
 crates/app/tests/screenshot/sample.rs text eol=lf
 *.bmp binary
+
+# Signed test fixtures must keep their exact bytes: a checkout that turns
+# LF into CRLF (Windows with core.autocrlf) breaks their signatures.
+crates/app/src/update/testdata/** -text

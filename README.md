@@ -241,10 +241,15 @@ Found a security problem? Please report it privately, as
 
 ### Updates
 
-Nimbus never connects to the network unless you ask it to. Run "Check
-for Updates" from the command palette to see whether a newer release is
-available, or turn on the check at startup as described in
-[checking for updates](docs/manual/troubleshooting.md#checking-for-updates).
+At each start Nimbus asks GitHub once whether a newer release exists:
+one HTTPS request to GitHub's API with a `nimbus/X.Y.Z` user agent and
+nothing else, and a message only when there is one. Set
+`check_updates = false` in `config.toml` to turn it off. Nothing is
+downloaded until you run "Install Update", which fetches the package,
+checks its signature against the key above and its SHA-256, and puts it
+in place when you run "Restart to Update" (Homebrew and `.deb` installs
+are left to `brew` and `apt`). See
+[updates](docs/manual/troubleshooting.md#installing-an-update).
 
 ## Usage
 

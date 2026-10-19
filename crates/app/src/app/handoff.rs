@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 
 use super::{App, AppEvent};
-use crate::install::{self, Plan};
 use crate::instance::Waiter;
+use crate::path_command::{self, Plan};
 
 /// One `nimbus --wait` command: the files it is waiting on and the
 /// connection to answer when none of them is open any more.
@@ -64,9 +64,9 @@ impl App {
     /// make the change on a worker.
     pub(super) fn install_command(&mut self, install: bool) {
         let plan = if install {
-            install::plan_install()
+            path_command::plan_install()
         } else {
-            install::plan_uninstall()
+            path_command::plan_uninstall()
         };
         let step = match plan {
             Plan::Nothing(note) => return self.say(note, false),
@@ -108,7 +108,7 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("nimbus-install".to_owned())
             .spawn(move || {
-                let _ = proxy.send_event(AppEvent::Installed(install::run(&step)));
+                let _ = proxy.send_event(AppEvent::Installed(path_command::run(&step)));
             });
         if let Err(e) = spawned {
             self.say(format!("Cannot start the install: {e}"), true);

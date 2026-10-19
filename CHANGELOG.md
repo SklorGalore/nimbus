@@ -19,6 +19,16 @@ section before tagging.
 - `nimbus --wait FILE` returns when the file's tab is closed, so
   `git config --global core.editor "nimbus --wait"` works.
 
+- Nimbus can update itself (M31). After a check finds a newer release,
+  **Install Update** downloads the package for your system in the
+  background, checks that `SHA256SUMS` is signed by the release key
+  built into Nimbus for exactly that version and that the package
+  matches its SHA-256, and unpacks it beside the running copy;
+  **Restart to Update** (or quitting) puts it in place and starts it
+  with your session. Nothing downloads until you ask. Homebrew and
+  `.deb` installs are left to `brew` and `apt`. **Cancel Update** and
+  **Roll Back Update** undo it, and a new version that fails to open
+  its window is rolled back at the next start.
 - Compatibility mode: on a machine with no usable graphics card (a
   virtual machine or remote desktop without one, a missing driver)
   Nimbus now starts anyway and draws on the CPU, saying so once in the
@@ -53,6 +63,12 @@ section before tagging.
 
 ### Changed
 
+- **The update check at startup is now on by default**
+  (`check_updates = true`). Each start asks GitHub's API once, after
+  the window appears, whether a newer release exists: one HTTPS request
+  with a `nimbus/X.Y.Z` user agent and nothing else, and a message only
+  when there is one. Set `check_updates = false` in `config.toml` to
+  turn it off.
 - Open Project Workspace opens only folders and files inside the
   project: a `.nimbus/workspace.toml` that names paths elsewhere (an
   absolute path, `../`, or a link pointing out) has them skipped, and

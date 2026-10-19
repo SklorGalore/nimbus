@@ -34,8 +34,10 @@ pub struct Config {
     /// and saved in, skipping detection (M17): `"*.csv" = "windows-1252"`.
     /// Checked by `io::set_encoding_rules`.
     pub encodings: HashMap<String, String>,
-    /// Ask GitHub for the latest release once at startup. Off unless set:
-    /// a personal tool should not phone home without being asked.
+    /// Ask GitHub for the latest release once at startup. On unless set
+    /// to `false` (M31, reversing M15's default): one HTTPS request with
+    /// a `nimbus/X.Y.Z` user agent, which speaks only when a newer release
+    /// exists. Installing it still waits for Install Update.
     pub check_updates: bool,
     /// Editing behaviour: auto-pairs and what happens on save, with
     /// per-language overrides (`[editor.rust]`).
@@ -238,7 +240,7 @@ impl Default for Config {
             keys: HashMap::new(),
             languages: HashMap::new(),
             encodings: HashMap::new(),
-            check_updates: false,
+            check_updates: true,
             editor: EditorSettings::default(),
             indent: IndentSettings::default(),
             font: String::new(),
@@ -304,7 +306,7 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # tab_width = 4
 # soft_wrap = false
 # theme = "dark"            # or "light", or NAME for themes/NAME.toml here
-# check_updates = false     # true: ask GitHub for a newer release at startup
+# check_updates = true      # false: do not ask GitHub for a newer release at startup
 
 # The editor font: an installed font's name or a font file's path. Empty is
 # the bundled Hack Nerd Font Mono. ligatures joins -> != => and friends in

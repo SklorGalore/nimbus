@@ -116,7 +116,7 @@ then exits, leaving the window open only if other tabs remain.
 
 ## Results
 
-Built on 2026-10-19 in `instance.rs` (the doorbell), `install.rs` (the
+Built on 2026-10-19 in `instance.rs` (the doorbell), `path_command.rs` (the
 two actions), `app/handoff.rs` (the running Nimbus's side) and `main.rs`
 (knocking before the GPU thread starts). The boxes stay unticked until
 the owner has checked them on the Mac; the Linux container has no
