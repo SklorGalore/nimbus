@@ -42,7 +42,8 @@ running on machines with no usable GPU, instead of exiting at startup.
       forces it. The screenshot test also passes in compatibility mode
       within a small per-pixel tolerance, and a frame of a full
       1600x1000 window paints in under 16 ms in release on the owner's
-      Mac.
+      Mac. The painter draws every primitive the GPU renderer has when
+      it lands.
 
 ## Scope
 
@@ -109,6 +110,12 @@ which painter runs.
   mode and why. The F12 overlay names the painter. The name users see is
   "compatibility mode" (owner's choice); Cumulus is only the code's
   name for it.
+- **It keeps up with the renderer.** The painter covers every primitive
+  the GPU renderer has when it lands (today rectangles and glyph
+  bitmaps). A later milestone that adds a primitive, such as the git client's
+  smooth commit-graph curves (M27), adds it to the painter in the same change
+  and checks it against the GPU screenshot (a standing requirement in
+  `docs/milestones/README.md`).
 - **Headless renders can use it.** `--headless --compat` renders with
   no GPU at all, which would let CI on Linux check pixels.
 - **Cost.** A 1600x1000 window is 1.6 million pixels, so a full frame is
