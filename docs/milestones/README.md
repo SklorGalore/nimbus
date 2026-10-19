@@ -24,6 +24,9 @@ repeated in each file:
 - Release binary size recorded in Results.
 - `DESIGN.md` updated, with a decision-log line, for any decision that changed.
 - No new `unsafe`, `unwrap` or crate-wide lint allows unless the plan says so.
+- Once compatibility mode exists (M23), anything new the GPU renderer
+  draws (a new primitive or pipeline) is drawn by the CPU painter too,
+  in the same change, and the screenshot test passes in both modes.
 
 | # | Plan | Status |
 |---|---|---|
