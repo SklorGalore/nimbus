@@ -1282,6 +1282,9 @@ impl App {
                 window.set_title_text_color(rgb(ui.text));
                 window.set_border_color(Some(rgb(ui.picker_border)));
             }
+            if let Some(menu) = &self.menu_bar {
+                menu.set_dark(window, self.theme.is_dark());
+            }
         }
     }
 

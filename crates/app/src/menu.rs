@@ -130,11 +130,51 @@ mod native {
     /// The built menu bar. Keep it alive for as long as the window, and
     /// drop it before the window: it is attached to the window's handle.
     pub struct MenuBar {
-        _menu: Menu,
+        #[cfg_attr(
+            target_os = "macos",
+            expect(dead_code, reason = "kept alive only; macOS never repaints it")
+        )]
+        menu: Menu,
         items: Vec<(&'static str, MenuItem)>,
     }
 
     impl MenuBar {
+        /// Paint the menu bar dark or light to match the theme. Only
+        /// Windows draws a menu bar inside the window; muda paints its dark
+        /// one in fixed greys, so a theme gets its shade rather than its
+        /// exact colours. The drop-down menus stay the system's.
+        #[cfg(target_os = "windows")]
+        #[expect(
+            unsafe_code,
+            reason = "muda themes a window's menu bar through its raw HWND"
+        )]
+        pub fn set_dark(&self, window: &Window, dark: bool) {
+            use muda::MenuTheme;
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let Ok(handle) = window.window_handle() else {
+                return;
+            };
+            let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+                return;
+            };
+            let theme = if dark {
+                MenuTheme::Dark
+            } else {
+                MenuTheme::Light
+            };
+            // SAFETY: the handle comes from the live winit window borrowed
+            // for this call, the same window `attach` gave the menu, so it
+            // is the valid HWND `set_theme_for_hwnd` requires.
+            if let Err(e) = unsafe { self.menu.set_theme_for_hwnd(handle.hwnd.get(), theme) } {
+                log::warn!("menu bar theme: {e}");
+            }
+        }
+
+        /// Nothing to paint: the macOS menu bar belongs to the system.
+        #[cfg(target_os = "macos")]
+        #[expect(clippy::unused_self, reason = "same signature as the Windows version")]
+        pub fn set_dark(&self, _window: &Window, _dark: bool) {}
+
         /// Show the keymap's current shortcuts, after the config changed.
         pub fn update(&self, keymap: &Keymap) {
             for (id, item) in &self.items {
@@ -207,7 +247,7 @@ mod native {
         }
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| on_action(e.id.0)));
         attach(&menu, window)?;
-        Some(MenuBar { _menu: menu, items })
+        Some(MenuBar { menu, items })
     }
 
     /// The tree's context menu (M12), by action id.
@@ -334,6 +374,13 @@ impl MenuBar {
         reason = "same signature as the native menu bar's update"
     )]
     pub fn update(&self, _keymap: &crate::keymap::Keymap) {}
+
+    /// Nothing to paint without menus.
+    #[expect(
+        clippy::unused_self,
+        reason = "same signature as the native menu bar's"
+    )]
+    pub fn set_dark(&self, _window: &winit::window::Window, _dark: bool) {}
 }
 
 /// No native menus on this platform; the command palette covers them.
