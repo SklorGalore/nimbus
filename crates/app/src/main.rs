@@ -107,6 +107,9 @@ pub struct Options {
     /// With `--headless`: draw the "Save changes before closing?" prompt
     /// over the frame, for checking how prompts look in a theme.
     pub prompt: bool,
+    /// With `--headless`: keep room for, and draw, the title bar Nimbus
+    /// draws on macOS, whatever system this runs on.
+    pub title_bar: bool,
     /// Use this theme instead of the config's.
     pub theme: Option<String>,
     /// Open every file in this backend, whatever its size (`--backend
@@ -230,7 +233,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]] [--prompt]] [--debug-overlay] [--preview] [--linear-blend] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]] [--prompt] [--title-bar]] [--debug-overlay] [--preview] [--linear-blend] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -327,6 +330,7 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
         "--cursors" => o.cursors = numbers(args.next()),
         "--picker" => o.picker = args.next().and_then(|p| p.into_string().ok()),
         "--prompt" => o.prompt = true,
+        "--title-bar" => o.title_bar = true,
         "--theme" => o.theme = args.next().and_then(|t| t.into_string().ok()),
         "--workspace" => {
             let Ok(name) = value(args, flag, "a workspace name").into_string() else {

@@ -19,9 +19,10 @@ section before tagging.
 
 ### Changed
 
-- The window's title bar follows the Nimbus theme instead of the system
-  appearance, so a light theme no longer sits under a dark title bar or
-  the other way round.
+- The title bar takes the theme's colours. On macOS Nimbus draws it,
+  in the tab bar's colour with the title centred, and the system keeps
+  only its window buttons; on Windows 11 the system bar is coloured to
+  match; elsewhere it follows the theme's light or dark.
 - Questions and messages ("Save changes before closing?", "Could not
   save", replacing a file in the tree and the rest) open inside the
   window in the theme's colours, on every system, instead of as system

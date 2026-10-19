@@ -2819,6 +2819,36 @@ pub fn draw_picker(
     }
 }
 
+/// Room kept at the left of the drawn title bar for macOS's close,
+/// minimise and zoom buttons, in points.
+const WINDOW_BUTTONS_PT: f32 = 78.0;
+
+/// Draw the title bar Nimbus paints on macOS, in the space
+/// [`Gpu::set_inset_top`] keeps above everything else (negative y):
+/// the tab bar's colour, so it runs on into the sidebar and the tabs, with
+/// `title` centred and dimmed while the window is in the background, as
+/// the system's own title is. The system draws its window buttons on top.
+/// Draws nothing when no space is kept.
+pub fn draw_title_bar(gpu: &mut Gpu, ui: &Ui, layout: &Layout, title: &str, active: bool) {
+    let h = gpu.inset_top();
+    if h <= 0.0 {
+        return;
+    }
+    gpu.begin_layer(None);
+    gpu.push_rect([0.0, -h], [layout.width, h], ui.tab_bar);
+    // Centred in the window, but never under the window buttons: a long
+    // title starts after them and is cut short at the right margin.
+    let left = (WINDOW_BUTTONS_PT * layout.scale).round();
+    let room = (layout.width - left - layout.margin).max(0.0);
+    let end = layout.ui.fit(title, room);
+    let text = &title[..end];
+    let w = layout.ui.width(text);
+    let x = ((layout.width - w) / 2.0).max(left).round();
+    let y = (-h + (h - layout.metrics.line_height) / 2.0).round();
+    let color = if active { ui.text } else { ui.gutter };
+    gpu.push_ui_text([x, y], text, color);
+}
+
 /// Draw the status bar along the bottom of the window: `message` (and
 /// whether it is an error) on the left, `info` (cursor position and the
 /// document's details, from [`View::status_info`]) on the right. A long

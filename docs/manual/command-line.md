@@ -83,6 +83,7 @@ need them for everyday use.
 | `--preview` | With `--headless`: draw the file's Markdown preview instead of its text. |
 | `--picker KIND[:QUERY]` | With `--headless`: draw an open picker, `palette`, `files`, `line` or `symbols`, optionally with a query. |
 | `--prompt` | With `--headless`: draw the "Save changes before closing?" question over the frame. |
+| `--title-bar` | With `--headless`: draw the title bar Nimbus draws on macOS, on any system. |
 
 ## Exit codes
 

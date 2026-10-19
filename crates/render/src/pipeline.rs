@@ -79,12 +79,15 @@ struct GlobalsUniform {
     /// 1.0 when the target is sRGB (`--linear-blend`): the shaders turn
     /// colours into linear light before blending. 0.0 otherwise.
     linear: f32,
-    pad: f32,
+    /// Pixels at the top of the window kept for a title bar the app draws
+    /// (see [`crate::Gpu::set_inset_top`]): positions shift down by this.
+    top: f32,
 }
 
 /// Group 0: data every shader reads: the viewport size, which the shaders
-/// need to turn pixel positions into clip-space positions, and whether
-/// colours are blended in linear light.
+/// need to turn pixel positions into clip-space positions, the top inset
+/// they shift positions down by, and whether colours are blended in linear
+/// light.
 pub(crate) struct Globals {
     buffer: wgpu::Buffer,
     linear: bool,
@@ -133,11 +136,11 @@ impl Globals {
         clippy::cast_precision_loss,
         reason = "surface sizes are far below 2^24, exact in f32"
     )]
-    pub(crate) fn set_viewport(&self, queue: &wgpu::Queue, width: u32, height: u32) {
+    pub(crate) fn set_viewport(&self, queue: &wgpu::Queue, width: u32, height: u32, top: f32) {
         let u = GlobalsUniform {
             viewport: [width as f32, height as f32],
             linear: if self.linear { 1.0 } else { 0.0 },
-            pad: 0.0,
+            top,
         };
         queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&u));
     }

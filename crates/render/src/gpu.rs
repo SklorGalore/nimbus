@@ -51,6 +51,9 @@ pub struct Gpu {
     /// The swapchain reported Suboptimal; reconfigure after presenting.
     /// Reconfiguring while a frame is acquired is an error in wgpu.
     reconfigure: bool,
+    /// Pixels kept at the top for a title bar the app draws
+    /// ([`Gpu::set_inset_top`]).
+    inset_top: f32,
 }
 
 /// The render target. Headless rendering (no window) draws into a texture,
@@ -446,7 +449,7 @@ impl Gpu {
     ) -> Self {
         let atlas = Atlas::new(&device);
         let globals = Globals::new(&device, config.format.is_srgb());
-        globals.set_viewport(&queue, config.width, config.height);
+        globals.set_viewport(&queue, config.width, config.height, 0.0);
         let pipelines = Pipelines {
             rect: RectPipeline::new(&device, config.format, &globals),
             glyph: GlyphPipeline::new(&device, config.format, &globals, &atlas),
@@ -468,6 +471,7 @@ impl Gpu {
             captured: None,
             background: BACKGROUND,
             reconfigure: false,
+            inset_top: 0.0,
         }
     }
 
@@ -486,7 +490,31 @@ impl Gpu {
         self.configure();
         self.pipelines
             .globals
-            .set_viewport(&self.queue, width, height);
+            .set_viewport(&self.queue, width, height, self.inset_top);
+    }
+
+    /// Keep `px` pixels at the top of the window for a title bar the app
+    /// draws itself (macOS, where the window's content runs up under the
+    /// system's buttons). Everything drawn after this moves down by `px`:
+    /// y = 0 is just below the bar, and the bar is drawn at negative y.
+    /// Clips given to [`Gpu::begin_layer`] move with it, so the app lays
+    /// out the window as if it were `px` shorter
+    /// ([`Gpu::content_size`]) and nothing else changes.
+    pub fn set_inset_top(&mut self, px: f32) {
+        let px = px.max(0.0).round();
+        if (px - self.inset_top).abs() < f32::EPSILON {
+            return;
+        }
+        self.inset_top = px;
+        self.pipelines
+            .globals
+            .set_viewport(&self.queue, self.config.width, self.config.height, px);
+    }
+
+    /// The top inset set by [`Gpu::set_inset_top`], in pixels.
+    #[must_use]
+    pub fn inset_top(&self) -> f32 {
+        self.inset_top
     }
 
     /// Draw the queued frame into `texture`, capturing it if requested.
@@ -782,8 +810,9 @@ impl Gpu {
             reason = "window pixel coordinates, clamped to be non-negative"
         )]
         let to_px = |v: f32| v.max(0.0).round() as u32;
+        let top = self.inset_top;
         self.frame
-            .begin_layer(clip.map(|[x, y, w, h]| [to_px(x), to_px(y), to_px(w), to_px(h)]));
+            .begin_layer(clip.map(|[x, y, w, h]| [to_px(x), to_px(y + top), to_px(w), to_px(h)]));
     }
 
     /// The current layer's clip, in the form [`Gpu::begin_layer`] takes
@@ -797,9 +826,10 @@ impl Gpu {
             reason = "window pixel coordinates, far below 2^24"
         )]
         let to_f = |v: u32| v as f32;
+        let top = self.inset_top;
         self.frame
             .clip()
-            .map(|[x, y, w, h]| [to_f(x), to_f(y), to_f(w), to_f(h)])
+            .map(|[x, y, w, h]| [to_f(x), to_f(y) - top, to_f(w), to_f(h)])
     }
 
     /// Queue a filled rectangle for this frame. Within a layer, rectangles
@@ -902,6 +932,19 @@ impl Gpu {
             atlas: self.atlas.occupancy(),
             color_page_bytes: self.atlas.color_bytes(),
         }
+    }
+
+    /// The size the app lays out: the surface less the top inset
+    /// ([`Gpu::set_inset_top`]), in physical pixels.
+    #[must_use]
+    pub fn content_size(&self) -> (u32, u32) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a whole, non-negative number of pixels"
+        )]
+        let top = self.inset_top as u32;
+        (self.config.width, self.config.height.saturating_sub(top))
     }
 
     /// Current surface size in physical pixels, as `(width, height)`.

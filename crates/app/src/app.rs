@@ -659,6 +659,12 @@ pub struct App {
     resume: Option<Resume>,
     /// A prompt button clicked, answered once the click is handled.
     prompt_click: Option<Answer>,
+    /// The window title, as given to the system and drawn in the title
+    /// bar Nimbus draws on macOS.
+    title: String,
+    /// The window has the keyboard focus: the drawn title is dimmed
+    /// without it, as the system's is.
+    window_focused: bool,
     message: Option<Message>,
     proxy: EventLoopProxy<AppEvent>,
     /// Search again at this time: edits happened while the find bar was
@@ -850,6 +856,8 @@ impl App {
             prompts: VecDeque::new(),
             resume: None,
             prompt_click: None,
+            title: String::new(),
+            window_focused: true,
             message,
             proxy,
             research_at: None,
@@ -953,6 +961,23 @@ impl App {
             let _ = proxy.send_event(AppEvent::FontLoaded);
         }));
         self.gpu = Some(gpu);
+    }
+
+    /// Keep room at the top for the title bar Nimbus draws, or none: on
+    /// macOS the window's content runs up under the system's title bar
+    /// ([`with_drawn_title_bar`]), except in full screen, where the system
+    /// slides its own bar in over the content.
+    fn sync_title_bar(&mut self) {
+        let (Some(window), Some(gpu)) = (self.window.as_ref(), self.gpu.as_mut()) else {
+            return;
+        };
+        let scale = to_f32(effective_scale(window.scale_factor()));
+        let px = if DRAWS_TITLE_BAR && window.fullscreen().is_none() {
+            TITLE_BAR_PT * scale
+        } else {
+            0.0
+        };
+        gpu.set_inset_top(px);
     }
 
     /// Look up the config's `font` on a worker (listing the system's fonts
@@ -1221,7 +1246,8 @@ impl App {
             return;
         }
         let dirty = if key.1 { "● " } else { "" };
-        window.set_title(&format!("{dirty}{} — Nimbus", self.doc().display_name()));
+        self.title = format!("{dirty}{} — Nimbus", self.doc().display_name());
+        window.set_title(&self.title);
         self.title_key = Some(key);
     }
 
@@ -1233,6 +1259,29 @@ impl App {
     fn sync_window_theme(&self) {
         if let Some(window) = &self.window {
             window.set_theme(Some(window_theme(&self.theme)));
+            #[cfg(target_os = "windows")]
+            {
+                // Windows 11 colours the title bar exactly: the tab bar's
+                // colour, so it runs on into the sidebar and the tabs.
+                // Windows 10 ignores these and keeps the light/dark bar.
+                use winit::platform::windows::{Color, WindowExtWindows};
+                let rgb = |c: crate::theme::Color| {
+                    let byte = |v: f32| {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "a colour channel clamped to 0-255"
+                        )]
+                        let b = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                        b
+                    };
+                    Color::from_rgb(byte(c[0]), byte(c[1]), byte(c[2]))
+                };
+                let ui = &self.theme.ui;
+                window.set_title_background_color(Some(rgb(ui.tab_bar)));
+                window.set_title_text_color(rgb(ui.text));
+                window.set_border_color(Some(rgb(ui.picker_border)));
+            }
         }
     }
 
@@ -4486,6 +4535,9 @@ impl App {
             return;
         };
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        if y < 0.0 {
+            return; // the title bar: the system drags and zooms the window
+        }
         if let Some(p) = self.prompts.front() {
             // Modal: a click outside its buttons does nothing.
             self.prompt_click = p.click(&window, x, y);
@@ -5303,6 +5355,13 @@ impl App {
             let ui = &self.theme.ui;
             draw_picker_overlay(gpu, ui, layout, p, &self.keymap, self.blink.visible);
         }
+        view::draw_title_bar(
+            gpu,
+            &self.theme.ui,
+            layout,
+            &self.title,
+            self.window_focused,
+        );
         if let Some(p) = self.prompts.front() {
             p.draw(gpu, &self.theme.ui, layout);
         }
@@ -5318,11 +5377,12 @@ impl App {
                 .as_ref()
                 .map_or(0, |p| nimbus_core::column::line_width(&p.text, tab_width)),
         );
+        let top = self.gpu.as_ref().map_or(0.0, Gpu::inset_top);
         #[expect(
             clippy::cast_possible_truncation,
             reason = "on-screen pixel coordinates fit in i32"
         )]
-        let area = [r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32];
+        let area = [r[0] as i32, (r[1] + top) as i32, r[2] as i32, r[3] as i32];
         if self.ime_area != Some(area) {
             window.set_ime_cursor_area(
                 PhysicalPosition::new(area[0], area[1]),
@@ -6302,6 +6362,33 @@ fn draw_headless_picker(
 
 /// Give the window the app icon where the window itself carries one.
 ///
+/// Whether Nimbus draws the title bar itself: on macOS, where the system
+/// keeps only its window buttons and leaves the bar to the app. Windows
+/// colours its own bar instead (`sync_window_theme`); Linux leaves the
+/// decorations to the window manager, which only knows light and dark.
+const DRAWS_TITLE_BAR: bool = cfg!(target_os = "macos");
+
+/// The height of the title bar Nimbus draws, in points: the system's own
+/// title bar height on macOS, so the window buttons sit centred in it.
+pub const TITLE_BAR_PT: f32 = 28.0;
+
+/// On macOS, let the window's content run up under a transparent title
+/// bar with the title hidden: the system still draws the close, minimise
+/// and zoom buttons and still drags the window by the bar, and Nimbus
+/// paints the bar in the theme's colours (`view::draw_title_bar`).
+fn with_drawn_title_bar(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        attrs
+            .with_titlebar_transparent(true)
+            .with_fullsize_content_view(true)
+            .with_title_hidden(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    attrs
+}
+
 /// The system appearance that matches `theme`: winit passes it to the
 /// window (`NSWindow.appearance` on macOS, the immersive dark mode
 /// attribute on Windows, the GTK theme variant on X11 and the decoration
@@ -6368,7 +6455,8 @@ pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar) -> Layo
 
 /// As [`layout_for`], for a gutter wide enough for `lines` lines.
 pub fn layout_for_lines(gpu: &Gpu, scale: f32, lines: usize, find: &FindBar) -> Layout {
-    let (w, h) = gpu.size();
+    // Below the title bar Nimbus draws on macOS, if any.
+    let (w, h) = gpu.content_size();
     let bar_rows = match (find.open, find.replace_mode) {
         (false, _) => 0,
         (true, false) => 1,
@@ -6464,7 +6552,7 @@ fn headless_gpu(
     context: GpuContext,
     config: &Config,
     (scale, size): (f64, (u32, u32)),
-    linear_blend: bool,
+    options: &Options,
 ) -> Option<Gpu> {
     let font = Font::bundled()
         .map_err(|e| print_err(&format!("nimbus: {e}")))
@@ -6474,9 +6562,12 @@ fn headless_gpu(
         font,
         to_f32(config.font_size * scale),
         size,
-        linear_blend,
+        options.linear_blend,
     );
     headless_fonts(&mut gpu, config);
+    if options.title_bar {
+        gpu.set_inset_top(TITLE_BAR_PT * to_f32(scale));
+    }
     Some(gpu)
 }
 
@@ -6627,7 +6718,7 @@ pub fn run_headless(
     };
     // No window to ask: default to a Retina scale, or NIMBUS_SCALE.
     let scale = effective_scale(2.0);
-    let Some(mut gpu) = headless_gpu(context, config, (scale, size), options.linear_blend) else {
+    let Some(mut gpu) = headless_gpu(context, config, (scale, size), options) else {
         return 1;
     };
     let mut view = View::default();
@@ -6704,9 +6795,7 @@ pub fn run_headless(
         if let Some(spec) = &options.picker {
             draw_headless_picker(&mut gpu, ui, &layout, (spec, &root), &doc, config);
         }
-        if options.prompt {
-            draw_headless_prompt(&mut gpu, ui, &layout, &doc);
-        }
+        draw_headless_chrome(&mut gpu, ui, &layout, &doc, options);
         // Nested languages are parsed a few per frame; keep painting
         // until none is left over, as the window would on redraws.
         if doc.syntax.injections_pending() {
@@ -6725,11 +6814,22 @@ pub fn run_headless(
     i32::from(!save_screenshot(path, gpu.take_capture().as_ref()))
 }
 
-/// `--prompt` with `--headless`: the question closing `doc` would ask,
-/// for checking how prompts look in a theme.
-fn draw_headless_prompt(gpu: &mut Gpu, ui: &Ui, layout: &Layout, doc: &Document) {
-    let question = format!("Save changes to {} before closing?", doc.display_name());
-    Prompt::new("Unsaved changes", question, &SAVE_DONT_CANCEL, ()).draw(gpu, ui, layout);
+/// With `--headless`: the title bar Nimbus draws on macOS (`--title-bar`)
+/// and the question closing `doc` would ask (`--prompt`), for checking how
+/// they look in a theme.
+fn draw_headless_chrome(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    doc: &Document,
+    options: &Options,
+) {
+    let name = doc.display_name();
+    view::draw_title_bar(gpu, ui, layout, &format!("{name} — Nimbus"), true);
+    if options.prompt {
+        let question = format!("Save changes to {name} before closing?");
+        Prompt::new("Unsaved changes", question, &SAVE_DONT_CANCEL, ()).draw(gpu, ui, layout);
+    }
 }
 
 /// Warnings on stderr, for headless runs with no message line to show them.
@@ -7087,7 +7187,10 @@ impl App {
 
     /// The pointer moved: carry on whatever drag is under way, then
     /// update what hovering shows.
-    fn cursor_moved(&mut self, position: PhysicalPosition<f64>) {
+    fn cursor_moved(&mut self, mut position: PhysicalPosition<f64>) {
+        // In the coordinates everything is laid out in: y = 0 is the top
+        // of the content, below the title bar Nimbus draws on macOS.
+        position.y -= f64::from(self.gpu.as_ref().map_or(0.0, Gpu::inset_top));
         self.mouse = position;
         if self.sidebar.resizing {
             if let Some(layout) = self.window_layout() {
@@ -7258,7 +7361,7 @@ impl ApplicationHandler<AppEvent> for App {
             .with_title(format!("{} — Nimbus", self.doc().display_name()))
             .with_inner_size(LogicalSize::new(960.0, 640.0))
             .with_theme(Some(window_theme(&self.theme)));
-        let attrs = self.restore_geometry(event_loop, with_app_icon(attrs));
+        let attrs = self.restore_geometry(event_loop, with_drawn_title_bar(with_app_icon(attrs)));
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -7319,6 +7422,8 @@ impl ApplicationHandler<AppEvent> for App {
         log::debug!("startup: menus at {:?}", self.started.elapsed());
         window.request_redraw();
         self.window = Some(window);
+        self.sync_window_theme();
+        self.sync_title_bar();
         self.update_title();
         if let Some(pattern) = self.options.find.clone() {
             self.open_find(false);
@@ -7568,6 +7673,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
 
             WindowEvent::Focused(false) => {
+                self.window_focused = false;
                 // Show the cursor solid in the background; it may have been
                 // in the off phase of a blink.
                 self.blink.stop();
@@ -7575,6 +7681,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
             WindowEvent::Occluded(true) => self.blink.stop(),
             WindowEvent::Focused(true) => {
+                self.window_focused = true;
                 self.blink.reset(now);
                 self.changed(false);
             }
@@ -7587,6 +7694,7 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.set_font_size(px);
                 }
+                self.sync_title_bar();
                 self.changed(false);
             }
 
@@ -7594,6 +7702,8 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
                 }
+                // Entering or leaving full screen arrives as a resize.
+                self.sync_title_bar();
                 self.changed(false);
             }
 
