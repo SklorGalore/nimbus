@@ -58,6 +58,7 @@ then `[tables]`.
 | `font` | text | `""` (empty) | The editor font: an installed font's name (`"JetBrains Mono"`) or a font file's path (`.ttf`, `.otf`, `.ttc`). Empty is the bundled Hack Nerd Font Mono. It loads just after the window appears; a name that is not found keeps Hack and says so. |
 | `ligatures` | `true` or `false` | `false` | Join `->`, `!=`, `=>` and friends into one glyph, in a font that has ligatures (Hack has none). Columns stay the same, and a ligature splits apart where the cursor or a selection edge falls inside it. |
 | `remember_zoom` | `true` or `false` | `true` | Keep the size Zoom In and Zoom Out left (in `state.toml`) for the next start. `false` starts every session at `font_size`. Changing `font_size` in the file always wins. |
+| `remember_workspace` | `true` or `false` | `true` | Reopen the last session when you start Nimbus: `nimbus` alone brings back the last project's tabs, split views and tree, and `nimbus FOLDER` that folder's. `false` starts every run with one empty tab and saves no session, like `--no-session`, but recent files, the window position and the zoom are still remembered. `--workspace NAME` and Reopen Last Session still open what you ask for. Read at startup. |
 | `render_whitespace` | `"selection"`, `"all"` or `"none"` | `"selection"` | Draw spaces as `·` and tabs as `→`: only inside a selection, everywhere, or never. Toggle Render Whitespace in the palette cycles it for the session. |
 | `indent_guides` | `true` or `false` | `false` | Draw a thin line at each indentation level, the one around the cursor brighter. Toggle Indent Guides in the palette switches it for the session. |
 | `sticky_scroll` | `true` or `false` | `true` | Pin the lines that start the function, class or Markdown section you are in at the top of the text, up to five. Files over 16 MB have none. Toggle Sticky Scroll in the palette switches it for the session. |
@@ -190,6 +191,9 @@ This is the file "Open Config File" writes:
 # Zoom (View > Zoom In/Out, Primary+= and Primary+-) is remembered between
 # sessions; false starts every session at font_size.
 # remember_zoom = true
+# `nimbus` alone reopens the last session's tabs, and `nimbus FOLDER` that
+# folder's; false starts every run with one empty tab and saves no session.
+# remember_workspace = true
 # Show spaces as · and tabs as →: "selection", "all" or "none".
 # render_whitespace = "selection"
 # indent_guides = false     # true: a hairline at each indentation level

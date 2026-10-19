@@ -6,6 +6,25 @@ section before tagging.
 
 ## Unreleased
 
+### Added
+
+- The release signing key, `minisign.pub`, is in the repository and
+  printed in the README, so `SHA256SUMS.minisig` can be checked.
+- `scripts/publish-packages.sh` puts a signed, published release in the
+  Homebrew tap and opens its winget pull request, with the hashes taken
+  from the signed `SHA256SUMS`.
+- The README and manual say how to install with Homebrew
+  (`brew install --cask sklorgalore/nimbus/nimbus`) and winget
+  (`winget install SklorGalore.Nimbus`).
+
+## 1.1.0
+
+### Added
+
+- `remember_workspace = false` in the config stops Nimbus reopening
+  the last session at startup and saving one, while recent files, the
+  window position and the zoom are still kept.
+
 ## 1.0.1
 
 ### Fixed

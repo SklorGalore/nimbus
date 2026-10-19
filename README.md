@@ -161,10 +161,33 @@ On Windows, when SmartScreen says "Windows protected your PC", click
 [installation guide](docs/manual/getting-started.md#installing) covers
 each package in detail.
 
+### With Homebrew or winget
+
+On macOS with [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask sklorgalore/nimbus/nimbus
+```
+
+This also puts the `nimbus` command on your `PATH`. The app is not
+signed, so the first launch still needs right-click > Open or the
+`xattr` command above.
+
+On Windows with winget:
+
+```powershell
+winget install SklorGalore.Nimbus
+```
+
+`brew upgrade --cask nimbus` and `winget upgrade SklorGalore.Nimbus`
+install newer releases. Both package managers carry releases from
+v1.1.0 on, and a winget release appears there once Microsoft's
+reviewers accept it, which can take a few days after the release.
+
 ### Running from a terminal
 
-On macOS, the command-line binary is inside the app bundle. Link it into
-a folder on your `PATH`:
+On macOS, the command-line binary is inside the app bundle. Homebrew
+links it for you; otherwise link it into a folder on your `PATH`:
 
 ```sh
 ln -s /Applications/Nimbus.app/Contents/MacOS/nimbus /usr/local/bin/nimbus
@@ -194,6 +217,15 @@ and `minisign.pub` from the root of this repository:
 ```sh
 minisign -V -p minisign.pub -m SHA256SUMS
 ```
+
+The key is:
+
+```
+RWQP3Q/4Mc3fpXtWGJHvMnuFQsX7WPR3tW8cPRKRzPeF+B8DlSwzqodi
+```
+
+so `minisign -V -P RWQP3Q/4Mc3fpXtWGJHvMnuFQsX7WPR3tW8cPRKRzPeF+B8DlSwzqodi -m SHA256SUMS`
+works without a copy of the repository.
 
 ### Updates
 
@@ -348,9 +380,9 @@ request.
 ## Roadmap
 
 <!-- Mirrors the status column of docs/milestones/README.md. When a
-milestone lands, move its line up to "Available now". -->
+milestone lands on development, move its line up to "Available now". -->
 
-**Available now** (on `main`)
+**Available now**
 
 - GPU text rendering, editing, tabs, syntax highlighting and the file tree
 - Huge files, multiple cursors, compare and merge
@@ -373,6 +405,14 @@ milestone lands, move its line up to "Available now". -->
 - Screen-reader support
 - Newer versions of the text and window libraries (ropey 2, winit 0.31)
   once they are stable
+- Compatibility mode: Nimbus keeps working on machines without a usable
+  GPU, drawing on the CPU instead
+- Security: signed releases you can check, a hardened build pipeline and
+  reviewed dependencies
+- A git window (`nimbus --git`): your changes, history and branches,
+  staging, commits and merges, built on Nimbus's compare and merge views
+- Updates from inside Nimbus: install a newer release in one step,
+  checked against the release signature first
 
 Some things are out of scope for now, including a Vim mode, plugins,
 LSP, a built-in terminal, collaborative editing and right-to-left text.
