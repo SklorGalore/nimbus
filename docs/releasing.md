@@ -69,8 +69,13 @@ updater (M31) reads the version from it. The script also signs an already
 published release: run it for `v1.0.0` and `v1.0.1`, which shipped
 without signatures.
 
-The workflow's own signing step stays off: leave the
-`MINISIGN_SECRET_KEY` secret unset. M26 removes that step.
+The workflow has no signing step and reads no key: leave the
+`MINISIGN_SECRET_KEY` secret unset (delete it if it exists). Why, and
+what to do if the key is lost or leaks: [security.md](security.md).
+
+The first job waits in the `release` environment for your approval
+(Actions tab, the run, **Review deployments**); nothing builds before
+that.
 
 ## Homebrew and winget
 

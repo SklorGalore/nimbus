@@ -49,7 +49,10 @@ NIMBUS_BENCH_FILE=$PWD/bench/out/src-10mb.rs cargo test --release -p nimbus -- -
 cargo run -- FILE --cursors 4,19,33 --headless 900x300 --screenshot /tmp/m.bmp  # several cursors (byte offsets; the last is primary)
 bench/gen.sh sizes && bench/threshold.sh                    # rope vs mapped open time and memory at 64-512 MB
 cargo test --release -p nimbus-syntax -- --ignored --nocapture --test-threads 1   # keystroke and first-parse cost, tree memory (needs bench/gen.sh)
-cargo +nightly fuzz run buffer -- -max_total_time=300             # M21 fuzz targets (buffer, diff, merge, search; config/theme need --features app-config/app-theme); fuzz/README.md
+cargo +nightly fuzz run buffer -- -max_total_time=300             # fuzz targets (buffer, diff, merge, search; config, theme, highlight, encoding, workspace, git_output need features); fuzz/README.md
+cargo vet                                                    # M26: every crate version reviewed, imported or exempted (supply-chain/); docs/security.md
+uvx zizmor --min-severity medium .github/workflows           # M26: lint the workflows as CI does
+scripts/pin-actions.sh                                      # pin new actions to commit SHAs and appimagetool to its SHA-256 (needs github.com)
 cargo test --workspace
 python3 scripts/make-icons.py                               # redraw the app icon (PNG, .icns via iconutil, .ico) into assets/icon
 scripts/bundle-macos.sh target/release/nimbus VERSION OUT_DIR  # Nimbus.app and its zip; releases: push a tag vX.Y.Z matching Cargo.toml (.github/workflows/release.yml)
@@ -144,7 +147,7 @@ The project uses wgpu 30, whose API differs from older examples and from model t
 
 ## CI
 
-`.github/workflows/ci.yml` runs fmt, clippy, and tests on macOS, Ubuntu, and Windows, plus the release-size check. Linux needs `libwayland-dev` and `libxkbcommon-dev`. Remote: `github.com/SklorGalore/nimbus` (private).
+`.github/workflows/ci.yml` runs fmt, clippy, and tests on macOS, Ubuntu, and Windows, plus the release-size check, `cargo deny`, `cargo vet` and `zizmor` (M26: a new or bumped crate needs `cargo vet certify` or an imported audit; a new action must be pinned to a SHA). Linux needs `libwayland-dev` and `libxkbcommon-dev`. Remote: `github.com/SklorGalore/nimbus` (private).
 
 ## Branches
 

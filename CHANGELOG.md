@@ -23,6 +23,30 @@ section before tagging.
 - The README and manual say how to install with Homebrew
   (`brew install --cask sklorgalore/nimbus/nimbus`) and winget
   (`winget install SklorGalore.Nimbus`).
+- Bidirectional control characters and zero-width characters are drawn
+  as a red box, even with whitespace rendering off, so text whose
+  display order differs from its bytes ("Trojan Source") cannot hide.
+- `SECURITY.md` says how to report a security problem privately, and
+  `docs/security.md` lists everything Nimbus reads and what each input
+  may do.
+- Each release package has a GitHub build provenance attestation
+  (`gh attestation verify FILE --repo SklorGalore/nimbus`), and the
+  release binaries carry their dependency list (`cargo audit bin`).
+
+### Changed
+
+- Open Project Workspace opens only folders and files inside the
+  project: a `.nimbus/workspace.toml` that names paths elsewhere (an
+  absolute path, `../`, or a link pointing out) has them skipped, and
+  the message line says how many.
+- Compare with HEAD no longer lets a repository's own config run
+  programs: git's filesystem monitor, hooks and lazy fetching are off,
+  and a filter program defined in the repository's `.git/config` is not
+  run (the stored file is compared as it is instead).
+- Preview links with an absolute path are no longer followed.
+- Releases are built from the committed `Cargo.lock` (`--locked`), every
+  workflow action is pinned to a commit, and dependency updates must
+  pass `cargo vet`.
 
 ## 1.1.0
 

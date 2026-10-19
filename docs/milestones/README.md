@@ -56,7 +56,7 @@ repeated in each file:
 | 23 | [Library upgrades](m23-library-upgrades.md) | Planned, waiting on stable releases |
 | 24 | [International text](m24-international-text.md) | Planned |
 | 25 | [Command line](m25-command-line.md) | Planned |
-| 26 | [Security](m26-security.md) | Planned |
+| 26 | [Security](m26-security.md) | In progress |
 | 27 | [Git window: viewing](m27-git-viewer.md) | Planned |
 | 28 | [Git window: staging and committing](m28-git-staging.md) | Planned |
 | 29 | [Git window: branches and remotes](m29-git-branches-remotes.md) | Planned |

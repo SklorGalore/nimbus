@@ -20,6 +20,9 @@ on:
         required: false
         default: "3600"
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -44,10 +47,24 @@ jobs:
           - target: theme
             features: app-theme
             seeds: crates/app/themes
+          # M26: every bundled grammar (tree-sitter parsers are C) and the
+          # Markdown outline; encodings; workspace files; git's output.
+          - target: highlight
+            features: syntax
+          - target: encoding
+            features: app-encoding
+          - target: workspace
+            features: app-workspace
+          - target: git_output
+            features: app-git
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c76c034f9e32a5d6e2c104dc4df23a22476db04 # nightly
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: fuzz
           key: ${{ matrix.target }}
@@ -55,7 +72,7 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Restore the corpus
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
@@ -63,22 +80,26 @@ jobs:
 
       - name: Seed the corpus
         if: matrix.seeds
+        env:
+          TARGET: ${{ matrix.target }}
+          SEEDS: ${{ matrix.seeds }}
         run: |
-          mkdir -p "fuzz/corpus/${{ matrix.target }}"
-          cp ${{ matrix.seeds }}/*.toml "fuzz/corpus/${{ matrix.target }}/"
+          mkdir -p "fuzz/corpus/$TARGET"
+          cp "$SEEDS"/*.toml "fuzz/corpus/$TARGET/"
 
       - name: Fuzz
         working-directory: fuzz
         env:
           SECONDS_PER_TARGET: ${{ inputs.seconds || '3600' }}
           FEATURES: ${{ matrix.features }}
+          TARGET: ${{ matrix.target }}
         run: |
-          cargo +nightly fuzz run "${{ matrix.target }}" ${FEATURES:+--features "$FEATURES"} -- \
+          cargo +nightly fuzz run "$TARGET" ${FEATURES:+--features "$FEATURES"} -- \
             -max_total_time="$SECONDS_PER_TARGET" -timeout=60
 
       - name: Upload the crashing input
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/

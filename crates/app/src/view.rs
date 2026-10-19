@@ -2117,6 +2117,7 @@ impl Painter<'_, '_> {
             );
             self.whitespace(row, (first, width));
         }
+        self.hidden_chars(row, (first, width));
         for i in self.next_sel..self.sels.len() {
             let head = self.sels[i].head;
             if self.sels[i].range().start > row.end() {
@@ -2222,6 +2223,30 @@ impl Painter<'_, '_> {
                 }
             }
             col += w;
+        }
+    }
+
+    /// A box on each bidirectional control and zero-width character in the
+    /// row's visible part (M26), whatever `render_whitespace` says: these
+    /// draw as nothing, and "Trojan Source" code uses them to make text
+    /// read differently from what it is (`column::is_hidden_char`).
+    fn hidden_chars(&mut self, row: &RowGeom<'_>, (first, width): (usize, usize)) {
+        if row.seg.is_ascii() {
+            return;
+        }
+        let tab = self.tab_width;
+        let cell = self.layout.metrics.cell_width;
+        let lh = self.layout.metrics.line_height;
+        let (s, e, sc) = visible_span(row.seg, row.start_col, first, width, tab);
+        let Some(text) = row.seg.get(s..e) else {
+            return;
+        };
+        for (col, w) in column::hidden_cols(text, sc, tab) {
+            let x = row.left + f(col - row.start_col) * cell;
+            if x >= self.layout.text_left {
+                self.gpu
+                    .push_rect([x, row.top], [f(w) * cell, lh], self.deco.ui.hidden_char);
+            }
         }
     }
 
