@@ -38,6 +38,7 @@ does not overwrite your session.
 | `--search PATTERN` | Open with the sidebar's Search panel searching the project folder for `PATTERN`. |
 | `--wrap` | Start every tab with soft wrap on, whatever the config says. |
 | `--theme NAME` | Use this theme instead of the config's `theme`: `dark`, `light`, or one of your own. |
+| `--compat` | Draw on the CPU instead of the graphics card (compatibility mode), without opening the graphics card at all. Nimbus does this by itself when it finds no usable graphics card; see [Troubleshooting](troubleshooting.md). |
 | `--encoding NAME` | Read the files named on the command line in this encoding instead of guessing, and save them in it: `utf-8`, `utf-16le`, `windows-1252`, `latin1`, … (see [Encodings](encodings.md#encoding-names)). An unknown name is an error. |
 | `--diff OLD NEW` | Open `NEW` in a tab, compared with `OLD` (see [Compare and merge](compare-and-merge.md#comparing)). With two folders, compare the folders instead (see [Comparing folders](compare-and-merge.md#comparing-folders)). |
 | `--merge BASE LOCAL REMOTE` | Open a three-way merge of the three files. The result saves to `LOCAL` unless `-o` says otherwise. The exit code is 0 only if the result was saved with no conflicts left, 1 otherwise. |

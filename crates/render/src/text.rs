@@ -137,18 +137,12 @@ impl TextRenderer {
     /// Draw with another font (`font` in the config): every cached bitmap
     /// belongs to the old one, so the cache and atlas are reset, and the
     /// grid is measured again.
-    pub(crate) fn set_font(
-        &mut self,
-        regular: Font,
-        bold: Option<Font>,
-        atlas: &mut Atlas,
-        queue: &wgpu::Queue,
-    ) {
+    pub(crate) fn set_font(&mut self, regular: Font, bold: Option<Font>, atlas: &mut Atlas) {
         self.font = regular;
         self.faces[0] = regular;
         self.faces[1] = bold.unwrap_or(regular);
         self.metrics = regular.metrics(self.metrics.size_px);
-        self.reset(atlas, queue);
+        self.reset(atlas);
     }
 
     /// Let the font join characters into ligatures.
@@ -167,12 +161,12 @@ impl TextRenderer {
 
     /// Change the pixel size, for a font-size or scale-factor change. Every
     /// cached bitmap is the wrong size now, so the cache and atlas are reset.
-    pub(crate) fn set_size(&mut self, size_px: f32, atlas: &mut Atlas, queue: &wgpu::Queue) {
+    pub(crate) fn set_size(&mut self, size_px: f32, atlas: &mut Atlas) {
         if (size_px - self.metrics.size_px).abs() < f32::EPSILON {
             return;
         }
         self.metrics = self.font.metrics(size_px);
-        self.reset(atlas, queue);
+        self.reset(atlas);
     }
 
     /// Call `notify` when a fallback font arrives, so the window draws
@@ -194,11 +188,11 @@ impl TextRenderer {
     /// Call at the start of each frame: takes fallback fonts that have
     /// arrived, and performs a reset requested by a full atlas during the
     /// previous frame.
-    pub(crate) fn begin_frame(&mut self, atlas: &mut Atlas, queue: &wgpu::Queue) {
+    pub(crate) fn begin_frame(&mut self, atlas: &mut Atlas) {
         self.receive_fonts();
         if self.reset_pending {
             log::info!("glyph atlas was full; clearing it");
-            self.reset(atlas, queue);
+            self.reset(atlas);
         }
     }
 
@@ -207,10 +201,10 @@ impl TextRenderer {
         self.reset_pending
     }
 
-    fn reset(&mut self, atlas: &mut Atlas, queue: &wgpu::Queue) {
+    fn reset(&mut self, atlas: &mut Atlas) {
         self.cache.clear();
         self.ui_cache.clear();
-        atlas.clear(queue);
+        atlas.clear();
         self.reset_pending = false;
     }
 
@@ -220,7 +214,6 @@ impl TextRenderer {
     /// scrolled text does not draw over the gutter.
     pub(crate) fn push_line(
         &mut self,
-        queue: &wgpu::Queue,
         atlas: &mut Atlas,
         frame: &mut FrameBuilder,
         origin: [f32; 2],
@@ -284,7 +277,7 @@ impl TextRenderer {
             let cached = if let Some(entry) = self.cache.get(&key) {
                 *entry
             } else {
-                match load_glyph(&self.faces, &mut self.raster, atlas, queue, key) {
+                match load_glyph(&self.faces, &mut self.raster, atlas, key) {
                     Loaded::Glyph(g) => {
                         self.cache.insert(key, Some(g));
                         Some(g)
@@ -315,13 +308,8 @@ impl TextRenderer {
     /// (see [`crate::ui`]). Graphemes the interface font lacks are drawn
     /// by the editor font in their cells. Returns the x where the text
     /// ends.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the GPU's queue, atlas and frame, as push_line takes them"
-    )]
     pub(crate) fn push_ui_line(
         &mut self,
-        queue: &wgpu::Queue,
         atlas: &mut Atlas,
         frame: &mut FrameBuilder,
         origin: [f32; 2],
@@ -330,31 +318,18 @@ impl TextRenderer {
         ui: &UiFont,
     ) -> f32 {
         if ui.font().is_none() {
-            self.push_line(queue, atlas, frame, origin, text, plain(color));
+            self.push_line(atlas, frame, origin, text, plain(color));
             return origin[0] + ui.width(text);
         }
-        self.push_ui_styled(
-            queue,
-            atlas,
-            frame,
-            (origin, color),
-            text,
-            ui,
-            UiStyle::PLAIN,
-        )
+        self.push_ui_styled(atlas, frame, (origin, color), text, ui, UiStyle::PLAIN)
     }
 
     /// Queue a line of interface text in `style` (size, weight, slant)
     /// with its top-left corner at `origin`; returns the x where it ends.
     /// Graphemes neither weight has are drawn by the editor font in its
     /// cells, at its own size.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the renderer's parts plus the text"
-    )]
     pub(crate) fn push_ui_styled(
         &mut self,
-        queue: &wgpu::Queue,
         atlas: &mut Atlas,
         frame: &mut FrameBuilder,
         (origin, color): ([f32; 2], [f32; 4]),
@@ -383,11 +358,11 @@ impl TextRenderer {
                         bold,
                         italic: style.italic,
                     };
-                    self.push_ui_glyph(queue, atlas, frame, glyph, [x, baseline_y], color);
+                    self.push_ui_glyph(atlas, frame, glyph, [x, baseline_y], color);
                     x += scaled.advance_width(id);
                 }
             } else if let Some(g) = text.get(i..i + g.len()) {
-                self.push_line(queue, atlas, frame, [pen, origin[1]], g, plain(color));
+                self.push_line(atlas, frame, [pen, origin[1]], g, plain(color));
             }
             pen += adv;
             col += cols;
@@ -399,7 +374,6 @@ impl TextRenderer {
     /// `at` (x, baseline y).
     fn push_ui_glyph(
         &mut self,
-        queue: &wgpu::Queue,
         atlas: &mut Atlas,
         frame: &mut FrameBuilder,
         glyph: UiGlyph,
@@ -419,7 +393,7 @@ impl TextRenderer {
             *entry
         } else {
             let raster_key = key.styled(REGULAR, glyph.italic);
-            match load_glyph(&[glyph.font], &mut self.raster, atlas, queue, raster_key) {
+            match load_glyph(&[glyph.font], &mut self.raster, atlas, raster_key) {
                 Loaded::Glyph(g) => {
                     self.ui_cache.insert(key, Some(g));
                     Some(g)
@@ -452,7 +426,6 @@ impl TextRenderer {
     /// if the font lacks the character.
     pub(crate) fn push_char(
         &mut self,
-        queue: &wgpu::Queue,
         atlas: &mut Atlas,
         frame: &mut FrameBuilder,
         origin: [f32; 2],
@@ -468,7 +441,7 @@ impl TextRenderer {
         let cached = if let Some(entry) = self.cache.get(&key) {
             *entry
         } else {
-            match load_glyph(&self.faces, &mut self.raster, atlas, queue, key) {
+            match load_glyph(&self.faces, &mut self.raster, atlas, key) {
                 Loaded::Glyph(g) => {
                     self.cache.insert(key, Some(g));
                     Some(g)
@@ -577,22 +550,11 @@ enum Loaded {
 }
 
 /// Rasterize `key` and copy its bitmap into the atlas.
-fn load_glyph(
-    fonts: &[Font],
-    raster: &mut Rasterizer,
-    atlas: &mut Atlas,
-    queue: &wgpu::Queue,
-    key: GlyphKey,
-) -> Loaded {
+fn load_glyph(fonts: &[Font], raster: &mut Rasterizer, atlas: &mut Atlas, key: GlyphKey) -> Loaded {
     let Some(bitmap) = raster.rasterize(fonts, key) else {
         return Loaded::Blank;
     };
-    match atlas.insert(
-        queue,
-        bitmap.page,
-        (bitmap.width, bitmap.height),
-        bitmap.data,
-    ) {
+    match atlas.insert(bitmap.page, (bitmap.width, bitmap.height), bitmap.data) {
         Ok(slot) => Loaded::Glyph(CachedGlyph {
             slot,
             left: bitmap.left,

@@ -8,7 +8,7 @@
 
 use std::ops::Range;
 
-use crate::atlas::{Atlas, AtlasPage, AtlasSlot};
+use crate::atlas::{AtlasPage, AtlasSlot, GpuPages};
 use crate::pipeline::{GLYPH_COLOR, GlyphInstance, Pipelines, RectInstance};
 
 /// One layer: a clip region and the instances drawn in it.
@@ -96,6 +96,27 @@ impl FrameBuilder {
         });
     }
 
+    /// Close the layer being built, so [`FrameBuilder::layers`] sees it.
+    /// Both painters call this before drawing; calling it twice is harmless.
+    pub(crate) fn finish(&mut self) {
+        self.close_layer();
+    }
+
+    /// The finished layers in drawing order: each one's clip, rectangles and
+    /// glyphs. The CPU painter (compatibility mode) walks these.
+    pub(crate) fn layers(
+        &self,
+    ) -> impl Iterator<Item = (Option<[u32; 4]>, &[RectInstance], &[GlyphInstance])> {
+        let slice = |r: &Range<u32>| r.start as usize..r.end as usize;
+        self.layers.iter().map(move |l| {
+            (
+                l.clip,
+                self.rects.get(slice(&l.rects)).unwrap_or_default(),
+                self.glyphs.get(slice(&l.glyphs)).unwrap_or_default(),
+            )
+        })
+    }
+
     /// Number of glyphs queued, for logging.
     #[must_use]
     pub fn glyph_count(&self) -> usize {
@@ -113,9 +134,9 @@ impl FrameBuilder {
         encoder: &mut wgpu::CommandEncoder,
         target: (&wgpu::TextureView, [u32; 2], wgpu::Color),
         pipelines: &mut Pipelines,
-        atlas: &Atlas,
+        atlas: &GpuPages,
     ) {
-        self.close_layer();
+        self.finish();
         let (view, [width, height], background) = target;
         pipelines.rect.instances.upload(device, queue, &self.rects);
         pipelines
