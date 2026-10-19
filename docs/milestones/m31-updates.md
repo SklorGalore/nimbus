@@ -1,6 +1,6 @@
 # M31 — Updates
 
-**Status: built (2026-10-19), waiting on the owner's Mac checks.** Written on 2026-10-18 at the owner's
+**Status: done (2026-10-19).** Written on 2026-10-18 at the owner's
 request, from what M15 deferred: "automatic in-place updates
 (downloading and replacing the binary)"; the owner answered its three
 questions on 2026-10-19 (`DESIGN.md` §9). Numbered after security (M26)
@@ -208,8 +208,10 @@ Update, Cancel Update, Roll Back Update, in `action.rs` with stable ids.
 
 _Written 2026-10-19 from a cloud container (Linux, no screen, no Mac or
 Windows). The download, verification and the Linux swap are tested
-here; the macOS and Windows swaps are written but unrun until the owner
-tries them (below)._
+here. The owner ran check 1 below on the M5 Pro the same day (a build
+numbered 1.0.0 updated itself to the signed 1.0.1) and reported it
+done; no timings were recorded. Windows and the AppImage are still
+untried on real machines._
 
 **What landed.**
 

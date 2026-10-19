@@ -65,6 +65,7 @@ then `[tables]`.
 | `minimap` | `true` or `false` | `false` | Show a map of the lines around the view at the right edge of the text. Toggle Minimap in the palette switches it for the session. |
 | `minimap_width` | number, 40 to 400 | `100` | The minimap's width in points. It never takes more than half the text area. |
 | `ui_font` | text | `""` (empty) | A proportional font, by name (`"Inter"`, `"SF Pro"`) or file path, for the sidebar, tabs, status bar, palette, pickers and the Markdown preview. The text you edit stays in the monospace `font`. Empty draws all of these in the editor font. Like `font`, it loads just after the window appears. |
+| `compat` | `true` or `false` | `false` | Draw on the CPU instead of the graphics card (compatibility mode), as `--compat` does, for a card or driver that draws wrongly. Nimbus switches to compatibility mode by itself when there is no usable graphics card. Read at startup. |
 
 ### `[keys]`
 
@@ -204,6 +205,10 @@ This is the file "Open Config File" writes:
 # Markdown preview, by name or path. Empty uses the editor font. The text
 # stays monospace.
 # ui_font = "Inter"
+# Draw on the CPU instead of the GPU (compatibility mode), for a GPU or
+# driver that misdraws. Nimbus does this by itself when there is no usable
+# GPU. Restart to apply.
+# compat = false
 
 # Key bindings: action id = list of chords. "Primary" is Cmd on macOS and
 # Ctrl elsewhere. An empty list unbinds the action. The command palette

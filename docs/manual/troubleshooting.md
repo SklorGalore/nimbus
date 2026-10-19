@@ -105,12 +105,21 @@ find-bar keys apply only while the find bar is open.
 language with a symbol list, under 16 MB, and finished parsing. The
 message line says which of these is missing.
 
-**Nimbus will not start, or the window is blank.** Run it from a
-terminal to see the error. Nimbus draws with your graphics card through
-Vulkan, Metal, DirectX 12 or OpenGL; if the default choice does not
-work with your driver, try another, for example
+**The status bar says "Compatibility mode".** Nimbus could not use the
+graphics card (a virtual machine or remote desktop without one, or a
+missing driver), so it draws on the CPU instead; the message says why.
+Everything works as usual, and the frames look the same, though
+scrolling a very large window can be less smooth. The F12 overlay's
+`painter` line says which one is drawing.
+
+**Nimbus will not start, or the window is blank or draws wrongly.** Run
+it from a terminal to see the error. Nimbus draws with your graphics
+card through Vulkan, Metal, DirectX 12 or OpenGL; if the default choice
+does not work with your driver, try another, for example
 `WGPU_BACKEND=gl nimbus` on Linux or `WGPU_BACKEND=dx12 nimbus` on
-Windows.
+Windows. Or leave the graphics card out: `nimbus --compat`, or
+`compat = true` in the [config](settings.md#top-level), draws on the
+CPU.
 
 **Accented letters look wrong (`Ã©` for `é`, or `�`).** Nimbus guessed
 the file's encoding wrong. Click the encoding in the status bar, choose

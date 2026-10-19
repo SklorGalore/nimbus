@@ -53,7 +53,7 @@ repeated in each file:
 | 20 | [Reading aids](m20-reading-aids.md) | Done |
 | 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | Done |
 | 22 | [Screen readers](m22-screen-readers.md) | Done |
-| 23 | [Library upgrades](m23-library-upgrades.md) | Planned, waiting on stable releases |
+| 23 | [Library upgrades](m23-library-upgrades.md) | In progress: compatibility mode built; the upgrades wait on stable releases |
 | 24 | [International text](m24-international-text.md) | Planned |
 | 25 | [Command line](m25-command-line.md) | Planned |
 | 26 | [Security](m26-security.md) | In progress |
@@ -61,7 +61,7 @@ repeated in each file:
 | 28 | [Git window: staging and committing](m28-git-staging.md) | Planned |
 | 29 | [Git window: branches and remotes](m29-git-branches-remotes.md) | Planned |
 | 30 | [Git window: history tools and merging](m30-git-history-merging.md) | Planned |
-| 31 | [Updates](m31-updates.md) | Built, Mac checks pending |
+| 31 | [Updates](m31-updates.md) | Done |
 
 **Next** is the milestone to start; **Planned** plans are approved and
 queued in table order. M10–M15 were drafted after M8 and approved, with

@@ -589,7 +589,7 @@ introduces and points at the code.
 | 20 | Reading aids | **Done** | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
 | 21 | Foundations and 1.0 | **Done** | Fuzzing, a soak run, a crash record, version 1.0 (ropey 2 and winit 0.31 wait for stable releases) | [m21](docs/milestones/m21-foundations-and-1-0.md) |
 | 22 | Screen readers | Next | Use Nimbus with VoiceOver, NVDA or Orca | [m22](docs/milestones/m22-screen-readers.md) |
-| 23 | Library upgrades | Planned, waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
+| 23 | Library upgrades | In progress: compatibility mode built, upgrades waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
 | 24 | International text | Planned | CJK and other scripts in the right fonts, variable fonts, editable huge files in single-byte encodings | [m24](docs/milestones/m24-international-text.md) |
 | 25 | Command line | Planned | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
 | 26 | Security | In progress | Signed releases with the key off GitHub; protected branches and tags; pinned workflows; reviewed dependencies; untrusted files stay data | [m26](docs/milestones/m26-security.md) |
@@ -597,7 +597,7 @@ introduces and points at the code.
 | 28 | Git window: staging and committing | Planned | Stage files, hunks or lines; discard safely; commit and amend | [m28](docs/milestones/m28-git-staging.md) |
 | 29 | Git window: branches and remotes | Planned | Branches, tags, stashes; fetch, pull and push with your own credentials | [m29](docs/milestones/m29-git-branches-remotes.md) |
 | 30 | Git window: history tools and merging | Planned | Blame, file history, search; merge, rebase, cherry-pick and revert with the merge view | [m30](docs/milestones/m30-git-history-merging.md) |
-| 31 | Updates | Built, Mac checks pending | Install a newer release from inside Nimbus, verified against the signed `SHA256SUMS`, and restart into it | [m31](docs/milestones/m31-updates.md) |
+| 31 | Updates | **Done** | Install a newer release from inside Nimbus, verified against the signed `SHA256SUMS`, and restart into it | [m31](docs/milestones/m31-updates.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
