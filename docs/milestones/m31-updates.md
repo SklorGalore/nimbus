@@ -124,9 +124,10 @@ crate with no dependencies by minisign's author, measured for size) and
 `ring`'s SHA-256, which rustls already brings in, so no hashing crate is
 added.
 
-**Prerequisite: the signing key.** The owner's M15 step 1 (make the key,
-commit `minisign.pub`, set `MINISIGN_SECRET_KEY`) has to be done, and
-one release signed, before task 3 can be tested end to end. Where the
+**Prerequisite: the signing key.** M26 (security) makes the key, keeps
+it on the owner's Mac with `scripts/sign-release.sh`, and commits
+`minisign.pub`; that, and one release signed with it, has to be done
+before task 3 can be tested end to end. Where the
 secret key lives, its backup, rotation and revocation, and the signing
 pipeline itself are M26's. The contract between the two plans: the app
 trusts exactly the key or keys embedded at build time, the signature is
