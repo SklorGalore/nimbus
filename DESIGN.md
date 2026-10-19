@@ -589,7 +589,7 @@ introduces and points at the code.
 | 20 | Reading aids | **Done** | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
 | 21 | Foundations and 1.0 | **Done** | Fuzzing, a soak run, a crash record, version 1.0 (ropey 2 and winit 0.31 wait for stable releases) | [m21](docs/milestones/m21-foundations-and-1-0.md) |
 | 22 | Screen readers | Next | Use Nimbus with VoiceOver, NVDA or Orca | [m22](docs/milestones/m22-screen-readers.md) |
-| 23 | Library upgrades | Planned, waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
+| 23 | Library upgrades | In progress: compatibility mode built, upgrades waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
 | 24 | International text | Planned | CJK and other scripts in the right fonts, variable fonts, editable huge files in single-byte encodings | [m24](docs/milestones/m24-international-text.md) |
 | 25 | Command line | Planned | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
 | 26 | Security | In progress | Signed releases with the key off GitHub; protected branches and tags; pinned workflows; reviewed dependencies; untrusted files stay data | [m26](docs/milestones/m26-security.md) |

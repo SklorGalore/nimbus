@@ -123,6 +123,9 @@ pub struct Options {
     /// `--linear-blend`: the M16 experiment, blending text in linear light
     /// on an sRGB surface instead of in gamma space.
     pub linear_blend: bool,
+    /// `--compat`: draw on the CPU (compatibility mode, M23) without
+    /// opening the GPU at all.
+    pub compat: bool,
     /// `--cursors 3,10,20`: with `--headless`, put a cursor at each byte
     /// offset (the last is the primary), to render several cursors.
     pub cursors: Vec<usize>,
@@ -227,7 +230,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]]] [--debug-overlay] [--preview] [--linear-blend] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]]] [--debug-overlay] [--preview] [--linear-blend] [--compat] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -320,6 +323,7 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
         "--wait-index" => o.wait_index = true,
         "--debug-overlay" => o.debug_overlay = true,
         "--linear-blend" => o.linear_blend = true,
+        "--compat" => o.compat = true,
         "--preview" => o.preview = true,
         "--cursors" => o.cursors = numbers(args.next()),
         "--picker" => o.picker = args.next().and_then(|p| p.into_string().ok()),
@@ -646,6 +650,25 @@ fn plan_startup(
     }
 }
 
+/// The GPU for a headless render, or `None` to paint on the CPU
+/// (compatibility mode): when `compat` asks for it, or the GPU could not be
+/// opened, which is said on stderr.
+fn headless_context(
+    gpu_init: Option<std::thread::JoinHandle<Result<GpuContext, nimbus_render::GpuError>>>,
+    compat: bool,
+) -> Option<GpuContext> {
+    if compat {
+        return None;
+    }
+    let why = match gpu_init.map(std::thread::JoinHandle::join) {
+        Some(Ok(Ok(context))) => return Some(context),
+        Some(Ok(Err(e))) => e.to_string(),
+        Some(Err(_)) | None => "GPU setup did not complete".to_owned(),
+    };
+    print_err(&format!("nimbus: {why}; rendering in compatibility mode"));
+    None
+}
+
 fn main() {
     let started = Instant::now();
     // Logging and argument parsing take microseconds. They come first so the
@@ -661,12 +684,14 @@ fn main() {
 
     // Start opening the GPU next, so the driver work overlaps reading the
     // file, event-loop setup and window creation (DESIGN.md §4.3).
-    let gpu_init = match GpuContext::spawn() {
-        Ok(handle) => handle,
-        Err(e) => {
-            print_err(&format!("nimbus: could not start GPU thread: {e}"));
-            std::process::exit(1);
-        }
+    // `--compat` never touches the GPU; without a thread, Nimbus starts in
+    // compatibility mode (M23) too.
+    let gpu_init = if options.compat {
+        None
+    } else {
+        GpuContext::spawn()
+            .map_err(|e| log::warn!("could not start the GPU thread: {e}"))
+            .ok()
     };
 
     let (mut config, mut warnings) = Config::load();
@@ -700,20 +725,9 @@ fn main() {
         for w in &warnings {
             print_err(&format!("nimbus: {w}"));
         }
-        let code = match gpu_init.join() {
-            Ok(Ok(context)) => {
-                let (docs, more) = headless_inputs(docs, startup);
-                app::run_headless(&options, &config, (docs, root, more), size, context)
-            }
-            Ok(Err(e)) => {
-                print_err(&format!("nimbus: {e}"));
-                1
-            }
-            Err(_) => {
-                print_err("nimbus: GPU setup thread did not complete");
-                1
-            }
-        };
+        let context = headless_context(gpu_init, options.compat || config.compat);
+        let (docs, more) = headless_inputs(docs, startup);
+        let code = app::run_headless(&options, &config, (docs, root, more), size, context);
         std::process::exit(code);
     }
 

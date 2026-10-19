@@ -1,4 +1,5 @@
-//! The glyph atlas: GPU textures holding every rasterized glyph bitmap.
+//! The glyph atlas: GPU textures holding every rasterized glyph bitmap, or,
+//! in compatibility mode (M23), the same pages kept in memory.
 //!
 //! Drawing thousands of glyphs from one texture means one bind group and one
 //! draw call per frame instead of one per glyph. The [`ShelfPacker`] decides
@@ -111,10 +112,28 @@ impl Book {
     }
 }
 
-/// The atlas textures, their packers, and the bind group the glyph shader
-/// uses.
+/// The atlas: its packers and where the pages are kept.
+///
+/// With a GPU the pages are textures (see [`GpuPages`]). In compatibility
+/// mode (M23) there is no GPU, so the same packers place bitmaps in two
+/// plain byte arrays ([`CpuPages`]) that the CPU painter reads. Either way
+/// a glyph's [`AtlasSlot`] is the same, so the text code above never knows
+/// which one it is filling.
 pub struct Atlas {
+    store: Store,
+    book: Book,
+}
+
+enum Store {
+    Gpu(Box<GpuPages>),
+    Cpu(CpuPages),
+}
+
+/// The pages as GPU textures, with the bind group the glyph shader reads
+/// them through.
+pub(crate) struct GpuPages {
     device: wgpu::Device,
+    queue: wgpu::Queue,
     coverage: wgpu::Texture,
     /// The colour page, once the first colour glyph has asked for it.
     color: Option<wgpu::Texture>,
@@ -123,14 +142,24 @@ pub struct Atlas {
     sampler: wgpu::Sampler,
     layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
-    book: Book,
+}
+
+/// The pages in memory, for the CPU painter: `ATLAS_SIZE` rows of
+/// `ATLAS_SIZE` texels each, row after row.
+#[derive(Debug)]
+pub(crate) struct CpuPages {
+    /// One coverage byte per texel (4 MB).
+    pub(crate) coverage: Vec<u8>,
+    /// Four premultiplied RGBA bytes per texel (16 MB), made on the first
+    /// colour glyph as on the GPU.
+    pub(crate) color: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for Atlas {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Atlas")
             .field("occupancy", &self.occupancy())
-            .field("color_page", &self.color.is_some())
+            .field("color_page", &(self.color_bytes() > 0))
             .finish_non_exhaustive()
     }
 }
@@ -170,12 +199,18 @@ fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+/// Bytes in one whole page of `page`'s kind.
+fn page_bytes(page: AtlasPage) -> usize {
+    ATLAS_SIZE as usize * ATLAS_SIZE as usize * page.bytes_per_texel() as usize
+}
+
 impl Atlas {
-    /// Create the coverage page. Its format is `R8Unorm`: one byte per
-    /// texel, which is exactly the grayscale coverage mask the rasterizer
-    /// produces. The colour page waits for the first colour glyph.
+    /// Create the atlas on the GPU. The coverage page's format is
+    /// `R8Unorm`: one byte per texel, which is exactly the grayscale
+    /// coverage mask the rasterizer produces. The colour page waits for the
+    /// first colour glyph. `queue` is kept to copy bitmaps in.
     #[must_use]
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let coverage = page_texture(
             device,
             "glyph atlas",
@@ -212,31 +247,37 @@ impl Atlas {
         });
         let bind_group = bind(device, &layout, &coverage, &stand_in, &sampler);
         Self {
-            device: device.clone(),
-            coverage,
-            color: None,
-            stand_in,
-            sampler,
-            layout,
-            bind_group,
+            store: Store::Gpu(Box::new(GpuPages {
+                device: device.clone(),
+                queue: queue.clone(),
+                coverage,
+                color: None,
+                stand_in,
+                sampler,
+                layout,
+                bind_group,
+            })),
             book: Book::new(),
         }
     }
 
-    fn rebind(&mut self) {
-        let color = self.color.as_ref().unwrap_or(&self.stand_in);
-        self.bind_group = bind(
-            &self.device,
-            &self.layout,
-            &self.coverage,
-            color,
-            &self.sampler,
-        );
+    /// Create the atlas in memory, for compatibility mode. The 4 MB
+    /// coverage page is allocated zeroed, which the OS hands out lazily.
+    #[must_use]
+    pub fn in_memory() -> Self {
+        Self {
+            store: Store::Cpu(CpuPages {
+                coverage: vec![0; page_bytes(AtlasPage::Coverage)],
+                color: None,
+            }),
+            book: Book::new(),
+        }
     }
 
-    /// Reserve space on `page` for a `width × height` bitmap and queue a
-    /// copy of it to the GPU. The copy lands before the next `queue.submit`.
-    /// The first colour glyph creates the colour page.
+    /// Reserve space on `page` for a `width × height` bitmap and copy it
+    /// in: queued for the GPU (it lands before the next `queue.submit`), or
+    /// written straight into memory. The first colour glyph creates the
+    /// colour page.
     ///
     /// # Errors
     ///
@@ -245,7 +286,6 @@ impl Atlas {
     /// size.
     pub fn insert(
         &mut self,
-        queue: &wgpu::Queue,
         page: AtlasPage,
         (width, height): (u32, u32),
         data: &[u8],
@@ -264,11 +304,90 @@ impl Atlas {
         if width == 0 || height == 0 {
             return Ok(slot_for(rect, page));
         }
-        if page == AtlasPage::Color && self.color.is_none() {
+        if page == AtlasPage::Color && self.color_bytes() == 0 {
             log::info!(
-                "colour atlas page created: {} MB of GPU memory",
-                COLOR_PAGE_BYTES >> 20
+                "colour atlas page created: {} MB of {} memory",
+                COLOR_PAGE_BYTES >> 20,
+                if matches!(self.store, Store::Gpu(_)) {
+                    "GPU"
+                } else {
+                    "main"
+                }
             );
+        }
+        match &mut self.store {
+            Store::Gpu(gpu) => gpu.write(page, rect, data),
+            Store::Cpu(cpu) => cpu.write(page, rect, data),
+        }
+        Ok(slot_for(rect, page))
+    }
+
+    /// Forget every glyph, for example after a scale or zoom change. The
+    /// coverage page is zeroed, because new glyphs rely on the empty padding
+    /// around them; stale texels there could bleed into edge samples. The
+    /// colour page is dropped instead (a new one starts zeroed), which
+    /// also gives its 16 MB back until an emoji is drawn again.
+    ///
+    /// Writes 4 MB of zeros, which is fine for a rare event.
+    pub fn clear(&mut self) {
+        self.book.coverage.clear();
+        self.book.color.clear();
+        match &mut self.store {
+            Store::Gpu(gpu) => gpu.clear(),
+            Store::Cpu(cpu) => {
+                cpu.coverage.fill(0);
+                cpu.color = None;
+            }
+        }
+    }
+
+    /// Fraction of the coverage page in use, for logging.
+    #[must_use]
+    pub fn occupancy(&self) -> f32 {
+        self.book.coverage.occupancy()
+    }
+
+    /// Memory the colour page takes: 0 until the first colour glyph.
+    #[must_use]
+    pub fn color_bytes(&self) -> u64 {
+        let made = match &self.store {
+            Store::Gpu(gpu) => gpu.color.is_some(),
+            Store::Cpu(cpu) => cpu.color.is_some(),
+        };
+        if made { COLOR_PAGE_BYTES } else { 0 }
+    }
+
+    /// The GPU pages, unless this atlas is in memory.
+    pub(crate) fn gpu(&self) -> Option<&GpuPages> {
+        match &self.store {
+            Store::Gpu(gpu) => Some(gpu),
+            Store::Cpu(_) => None,
+        }
+    }
+
+    /// The pages in memory, unless this atlas is on the GPU.
+    pub(crate) fn cpu(&self) -> Option<&CpuPages> {
+        match &self.store {
+            Store::Cpu(cpu) => Some(cpu),
+            Store::Gpu(_) => None,
+        }
+    }
+}
+
+impl GpuPages {
+    fn rebind(&mut self) {
+        let color = self.color.as_ref().unwrap_or(&self.stand_in);
+        self.bind_group = bind(
+            &self.device,
+            &self.layout,
+            &self.coverage,
+            color,
+            &self.sampler,
+        );
+    }
+
+    fn write(&mut self, page: AtlasPage, rect: Rect, data: &[u8]) {
+        if page == AtlasPage::Color && self.color.is_none() {
             self.color = Some(page_texture(
                 &self.device,
                 "colour glyph atlas",
@@ -281,7 +400,7 @@ impl Atlas {
             AtlasPage::Coverage => &self.coverage,
             AtlasPage::Color => self.color.as_ref().unwrap_or(&self.stand_in),
         };
-        queue.write_texture(
+        self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture,
                 mip_level: 0,
@@ -297,33 +416,23 @@ impl Atlas {
             // applies to buffer-to-texture copies, not to write_texture.
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(width * bpt),
+                bytes_per_row: Some(rect.w * page.bytes_per_texel()),
                 rows_per_image: None,
             },
             wgpu::Extent3d {
-                width,
-                height,
+                width: rect.w,
+                height: rect.h,
                 depth_or_array_layers: 1,
             },
         );
-        Ok(slot_for(rect, page))
     }
 
-    /// Forget every glyph, for example after a scale or zoom change. The
-    /// coverage page is zeroed, because new glyphs rely on the empty padding
-    /// around them; stale texels there could bleed into edge samples. The
-    /// colour page is dropped instead (a new texture starts zeroed), which
-    /// also gives its 16 MB back until an emoji is drawn again.
-    ///
-    /// Uploads 4 MB of zeros, which is fine for a rare event.
-    pub fn clear(&mut self, queue: &wgpu::Queue) {
-        self.book.coverage.clear();
-        self.book.color.clear();
+    fn clear(&mut self) {
         if self.color.take().is_some() {
             self.rebind();
         }
-        let zeros = vec![0u8; (ATLAS_SIZE * ATLAS_SIZE) as usize];
-        queue.write_texture(
+        let zeros = vec![0u8; page_bytes(AtlasPage::Coverage)];
+        self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.coverage,
                 mip_level: 0,
@@ -344,28 +453,34 @@ impl Atlas {
         );
     }
 
-    /// Fraction of the coverage page in use, for logging.
-    #[must_use]
-    pub fn occupancy(&self) -> f32 {
-        self.book.coverage.occupancy()
-    }
-
-    /// GPU memory the colour page takes: 0 until the first colour glyph.
-    #[must_use]
-    pub fn color_bytes(&self) -> u64 {
-        if self.color.is_some() {
-            COLOR_PAGE_BYTES
-        } else {
-            0
-        }
-    }
-
     pub(crate) fn layout(&self) -> &wgpu::BindGroupLayout {
         &self.layout
     }
 
     pub(crate) fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
+    }
+}
+
+impl CpuPages {
+    /// Copy `data` (rows of `rect.w` texels, tightly packed) into the page
+    /// at `rect`, creating the colour page on first use.
+    fn write(&mut self, page: AtlasPage, rect: Rect, data: &[u8]) {
+        let bpt = page.bytes_per_texel() as usize;
+        let target = match page {
+            AtlasPage::Coverage => &mut self.coverage,
+            AtlasPage::Color => self
+                .color
+                .get_or_insert_with(|| vec![0; page_bytes(AtlasPage::Color)]),
+        };
+        let row = rect.w as usize * bpt;
+        let stride = ATLAS_SIZE as usize * bpt;
+        for (y, src) in data.chunks_exact(row).enumerate() {
+            let at = (rect.y as usize + y) * stride + rect.x as usize * bpt;
+            if let Some(dst) = target.get_mut(at..at + row) {
+                dst.copy_from_slice(src);
+            }
+        }
     }
 }
 

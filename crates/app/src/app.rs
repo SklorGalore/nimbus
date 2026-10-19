@@ -674,7 +674,7 @@ impl App {
     pub fn new(
         options: Options,
         started: Instant,
-        gpu_init: JoinHandle<Result<GpuContext, GpuError>>,
+        gpu_init: Option<JoinHandle<Result<GpuContext, GpuError>>>,
         (config, languages, docs, root): (Config, Languages, Vec<Document>, PathBuf),
         startup: Startup,
         proxy: EventLoopProxy<AppEvent>,
@@ -727,7 +727,7 @@ impl App {
             languages,
             keymap,
             root,
-            gpu_init: Some(gpu_init),
+            gpu_init,
             window: None,
             gpu: None,
             menu_bar: None,
@@ -860,6 +860,75 @@ impl App {
             let _ = proxy.send_event(AppEvent::FontLoaded);
         }));
         self.gpu = Some(gpu);
+    }
+
+    /// Paint on the CPU from now on (compatibility mode, M23), and say so
+    /// once in the status bar: `why` the GPU could not be used, or `None`
+    /// when `--compat` or the config asked for it.
+    ///
+    /// # Errors
+    ///
+    /// When the window cannot show the CPU's frames either.
+    fn start_compat(&mut self, window: &Arc<Window>, why: Option<&str>) -> Result<(), String> {
+        let font = Font::bundled().map_err(|e| e.to_string())?;
+        let px = self.font_px(effective_scale(window.scale_factor()));
+        let gpu = Gpu::compat(window, font, px).map_err(|e| e.to_string())?;
+        self.gpu_ready(gpu);
+        let text = match why {
+            Some(why) => {
+                log::warn!("compatibility mode: {why}");
+                format!("Compatibility mode: drawing without the GPU ({why})")
+            }
+            None => "Compatibility mode: drawing without the GPU, as asked".to_owned(),
+        };
+        self.notice(text);
+        Ok(())
+    }
+
+    /// The GPU failed mid-session (`e`): carry on painting on the CPU
+    /// rather than exit with unsaved work. `false` when that failed too,
+    /// or the failing painter was already the CPU's.
+    fn gpu_lost(&mut self, window: &Arc<Window>, e: nimbus_render::FrameError) -> bool {
+        log::error!("{e}");
+        let on_gpu = self.gpu.as_ref().is_some_and(|g| !g.compatibility());
+        if !on_gpu || self.start_compat(window, Some(&e.to_string())).is_err() {
+            return false;
+        }
+        self.reload_fonts();
+        window.request_redraw();
+        true
+    }
+
+    /// Look up the configured editor and interface fonts again, for a new
+    /// painter: the old one's fonts went with it.
+    fn reload_fonts(&mut self) {
+        if !self.config.font.is_empty() {
+            self.load_editor_font();
+        }
+        if !self.config.ui_font.is_empty() {
+            self.load_ui_font();
+        }
+    }
+
+    /// Show `text` in the status bar after whatever it already shows (for
+    /// example startup warnings), rather than replacing it.
+    fn notice(&mut self, text: String) {
+        let until = Instant::now() + MESSAGE_TIME * 2;
+        match &mut self.message {
+            Some(m) => {
+                m.text.push_str("; ");
+                m.text.push_str(&text);
+                m.until = m.until.max(until);
+            }
+            None => {
+                self.message = Some(Message {
+                    text,
+                    is_error: false,
+                    until,
+                });
+            }
+        }
+        self.changed(false);
     }
 
     /// Look up the config's `font` on a worker (listing the system's fonts
@@ -5134,8 +5203,9 @@ impl App {
                 return;
             }
             Err(e) => {
-                log::error!("{e}");
-                event_loop.exit();
+                if !self.gpu_lost(&window, e) {
+                    event_loop.exit();
+                }
                 return;
             }
         }
@@ -6180,7 +6250,7 @@ fn headless_fonts(gpu: &mut Gpu, config: &Config) {
 /// config's fonts; `None` after saying why the bundled font could not be
 /// read.
 fn headless_gpu(
-    context: GpuContext,
+    context: Option<GpuContext>,
     config: &Config,
     (scale, size): (f64, (u32, u32)),
     linear_blend: bool,
@@ -6188,13 +6258,12 @@ fn headless_gpu(
     let font = Font::bundled()
         .map_err(|e| print_err(&format!("nimbus: {e}")))
         .ok()?;
-    let mut gpu = Gpu::headless(
-        context,
-        font,
-        to_f32(config.font_size * scale),
-        size,
-        linear_blend,
-    );
+    let px = to_f32(config.font_size * scale);
+    let mut gpu = match context {
+        Some(context) => Gpu::headless(context, font, px, size, linear_blend),
+        // Compatibility mode (M23): no GPU at all.
+        None => Gpu::compat_headless(font, px, size),
+    };
     headless_fonts(&mut gpu, config);
     Some(gpu)
 }
@@ -6328,13 +6397,15 @@ pub fn paint_status(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
 
 /// `--headless WxH --screenshot FILE`: render the first frame into an
 /// off-screen texture, with no window, and save it. Works with the screen
-/// locked or no display attached. Returns the process exit code.
+/// locked or no display attached. With no `context` the frame is painted on
+/// the CPU (compatibility mode), with no GPU at all. Returns the process
+/// exit code.
 pub fn run_headless(
     options: &Options,
     config: &Config,
     (docs, root, more_roots): (Vec<Document>, PathBuf, Vec<PathBuf>),
     size: (u32, u32),
-    context: GpuContext,
+    context: Option<GpuContext>,
 ) -> i32 {
     let labels = headless_labels(&docs);
     let mut doc = docs.into_iter().next().unwrap_or_else(Document::untitled);
@@ -7017,21 +7088,6 @@ impl ApplicationHandler<AppEvent> for App {
 
         log::debug!("startup: window created at {:?}", self.started.elapsed());
 
-        // Join the GPU thread started in `main`. By now it has usually
-        // finished, so this rarely waits.
-        let context = match self.gpu_init.take().map(JoinHandle::join) {
-            Some(Ok(Ok(context))) => context,
-            Some(Ok(Err(e))) => {
-                self.fail_start(event_loop, &format!("Could not start the GPU: {e}"));
-                return;
-            }
-            Some(Err(_)) | None => {
-                self.fail_start(event_loop, "GPU setup thread did not complete");
-                return;
-            }
-        };
-        log::debug!("startup: gpu joined at {:?}", self.started.elapsed());
-
         let font = match Font::bundled() {
             Ok(f) => f,
             Err(e) => {
@@ -7040,17 +7096,27 @@ impl ApplicationHandler<AppEvent> for App {
             }
         };
         let scale = effective_scale(window.scale_factor());
-        match Gpu::new(
-            &window,
-            context,
-            font,
-            self.font_px(scale),
-            self.options.linear_blend,
-        ) {
+        let px = self.font_px(scale);
+        // Join the GPU thread started in `main`. By now it has usually
+        // finished, so this rarely waits. Without a GPU, or when asked,
+        // Nimbus paints on the CPU instead (compatibility mode, M23).
+        let gpu = match self.gpu_init.take().map(JoinHandle::join) {
+            _ if self.options.compat || self.config.compat => Err(None),
+            Some(Ok(Ok(context))) => {
+                log::debug!("startup: gpu joined at {:?}", self.started.elapsed());
+                Gpu::new(&window, context, font, px, self.options.linear_blend)
+                    .map_err(|e| Some(format!("could not set up drawing: {e}")))
+            }
+            Some(Ok(Err(e))) => Err(Some(e.to_string())),
+            Some(Err(_)) | None => Err(Some("GPU setup did not complete".to_owned())),
+        };
+        match gpu {
             Ok(gpu) => self.gpu_ready(gpu),
-            Err(e) => {
-                self.fail_start(event_loop, &format!("Could not set up drawing: {e}"));
-                return;
+            Err(why) => {
+                if let Err(e) = self.start_compat(&window, why.as_deref()) {
+                    self.fail_start(event_loop, &format!("Could not set up drawing: {e}"));
+                    return;
+                }
             }
         }
 

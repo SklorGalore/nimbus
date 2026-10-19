@@ -68,7 +68,204 @@ version = "0.57.1"
 when = "2026-04-17"
 trusted-publisher = "github:bytecodealliance/wit-bindgen"
 
-[audits.ariel-os.audits]
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "1.13.0 -> 2.0.0"
+notes = """
+New unsafe code seems reasonable and uses of unsafe code have proper accompanying comments.
+Some exceptions:
+- Win32 unsafe functions that don't have safety docs.
+- `polling::os::kqueue::Process:new`. This is called in `reactor::kqueue::Registration::add` which is pub(crate).
+- Same remark in `reactor::kqueue::Registration::delete`.
+"""
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.0.0 -> 2.1.0"
+notes = "Only adds new (unsafe) marker impls of `IoSafe` to more std types."
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.1.0 -> 2.2.0"
+notes = "No new code, only bumps futures-lite and async-lock deps"
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.2.0 -> 2.2.1"
+notes = """
+No new unsafe code.
+Updates windowsd-sys deps and drop waker-fn dep.
+"""
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.2.1 -> 2.2.2"
+notes = """
+No new unsafe code.
+Fixes an error when trying to use abstract sockets.
+"""
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.2.2 -> 2.3.0"
+notes = """
+New unsafe code uses includes:
+- `Registration::new_waitable` in `Waitable::new`. The constraint is upheld by the implementation although not stated.
+- `Send + Sync` impls on `Registration`. No idea if that's safe.
+- `Poller::add_waitable` in `Registration::add`. Covered by the previous safety comment for `Poller::add`
+"""
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.3.0 -> 2.3.1"
+notes = """
+No new unsafe code.
+Only fixes and issue on windows.
+"""
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.3.1 -> 2.3.2"
+notes = """
+No new unsafe code.
+Only adds compilation flags to fix an issue for aix OS. Also remove some unnecessary imports.
+"""
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.3.2 -> 2.3.3"
+notes = """
+No new unsafe code.
+Only fixes some clippy warnings.
+"""
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.3.3 -> 2.3.4"
+notes = """
+No new unsafe code.
+Only bumps windows-sys dep and make netbsd and dragonfly set `nosigpipe` on sockets.
+"""
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.3.4 -> 2.4.0"
+notes = """
+New unsafe code uses includes:
+- `polling::Process::from_pid` in `kqueue::Registration::add`. This code is only reached by registration of the form `Registration::Process(_)` which are only produced by `os::kqueue::Exit` which upholds the expected constraint either by construction when used from safe code or by forwarded the constraint when used from unsafe code.
+Otherwise this just groups apple OSes by their common vendor in `cfg`s.
+"""
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.4.0 -> 2.4.1"
+notes = "No new unsafe code. Only updates rustix deps."
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.4.1 -> 2.5.0"
+notes = """
+No new unsafe code.
+Makes tracing optional, fixes some comments and add Haiku OS support without adding code.
+"""
+
+[[audits.ariel-os.audits.async-io]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.5.0 -> 2.6.0"
+notes = """
+New unsafe code is reduced to conditional impls of unsafe marker trait `IoSafe` on std types.
+Otherwise it's mainly refactors, including dropping `async_lock::OnceCell` for `std::sync::OnceLock`.
+"""
+
+[[audits.ariel-os.audits.futures-lite]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "1.13.0 -> 2.0.0"
+notes = """
+No new unsafe code.
+Only internal refactors, refactors to drop local `Pending` and `Ready` Futures for core equivalents.
+Also make race futures available in no std using provided rng.
+"""
+
+[[audits.ariel-os.audits.futures-lite]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.0.0 -> 2.0.1"
+notes = "No new code, just removes an unnecessary dependency."
+
+[[audits.ariel-os.audits.futures-lite]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.0.1 -> 2.1.0"
+notes = """
+No new unsafe code.
+Just makes use of the `memchr` crate optional.
+"""
+
+[[audits.ariel-os.audits.futures-lite]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.1.0 -> 2.2.0"
+notes = """
+No new unsafe code.
+Relaxes MSRV; Remove `UnPin` bound; refactor a match expressions; impl `size_hint` for `Filter`
+"""
+
+[[audits.ariel-os.audits.futures-lite]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.2.0 -> 2.3.0"
+notes = """
+No new unsafe code.
+Adds a drain method to streams and related code. Also fix some conditional compilation flags regarding alloc and std.
+"""
+
+[[audits.ariel-os.audits.futures-lite]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.3.0 -> 2.4.0"
+notes = """
+No new unsafe code.
+Make TryZip and Zip drop the futures when completed. Also add some Stream functionality.
+"""
+
+[[audits.ariel-os.audits.futures-lite]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.4.0 -> 2.5.0"
+notes = """
+No new unsafe code.
+Removes `Unpin` bound on `Lines`
+"""
+
+[[audits.ariel-os.audits.futures-lite]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.5.0 -> 2.6.0"
+notes = """
+No new unsafe code.
+Small changes to docs and adds `map_while` to stream and removes some explicit lifetimes.
+"""
+
+[[audits.ariel-os.audits.futures-lite]]
+who = "Antoine Lavandier <antoine.lavandier@inria.fr>"
+criteria = "safe-to-deploy"
+delta = "2.6.0 -> 2.6.1"
+notes = "No new unsafe code. Only docs change and import positions."
 
 [[audits.bytecode-alliance.wildcard-audits.bumpalo]]
 who = "Nick Fitzgerald <fitzgen@gmail.com>"
@@ -112,6 +309,12 @@ notes = """
 Unsafe code, but its logic looks good to me. Necessary given what it is
 doing. Well tested, has quickchecks.
 """
+
+[[audits.bytecode-alliance.audits.async-task]]
+who = "Chris Fallin <chris@cfallin.org>"
+criteria = "safe-to-deploy"
+version = "4.7.1"
+notes = "Fairly significant chunk of unsafe code in the async executor core, but seems isolated to well-understood patterns, e.g. a manual vtable and some manual layout code."
 
 [[audits.bytecode-alliance.audits.atomic-waker]]
 who = "Alex Crichton <alex@alexcrichton.com>"
@@ -164,6 +367,12 @@ who = "Pat Hickey <pat@moreproductive.org>"
 criteria = "safe-to-deploy"
 delta = "0.3.28 -> 0.3.31"
 
+[[audits.bytecode-alliance.audits.futures-lite]]
+who = "Chris Fallin <chris@cfallin.org>"
+criteria = "safe-to-deploy"
+version = "1.13.0"
+notes = "No unsafe code and fairly straightforward/expected imports for async IO primitives."
+
 [[audits.bytecode-alliance.audits.iana-time-zone-haiku]]
 who = "Dan Gohman <dev@sunfishcode.online>"
 criteria = "safe-to-deploy"
@@ -204,6 +413,12 @@ who = "Alex Crichton <alex@alexcrichton.com>"
 criteria = "safe-to-deploy"
 delta = "0.8.5 -> 0.8.9"
 notes = "No new unsafe code, just refactorings."
+
+[[audits.bytecode-alliance.audits.parking]]
+who = "Chris Fallin <chris@cfallin.org>"
+criteria = "safe-to-deploy"
+version = "2.2.1"
+notes = "forbid-unsafe crate with straightforward imports."
 
 [[audits.bytecode-alliance.audits.percent-encoding]]
 who = "Alex Crichton <alex@alexcrichton.com>"
@@ -252,6 +467,17 @@ who = "Alex Crichton <alex@alexcrichton.com>"
 criteria = "safe-to-deploy"
 version = "1.1.0"
 notes = "Only minor `unsafe` code blocks which look valid and otherwise does what it says on the tin."
+
+[[audits.bytecode-alliance.audits.tempfile]]
+who = "Pat Hickey <phickey@fastly.com>"
+criteria = "safe-to-deploy"
+delta = "3.3.0 -> 3.5.0"
+
+[[audits.bytecode-alliance.audits.tempfile]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "3.5.0 -> 3.6.0"
+notes = "Dependency updates and new optimized trait implementations, but otherwise everything looks normal."
 
 [[audits.bytecode-alliance.audits.tracing-core]]
 who = "Alex Crichton <alex@alexcrichton.com>"
@@ -657,12 +883,6 @@ description contains a link to a document with an additional security review.
 """
 aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
 
-[[audits.google.audits.tempfile]]
-who = "Ying Hsu <yinghsu@chromium.org>"
-criteria = "safe-to-run"
-version = "3.10.1"
-aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
-
 [[audits.google.audits.utf8parse]]
 who = "David Koloski <dkoloski@google.com>"
 criteria = "safe-to-deploy"
@@ -1064,6 +1284,12 @@ criteria = "safe-to-deploy"
 delta = "0.17.0 -> 0.17.1"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
+[[audits.mozilla.audits.hex]]
+who = "Simon Friedberger <simon@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "0.4.3"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
 [[audits.mozilla.audits.objc2]]
 who = "Andy Leiserson <aleiserson@mozilla.com>"
 criteria = "safe-to-deploy"
@@ -1334,6 +1560,24 @@ who = "Simon Friedberger <simon@mozilla.com>"
 criteria = "safe-to-deploy"
 version = "2.5.0"
 notes = "The goal is to provide some constant-time correctness for cryptographic implementations. The approach is reasonable, it is known to be insufficient but this is pointed out in the documentation."
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tempfile]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "3.6.0 -> 3.8.0"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tempfile]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "3.8.0 -> 3.9.0"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tempfile]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "3.9.0 -> 3.10.1"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.tempfile]]

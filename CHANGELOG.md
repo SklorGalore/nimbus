@@ -8,6 +8,13 @@ section before tagging.
 
 ### Added
 
+- Compatibility mode: on a machine with no usable graphics card (a
+  virtual machine or remote desktop without one, a missing driver)
+  Nimbus now starts anyway and draws on the CPU, saying so once in the
+  status bar, instead of exiting. Frames look the same as on the GPU.
+  `--compat` or `compat = true` in the config forces it, and the F12
+  overlay names the painter. If the graphics card is lost while Nimbus
+  runs, it carries on in compatibility mode rather than closing.
 - Screen readers can read Nimbus: VoiceOver, NVDA, Narrator and Orca
   see the text as a text field they can move through by character, word
   and line, the tabs as a tab list, the file tree as a tree, the palette

@@ -1,17 +1,25 @@
-//! The GPU screenshot test (M8): render a fixed file headless and compare
-//! the frame with a reference image, allowing small differences.
+//! The screenshot test (M8): render a fixed file headless and compare the
+//! frame with a reference image, allowing small differences.
 //!
-//! macOS only: GPUs and font rasterizers differ by platform, so one
-//! reference would not fit them all, and the owner's machine is a Mac.
 //! It runs the debug binary Cargo built for the tests with `--headless`, a
 //! scale of 1 and an empty config folder (sidebar hidden), so nothing about
-//! the machine or the owner's settings changes the picture. Where there is
-//! no usable GPU (some CI machines), it says so and passes.
+//! the machine or the owner's settings changes the picture.
+//!
+//! The GPU test is macOS only: GPUs differ by platform, so one reference
+//! would not fit them all, and the owner's machine is a Mac. Where there is
+//! no usable GPU, Nimbus paints in compatibility mode instead, which the
+//! second test covers anyway, so the first one skips.
+//!
+//! The compatibility-mode test (M23) runs everywhere. The CPU painter
+//! blends exactly as the shaders do and swash rasterizes the same on every
+//! system, so it must match the Mac's GPU reference too. That makes it the
+//! one pixel check that runs on Linux and Windows CI.
 //!
 //! After an intended change to how text is drawn, make the reference again:
-//! `NIMBUS_UPDATE_SCREENSHOT=1 cargo test -p nimbus --test screenshot`,
-//! then look at `tests/screenshot/reference.bmp` before committing it.
-#![cfg(target_os = "macos")]
+//! `NIMBUS_UPDATE_SCREENSHOT=1 cargo test -p nimbus --test screenshot`
+//! on the Mac, then look at `tests/screenshot/reference.bmp` before
+//! committing it.
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -72,18 +80,12 @@ fn differing(a: &Image, b: &Image) -> usize {
         .count()
 }
 
-#[expect(
-    clippy::print_stderr,
-    reason = "telling the test runner why it skipped"
-)]
-fn skip(why: &str) {
-    eprintln!("screenshot test skipped: {why}");
-}
-
-#[test]
-fn the_editor_draws_the_same_frame_as_the_reference() {
+/// Render the sample headless with `extra` arguments; returns the BMP's
+/// bytes and the folder it was written in, plus stderr.
+fn render(extra: &[&str]) -> (Option<Vec<u8>>, PathBuf, String) {
     let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/screenshot");
-    let out_dir = std::env::temp_dir().join(format!("nimbus-shot-{}", std::process::id()));
+    let tag = extra.join("");
+    let out_dir = std::env::temp_dir().join(format!("nimbus-shot-{}{tag}", std::process::id()));
     let config = out_dir.join("config");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(config.join("state.toml"), "sidebar_visible = false\n").unwrap();
@@ -92,6 +94,7 @@ fn the_editor_draws_the_same_frame_as_the_reference() {
     let output = Command::new(env!("CARGO_BIN_EXE_nimbus"))
         .arg(here.join("sample.rs"))
         .args(["--headless", "640x360", "--cursors", "200"])
+        .args(extra)
         .arg("--screenshot")
         .arg(&actual_path)
         .env("NIMBUS_CONFIG_DIR", &config)
@@ -99,21 +102,23 @@ fn the_editor_draws_the_same_frame_as_the_reference() {
         .env("RUST_LOG", "off")
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        assert!(stderr.contains("no compatible GPU adapter"), "{stderr}");
-        skip("no GPU adapter on this machine");
-        return;
-    }
-    let actual_bytes = std::fs::read(&actual_path).unwrap();
-    let reference_path: PathBuf = here.join("reference.bmp");
-    if std::env::var_os("NIMBUS_UPDATE_SCREENSHOT").is_some() {
-        std::fs::write(&reference_path, &actual_bytes).unwrap();
-        skip("reference image written; look at it before committing");
-        return;
-    }
-    let actual = read_bmp(&actual_bytes).unwrap();
-    let reference = read_bmp(&std::fs::read(&reference_path).unwrap()).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let bytes = output
+        .status
+        .success()
+        .then(|| std::fs::read(&actual_path).unwrap());
+    (bytes, out_dir, stderr)
+}
+
+fn reference_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/screenshot/reference.bmp")
+}
+
+/// Compare `actual_bytes` (written in `out_dir`) with the reference.
+fn assert_matches_reference(actual_bytes: &[u8], out_dir: &Path) {
+    let actual_path = out_dir.join("actual.bmp");
+    let actual = read_bmp(actual_bytes).unwrap();
+    let reference = read_bmp(&std::fs::read(reference_path()).unwrap()).unwrap();
     assert_eq!(
         (actual.width, actual.height),
         (reference.width, reference.height),
@@ -126,5 +131,40 @@ fn the_editor_draws_the_same_frame_as_the_reference() {
         "{bad} pixels differ from tests/screenshot/reference.bmp; the frame drawn is {}",
         actual_path.display()
     );
-    let _ = std::fs::remove_dir_all(&out_dir);
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+/// Tell the test runner why the test skipped.
+#[cfg(target_os = "macos")]
+fn skip(why: &str) {
+    eprintln!("screenshot test skipped: {why}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_editor_draws_the_same_frame_as_the_reference() {
+    let (bytes, out_dir, stderr) = render(&[]);
+    let actual_bytes = bytes.unwrap_or_else(|| panic!("{stderr}"));
+    if stderr.contains("compatibility mode") {
+        skip("no usable GPU on this machine; the compatibility test covers it");
+        return;
+    }
+    if std::env::var_os("NIMBUS_UPDATE_SCREENSHOT").is_some() {
+        std::fs::write(reference_path(), &actual_bytes).unwrap();
+        skip("reference image written; look at it before committing");
+        return;
+    }
+    assert_matches_reference(&actual_bytes, &out_dir);
+}
+
+#[test]
+fn compatibility_mode_draws_the_same_frame_as_the_reference() {
+    // While the GPU test is writing a new reference there is nothing to
+    // compare with yet.
+    if std::env::var_os("NIMBUS_UPDATE_SCREENSHOT").is_some() {
+        return;
+    }
+    let (bytes, out_dir, stderr) = render(&["--compat"]);
+    let actual_bytes = bytes.unwrap_or_else(|| panic!("{stderr}"));
+    assert_matches_reference(&actual_bytes, &out_dir);
 }
