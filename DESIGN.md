@@ -588,7 +588,7 @@ introduces and points at the code.
 | 23 | Library upgrades | Planned, waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
 | 24 | International text | Planned | CJK and other scripts in the right fonts, variable fonts, editable huge files in single-byte encodings | [m24](docs/milestones/m24-international-text.md) |
 | 25 | Command line | Planned | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
-| 26 | Security | Draft | Signed releases with the key off GitHub; protected branches and tags; pinned workflows; reviewed dependencies; untrusted files stay data | [m26](docs/milestones/m26-security.md) |
+| 26 | Security | Planned | Signed releases with the key off GitHub; protected branches and tags; pinned workflows; reviewed dependencies; untrusted files stay data | [m26](docs/milestones/m26-security.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
@@ -602,7 +602,7 @@ is Next, and M23 goes whenever its releases are stable. M25 (command
 line) was added the same day at the owner's request.
 M26 (security) was drafted the same evening at the owner's request
 and goes before the git client (M27–M30) and updates (M31) plans
-drafted alongside it; its remaining questions are open in §9.
+drafted alongside it; the owner answered its questions the next day (§9).
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -611,15 +611,18 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-Open, from the M26 (security) draft, asked one at a time (the order
-is answered: security goes before the git client and updates, since
-updates depend on the signing key and the git client on the git rule;
-and the signing key lives on the owner's Mac, never in GitHub):
+None open. The questions the M26 (security) draft raised were answered
+on 2026-10-19:
 
-- Dependency review: `cargo vet` with imported audits and today's
-  versions exempted (recommended), or `cargo deny` alone as now?
+- Order: security goes first, as M26, before the git client (M27–M30)
+  and updates (M31), since updates depend on the signing key and the
+  git client on the git rule.
+- The release signing key lives on the owner's Mac with a password and
+  is used by `scripts/sign-release.sh`; it is never an Actions secret.
+- Dependencies are reviewed with `cargo vet` (imported audits, today's
+  versions exempted once), not `cargo deny` alone.
 
-Answered earlier. The questions the drafts of M22–M25, the plans after 1.0,
+The questions the drafts of M22–M25, the plans after 1.0,
 raised were answered on 2026-10-18:
 
 - Order: M22 (screen readers) first, on winit 0.30, since
@@ -800,4 +803,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | Finder "Open With" moves from M23 to a 1.0.1 fix with a small `objc2` open-files listener in `app` (new `unsafe` outside `render` and the mmap buffer, owner's choice), since winit 0.31.0-beta.3 still does not pass the files on | §9, m23 |
 | 2026-10-18 | M25 Command line added at the owner's request: an "Install `nimbus` Command" palette action (macOS via the system administrator prompt, no `unsafe`), opening files in the running window, `--wait` | m25, backlog |
 | 2026-10-18 | Compatibility mode (Cumulus) joins M23: an automatic CPU painter over `FrameBuilder`'s rects and glyphs, presented with `softbuffer`, with a one-time notice and `--compat`; no wgpu CPU-driver step, no separate app or terminal editor | §9, m23 |
-| 2026-10-19 | M26 Security drafted at the owner's request and put before the git client (M27–M30) and updates (M31): no release has been signed yet (`minisign.pub` never committed), so the key comes first, kept on the owner's Mac and used by `scripts/sign-release.sh`, never an Actions secret; actions pinned by SHA, protected branches and `v*` tags, `cargo vet`, provenance, a threat model; M31 owns the update check itself | §9, m26 |
+| 2026-10-19 | M26 Security drafted at the owner's request and put before the git client (M27–M30) and updates (M31): no release has been signed yet (`minisign.pub` never committed), so the key comes first, kept on the owner's Mac and used by `scripts/sign-release.sh`, never an Actions secret; actions pinned by SHA, protected branches and `v*` tags, `cargo vet` (chosen over `cargo deny` alone), provenance, a threat model; M31 owns the update check itself | §9, m26 |

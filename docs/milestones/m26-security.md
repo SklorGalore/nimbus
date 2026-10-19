@@ -1,11 +1,11 @@
 # M26 — Security
 
-**Status: draft (2026-10-18).** Written on 2026-10-18 at the owner's
+**Status: planned (2026-10-19).** Written on 2026-10-18 at the owner's
 request: a security milestone for the program and the repository,
-supply chain attacks included. Its open questions are in `DESIGN.md`
-§9. The owner chose to run it before the git client and updates plans
-drafted the same evening, which move to M27–M30 (git client) and M31
-(updates).
+supply chain attacks included. Approved on 2026-10-19 with three
+answers (`DESIGN.md` §9): it runs before the git client (M27–M30) and
+updates (M31) plans drafted the same evening; the signing key stays on
+the owner's Mac; dependencies are reviewed with `cargo vet`.
 
 ## Goal
 
@@ -168,8 +168,8 @@ was read. From then on, a new crate or a version bump fails CI until it
 is covered by an import or by a short review of the diff (`cargo vet
 diff`), which is where a malicious update would show up. Build scripts
 and proc macros run code on the build machine, so they get the closest
-look. §9 asks whether this is worth the upkeep, or `cargo deny` alone
-should stay.
+look. The owner chose this over `cargo deny` alone (2026-10-19);
+`cargo deny` stays for advisories and licences.
 
 **Untrusted files stay data.** Nimbus never executes what it opens:
 no plugins, no modelines, no tasks. The audit checks the few places
