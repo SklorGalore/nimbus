@@ -133,7 +133,7 @@ pub struct Debug {
 }
 
 /// Lines in the overlay panel.
-const LINES: usize = 6;
+const LINES: usize = 7;
 
 /// A duration in milliseconds with one decimal, or `-` before any value.
 fn ms(out: &mut String, d: Option<Duration>) {
@@ -205,6 +205,16 @@ impl Debug {
             let _ = write!(line, "  emoji {} MB", stats.color_page_bytes >> 20);
         }
         put(gpu, line);
+
+        // Which painter draws the frames (M23).
+        put(
+            gpu,
+            if stats.compatibility {
+                "painter  CPU (compatibility mode)"
+            } else {
+                "painter  GPU"
+            },
+        );
 
         line.clear();
         let _ = write!(line, "buffer   {} ", facts.backend);

@@ -38,10 +38,12 @@ does not overwrite your session.
 | `--search PATTERN` | Open with the sidebar's Search panel searching the project folder for `PATTERN`. |
 | `--wrap` | Start every tab with soft wrap on, whatever the config says. |
 | `--theme NAME` | Use this theme instead of the config's `theme`: `dark`, `light`, or one of your own. |
+| `--compat` | Draw on the CPU instead of the graphics card (compatibility mode), without opening the graphics card at all. Nimbus does this by itself when it finds no usable graphics card; see [Troubleshooting](troubleshooting.md). |
 | `--encoding NAME` | Read the files named on the command line in this encoding instead of guessing, and save them in it: `utf-8`, `utf-16le`, `windows-1252`, `latin1`, … (see [Encodings](encodings.md#encoding-names)). An unknown name is an error. |
 | `--diff OLD NEW` | Open `NEW` in a tab, compared with `OLD` (see [Compare and merge](compare-and-merge.md#comparing)). With two folders, compare the folders instead (see [Comparing folders](compare-and-merge.md#comparing-folders)). |
 | `--merge BASE LOCAL REMOTE` | Open a three-way merge of the three files. The result saves to `LOCAL` unless `-o` says otherwise. The exit code is 0 only if the result was saved with no conflicts left, 1 otherwise. |
 | `-o FILE`, `--output FILE` | With `--merge`: where the result saves. |
+| `--wait` | Return only when the files' tabs are closed (or Nimbus quits). For tools that wait for an editor, such as git: see [Nimbus as git's editor](#nimbus-as-gits-editor). |
 | `--version`, `-V` | Print the version (`nimbus 0.10.0`) and exit. |
 | `--help`, `-h` | Print a one-line usage summary and exit. |
 
@@ -61,6 +63,45 @@ nimbus . --search 'fn \w+_test'           # search the project on start
 nimbus --encoding windows-1252 export.csv # skip the encoding guess
 nimbus --diff old/config.toml config.toml # what changed?
 nimbus --merge base.rs mine.rs theirs.rs -o merged.rs; echo $?
+nimbus --wait notes.txt                   # return when the tab is closed
+```
+
+## One window
+
+Nimbus keeps one window. With Nimbus already open, `nimbus a.rs b.rs`
+opens the two files as tabs in that window, brings it to the front, and
+returns at once; a folder joins the sidebar, and plain `nimbus` just
+brings the window forward. Paths are read relative to the folder you
+typed the command in.
+
+Only a plain command does this: files, folders and `--wait`. Any other
+option (`--theme`, `--find`, `--diff`, `--workspace`, `--no-session`,
+the testing options below, …) says how a window should start, so it
+starts a window of its own. `--merge` and the testing options never
+take files from later commands.
+
+The open Nimbus listens on a socket in `run/` inside the config folder,
+which only you can open; it accepts file names and `--wait`, nothing
+else. If Nimbus crashed, the socket left behind is noticed and replaced
+by the next start.
+
+## Nimbus as git's editor
+
+```sh
+git config --global core.editor "nimbus --wait"
+```
+
+git starts the editor for a commit message and waits for it to exit.
+`nimbus --wait FILE` opens the file and exits only when that file's tab
+is closed (or Nimbus quits), with exit code 0. Save, close the tab, and
+the commit goes ahead. With Nimbus already open, the file opens there;
+with no Nimbus open, `--wait` starts one first, so after the commit the
+window stays open if you had other tabs.
+
+The same works for anything that runs `$EDITOR` or `$VISUAL`:
+
+```sh
+export EDITOR="nimbus --wait"
 ```
 
 ## For testing and measuring
@@ -91,12 +132,12 @@ need them for everyday use.
 |---|---|
 | 0 | Normal exit. With `--merge`: the result was saved with no conflicts left. |
 | 1 | A file could not be opened; the window, the GPU or the font could not start (the reason is printed, and shown in a dialog when there is no terminal); with `--soak`, memory grew more than 20 MB; with `--screenshot` or `--smoke`, no frame could be drawn or saved; with `--merge`, the result was not saved or still had conflicts. |
-| 2 | A mistake on the command line. |
+| 2 | A mistake on the command line (including `--wait` with no file to wait for). |
 
 ## Environment variables
 
 | Variable | Effect |
 |---|---|
-| `NIMBUS_CONFIG_DIR` | Use this folder instead of the usual config folder, for `config.toml`, `state.toml`, `crash.log`, themes, languages and queries. Handy for trying settings without touching your own. |
+| `NIMBUS_CONFIG_DIR` | Use this folder instead of the usual config folder, for `config.toml`, `state.toml`, `crash.log`, themes, languages and queries. Handy for trying settings without touching your own. A Nimbus started with it has its own [one window](#one-window): it neither takes files from nor hands files to a Nimbus using another folder. |
 | `RUST_LOG` | How much Nimbus logs to the terminal. The default is `nimbus=info`; `RUST_LOG=nimbus=debug` adds detail such as startup times. |
 | `WGPU_BACKEND` | Which graphics API to use, such as `vulkan`, `gl`, `metal` or `dx12`. Useful if Nimbus fails to start on your graphics driver. |

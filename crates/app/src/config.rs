@@ -34,8 +34,10 @@ pub struct Config {
     /// and saved in, skipping detection (M17): `"*.csv" = "windows-1252"`.
     /// Checked by `io::set_encoding_rules`.
     pub encodings: HashMap<String, String>,
-    /// Ask GitHub for the latest release once at startup. Off unless set:
-    /// a personal tool should not phone home without being asked.
+    /// Ask GitHub for the latest release once at startup. On unless set
+    /// to `false` (M31, reversing M15's default): one HTTPS request with
+    /// a `nimbus/X.Y.Z` user agent, which speaks only when a newer release
+    /// exists. Installing it still waits for Install Update.
     pub check_updates: bool,
     /// Editing behaviour: auto-pairs and what happens on save, with
     /// per-language overrides (`[editor.rust]`).
@@ -76,6 +78,11 @@ pub struct Config {
     /// a font file's path; empty uses the bundled editor font, so the
     /// first frame needs no font lookup. The editor text stays monospace.
     pub ui_font: String,
+    /// Draw on the CPU (compatibility mode, M23) even when a GPU is
+    /// there, as `--compat` does. Without it, Nimbus switches to
+    /// compatibility mode by itself only when the GPU cannot be used.
+    /// Read once at startup.
+    pub compat: bool,
 }
 
 /// Which spaces and tabs are drawn visibly (`render_whitespace`).
@@ -233,7 +240,7 @@ impl Default for Config {
             keys: HashMap::new(),
             languages: HashMap::new(),
             encodings: HashMap::new(),
-            check_updates: false,
+            check_updates: true,
             editor: EditorSettings::default(),
             indent: IndentSettings::default(),
             font: String::new(),
@@ -246,6 +253,7 @@ impl Default for Config {
             minimap: false,
             minimap_width: 100.0,
             ui_font: String::new(),
+            compat: false,
         }
     }
 }
@@ -287,6 +295,7 @@ const KNOWN: &[&str] = &[
     "minimap",
     "minimap_width",
     "ui_font",
+    "compat",
 ];
 
 /// A commented starting point written by "Open Config File" when there is
@@ -297,7 +306,7 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # tab_width = 4
 # soft_wrap = false
 # theme = "dark"            # or "light", or NAME for themes/NAME.toml here
-# check_updates = false     # true: ask GitHub for a newer release at startup
+# check_updates = true      # false: do not ask GitHub for a newer release at startup
 
 # The editor font: an installed font's name or a font file's path. Empty is
 # the bundled Hack Nerd Font Mono. ligatures joins -> != => and friends in
@@ -320,6 +329,10 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # Markdown preview, by name or path. Empty uses the editor font. The text
 # stays monospace.
 # ui_font = "Inter"
+# Draw on the CPU instead of the GPU (compatibility mode), for a GPU or
+# driver that misdraws. Nimbus does this by itself when there is no usable
+# GPU. Restart to apply.
+# compat = false
 
 # Key bindings: action id = list of chords. "Primary" is Cmd on macOS and
 # Ctrl elsewhere. An empty list unbinds the action. The command palette
@@ -448,6 +461,7 @@ impl Config {
             &mut warnings,
         );
         take(&table, "ui_font", &mut config.ui_font, &mut warnings);
+        take(&table, "compat", &mut config.compat, &mut warnings);
         if !(40.0..=400.0).contains(&config.minimap_width) {
             warnings.push(format!(
                 "config: minimap_width {} out of range 40–400",

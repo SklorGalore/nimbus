@@ -8,6 +8,34 @@ section before tagging.
 
 ### Added
 
+- **Install nimbus Command in PATH** in the command palette puts a
+  `nimbus` command on your `PATH`: a link in `/usr/local/bin` on macOS
+  (asking for your password through macOS when needed), in
+  `~/.local/bin` on Linux, or Nimbus's folder added to your `PATH` on
+  Windows. **Uninstall nimbus Command** takes it away. Something else
+  already there is never replaced without asking.
+- With Nimbus open, `nimbus FILE` opens the file in that window and
+  brings it to the front instead of starting a second Nimbus.
+- `nimbus --wait FILE` returns when the file's tab is closed, so
+  `git config --global core.editor "nimbus --wait"` works.
+
+- Nimbus can update itself (M31). After a check finds a newer release,
+  **Install Update** downloads the package for your system in the
+  background, checks that `SHA256SUMS` is signed by the release key
+  built into Nimbus for exactly that version and that the package
+  matches its SHA-256, and unpacks it beside the running copy;
+  **Restart to Update** (or quitting) puts it in place and starts it
+  with your session. Nothing downloads until you ask. Homebrew and
+  `.deb` installs are left to `brew` and `apt`. **Cancel Update** and
+  **Roll Back Update** undo it, and a new version that fails to open
+  its window is rolled back at the next start.
+- Compatibility mode: on a machine with no usable graphics card (a
+  virtual machine or remote desktop without one, a missing driver)
+  Nimbus now starts anyway and draws on the CPU, saying so once in the
+  status bar, instead of exiting. Frames look the same as on the GPU.
+  `--compat` or `compat = true` in the config forces it, and the F12
+  overlay names the painter. If the graphics card is lost while Nimbus
+  runs, it carries on in compatibility mode rather than closing.
 - Screen readers can read Nimbus: VoiceOver, NVDA, Narrator and Orca
   see the text as a text field they can move through by character, word
   and line, the tabs as a tab list, the file tree as a tree, the palette
@@ -35,6 +63,12 @@ section before tagging.
 
 ### Changed
 
+- **The update check at startup is now on by default**
+  (`check_updates = true`). Each start asks GitHub's API once, after
+  the window appears, whether a newer release exists: one HTTPS request
+  with a `nimbus/X.Y.Z` user agent and nothing else, and a message only
+  when there is one. Set `check_updates = false` in `config.toml` to
+  turn it off.
 - Open Project Workspace opens only folders and files inside the
   project: a `.nimbus/workspace.toml` that names paths elsewhere (an
   absolute path, `../`, or a link pointing out) has them skipped, and

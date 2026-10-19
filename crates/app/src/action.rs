@@ -379,6 +379,44 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::OpenRelease,
         Keys::NONE,
     ),
+    // Command line (M25).
+    act(
+        "app.installCommand",
+        "Install nimbus Command in PATH",
+        Command::InstallOnPath,
+        Keys::NONE,
+    ),
+    act(
+        "app.uninstallCommand",
+        "Uninstall nimbus Command",
+        Command::RemoveFromPath,
+        Keys::NONE,
+    ),
+    // Updates (M31).
+    act(
+        "app.installUpdate",
+        "Install Update",
+        Command::InstallUpdate,
+        Keys::NONE,
+    ),
+    act(
+        "app.restartToUpdate",
+        "Restart to Update",
+        Command::RestartToUpdate,
+        Keys::NONE,
+    ),
+    act(
+        "app.cancelUpdate",
+        "Cancel Update",
+        Command::CancelUpdate,
+        Keys::NONE,
+    ),
+    act(
+        "app.rollBackUpdate",
+        "Roll Back Update",
+        Command::RollBackUpdate,
+        Keys::NONE,
+    ),
     // Compare (M9).
     act(
         "diff.compareSaved",

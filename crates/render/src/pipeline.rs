@@ -16,7 +16,7 @@
 use std::marker::PhantomData;
 use std::ops::Range;
 
-use crate::atlas::Atlas;
+use crate::atlas::GpuPages;
 
 /// One solid rectangle in physical pixels, origin top left.
 #[repr(C)]
@@ -308,7 +308,7 @@ impl GlyphPipeline {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         globals: &Globals,
-        atlas: &Atlas,
+        atlas: &GpuPages,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/glyph.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -334,7 +334,7 @@ impl GlyphPipeline {
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         globals: &Globals,
-        atlas: &Atlas,
+        atlas: &GpuPages,
         range: Range<u32>,
     ) {
         let range = range.start.min(self.instances.len)..range.end.min(self.instances.len);

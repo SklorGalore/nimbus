@@ -1,6 +1,9 @@
 # M23 — Library upgrades
 
-**Status: planned (2026-10-18), waiting on stable releases.** Written on
+**Status: in progress (2026-10-19). Compatibility mode is built; the
+three upgrades wait on stable releases (on 2026-10-19 ropey was still
+2.0.0-beta.1, winit 0.31.0-beta.3, and wgpu 30.0.1 was already
+current).** Planned 2026-10-18. Written on
 2026-10-18 from what M21 deferred: 1.0 shipped on ropey 1.6 and winit
 0.30 because ropey 2 and winit 0.31 were still betas (ropey
 2.0.0-beta.1, winit 0.31.0-beta.3), and the owner chose to move both
@@ -36,7 +39,9 @@ running on machines with no usable GPU, instead of exiting at startup.
       (`Ctrl+Cmd+Space`) arrives in the buffer.
 - [ ] **wgpu current**: whatever wgpu release is current when the
       milestone starts, with the same before-and-after numbers.
-- [ ] **Compatibility mode**: when the GPU cannot be opened, Nimbus
+- [ ] **Compatibility mode** (built 2026-10-19; waiting on the owner's
+      run on the Mac for the window and the 16 ms number): when the GPU
+      cannot be opened, Nimbus
       starts anyway, drawing on the CPU, and says once that it is in
       compatibility mode; `--compat` (and `compat = true` in the config)
       forces it. The screenshot test also passes in compatibility mode
@@ -166,4 +171,64 @@ item stays in the backlog. A patched copy of winit stays out.
 
 ## Results
 
-_To be filled in when the milestone lands._
+Partial, 2026-10-19: compatibility mode (task 5). The upgrades (tasks
+1 to 4) have not started, because no stable release exists yet: ropey
+is at 2.0.0-beta.1 and winit at 0.31.0-beta.3, and wgpu 30.0.1, which
+Nimbus already uses, is the newest wgpu.
+
+**What was built.**
+
+- `crates/render/src/soft.rs` is the painter: `draw` clears to the
+  background, then for each layer fills its rectangles (`fill_rect`) and
+  blends its glyphs (`blend_glyph`) inside the layer's clip, with the
+  shader's formula (`over`) and gamma table (`SHAPED`). `span` picks the
+  pixels whose centres are inside a shape, as a GPU does. Frames reach
+  the window through `softbuffer` (`Cpu::window`).
+- `Atlas` (`atlas.rs`) keeps its pages either as textures (`GpuPages`)
+  or in memory (`CpuPages`), behind the same packer, so `text.rs` no
+  longer passes the GPU queue around.
+- `Gpu` (`gpu.rs`) holds one of two painters (`Painter::Wgpu` or
+  `Painter::Cpu`); `Gpu::compat` and `Gpu::compat_headless` make the
+  second. Nothing in `app` changed in how it draws.
+- The switch (`App::resumed` and `start_compat` in `app.rs`): `--compat`
+  never starts the GPU thread; `compat = true` ignores its result; a GPU
+  that fails to open or to set up the window starts the painter, with a
+  status-bar notice saying why. A GPU lost while running
+  (`FrameError`) also switches, instead of exiting with unsaved work.
+  Headless renders fall back the same way and say so on stderr.
+- The F12 overlay has a `painter` line.
+
+**Numbers** (Linux container, x86-64, no GPU; the owner's Mac is
+still to be measured):
+
+| | before | after |
+|---|---|---|
+| release binary (Linux) | 28,833,792 bytes | 28,966,496 bytes (+130 KB) |
+| CPU frame, 1600x1000 (`compat_frame_bench`, p50 / worst) | – | 7.4 ms / 12.6 ms |
+| CPU frame, 3200x2000 | – | 16.6 ms / 23.4 ms |
+
+**Screenshot test.** The compatibility render of the screenshot sample
+matches the Mac's GPU `reference.bmp` exactly: 0 of 230,400 pixels
+differ, not merely within the tolerance. swash rasterizes the same on
+every system and the painter rounds as the GPU does, so the new
+`compatibility_mode_draws_the_same_frame_as_the_reference` test runs on
+Linux and Windows CI too: the first pixel check there.
+
+**Not verified here** (no GPU or display in the cloud container): the
+painter in a real window on macOS, Windows, X11 and Wayland; the
+switch after a real GPU failure; `--smoke`; and the 16 ms frame on the
+owner's Mac. To check on the Mac: `cargo run --release -- README.md
+--compat`, press F12, scroll and type; and `cargo test --release -p
+nimbus-render -- --ignored --nocapture compat_frame_bench`.
+
+**Surprises.** The match with the GPU was exact, which says the GPU
+also rounds to nearest and samples pixel centres as expected. On a
+Retina-sized frame the painter is at the edge of 16 ms in the
+container; the plan's fallback (redraw only changed rows, then bands
+on threads) is ready if the Mac's number misses.
+
+**New dependencies.** `softbuffer` 0.4.8 (with its X11 and Wayland
+backends loaded at run time, and no KMS), which brings `tiny-xlib`,
+`ctor` and `dtor` on Linux. All four are exempted in
+`supply-chain/config.toml` at these versions pending the owner's
+review (`cargo vet diff`), as M22's AccessKit crates were.

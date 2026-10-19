@@ -46,6 +46,8 @@ cargo test --release -p nimbus --bin nimbus -- --ignored --nocapture m20_preview
 cargo test --release -p nimbus --bin nimbus -- --ignored --nocapture access_typing_bench   # M22: keystroke cost of the screen-reader description on a 10 MB text (budget 1 ms)
 NIMBUS_BENCH_FILE=$PWD/bench/out/src-10mb.rs cargo test --release -p nimbus -- --ignored --nocapture m20_scroll_bench   # scroll frame cost with sticky scroll and the minimap on vs off (needs a GPU)
 cargo run -- FILE --linear-blend --headless 1400x500 --screenshot /tmp/lin.bmp  # M16 experiment: blend text in linear light (sRGB target)
+cargo run -- FILE --compat --headless 1600x1000 --screenshot /tmp/c.bmp   # M23 compatibility mode: paint on the CPU, no GPU at all (also the automatic fallback)
+cargo test --release -p nimbus-render -- --ignored --nocapture compat_frame_bench   # CPU frame time at 1600x1000 and 3200x2000 (budget 16 ms at 1600x1000)
 NIMBUS_BENCH_FILE=$PWD/bench/out/src-10mb.rs cargo test --release -p nimbus -- --ignored --nocapture m16_typing_bench   # keystroke cost with whitespace, guides and ligatures on vs off (needs a GPU)
 cargo run -- FILE --cursors 4,19,33 --headless 900x300 --screenshot /tmp/m.bmp  # several cursors (byte offsets; the last is primary)
 bench/gen.sh sizes && bench/threshold.sh                    # rope vs mapped open time and memory at 64-512 MB
@@ -126,7 +128,7 @@ Cargo workspace; crates live in `crates/`, each package named `nimbus-<dir>` exc
 
 - `core`: text buffers, edits, undo, cursors, search. No I/O, no GPU, no workspace deps. Must stay testable headlessly.
 - `syntax`: tree-sitter highlighting. Depends on `core`. `SyntaxState` (one per `Document`) must see every edit, undo and redo included, through `SyntaxState::edit`; a missed edit leaves the tree describing other text. It starts no threads: it returns `Job`s that the app runs (`spawn_syntax` in `app.rs`). Each grammar is a cargo feature; the Rust highlights query is vendored in `crates/syntax/queries/`. Files over 16 MB skip tree-sitter for the line-by-line rules in `lexical.rs`, whose checkpoints `Lexical::edit` must also see every edit of (it does, through `SyntaxState::edit`).
-- `render`: owns the wgpu surface and, later, the glyph atlas, layout, and the two instanced pipelines (rects and glyph quads). Depends on `core`.
+- `render`: owns the wgpu surface, the glyph atlas, layout, and the two instanced pipelines (rects and glyph quads). Depends on `core`. Compatibility mode (M23, `soft.rs`) paints the same `FrameBuilder` lists on the CPU and shows them with `softbuffer` when no GPU can be opened, with the atlas pages kept in memory; any new GPU primitive must be added to that painter in the same change, and the screenshot test checks it on every OS against the Mac's GPU reference.
 - `app`: winit `ApplicationHandler`, editor state, UI chrome, keymap, config. Depends on everything. The sidebar (`sidebar.rs` over the arena tree in `tree.rs`) lists folders on workers when first expanded; `watch.rs` watches only listed folders and open files' folders, non-recursively, starting after the first frame. Nimbus never writes `config.toml`; remembered window state goes in `state.toml`. A `Document` records its file's size and mtime at open and save (`Stamp`) so watch events for our own saves are ignored.
 
 Dependencies only point downward. Don't add a dependency from `core` onto any other workspace crate, and don't put GPU or windowing types in `core`.

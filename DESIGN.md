@@ -50,7 +50,8 @@ after a rebuild, in each milestone's Results.
   proportional font setting in M20.
 - Bidirectional and right-to-left text. Decided at approval; the renderer
   assumes left-to-right runs.
-- Multiple windows. One window with tabs.
+- Multiple windows. One window with tabs; since M25 a later `nimbus`
+  command hands its files to the open window (`instance.rs`).
 - Native menu bar on Linux (§4.4).
 
 ## 3. Platform
@@ -589,15 +590,15 @@ introduces and points at the code.
 | 20 | Reading aids | **Done** | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
 | 21 | Foundations and 1.0 | **Done** | Fuzzing, a soak run, a crash record, version 1.0 (ropey 2 and winit 0.31 wait for stable releases) | [m21](docs/milestones/m21-foundations-and-1-0.md) |
 | 22 | Screen readers | Next | Use Nimbus with VoiceOver, NVDA or Orca | [m22](docs/milestones/m22-screen-readers.md) |
-| 23 | Library upgrades | Planned, waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
+| 23 | Library upgrades | In progress: compatibility mode built, upgrades waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
 | 24 | International text | Planned | CJK and other scripts in the right fonts, variable fonts, editable huge files in single-byte encodings | [m24](docs/milestones/m24-international-text.md) |
-| 25 | Command line | Planned | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
+| 25 | Command line | In progress | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
 | 26 | Security | In progress | Signed releases with the key off GitHub; protected branches and tags; pinned workflows; reviewed dependencies; untrusted files stay data | [m26](docs/milestones/m26-security.md) |
 | 27 | Git window: viewing | Planned | `nimbus --git`: changes, history with a branch graph, any commit's diffs | [m27](docs/milestones/m27-git-viewer.md) |
 | 28 | Git window: staging and committing | Planned | Stage files, hunks or lines; discard safely; commit and amend | [m28](docs/milestones/m28-git-staging.md) |
 | 29 | Git window: branches and remotes | Planned | Branches, tags, stashes; fetch, pull and push with your own credentials | [m29](docs/milestones/m29-git-branches-remotes.md) |
 | 30 | Git window: history tools and merging | Planned | Blame, file history, search; merge, rebase, cherry-pick and revert with the merge view | [m30](docs/milestones/m30-git-history-merging.md) |
-| 31 | Updates | Planned | Install a newer release from inside Nimbus, verified against the signed `SHA256SUMS`, and restart into it | [m31](docs/milestones/m31-updates.md) |
+| 31 | Updates | **Done** | Install a newer release from inside Nimbus, verified against the signed `SHA256SUMS`, and restart into it | [m31](docs/milestones/m31-updates.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
@@ -850,4 +851,6 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | M31 Updates drafted at the owner's request: Install Update downloads the release package, checks it against the `minisign`-signed `SHA256SUMS` with the key compiled in (version pinned in the trusted comment), swaps it in and restarts with the session; no new trust beyond the release key; needs `minisign.pub` committed first | §8, §9, m31 |
 | 2026-10-19 | M26 built (in progress until the owner's GitHub settings land): git's checkout filters are skipped when the repository's own config names a filter program, instead of the plan's `safe.directory` check, which a clone the user owns always passes; a project's `.nimbus/workspace.toml` drops outside roots as well as tabs and folders (named workspaces keep them); the zero-width joiner and non-joiner are not marked as hidden characters, since emoji and scripts need them | m26, docs/security.md |
 | 2026-10-19 | M31: updates install on request only; the startup update check becomes on by default (`check_updates = true`), reversing M15's off default; Homebrew and `.deb` installs are handed back to their package manager | §9, m31 |
+| 2026-10-19 | M31 built: the replaced version is kept until the next update (so Roll Back Update has something to restore) instead of being deleted at the new version's first frame; a version that never draws its first frame is rolled back at the next start; Windows restarts into the last session; builds from source are never replaced | §9, m31 |
 | 2026-10-19 | M22: the screen-reader description (AccessKit) is built only while a reader is active and the window is created hidden until the adapter exists; the editor is one text field holding a window of 200 lines or 256 KB either side of the cursor (not of the view, so a reader's place survives scrolling), one text run per visual row, rebuilt near its edges; not yet described: Search results, the Compare panel, compare and merge rows, preview headings, unfocused groups | §9, m22 |
+| 2026-10-19 | M25 built (in progress until checked on the owner's Mac): the single-instance socket is `run/` beside the config (so `NIMBUS_CONFIG_DIR` isolates it); only a plain `nimbus [FILE\|FOLDER]... [--wait]` hands off, any other option starts its own window; `--wait` with no Nimbus open starts one in the background (git's `GIT_*` variables removed) and waits on it, so the editor outlives the commit; Windows uses a loopback port with a random token in `%APPDATA%` instead of a named pipe (no crate, no `unsafe`), and edits the user `PATH` through PowerShell, which also tells running programs it changed | §2, m25, docs/security.md |

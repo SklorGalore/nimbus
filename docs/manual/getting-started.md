@@ -21,17 +21,28 @@ Nimbus from source.
 ### Using Nimbus from a terminal
 
 Everything in this manual that starts with `nimbus` is typed in a
-terminal. On Linux with the `.deb` the command is already there. On macOS
-the program inside the app is
-`/Applications/Nimbus.app/Contents/MacOS/nimbus`; to type just `nimbus`,
-link it into a folder on your `PATH`, for example:
+terminal. To make the command available, open the command palette
+(`Cmd+Shift+P` / `Ctrl+Shift+P`) and run **Install nimbus Command in PATH**:
 
-```sh
-ln -s /Applications/Nimbus.app/Contents/MacOS/nimbus /usr/local/bin/nimbus
-```
+- **macOS**: it links `/usr/local/bin/nimbus` to the program inside the
+  app. If that folder needs an administrator, macOS asks for your
+  password in its own window; Nimbus never sees it.
+- **Linux**: it links `~/.local/bin/nimbus`. If that folder is not on
+  your `PATH` yet, the message line says so; add it in your shell's
+  profile.
+- **Windows**: it adds the folder holding `nimbus.exe` to your own
+  `PATH`. Terminals opened afterwards find `nimbus`.
 
-On Windows, run `nimbus.exe` from the folder it was installed to, or add
-that folder to your `PATH`.
+The command is a link to Nimbus, not a copy, so it keeps working after
+an update. Homebrew and the `.deb` already put `nimbus` on your `PATH`;
+the action then just says so. If something else is already at the
+link's place, Nimbus asks before replacing it. **Uninstall nimbus
+Command** takes the link (or the `PATH` entry) away again, and leaves
+anything that is not Nimbus's alone.
+
+With Nimbus already open, `nimbus FILE` opens the file as a tab in that
+window and brings it to the front; see
+[One window](command-line.md#one-window).
 
 ## Opening files and folders
 

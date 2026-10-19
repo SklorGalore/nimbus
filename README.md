@@ -186,15 +186,16 @@ reviewers accept it, which can take a few days after the release.
 
 ### Running from a terminal
 
-On macOS, the command-line binary is inside the app bundle. Homebrew
-links it for you; otherwise link it into a folder on your `PATH`:
+Run **Install nimbus Command in PATH** from the command palette
+(`Cmd+Shift+P` on macOS, `Ctrl+Shift+P` elsewhere). On macOS it links
+`/usr/local/bin/nimbus` to the app, asking for your password if that
+folder needs it; on Linux it links `~/.local/bin/nimbus`; on Windows it
+adds Nimbus's folder to your `PATH`. Homebrew and the `.deb` already put
+the command there.
 
-```sh
-ln -s /Applications/Nimbus.app/Contents/MacOS/nimbus /usr/local/bin/nimbus
-```
-
-On Windows and Linux, put `nimbus.exe` or `nimbus` in a folder on your
-`PATH`.
+With Nimbus open, `nimbus FILE` opens the file in that window, and
+`git config --global core.editor "nimbus --wait"` makes Nimbus git's
+editor ([Command line](docs/manual/command-line.md)).
 
 ### Verifying a download
 
@@ -240,10 +241,15 @@ Found a security problem? Please report it privately, as
 
 ### Updates
 
-Nimbus never connects to the network unless you ask it to. Run "Check
-for Updates" from the command palette to see whether a newer release is
-available, or turn on the check at startup as described in
-[checking for updates](docs/manual/troubleshooting.md#checking-for-updates).
+At each start Nimbus asks GitHub once whether a newer release exists:
+one HTTPS request to GitHub's API with a `nimbus/X.Y.Z` user agent and
+nothing else, and a message only when there is one. Set
+`check_updates = false` in `config.toml` to turn it off. Nothing is
+downloaded until you run "Install Update", which fetches the package,
+checks its signature against the key above and its SHA-256, and puts it
+in place when you run "Restart to Update" (Homebrew and `.deb` installs
+are left to `brew` and `apt`). See
+[updates](docs/manual/troubleshooting.md#installing-an-update).
 
 ## Usage
 

@@ -66,12 +66,15 @@ use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_scre
 
 mod access;
 mod geometry;
+mod handoff;
 mod preview_tab;
 mod tail;
 mod tree_ops;
+mod updates;
 mod workspace;
 mod workspaces;
 
+pub use updates::UpdateOnQuit;
 pub use workspace::Startup;
 use workspace::{Pending, Workspace, configure_tabs, startup_message};
 
@@ -124,6 +127,8 @@ pub enum AppEvent {
     /// A check for updates finished; `true` when it was the startup
     /// check, which stays quiet unless a newer release exists.
     Update(Result<update::Outcome, UpdateError>, bool),
+    /// Progress or the end of preparing an update (M31).
+    Installing(updates::UpdateEvent),
     /// A Fold All or Fold Level N scan finished on a worker (M13).
     Folded(folding::FoldResult),
     /// `git` read a file at a revision for Compare with HEAD (M18).
@@ -139,6 +144,13 @@ pub enum AppEvent {
         expect(dead_code, reason = "only macOS sends it")
     )]
     OpenFiles(Vec<PathBuf>),
+    /// A later `nimbus` command handed over these files and folders, and,
+    /// with `--wait`, the connection to answer once they close (M25,
+    /// `instance.rs`).
+    Handoff(Vec<PathBuf>, Option<crate::instance::Waiter>),
+    /// Install or Uninstall `nimbus` Command finished on its worker: what
+    /// to say, and whether it is an error (M25, `path_command.rs`).
+    Installed(Result<String, String>),
     /// A screen reader asked for the accessibility tree, asked the app to
     /// do something, or stopped (M22, `app/access.rs`).
     Access(accesskit_winit::WindowEvent),
@@ -496,6 +508,9 @@ enum Asked {
     Replace { from: PathBuf, to: PathBuf },
     /// "Move this to the trash, losing unsaved changes in its tabs?"
     Trash(PathBuf),
+    /// "Replace what is there with the `nimbus` command?" (M25), for an
+    /// install (`true`) or uninstall.
+    InstallCommand(bool, crate::path_command::Step),
 }
 
 /// The buttons of "Save changes before closing?".
@@ -706,6 +721,8 @@ pub struct App {
     zoom_started: Option<Instant>,
     /// What is remembered between runs, and the session's bookkeeping.
     ws: Workspace,
+    /// A newer release found, an update downloading or ready (M31).
+    updater: updates::Updater,
     /// The pointer shows the resize cursor.
     resize_cursor: bool,
     /// The pointer is over a link in a Markdown preview (M20).
@@ -730,6 +747,9 @@ pub struct App {
     /// The accessibility tree for screen readers (M22): the adapter and
     /// what was last sent through it.
     access: access::Access,
+    /// `nimbus --wait` commands waiting for their files' tabs to close
+    /// (M25).
+    waiting: Vec<handoff::Waiting>,
 }
 
 /// Multi-click detection and drag state. winit reports presses, not
@@ -778,7 +798,7 @@ impl App {
     pub fn new(
         options: Options,
         started: Instant,
-        gpu_init: JoinHandle<Result<GpuContext, GpuError>>,
+        gpu_init: Option<JoinHandle<Result<GpuContext, GpuError>>>,
         (config, languages, docs, root): (Config, Languages, Vec<Document>, PathBuf),
         startup: Startup,
         proxy: EventLoopProxy<AppEvent>,
@@ -827,7 +847,7 @@ impl App {
             languages,
             keymap,
             root,
-            gpu_init: Some(gpu_init),
+            gpu_init,
             window: None,
             gpu: None,
             menu_bar: None,
@@ -871,6 +891,7 @@ impl App {
             watch,
             zoom_started: None,
             ws: Workspace::new(state, session_root),
+            updater: updates::Updater::default(),
             resize_cursor: false,
             link_cursor: false,
             watching: false,
@@ -882,6 +903,7 @@ impl App {
             replace_undo: None,
             replace_summary: ReplaceSummary::default(),
             access: access::Access::default(),
+            waiting: Vec::new(),
         }
     }
 
@@ -982,6 +1004,75 @@ impl App {
             0.0
         };
         gpu.set_inset_top(px);
+    }
+
+    /// Paint on the CPU from now on (compatibility mode, M23), and say so
+    /// once in the status bar: `why` the GPU could not be used, or `None`
+    /// when `--compat` or the config asked for it.
+    ///
+    /// # Errors
+    ///
+    /// When the window cannot show the CPU's frames either.
+    fn start_compat(&mut self, window: &Arc<Window>, why: Option<&str>) -> Result<(), String> {
+        let font = Font::bundled().map_err(|e| e.to_string())?;
+        let px = self.font_px(effective_scale(window.scale_factor()));
+        let gpu = Gpu::compat(window, font, px).map_err(|e| e.to_string())?;
+        self.gpu_ready(gpu);
+        let text = match why {
+            Some(why) => {
+                log::warn!("compatibility mode: {why}");
+                format!("Compatibility mode: drawing without the GPU ({why})")
+            }
+            None => "Compatibility mode: drawing without the GPU, as asked".to_owned(),
+        };
+        self.notice(text);
+        Ok(())
+    }
+
+    /// The GPU failed mid-session (`e`): carry on painting on the CPU
+    /// rather than exit with unsaved work. `false` when that failed too,
+    /// or the failing painter was already the CPU's.
+    fn gpu_lost(&mut self, window: &Arc<Window>, e: nimbus_render::FrameError) -> bool {
+        log::error!("{e}");
+        let on_gpu = self.gpu.as_ref().is_some_and(|g| !g.compatibility());
+        if !on_gpu || self.start_compat(window, Some(&e.to_string())).is_err() {
+            return false;
+        }
+        self.reload_fonts();
+        window.request_redraw();
+        true
+    }
+
+    /// Look up the configured editor and interface fonts again, for a new
+    /// painter: the old one's fonts went with it.
+    fn reload_fonts(&mut self) {
+        if !self.config.font.is_empty() {
+            self.load_editor_font();
+        }
+        if !self.config.ui_font.is_empty() {
+            self.load_ui_font();
+        }
+    }
+
+    /// Show `text` in the status bar after whatever it already shows (for
+    /// example startup warnings), rather than replacing it.
+    fn notice(&mut self, text: String) {
+        let until = Instant::now() + MESSAGE_TIME * 2;
+        match &mut self.message {
+            Some(m) => {
+                m.text.push_str("; ");
+                m.text.push_str(&text);
+                m.until = m.until.max(until);
+            }
+            None => {
+                self.message = Some(Message {
+                    text,
+                    is_error: false,
+                    until,
+                });
+            }
+        }
+        self.changed(false);
     }
 
     /// Look up the config's `font` on a worker (listing the system's fonts
@@ -1500,6 +1591,10 @@ impl App {
                     "Keeping your version; saving overwrites the file on disk",
                     false,
                 );
+            }
+            Command::RestartToUpdate => {
+                self.restart_to_update(event_loop);
+                return true;
             }
             _ if cmd.is_setup() => self.run_setup(cmd),
             Command::Close => {
@@ -2905,7 +3000,7 @@ impl App {
             return Saved::Started;
         }
         if let Some(why) = self.docs[self.tabs[i].doc].read_only.clone() {
-            self.notice("Could not save", why);
+            self.alert("Could not save", why);
             return Saved::No;
         }
         if !self.confirm_lossy(i) {
@@ -2940,7 +3035,7 @@ impl App {
                 if let Some(u) = e.unencodable().copied() {
                     return self.offer_utf8(i, u);
                 }
-                self.notice("Could not save", e.to_string());
+                self.alert("Could not save", e.to_string());
                 Saved::No
             }
         }
@@ -3170,7 +3265,7 @@ impl App {
             Ok(job) => job,
             Err(e) => {
                 log::error!("{e}");
-                self.notice("Could not save", e.to_string());
+                self.alert("Could not save", e.to_string());
                 return Saved::No;
             }
         };
@@ -3185,7 +3280,7 @@ impl App {
             });
             let step = self.docs[self.tabs[i].doc].save_written(token, failed, Instant::now());
             log::debug!("save of {name} ended before it began: {step:?}");
-            self.notice(
+            self.alert(
                 "Could not save",
                 "Could not start saving; nothing was written".to_owned(),
             );
@@ -3291,7 +3386,7 @@ impl App {
                 tab.discard_at = None;
             }
             self.say(message.clone(), true);
-            self.notice("Could not save", message);
+            self.alert("Could not save", message);
         } else {
             log::info!("saved {name}");
             self.say(format!("Saved {name}"), false);
@@ -3392,7 +3487,7 @@ impl App {
     }
 
     /// Show a message with an OK button, such as why a save failed.
-    fn notice(&mut self, title: &str, text: String) {
+    fn alert(&mut self, title: &str, text: String) {
         let ok = [Button {
             label: "OK",
             answer: Answer::Yes,
@@ -3490,6 +3585,13 @@ impl App {
                     self.trash(path);
                 }
             }
+            Asked::InstallCommand(install, step) => {
+                if go {
+                    self.run_install(install, step);
+                } else {
+                    self.say("Left as it is", false);
+                }
+            }
         }
     }
 
@@ -3521,6 +3623,8 @@ impl App {
     /// forgotten, so trying again asks again.
     fn resume_cancelled(&mut self) {
         self.saves.quit_after = false;
+        // A Restart to Update waits on the quit this may have stopped.
+        self.quit_cancelled();
         for tab in &mut self.tabs {
             tab.discard_at = None;
             tab.save_at = None;
@@ -4034,6 +4138,11 @@ impl App {
                 spawn_update_check(&self.proxy, false);
             }
             Command::OpenRelease => self.open_release(),
+            Command::InstallOnPath => self.install_command(true),
+            Command::RemoveFromPath => self.install_command(false),
+            Command::InstallUpdate => self.install_update(),
+            Command::CancelUpdate => self.cancel_update(),
+            Command::RollBackUpdate => self.roll_back_update(),
             _ => {}
         }
     }
@@ -4056,13 +4165,18 @@ impl App {
         let current = env!("CARGO_PKG_VERSION");
         match result {
             Ok(update::Outcome::Newer(release)) => {
+                let how = match update::install::detect().refusal(&release.version) {
+                    None => "run Install Update to get it".to_owned(),
+                    Some(_) => "run Open Latest Release Page to get it".to_owned(),
+                };
                 self.say(
                     format!(
-                        "Nimbus {} is available (you have {current}); run Open Latest Release Page to get it",
+                        "Nimbus {} is available (you have {current}); {how}",
                         release.version
                     ),
                     false,
                 );
+                self.updater.available = Some(release);
             }
             Ok(update::Outcome::UpToDate(release)) => {
                 if !at_startup {
@@ -4347,7 +4461,6 @@ impl App {
             | Command::QuickOpen
             | Command::Palette
             | Command::ReloadConfig
-            | Command::OpenConfig
             | Command::CompareSaved
             | Command::CompareFile
             | Command::CompareTab
@@ -4364,12 +4477,8 @@ impl App {
             | Command::NextConflict
             | Command::PrevConflict
             | Command::ResolveMarkers
-            | Command::MergeWithDisk
-            | Command::CheckUpdates
-            | Command::OpenRelease => return false,
-            _ if cmd.is_find_in_files() || cmd.is_layout() || cmd.is_compare_extra() => {
-                return false;
-            }
+            | Command::MergeWithDisk => return false,
+            _ if cmd.leaves_find_field() => return false,
             _ => {
                 let paste = (cmd == Command::Paste)
                     .then(|| self.clipboard_get())
@@ -5497,8 +5606,9 @@ impl App {
                 return;
             }
             Err(e) => {
-                log::error!("{e}");
-                event_loop.exit();
+                if !self.gpu_lost(&window, e) {
+                    event_loop.exit();
+                }
                 return;
             }
         }
@@ -6583,7 +6693,7 @@ fn headless_fonts(gpu: &mut Gpu, config: &Config) {
 /// config's fonts; `None` after saying why the bundled font could not be
 /// read.
 fn headless_gpu(
-    context: GpuContext,
+    context: Option<GpuContext>,
     config: &Config,
     (scale, size): (f64, (u32, u32)),
     options: &Options,
@@ -6591,13 +6701,12 @@ fn headless_gpu(
     let font = Font::bundled()
         .map_err(|e| print_err(&format!("nimbus: {e}")))
         .ok()?;
-    let mut gpu = Gpu::headless(
-        context,
-        font,
-        to_f32(config.font_size * scale),
-        size,
-        options.linear_blend,
-    );
+    let px = to_f32(config.font_size * scale);
+    let mut gpu = match context {
+        Some(context) => Gpu::headless(context, font, px, size, options.linear_blend),
+        // Compatibility mode (M23): no GPU at all.
+        None => Gpu::compat_headless(font, px, size),
+    };
     headless_fonts(&mut gpu, config);
     if options.title_bar {
         gpu.set_inset_top(TITLE_BAR_PT * to_f32(scale));
@@ -6734,13 +6843,15 @@ pub fn paint_status(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
 
 /// `--headless WxH --screenshot FILE`: render the first frame into an
 /// off-screen texture, with no window, and save it. Works with the screen
-/// locked or no display attached. Returns the process exit code.
+/// locked or no display attached. With no `context` the frame is painted on
+/// the CPU (compatibility mode), with no GPU at all. Returns the process
+/// exit code.
 pub fn run_headless(
     options: &Options,
     config: &Config,
     (docs, root, more_roots): (Vec<Document>, PathBuf, Vec<PathBuf>),
     size: (u32, u32),
-    context: GpuContext,
+    context: Option<GpuContext>,
 ) -> i32 {
     let labels = headless_labels(&docs);
     let mut doc = docs.into_iter().next().unwrap_or_else(Document::untitled);
@@ -7321,6 +7432,11 @@ impl ApplicationHandler<AppEvent> for App {
         match event {
             AppEvent::PickerChanged => self.tick_picker(),
             AppEvent::OpenFiles(paths) => self.open_from_system(&paths),
+            AppEvent::Handoff(paths, waiter) => self.handed_off(&paths, waiter),
+            AppEvent::Installed(result) => match result {
+                Ok(note) => self.say(note, false),
+                Err(why) => self.say(why, true),
+            },
             AppEvent::Access(event) => self.access_event(event, event_loop),
             AppEvent::Menu(id) => {
                 // A held menu shortcut delivers a menu event for every key
@@ -7397,6 +7513,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.changed(false);
             }
             AppEvent::Update(result, at_startup) => self.update_checked(result, at_startup),
+            AppEvent::Installing(event) => self.update_event(event),
             AppEvent::Search(batch) => {
                 if !self.find.receive(batch) {
                     return;
@@ -7446,21 +7563,6 @@ impl ApplicationHandler<AppEvent> for App {
 
         log::debug!("startup: window created at {:?}", self.started.elapsed());
 
-        // Join the GPU thread started in `main`. By now it has usually
-        // finished, so this rarely waits.
-        let context = match self.gpu_init.take().map(JoinHandle::join) {
-            Some(Ok(Ok(context))) => context,
-            Some(Ok(Err(e))) => {
-                self.fail_start(event_loop, &format!("Could not start the GPU: {e}"));
-                return;
-            }
-            Some(Err(_)) | None => {
-                self.fail_start(event_loop, "GPU setup thread did not complete");
-                return;
-            }
-        };
-        log::debug!("startup: gpu joined at {:?}", self.started.elapsed());
-
         let font = match Font::bundled() {
             Ok(f) => f,
             Err(e) => {
@@ -7469,17 +7571,27 @@ impl ApplicationHandler<AppEvent> for App {
             }
         };
         let scale = effective_scale(window.scale_factor());
-        match Gpu::new(
-            &window,
-            context,
-            font,
-            self.font_px(scale),
-            self.options.linear_blend,
-        ) {
+        let px = self.font_px(scale);
+        // Join the GPU thread started in `main`. By now it has usually
+        // finished, so this rarely waits. Without a GPU, or when asked,
+        // Nimbus paints on the CPU instead (compatibility mode, M23).
+        let gpu = match self.gpu_init.take().map(JoinHandle::join) {
+            _ if self.options.compat || self.config.compat => Err(None),
+            Some(Ok(Ok(context))) => {
+                log::debug!("startup: gpu joined at {:?}", self.started.elapsed());
+                Gpu::new(&window, context, font, px, self.options.linear_blend)
+                    .map_err(|e| Some(format!("could not set up drawing: {e}")))
+            }
+            Some(Ok(Err(e))) => Err(Some(e.to_string())),
+            Some(Err(_)) | None => Err(Some("GPU setup did not complete".to_owned())),
+        };
+        match gpu {
             Ok(gpu) => self.gpu_ready(gpu),
-            Err(e) => {
-                self.fail_start(event_loop, &format!("Could not set up drawing: {e}"));
-                return;
+            Err(why) => {
+                if let Err(e) = self.start_compat(&window, why.as_deref()) {
+                    self.fail_start(event_loop, &format!("Could not set up drawing: {e}"));
+                    return;
+                }
             }
         }
 
@@ -7599,6 +7711,9 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.waiting.is_empty() {
+            self.check_waiting();
+        }
         if self.frames > 0 {
             // Huge files count their lines in the background, started
             // after the first frame so the disk is not shared with it.
@@ -7612,6 +7727,7 @@ impl ApplicationHandler<AppEvent> for App {
             // event stream for each folder), so not before the first frame.
             self.watching = true;
             self.sync_watch();
+            self.update_started();
             // A configured font, looked up once the first frame is up.
             if !self.config.font.is_empty() {
                 self.load_editor_font();

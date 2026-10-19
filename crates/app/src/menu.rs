@@ -129,7 +129,15 @@ mod native {
                 "tab.previous",
             ],
         ),
-        ("Help", &["app.checkUpdates", "app.openRelease"]),
+        (
+            "Help",
+            &[
+                "app.checkUpdates",
+                "app.installUpdate",
+                "app.restartToUpdate",
+                "app.openRelease",
+            ],
+        ),
     ];
 
     /// The built menu bar. Keep it alive for as long as the window, and
