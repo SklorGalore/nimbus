@@ -64,6 +64,7 @@ use crate::config::Config;
 use crate::document::Document;
 use crate::languages::Languages;
 use crate::state::State;
+use crate::update::install;
 
 /// Command-line options.
 #[expect(
@@ -650,6 +651,47 @@ fn plan_startup(
     }
 }
 
+/// The first thing a windowed start does (M31): if the last start of
+/// this version, just installed by an update, never drew a frame, put
+/// the previous version back and start it instead.
+fn start_after_update(options: &Options) {
+    if options.unattended() {
+        return;
+    }
+    let install::Start::RollBack(staged) = install::on_start(env!("CARGO_PKG_VERSION")) else {
+        return;
+    };
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    match install::apply(&staged, Some(&args)) {
+        Ok(()) => std::process::exit(0),
+        Err(e) => log::error!("could not roll back the update: {e}"),
+    }
+}
+
+/// The event loop has ended with an update staged: make the change, and
+/// restart if asked. A failure leaves the old version in place; when a
+/// restart was asked for, the old version is started again so the
+/// window still comes back.
+fn finish_update(pending: Option<app::UpdateOnQuit>) {
+    let Some(pending) = pending else { return };
+    let relaunch = pending.relaunch.as_deref();
+    match install::apply(&pending.staged, relaunch) {
+        Ok(()) => log::info!("update: installed"),
+        Err(e) => {
+            log::error!("could not install the update: {e}");
+            print_err(&format!("nimbus: could not install the update: {e}"));
+            if let (Some(args), Ok(exe)) = (relaunch, std::env::current_exe()) {
+                let _ = std::process::Command::new(exe)
+                    .args(args)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
+        }
+    }
+}
+
 /// The GPU for a headless render, or `None` to paint on the CPU
 /// (compatibility mode): when `compat` asks for it, or the GPU could not be
 /// opened, which is said on stderr.
@@ -678,6 +720,7 @@ fn main() {
         .init();
     crash::install();
     let options = parse_options();
+    start_after_update(&options);
     if let Some(backend) = options.backend {
         io::force_backend(backend);
     }
@@ -767,6 +810,7 @@ fn main() {
         print_err(&format!("nimbus: event loop error: {e}"));
         std::process::exit(1);
     }
+    finish_update(app.take_update());
     if app.exit_code != 0 {
         std::process::exit(app.exit_code);
     }

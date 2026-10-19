@@ -289,6 +289,14 @@ pub enum Command<'a> {
     CheckUpdates,
     /// Open the latest release's page in the browser.
     OpenRelease,
+    /// Download, verify and unpack the newer release a check found (M31).
+    InstallUpdate,
+    /// Quit (asking about unsaved changes) and start the updated version.
+    RestartToUpdate,
+    /// Stop an update's download, or forget an update that is ready.
+    CancelUpdate,
+    /// Put back the version the last update replaced, at the next start.
+    RollBackUpdate,
     /// Quit (asking about unsaved changes first).
     /// Compare the active tab with its file on disk (M9).
     CompareSaved,
@@ -346,8 +354,22 @@ impl Command<'_> {
     pub fn is_setup(self) -> bool {
         matches!(
             self,
-            Command::OpenConfig | Command::CheckUpdates | Command::OpenRelease
+            Command::OpenConfig
+                | Command::CheckUpdates
+                | Command::OpenRelease
+                | Command::InstallUpdate
+                | Command::RestartToUpdate
+                | Command::CancelUpdate
+                | Command::RollBackUpdate
         )
+    }
+
+    /// Whether a find bar field with the keyboard lets this through to
+    /// the app: find in files, layout, compare extras and the editor's own
+    /// setup (config, updates) are not edits of the field.
+    #[must_use]
+    pub fn leaves_find_field(self) -> bool {
+        self.is_find_in_files() || self.is_layout() || self.is_compare_extra() || self.is_setup()
     }
 
     /// Whether this arranges the editor rather than editing: the groups

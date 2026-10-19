@@ -241,6 +241,12 @@ jobs:
             --pattern '*.deb' --pattern '*.AppImage' --pattern '*-setup.exe'
           ls -l
           test "$(ls | wc -l)" -eq 7
+          # Install Update (M31, crates/app/src/update/install.rs) builds
+          # these names from the tag; a renamed package breaks updating.
+          for name in "Nimbus-$version-macos.zip" "Nimbus-$version-x86_64.AppImage" \
+            "nimbus-$version-linux-x86_64.tar.gz" "nimbus-$version-windows-x86_64-setup.exe"; do
+            test -f "$name" || { echo "missing $name, which the updater downloads"; exit 1; }
+          done
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
           cd ..

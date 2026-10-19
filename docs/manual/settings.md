@@ -54,7 +54,7 @@ then `[tables]`.
 | `tab_width` | whole number, 1 to 16 | `4` | How many columns a tab character is drawn as. This does not decide what the Tab key inserts; see `[indent]`. |
 | `soft_wrap` | `true` or `false` | `false` | Whether new tabs start with soft wrap on. Languages can override it with `wrap` in `[editor.LANGUAGE]`; Markdown wraps unless told not to. |
 | `theme` | text | `"dark"` | `"dark"`, `"light"`, or the name of your own theme in `themes/NAME.toml`. An unknown name falls back to dark with a warning. |
-| `check_updates` | `true` or `false` | `false` | Ask GitHub once at each start whether a newer release exists. Off by default, so Nimbus never contacts the network unless you ask. See [Updates](troubleshooting.md#checking-for-updates). |
+| `check_updates` | `true` or `false` | `true` | Ask GitHub once at each start whether a newer release exists: one HTTPS request, and a message only when there is one. `false` turns it off. Nothing is downloaded until you run Install Update. See [Updates](troubleshooting.md#checking-for-updates). |
 | `font` | text | `""` (empty) | The editor font: an installed font's name (`"JetBrains Mono"`) or a font file's path (`.ttf`, `.otf`, `.ttc`). Empty is the bundled Hack Nerd Font Mono. It loads just after the window appears; a name that is not found keeps Hack and says so. |
 | `ligatures` | `true` or `false` | `false` | Join `->`, `!=`, `=>` and friends into one glyph, in a font that has ligatures (Hack has none). Columns stay the same, and a ligature splits apart where the cursor or a selection edge falls inside it. |
 | `remember_zoom` | `true` or `false` | `true` | Keep the size Zoom In and Zoom Out left (in `state.toml`) for the next start. `false` starts every session at `font_size`. Changing `font_size` in the file always wins. |
@@ -182,7 +182,7 @@ This is the file "Open Config File" writes:
 # tab_width = 4
 # soft_wrap = false
 # theme = "dark"            # or "light", or NAME for themes/NAME.toml here
-# check_updates = false     # true: ask GitHub for a newer release at startup
+# check_updates = true      # false: do not ask GitHub for a newer release at startup
 
 # The editor font: an installed font's name or a font file's path. Empty is
 # the bundled Hack Nerd Font Mono. ligatures joins -> != => and friends in

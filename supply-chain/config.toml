@@ -617,6 +617,11 @@ criteria = "safe-to-deploy"
 version = "0.9.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.minisign-verify]]
+version = "0.3.0"
+criteria = "safe-to-deploy"
+notes = "M31 updater. No dependencies, no build script, no unsafe code; verified against the real v1.0.0 and v1.0.1 signatures in crates/app/src/update/testdata. Its Ed25519 code has not been reviewed line by line."
+
 [[exemptions.miniz_oxide]]
 version = "0.9.1"
 criteria = "safe-to-deploy"

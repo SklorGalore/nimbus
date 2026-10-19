@@ -84,3 +84,13 @@ Root: HKA; Subkey: "Software\Classes\Applications\nimbus.exe"; ValueType: string
 
 [Run]
 Filename: "{app}\nimbus.exe"; Description: "{cm:LaunchProgram,Nimbus}"; Flags: nowait postinstall skipifsilent
+; Restart to Update (M31) runs this installer with /VERYSILENT /RELAUNCH=1
+; after Nimbus quits; start the new version when it is done. Nimbus
+; restores its last session when started with no arguments.
+Filename: "{app}\nimbus.exe"; Flags: nowait; Check: RelaunchAsked
+
+[Code]
+function RelaunchAsked: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
