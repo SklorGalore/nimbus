@@ -42,10 +42,11 @@ serde = { version = "1", features = ["derive"], optional = true }
 toml = { version = "1", optional = true }
 
 [features]
-# `cargo fuzz run config --features app-config`
-app-config = ["dep:dirs", "dep:serde", "dep:toml"]
+# `cargo fuzz run config --features app-config`. config.rs checks the
+# `[fallback_fonts]` keys and `cjk_language` against nimbus-render (M24).
+app-config = ["dep:dirs", "dep:nimbus-render", "dep:serde", "dep:toml"]
 # `cargo fuzz run theme --features app-theme`
-app-theme = ["app-config", "dep:nimbus-render", "dep:nimbus-syntax"]
+app-theme = ["app-config", "dep:nimbus-syntax"]
 # `cargo fuzz run highlight --features syntax`: every bundled grammar.
 syntax = ["dep:nimbus-syntax"]
 # `cargo fuzz run encoding --features app-encoding`, East Asian encodings
