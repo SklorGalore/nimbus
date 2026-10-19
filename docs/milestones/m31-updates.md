@@ -1,12 +1,12 @@
-# M30 — Updates
+# M31 — Updates
 
 **Status: draft (2026-10-18), awaiting the owner's answers.** Written on
 2026-10-18 at the owner's request, from what M15 deferred: "automatic
 in-place updates (downloading and replacing the binary)". Numbered after
-the git client plans (M26–M29) and before security (M31). Items marked
+security (M26) and the git client plans (M27–M30). Items marked
 **Proposed** are the drafter's defaults until the owner answers them.
 Wider hardening of the program, the repository and the supply chain is
-M31's; this plan covers only getting a release onto the machine and
+M26's; this plan covers only getting a release onto the machine and
 checking it before it runs.
 
 ## What exists today
@@ -109,7 +109,7 @@ updates" section.
 beta or nightly channels; updating `.deb` installs through an apt
 repository; code signing and notarisation, which stay declined (M15);
 key rotation beyond the one documented below. Wider supply-chain work
-(dependency review, pinned CI actions, reproducible builds) is M31's.
+(dependency review, pinned CI actions, reproducible builds) is M26's.
 
 ## Design
 
@@ -128,9 +128,9 @@ added.
 commit `minisign.pub`, set `MINISIGN_SECRET_KEY`) has to be done, and
 one release signed, before task 3 can be tested end to end. Where the
 secret key lives, its backup, rotation and revocation, and the signing
-pipeline itself are M31's. The contract between the two plans: the app
+pipeline itself are M26's. The contract between the two plans: the app
 trusts exactly the key or keys embedded at build time, the signature is
-over `SHA256SUMS`, and its trusted comment carries the version. If M31
+over `SHA256SUMS`, and its trusted comment carries the version. If M26
 ships a second key for rotation, the updater accepts either.
 
 **Asset names, not JSON.** The release packages already have fixed
@@ -191,7 +191,7 @@ Update, Cancel Update, Roll Back Update, in `action.rs` with stable ids.
 
 | Risk | Fallback |
 |---|---|
-| The signing key is lost or leaks | Updates through Nimbus stop until a build trusting a new key is installed; custody, backup and rotation are planned in M31 |
+| The signing key is lost or leaks | Updates through Nimbus stop until a build trusting a new key is installed; custody, backup and rotation are planned in M26 |
 | A swap fails halfway (power cut, full disk) | The two renames are atomic one at a time; at worst the old app is at `.previous` and the next start of Nimbus or the release page restores it |
 | `/Applications` is not writable for this user | Detected before downloading; Nimbus offers the release page instead |
 | Homebrew or winget sees a version it did not install | Homebrew installs are left to `brew`; winget uses the same installer, so its record stays right |
