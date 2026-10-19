@@ -289,6 +289,10 @@ pub enum Command<'a> {
     CheckUpdates,
     /// Open the latest release's page in the browser.
     OpenRelease,
+    /// Put a `nimbus` command on the user's `PATH` (M25).
+    InstallOnPath,
+    /// Take the `nimbus` command off the `PATH` again (M25).
+    RemoveFromPath,
     /// Download, verify and unpack the newer release a check found (M31).
     InstallUpdate,
     /// Quit (asking about unsaved changes) and start the updated version.
@@ -357,6 +361,8 @@ impl Command<'_> {
             Command::OpenConfig
                 | Command::CheckUpdates
                 | Command::OpenRelease
+                | Command::InstallOnPath
+                | Command::RemoveFromPath
                 | Command::InstallUpdate
                 | Command::RestartToUpdate
                 | Command::CancelUpdate

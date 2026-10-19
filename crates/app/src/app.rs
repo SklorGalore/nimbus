@@ -65,6 +65,7 @@ use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_scre
 
 mod access;
 mod geometry;
+mod handoff;
 mod preview_tab;
 mod tail;
 mod tree_ops;
@@ -142,6 +143,13 @@ pub enum AppEvent {
         expect(dead_code, reason = "only macOS sends it")
     )]
     OpenFiles(Vec<PathBuf>),
+    /// A later `nimbus` command handed over these files and folders, and,
+    /// with `--wait`, the connection to answer once they close (M25,
+    /// `instance.rs`).
+    Handoff(Vec<PathBuf>, Option<crate::instance::Waiter>),
+    /// Install or Uninstall `nimbus` Command finished on its worker: what
+    /// to say, and whether it is an error (M25, `path_command.rs`).
+    Installed(Result<String, String>),
     /// A screen reader asked for the accessibility tree, asked the app to
     /// do something, or stopped (M22, `app/access.rs`).
     Access(accesskit_winit::WindowEvent),
@@ -632,6 +640,9 @@ pub struct App {
     /// The accessibility tree for screen readers (M22): the adapter and
     /// what was last sent through it.
     access: access::Access,
+    /// `nimbus --wait` commands waiting for their files' tabs to close
+    /// (M25).
+    waiting: Vec<handoff::Waiting>,
 }
 
 /// Multi-click detection and drag state. winit reports presses, not
@@ -784,6 +795,7 @@ impl App {
             replace_undo: None,
             replace_summary: ReplaceSummary::default(),
             access: access::Access::default(),
+            waiting: Vec::new(),
         }
     }
 
@@ -3771,6 +3783,8 @@ impl App {
                 spawn_update_check(&self.proxy, false);
             }
             Command::OpenRelease => self.open_release(),
+            Command::InstallOnPath => self.install_command(true),
+            Command::RemoveFromPath => self.install_command(false),
             Command::InstallUpdate => self.install_update(),
             Command::CancelUpdate => self.cancel_update(),
             Command::RollBackUpdate => self.roll_back_update(),
@@ -4092,7 +4106,6 @@ impl App {
             | Command::QuickOpen
             | Command::Palette
             | Command::ReloadConfig
-            | Command::OpenConfig
             | Command::CompareSaved
             | Command::CompareFile
             | Command::CompareTab
@@ -6980,6 +6993,11 @@ impl ApplicationHandler<AppEvent> for App {
         match event {
             AppEvent::PickerChanged => self.tick_picker(),
             AppEvent::OpenFiles(paths) => self.open_from_system(&paths),
+            AppEvent::Handoff(paths, waiter) => self.handed_off(&paths, waiter),
+            AppEvent::Installed(result) => match result {
+                Ok(note) => self.say(note, false),
+                Err(why) => self.say(why, true),
+            },
             AppEvent::Access(event) => self.access_event(event, event_loop),
             AppEvent::Menu(id) => {
                 // A held menu shortcut delivers a menu event for every key
@@ -7260,6 +7278,9 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.waiting.is_empty() {
+            self.check_waiting();
+        }
         if self.frames > 0 {
             // Huge files count their lines in the background, started
             // after the first frame so the disk is not shared with it.

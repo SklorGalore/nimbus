@@ -8,6 +8,17 @@ section before tagging.
 
 ### Added
 
+- **Install nimbus Command in PATH** in the command palette puts a
+  `nimbus` command on your `PATH`: a link in `/usr/local/bin` on macOS
+  (asking for your password through macOS when needed), in
+  `~/.local/bin` on Linux, or Nimbus's folder added to your `PATH` on
+  Windows. **Uninstall nimbus Command** takes it away. Something else
+  already there is never replaced without asking.
+- With Nimbus open, `nimbus FILE` opens the file in that window and
+  brings it to the front instead of starting a second Nimbus.
+- `nimbus --wait FILE` returns when the file's tab is closed, so
+  `git config --global core.editor "nimbus --wait"` works.
+
 - Nimbus can update itself (M31). After a check finds a newer release,
   **Install Update** downloads the package for your system in the
   background, checks that `SHA256SUMS` is signed by the release key
