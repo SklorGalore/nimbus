@@ -1124,6 +1124,17 @@ impl App {
         self.title_key = Some(key);
     }
 
+    /// Tell the operating system whether the theme is light or dark, so
+    /// the parts of the window it draws follow Nimbus rather than the
+    /// system appearance: the title bar everywhere, and on macOS the
+    /// prompts (unsaved changes and the rest), which `rfd` shows as sheets
+    /// on this window and so inherit its appearance.
+    fn sync_window_theme(&self) {
+        if let Some(window) = &self.window {
+            window.set_theme(Some(window_theme(&self.theme)));
+        }
+    }
+
     /// Something changed what is on screen.
     fn changed(&mut self, keep_cursor_visible: bool) {
         // The tree's name field goes away with the keyboard.
@@ -1271,6 +1282,7 @@ impl App {
                     "light"
                 };
                 self.theme = Theme::built_in(next).unwrap_or_default();
+                self.sync_window_theme();
                 self.say(format!("Theme: {next}"), false);
             }
             Command::ToggleSidebar => self.toggle_sidebar(),
@@ -3616,6 +3628,7 @@ impl App {
         let (theme, theme_warnings) = Theme::load(&config.theme);
         warnings.extend(theme_warnings);
         self.theme = theme;
+        self.sync_window_theme();
         // Language mappings and user languages may have changed; files
         // whose language did not change keep their state.
         let (languages, language_warnings) = Languages::load(&config.languages);
@@ -6012,6 +6025,18 @@ fn draw_headless_picker(
 
 /// Give the window the app icon where the window itself carries one.
 ///
+/// The system appearance that matches `theme`: winit passes it to the
+/// window (`NSWindow.appearance` on macOS, the immersive dark mode
+/// attribute on Windows, the GTK theme variant on X11 and the decoration
+/// colours on Wayland).
+fn window_theme(theme: &Theme) -> winit::window::Theme {
+    if theme.is_dark() {
+        winit::window::Theme::Dark
+    } else {
+        winit::window::Theme::Light
+    }
+}
+
 /// On Windows the icon embedded in `nimbus.exe` (by `build.rs`, resource
 /// 1 in `assets/icon/nimbus.rc`) shows in Explorer, but a window starts
 /// with none: without this its title bar and Alt-Tab entry show a blank
@@ -6944,7 +6969,8 @@ impl ApplicationHandler<AppEvent> for App {
 
         let attrs = Window::default_attributes()
             .with_title(format!("{} — Nimbus", self.doc().display_name()))
-            .with_inner_size(LogicalSize::new(960.0, 640.0));
+            .with_inner_size(LogicalSize::new(960.0, 640.0))
+            .with_theme(Some(window_theme(&self.theme)));
         let attrs = self.restore_geometry(event_loop, with_app_icon(attrs));
 
         let window = match event_loop.create_window(attrs) {

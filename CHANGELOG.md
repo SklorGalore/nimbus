@@ -17,6 +17,13 @@ section before tagging.
   (`brew install --cask sklorgalore/nimbus/nimbus`) and winget
   (`winget install SklorGalore.Nimbus`).
 
+### Changed
+
+- The window's title bar follows the Nimbus theme instead of the system
+  appearance, so a light theme no longer sits under a dark title bar or
+  the other way round. On macOS the prompts (such as "close without
+  saving") follow it too.
+
 ## 1.1.0
 
 ### Added
