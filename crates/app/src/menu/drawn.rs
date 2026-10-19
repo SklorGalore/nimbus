@@ -112,15 +112,36 @@ struct Popup {
     hover: Option<usize>,
     /// The bar menu it drops down from, if any.
     bar: Option<usize>,
+    /// How far the entries are scrolled up, in pixels, when the menu is
+    /// taller than the window.
+    scroll: f32,
 }
 
 /// Where things are, in layout pixels.
 struct Geometry {
     /// The box: x, y, width, height.
     frame: [f32; 4],
-    /// Each entry's top and height.
+    /// Each entry's top and height, scrolled.
     rows: Vec<(f32, f32)>,
     pad: f32,
+    /// The band the entries show in: top and bottom. The whole box, or
+    /// the part between the scroll arrows.
+    view: (f32, f32),
+    /// When the menu is taller than the window: the scroll arrows' bands
+    /// (top and bottom, each a top y and height) and the furthest it
+    /// scrolls.
+    arrows: Option<Arrows>,
+    /// The scroll actually used: `Popup::scroll` kept in range.
+    scroll: f32,
+}
+
+/// The scroll arrows of a menu taller than the window.
+struct Arrows {
+    up: (f32, f32),
+    down: (f32, f32),
+    max_scroll: f32,
+    /// How far one press of an arrow scrolls: a few rows.
+    step: f32,
 }
 
 /// The app's menus: whether one is open, and which.
@@ -179,6 +200,7 @@ impl Menus {
             at: [x, 0.0],
             hover,
             bar: Some(i),
+            scroll: 0.0,
         });
     }
 
@@ -189,7 +211,24 @@ impl Menus {
             at,
             hover: None,
             bar: None,
+            scroll: 0.0,
         });
+    }
+
+    /// Scroll the open menu by `dy` pixels (positive is down the list),
+    /// when it is taller than the window. Returns whether it moved.
+    pub fn scroll_by(&mut self, layout: &Layout, dy: f32) -> bool {
+        let Some(popup) = self.open.as_mut() else {
+            return false;
+        };
+        let geo = geometry(popup, layout);
+        let Some(arrows) = geo.arrows else {
+            return false;
+        };
+        let to = (geo.scroll + dy).clamp(0.0, arrows.max_scroll);
+        let moved = (to - popup.scroll).abs() > f32::EPSILON;
+        popup.scroll = to;
+        moved
     }
 
     /// The bar menu that is open, if the open menu drops down from the bar.
@@ -217,6 +256,7 @@ impl Menus {
                         }
                     })
                     .find(|&i| popup.entries[i].is_item());
+                reveal(popup, layout);
                 None
             }
             Key::Left | Key::Right => {
@@ -309,6 +349,20 @@ impl Menus {
             self.open = None;
             return Click::Closed;
         }
+        if let Some(arrows) = &geo.arrows {
+            let inside = |(top, h): (f32, f32)| y >= top && y < top + h;
+            let dy = if inside(arrows.up) {
+                -arrows.step
+            } else if inside(arrows.down) {
+                arrows.step
+            } else {
+                0.0
+            };
+            if dy != 0.0 {
+                self.scroll_by(layout, dy);
+                return Click::Handled;
+            }
+        }
         match item_at(popup, &geo, x, y).and_then(|i| item_id(&popup.entries[i])) {
             Some(id) => {
                 self.open = None;
@@ -359,7 +413,26 @@ impl Menus {
         );
         let lh = layout.metrics.line_height;
         let keys_right = x + w - geo.pad;
+        if let Some(arrows) = &geo.arrows {
+            // ▲ and ▼ in their bands, dimmed at the end they cannot go past.
+            for ((top, ah), arrow, live) in [
+                (arrows.up, "▲", geo.scroll > 0.0),
+                (arrows.down, "▼", geo.scroll < arrows.max_scroll),
+            ] {
+                let aw = layout.ui.width(arrow);
+                let at = [
+                    (x + (w - aw) / 2.0).round(),
+                    (top + (ah - lh) / 2.0).round(),
+                ];
+                gpu.push_ui_text(at, arrow, if live { ui.text } else { ui.gutter });
+            }
+        }
+        let (view_top, view_bottom) = geo.view;
+        gpu.begin_layer(Some([x, view_top, w, view_bottom - view_top]));
         for (i, (entry, &(top, rh))) in popup.entries.iter().zip(&geo.rows).enumerate() {
+            if top + rh <= view_top || top >= view_bottom {
+                continue;
+            }
             match entry {
                 Entry::Separator => {
                     let mid = (top + rh / 2.0).round();
@@ -402,7 +475,7 @@ fn title_at(layout: &Layout, x: f32) -> Option<usize> {
 /// The item (not separator) under (`x`, `y`), if any.
 fn item_at(popup: &Popup, geo: &Geometry, x: f32, y: f32) -> Option<usize> {
     let [fx, _, fw, _] = geo.frame;
-    if x < fx || x >= fx + fw {
+    if x < fx || x >= fx + fw || y < geo.view.0 || y >= geo.view.1 {
         return None;
     }
     geo.rows
@@ -436,40 +509,48 @@ fn geometry(popup: &Popup, layout: &Layout) -> Geometry {
         .max(16.0 * cell)
         .min(layout.width)
         .round();
-    let items = popup.entries.iter().filter(|e| e.is_item()).count();
-    let seps = popup.entries.len() - items;
-    #[expect(clippy::cast_precision_loss, reason = "a menu has a few dozen entries")]
-    let (items_f, seps_f) = (items as f32, seps as f32);
-    // A long menu in a short window gets tighter rows, down to one line
-    // each, rather than running off the bottom.
-    let room = layout.height
-        - if popup.bar.is_some() {
-            popup.at[1]
-        } else {
-            0.0
-        };
-    let fixed = seps_f * sep_h + 2.0 * inner;
-    let row_h = if items > 0 && fixed + items_f * row_h > room {
-        ((room - fixed) / items_f)
-            .floor()
-            .clamp(lh.min(row_h), row_h)
-    } else {
-        row_h
-    };
-    let h = fixed + items_f * row_h;
+    let h: f32 = popup
+        .entries
+        .iter()
+        .map(|e| if e.is_item() { row_h } else { sep_h })
+        .sum::<f32>()
+        + 2.0 * inner;
     // Keep it in the window: shift left at the right edge, and up at the
-    // bottom (a right-click low in the window opens upward instead).
+    // bottom (a right-click low in the window opens upward instead). A
+    // menu taller than the window fills it and scrolls.
     let x = popup.at[0].min(layout.width - w).max(0.0).round();
     let mut y = popup.at[1];
     if y + h > layout.height {
         y = if popup.bar.is_none() && popup.at[1] - h >= 0.0 {
             popup.at[1] - h
+        } else if popup.bar.is_some() {
+            y
         } else {
             (layout.height - h).max(0.0)
         };
     }
     let y = y.round();
-    let mut top = y + inner;
+    let shown = h.min(layout.height - y).max(0.0);
+    let (arrows, view, scroll) = if h > shown {
+        let ah = lh.round();
+        let up = (y + 1.0, ah);
+        let down = (y + shown - ah - 1.0, ah);
+        let view = (up.0 + ah, down.0);
+        // The rows alone, without the box's inner padding.
+        let max_scroll = (h - 2.0 * inner - (view.1 - view.0)).max(0.0);
+        let arrows = Arrows {
+            up,
+            down,
+            max_scroll,
+            step: 3.0 * row_h,
+        };
+        (Some(arrows), view, popup.scroll.clamp(0.0, max_scroll))
+    } else {
+        (None, (y, y + shown), 0.0)
+    };
+    // With arrows, the entries start under the top one (`view.0`), less
+    // the inner padding the box keeps above the first row.
+    let mut top = if arrows.is_some() { view.0 } else { y + inner } - scroll;
     let rows = popup
         .entries
         .iter()
@@ -481,11 +562,33 @@ fn geometry(popup: &Popup, layout: &Layout) -> Geometry {
         })
         .collect();
     Geometry {
-        // Cut at the window's bottom when even one-line rows do not fit.
-        frame: [x, y, w, h.min(layout.height - y)],
+        frame: [x, y, w, shown],
         rows,
         pad,
+        view,
+        arrows,
+        scroll,
     }
+}
+
+/// Scroll `popup` just enough to show its highlighted entry.
+fn reveal(popup: &mut Popup, layout: &Layout) {
+    let geo = geometry(popup, layout);
+    let (Some(arrows), Some(i)) = (&geo.arrows, popup.hover) else {
+        return;
+    };
+    let Some(&(top, h)) = geo.rows.get(i) else {
+        return;
+    };
+    let (view_top, view_bottom) = geo.view;
+    let dy = if top < view_top {
+        top - view_top
+    } else if top + h > view_bottom {
+        top + h - view_bottom
+    } else {
+        return;
+    };
+    popup.scroll = (geo.scroll + dy).clamp(0.0, arrows.max_scroll);
 }
 
 #[cfg(test)]
@@ -572,6 +675,48 @@ mod tests {
         let [x, y, w, h] = geometry(menus.open.as_ref().unwrap(), &layout).frame;
         assert!(x >= 0.0 && x + w <= layout.width);
         assert!(y >= 0.0 && y + h <= layout.height);
+    }
+
+    #[test]
+    fn a_menu_taller_than_the_window_scrolls() {
+        let metrics = nimbus_render::Metrics {
+            size_px: 14.0,
+            line_height: 20.0,
+            baseline: 15.0,
+            cell_width: 10.0,
+        };
+        let layout = Layout::new(metrics, 1000, 200, 1.0, 10);
+        let keymap = keymap();
+        let mut menus = Menus::default();
+        menus.open_bar(1, &layout, &keymap, true);
+        let geo = geometry(menus.open.as_ref().unwrap(), &layout);
+        let [_, y, _, h] = geo.frame;
+        assert!(y + h <= layout.height);
+        let arrows = geo.arrows.as_ref().expect("scroll arrows");
+        assert!(arrows.max_scroll > 0.0);
+        // Down to the last item: it is scrolled into view.
+        let last = menus.open.as_ref().unwrap().entries.len() - 1;
+        for _ in 0..200 {
+            menus.key(Key::Down, &layout, &keymap);
+            if menus.open.as_ref().unwrap().hover == Some(last) {
+                break;
+            }
+        }
+        let geo = geometry(menus.open.as_ref().unwrap(), &layout);
+        let (top, rh) = geo.rows[last];
+        assert!(top >= geo.view.0 && top + rh <= geo.view.1 + 0.5);
+        // The wheel goes back to the top and no further.
+        assert!(menus.scroll_by(&layout, -10_000.0));
+        assert!(!menus.scroll_by(&layout, -10.0));
+        // A click on the down arrow scrolls; it chooses nothing.
+        let geo = geometry(menus.open.as_ref().unwrap(), &layout);
+        let (down, dh) = geo.arrows.as_ref().unwrap().down;
+        let x = geo.frame[0] + 5.0;
+        assert_eq!(
+            menus.click(&layout, (x, down + dh / 2.0), &keymap),
+            Click::Handled
+        );
+        assert!(menus.open.as_ref().unwrap().scroll > 0.0);
     }
 
     #[test]

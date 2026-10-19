@@ -301,7 +301,8 @@ and Help (and the Nimbus application menu on macOS). On Windows Nimbus
 draws it, and its menus, in the theme's colours: `F10` opens it from the
 keyboard, the arrow keys move between items and menus, `Enter` runs an
 item, a letter runs the first item starting with it, and `Esc` or a
-click elsewhere closes it. The File menu also
+click elsewhere closes it. A menu taller than the window scrolls: with
+the mouse wheel, the arrow keys, or the ▲ and ▼ at its ends. The File menu also
 has Open Recent, Reopen Closed Tab, Reopen Last Session, Save with Encoding and Reopen with Encoding. The menus run the
 same commands as the keys and the palette, and show your current
 shortcuts, including ones you changed in the config. Linux has no menu

@@ -5190,7 +5190,11 @@ impl App {
                 (x * cell * lines_per_notch, y * lh * lines_per_notch)
             }
         };
-        if self.sidebar.contains(&window, x) {
+        if self.menus.is_open() {
+            if self.menus.scroll_by(&window, -dy) {
+                self.changed(false);
+            }
+        } else if self.sidebar.contains(&window, x) {
             self.sidebar.wheel(-dy, &window);
         } else if self.preview_wheel(i, -dy, &layout) {
             // A preview scrolls on its own; its source stays put.
