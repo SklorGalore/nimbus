@@ -1772,6 +1772,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "minisign-verify"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871285dc19d8d0ebe0eef3d0e99a205f2a71363b122632cbbfa4a6c370a960ce"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1912,6 +1918,7 @@ dependencies = [
  "log",
  "memchr",
  "memmap2",
+ "minisign-verify",
  "muda",
  "nimbus-core",
  "nimbus-render",
@@ -1923,6 +1930,7 @@ dependencies = [
  "objc2-foundation 0.2.2",
  "regex",
  "rfd",
+ "ring",
  "serde",
  "toml",
  "trash",

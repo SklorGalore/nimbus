@@ -16,6 +16,7 @@ ignore = "0.4"
 log = "0.4.34"
 memchr = "2.8.3"
 memmap2 = "0.9"
+minisign-verify = "0.3"
 nimbus-core = { version = "0.7.2", path = "../core" }
 nimbus-render = { version = "0.3.0", path = "../render" }
 nimbus-syntax = { version = "0.3.0", path = "../syntax" }
@@ -23,6 +24,7 @@ notify = "8.2.0"
 nucleo = "0.5"
 regex = "1"
 rfd = "0.17"
+ring = { version = "0.17", default-features = false }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 trash = "5.2.9"

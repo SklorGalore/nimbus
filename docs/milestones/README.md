@@ -61,7 +61,7 @@ repeated in each file:
 | 28 | [Git window: staging and committing](m28-git-staging.md) | Planned |
 | 29 | [Git window: branches and remotes](m29-git-branches-remotes.md) | Planned |
 | 30 | [Git window: history tools and merging](m30-git-history-merging.md) | Planned |
-| 31 | [Updates](m31-updates.md) | Planned |
+| 31 | [Updates](m31-updates.md) | Built, Mac checks pending |
 
 **Next** is the milestone to start; **Planned** plans are approved and
 queued in table order. M10–M15 were drafted after M8 and approved, with
