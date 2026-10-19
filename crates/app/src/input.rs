@@ -314,6 +314,9 @@ pub enum Command<'a> {
     CompareRevision,
     /// Compare two folders, listed in the sidebar's Compare mode (M18).
     CompareFolders,
+    /// Open the git window (M27) for the workspace's first folder, in a
+    /// process of its own.
+    OpenGitWindow,
     /// Cycle the compare's whitespace option: off, ends, all (M18).
     DiffWhitespace,
     /// Toggle the compare's ignore-case option.

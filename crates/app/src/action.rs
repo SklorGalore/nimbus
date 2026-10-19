@@ -443,6 +443,13 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::CompareHead,
         Keys::NONE,
     ),
+    // The git window (M27).
+    act(
+        "git.openWindow",
+        "Open Git Window",
+        Command::OpenGitWindow,
+        Keys::NONE,
+    ),
     act(
         "diff.compareRevision",
         "Compare with Revision…",

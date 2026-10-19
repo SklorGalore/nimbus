@@ -1,12 +1,13 @@
 //! Compatibility mode (M23): painting frames on the CPU when no GPU can be
 //! opened.
 //!
-//! **Software rendering.** For each frame a GPU does three things: fills
-//! rectangles, blends glyph bitmaps in the text colour, and shows the
-//! result. Our frames are simple enough that the CPU can do the same with
-//! two loops over an array of pixels, one `u32` per pixel. The frame is
-//! already built on the CPU by [`FrameBuilder`] as flat lists of
-//! [`RectInstance`]s and [`GlyphInstance`]s, and the glyph bitmaps are
+//! **Software rendering.** For each frame a GPU does four things: fills
+//! rectangles, strokes curve segments, blends glyph bitmaps in the text
+//! colour, and shows the result. Our frames are simple enough that the CPU
+//! can do the same with three loops over an array of pixels, one `u32` per
+//! pixel. The frame is already built on the CPU by [`FrameBuilder`] as flat
+//! lists of [`RectInstance`]s, [`SegmentInstance`]s and [`GlyphInstance`]s,
+//! and the glyph bitmaps are
 //! already rasterized on the CPU by swash, so nothing above this module
 //! knows which painter runs.
 //!
@@ -23,6 +24,12 @@
 //! passes exactly through a centre as inside. [`span`] does the same, so
 //! rectangles with fractional edges cover the same pixels in both painters.
 //!
+//! **Curves.** A segment is painted the way `segment.wgsl` paints it: the
+//! curve is flattened into the same number of straight pieces (once per
+//! segment, into an array on the stack), and every pixel in the same grown
+//! bounding box gets coverage from its centre's distance to the nearest
+//! piece. The shared numbers live in `segment.rs`.
+//!
 //! Frames reach the window through `softbuffer`, a small crate that shows
 //! a pixel array in a window on macOS, Windows, X11 and Wayland, with no
 //! `unsafe` on our side.
@@ -36,7 +43,8 @@ use winit::window::Window;
 use crate::atlas::{ATLAS_SIZE, CpuPages};
 use crate::frame::FrameBuilder;
 use crate::gpu::{Capture, FrameStatus};
-use crate::pipeline::{GLYPH_COLOR, GlyphInstance, RectInstance};
+use crate::pipeline::{GLYPH_COLOR, GlyphInstance, RectInstance, SegmentInstance};
+use crate::segment;
 
 /// Same constant as `GAMMA_ADJUST` in `glyph.wgsl`: above 1 thickens text
 /// slightly, which blending in gamma space otherwise makes look thin.
@@ -229,8 +237,8 @@ fn paint(
     capture.then(|| to_capture(&canvas))
 }
 
-/// Clear to `background`, then each layer's rectangles and glyphs within
-/// its clip, in order: the same steps as `FrameBuilder::record`.
+/// Clear to `background`, then each layer's rectangles, segments and glyphs
+/// within its clip, in order: the same steps as `FrameBuilder::record`.
 pub(crate) fn draw(
     canvas: &mut Canvas<'_>,
     frame: &FrameBuilder,
@@ -246,14 +254,17 @@ pub(crate) fn draw(
         return;
     };
     pixels.fill(clear);
-    for (clip, rects, glyphs) in frame.layers() {
-        let Some(clip) = clip_box(clip, canvas.width, canvas.height) else {
+    for layer in frame.layers() {
+        let Some(clip) = clip_box(layer.clip, canvas.width, canvas.height) else {
             continue;
         };
-        for rect in rects {
+        for rect in layer.rects {
             fill_rect(canvas, &clip, rect);
         }
-        for glyph in glyphs {
+        for seg in layer.segments {
+            stroke_segment(canvas, &clip, seg);
+        }
+        for glyph in layer.glyphs {
             blend_glyph(canvas, &clip, glyph, pages, shaped);
         }
     }
@@ -328,6 +339,43 @@ fn fill_rect(canvas: &mut Canvas<'_>, clip: &ClipBox, rect: &RectInstance) {
             for p in px {
                 *p = over(*p, src);
             }
+        }
+    }
+}
+
+/// Stroke one curve segment: for each pixel of its grown bounding box (the
+/// GPU's quad) inside the clip, the coverage its centre gets from the
+/// distance to the flattened curve, blended over what is there.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "pixel indices are below MAX_SIDE (2^14), exact in f32"
+)]
+fn stroke_segment(canvas: &mut Canvas<'_>, clip: &ClipBox, seg: &SegmentInstance) {
+    let [x0, y0, x1, y1] = segment::bounds(seg);
+    let xs = span(x0, x1, &clip.x);
+    let ys = span(y0, y1, &clip.y);
+    let [red, green, blue, alpha] = seg.color;
+    if xs.is_empty() || ys.is_empty() || alpha <= 0.0 {
+        return;
+    }
+    let flat = segment::flatten(seg);
+    let stride = canvas.width as usize;
+    for py in ys {
+        let Some(row) = canvas
+            .pixels
+            .get_mut(py * stride + xs.start..py * stride + xs.end)
+        else {
+            continue;
+        };
+        let cy = py as f32 + 0.5;
+        for (p, px) in row.iter_mut().zip(xs.clone()) {
+            let d = segment::distance(&flat, [px as f32 + 0.5, cy]);
+            let cov = segment::coverage(seg.width, d);
+            if cov <= 0.0 {
+                continue;
+            }
+            let a = alpha * cov;
+            *p = over(*p, [red * a, green * a, blue * a, a]);
         }
     }
 }
@@ -588,6 +636,148 @@ mod tests {
         f.push_glyph([0.0, 0.0], &slot, [1.0; 4]);
         let px = paint_small(&mut f, &atlas, (4, 1));
         assert_eq!(px, [0, 0x00ff_ffff, 0x00ff_ffff, 0]);
+    }
+
+    const WHITE: u32 = 0x00ff_ffff;
+
+    fn curve(points: [[f32; 2]; 4], width: f32, color: [f32; 4]) -> SegmentInstance {
+        SegmentInstance {
+            p0: points[0],
+            p1: points[1],
+            p2: points[2],
+            p3: points[3],
+            color,
+            width,
+            pad: [0.0; 3],
+        }
+    }
+
+    fn line(from: [f32; 2], to: [f32; 2], width: f32) -> SegmentInstance {
+        let at = |t: f32| {
+            [
+                from[0] + (to[0] - from[0]) * t,
+                from[1] + (to[1] - from[1]) * t,
+            ]
+        };
+        curve([from, at(1.0 / 3.0), at(2.0 / 3.0), to], width, [1.0; 4])
+    }
+
+    fn dot(center: [f32; 2], diameter: f32, color: [f32; 4]) -> SegmentInstance {
+        curve([center; 4], diameter, color)
+    }
+
+    #[test]
+    fn a_horizontal_line_covers_the_pixels_under_it() {
+        let atlas = Atlas::in_memory();
+        let mut f = FrameBuilder::default();
+        // Two pixels tall, centred on the boundary between rows 4 and 5.
+        f.push_segment(line([2.0, 5.0], [18.0, 5.0], 2.0));
+        let px = paint_small(&mut f, &atlas, (20, 10));
+        let at = |x: usize, y: usize| px[y * 20 + x];
+        for x in 2..18 {
+            assert_eq!((at(x, 4), at(x, 5)), (WHITE, WHITE), "column {x}");
+            // A pixel and a half away: the soft edge has ended.
+            assert_eq!((at(x, 3), at(x, 6)), (0, 0), "column {x}");
+        }
+        // Round ends: partly covered just past the end, then nothing.
+        assert!(at(1, 4) != 0 && at(1, 4) != WHITE);
+        for y in (0..3).chain(7..10) {
+            assert!((0..20).all(|x| at(x, y) == 0), "row {y}");
+        }
+        assert_eq!((at(0, 4), at(19, 5)), (0, 0));
+    }
+
+    #[test]
+    fn a_dot_is_round_and_symmetric() {
+        let atlas = Atlas::in_memory();
+        let mut f = FrameBuilder::default();
+        // Centred on pixel (5, 5)'s centre, 6 pixels across.
+        f.push_segment(dot([5.5, 5.5], 6.0, [1.0; 4]));
+        let px = paint_small(&mut f, &atlas, (11, 11));
+        let at = |x: usize, y: usize| px[y * 11 + x];
+        assert_eq!(at(5, 5), WHITE);
+        for y in 0..11 {
+            for x in 0..11 {
+                let v = at(x, y);
+                assert_eq!(v, at(10 - x, y), "mirror x at ({x}, {y})");
+                assert_eq!(v, at(x, 10 - y), "mirror y at ({x}, {y})");
+                assert_eq!(v, at(y, x), "diagonal at ({x}, {y})");
+                // Past radius + 1 (the soft edge), untouched.
+                let (dx, dy) = (x.abs_diff(5), y.abs_diff(5));
+                if dx * dx + dy * dy >= 16 {
+                    assert_eq!(v, 0, "outside at ({x}, {y})");
+                }
+            }
+        }
+        // Partial coverage on the rim: grey, not white.
+        let [_, r, g, b] = at(5, 8).to_be_bytes();
+        assert!(r == g && g == b && r > 0 && r < 255);
+    }
+
+    #[test]
+    fn segments_are_clipped_to_the_layer() {
+        let atlas = Atlas::in_memory();
+        let mut f = FrameBuilder::default();
+        f.begin_layer(Some([0, 0, 5, 4]));
+        f.push_segment(line([-2.0, 2.0], [12.0, 2.0], 2.0));
+        let px = paint_small(&mut f, &atlas, (10, 4));
+        for row in [1, 2] {
+            let r = &px[row * 10..row * 10 + 10];
+            assert_eq!(r, [WHITE, WHITE, WHITE, WHITE, WHITE, 0, 0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn segments_draw_over_rects_and_under_glyphs() {
+        let mut atlas = Atlas::in_memory();
+        let slot = atlas.insert(AtlasPage::Coverage, (1, 1), &[255]).unwrap();
+        let mut f = FrameBuilder::default();
+        // Pushed in the opposite order to the one they draw in.
+        f.push_glyph([4.0, 4.0], &slot, [0.0, 1.0, 0.0, 1.0]);
+        f.push_segment(line([0.0, 5.0], [10.0, 5.0], 4.0));
+        f.push_rect([0.0, 0.0], [10.0, 10.0], [1.0, 0.0, 0.0, 1.0]);
+        let px = paint_small(&mut f, &atlas, (10, 10));
+        assert_eq!(px[4 * 10 + 4], 0x0000_ff00, "glyph over the line");
+        assert_eq!(px[5 * 10 + 4], WHITE, "line over the rect");
+        assert_eq!(px[0], 0x00ff_0000, "rect where the line is not");
+    }
+
+    #[test]
+    fn segments_draw_in_the_order_pushed() {
+        let atlas = Atlas::in_memory();
+        let mut f = FrameBuilder::default();
+        // A line, a white dot over it, then a smaller red dot: a ring.
+        f.push_segment(curve(
+            [[0.0, 7.5], [5.0, 7.5], [10.0, 7.5], [15.0, 7.5]],
+            1.0,
+            [0.0, 0.0, 1.0, 1.0],
+        ));
+        f.push_segment(dot([7.5, 7.5], 10.0, [1.0; 4]));
+        f.push_segment(dot([7.5, 7.5], 4.0, [1.0, 0.0, 0.0, 1.0]));
+        let px = paint_small(&mut f, &atlas, (15, 15));
+        let at = |x: usize, y: usize| px[y * 15 + x];
+        assert_eq!(at(7, 7), 0x00ff_0000, "inner dot on top");
+        assert_eq!(at(4, 7), WHITE, "ring covers the line");
+        assert_eq!(at(0, 7) & 0xff, 0xff, "line outside the ring");
+    }
+
+    #[test]
+    fn a_curve_passes_through_its_endpoints() {
+        let atlas = Atlas::in_memory();
+        let mut f = FrameBuilder::default();
+        // A lane change: down from (2.5, 2.5), across, down into (17.5, 17.5).
+        f.push_segment(curve(
+            [[2.5, 2.5], [2.5, 10.0], [17.5, 10.0], [17.5, 17.5]],
+            2.0,
+            [1.0; 4],
+        ));
+        let px = paint_small(&mut f, &atlas, (20, 20));
+        let at = |x: usize, y: usize| px[y * 20 + x];
+        assert_eq!((at(2, 2), at(17, 17)), (WHITE, WHITE));
+        // It bends through the middle, not along the straight diagonal's
+        // far corners.
+        assert!(at(10, 10) != 0);
+        assert_eq!((at(17, 2), at(2, 17)), (0, 0));
     }
 
     #[test]
