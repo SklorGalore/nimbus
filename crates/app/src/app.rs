@@ -812,12 +812,8 @@ impl App {
             sidebar.search.focus_query(Some(pattern.clone()));
             started
         });
-        let all_warnings: Vec<String> = warnings
-            .into_iter()
-            .chain(key_warnings)
-            .chain(theme_warnings)
-            .collect();
-        let message = startup_message(all_warnings, note);
+        warnings.extend(key_warnings.into_iter().chain(theme_warnings));
+        let message = startup_message(warnings, note);
         Self {
             options,
             started,
@@ -1264,6 +1260,21 @@ impl App {
     /// system appearance: the title bar everywhere, and on macOS the
     /// prompts (unsaved changes and the rest), which `rfd` shows as sheets
     /// on this window and so inherit its appearance.
+    /// Attach the menu bar to the new window, keep the window, and give
+    /// its title bar and menus the theme's colours.
+    fn window_ready(&mut self, window: Arc<Window>) {
+        let proxy = self.proxy.clone();
+        self.menu_bar = menu::install(&window, &self.keymap, move |id| {
+            let _ = proxy.send_event(AppEvent::Menu(id));
+        });
+        log::debug!("startup: menus at {:?}", self.started.elapsed());
+        window.request_redraw();
+        self.window = Some(window);
+        self.sync_window_theme();
+        self.sync_title_bar();
+        self.update_title();
+    }
+
     fn sync_window_theme(&self) {
         if let Some(window) = &self.window {
             window.set_theme(Some(window_theme(&self.theme)));
@@ -7478,16 +7489,7 @@ impl ApplicationHandler<AppEvent> for App {
         window.set_ime_allowed(true);
 
         log::info!("window + gpu ready in {:?}", self.started.elapsed());
-        let proxy = self.proxy.clone();
-        self.menu_bar = menu::install(&window, &self.keymap, move |id| {
-            let _ = proxy.send_event(AppEvent::Menu(id));
-        });
-        log::debug!("startup: menus at {:?}", self.started.elapsed());
-        window.request_redraw();
-        self.window = Some(window);
-        self.sync_window_theme();
-        self.sync_title_bar();
-        self.update_title();
+        self.window_ready(window);
         if let Some(pattern) = self.options.find.clone() {
             self.open_find(false);
             let _ = self.find.find.ed().insert(&pattern);
