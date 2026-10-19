@@ -612,10 +612,10 @@ Open for M31 (updates), drafted on 2026-10-18; the plan's **Proposed**
 items are the defaults until they are answered. Answered on
 2026-10-19: updates install on request only (nothing downloads until
 the person runs Install Update); background download and install on
-quit were declined for now. Still open:
+quit were declined for now. The startup check becomes on by default
+(`check_updates = true`), reversing M15's default; unattended runs
+never check. Still open:
 
-- Whether `check_updates` stays off by default (proposed) now that a
-  found update can be installed in one step.
 - Installs owned by Homebrew or a `.deb`: hand them back to `brew` and
   `apt` with the command to run (proposed), or replace them anyway.
 
@@ -801,3 +801,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | M25 Command line added at the owner's request: an "Install `nimbus` Command" palette action (macOS via the system administrator prompt, no `unsafe`), opening files in the running window, `--wait` | m25, backlog |
 | 2026-10-18 | Compatibility mode (Cumulus) joins M23: an automatic CPU painter over `FrameBuilder`'s rects and glyphs, presented with `softbuffer`, with a one-time notice and `--compat`; no wgpu CPU-driver step, no separate app or terminal editor | §9, m23 |
 | 2026-10-18 | M31 Updates drafted at the owner's request: Install Update downloads the release package, checks it against the `minisign`-signed `SHA256SUMS` with the key compiled in (version pinned in the trusted comment), swaps it in and restarts with the session; no new trust beyond the release key; needs `minisign.pub` committed first | §8, §9, m31 |
+| 2026-10-19 | M31: updates install on request only; the startup update check becomes on by default (`check_updates = true`), reversing M15's off default | §9, m31 |

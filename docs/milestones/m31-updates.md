@@ -48,9 +48,16 @@ a password prompt or a Gatekeeper or SmartScreen warning.
       the person runs Install Update; the startup check (when on) only
       tells them. Downloading in the background and installing on quit
       were declined for now; a config key could add them later.
-- [ ] **Proposed: the check stays off by default.** `check_updates`
-      keeps its default of `false`. Install Update still works on
-      demand after a manual Check for Updates.
+- [ ] **The startup check is on by default** (owner, 2026-10-19):
+      `check_updates` defaults to `true`, so each start asks GitHub once,
+      after the first frame, and speaks only when a newer release
+      exists. `check_updates = false` turns it off, and `--headless`,
+      `--smoke` and the other unattended runs never check. The README,
+      the manual and the config template stop saying Nimbus never
+      contacts the network unless asked, and say what the check sends
+      (one HTTPS request to GitHub's API with a `nimbus/X.Y.Z` user
+      agent, nothing else) and how to turn it off; the CHANGELOG calls
+      out the changed default.
 - [ ] **Verification before anything is written in place**:
       `SHA256SUMS.minisig` is checked against the public key compiled
       into the binary; its trusted comment must read exactly
