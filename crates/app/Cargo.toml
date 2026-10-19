@@ -5,6 +5,8 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
+accesskit = "0.25"
+accesskit_winit = "0.34"
 arboard = { version = "3", default-features = false }
 dirs = "7"
 encoding_rs = "0.8.42"
@@ -52,3 +54,6 @@ objc2-foundation = { version = "0.2.2", default-features = false, features = ["s
 
 [build-dependencies]
 embed-resource = "3.0.12"
+
+[dev-dependencies]
+accesskit_consumer = "0.39"

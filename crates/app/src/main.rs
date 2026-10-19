@@ -3,6 +3,7 @@
 //! This file is startup: command-line options, loading the config and the
 //! files to open, and handing over to the event loop in [`app`].
 
+mod access;
 mod action;
 mod app;
 mod bmp;

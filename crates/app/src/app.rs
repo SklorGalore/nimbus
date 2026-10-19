@@ -63,6 +63,7 @@ use crate::view::{self, Decorations, Layout, PickerView, Preedit, StatusItem, Ta
 use crate::watch::{Change, Watch};
 use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
 
+mod access;
 mod geometry;
 mod preview_tab;
 mod tail;
@@ -137,6 +138,9 @@ pub enum AppEvent {
         expect(dead_code, reason = "only macOS sends it")
     )]
     OpenFiles(Vec<PathBuf>),
+    /// A screen reader asked for the accessibility tree, asked the app to
+    /// do something, or stopped (M22, `app/access.rs`).
+    Access(accesskit_winit::WindowEvent),
 }
 
 /// A file read at a git revision on a worker (M18).
@@ -619,6 +623,9 @@ pub struct App {
     /// The open-tab part of a Replace in Files, until its files on disk
     /// are written and the summary can be shown.
     replace_summary: ReplaceSummary,
+    /// The accessibility tree for screen readers (M22): the adapter and
+    /// what was last sent through it.
+    access: access::Access,
 }
 
 /// Multi-click detection and drag state. winit reports presses, not
@@ -769,6 +776,7 @@ impl App {
             search_files_at,
             replace_undo: None,
             replace_summary: ReplaceSummary::default(),
+            access: access::Access::default(),
         }
     }
 
@@ -4834,24 +4842,8 @@ impl App {
         let (rows, _) = picker.rows(&self.keymap);
         match view::picker_row_at(layout, rows.len(), x, y) {
             Some(row) => {
-                picker.selected = picker.scroll + row;
-                let chosen = picker.chosen();
-                let kind = picker.kind;
-                self.picker = None;
-                match chosen {
-                    Some(Item::Name(name)) => self.name_chosen(kind, &name),
-                    Some(Item::Workspace(name)) => self.open_named_workspace(&name),
-                    Some(Item::File(path) | Item::Recent(path)) => self.open_path(&path),
-                    Some(Item::Action(a)) => self.pending_action = Some(a.command),
-                    Some(Item::Line(n)) => self.go_to_line(n),
-                    Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
-                    Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
-                    Some(Item::Revision(rev)) => self.compare_with_revision(rev),
-                    Some(Item::Encoding(purpose, choice, _)) => {
-                        self.encoding_chosen(purpose, choice);
-                    }
-                    None => {}
-                }
+                let n = picker.scroll + row;
+                self.picker_choose(n);
             }
             None => {
                 if !view::picker_contains(layout, rows.len(), x, y) {
@@ -4860,6 +4852,33 @@ impl App {
             }
         }
         self.changed(false);
+    }
+
+    /// Choose the picker's match `n` (counted from the first match), as a
+    /// click on its row does, and close the picker. A command chosen this
+    /// way runs once the click (or screen reader request) is handled.
+    fn picker_choose(&mut self, n: usize) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        picker.selected = n;
+        let chosen = picker.chosen();
+        let kind = picker.kind;
+        self.picker = None;
+        match chosen {
+            Some(Item::Name(name)) => self.name_chosen(kind, &name),
+            Some(Item::Workspace(name)) => self.open_named_workspace(&name),
+            Some(Item::File(path) | Item::Recent(path)) => self.open_path(&path),
+            Some(Item::Action(a)) => self.pending_action = Some(a.command),
+            Some(Item::Line(n)) => self.go_to_line(n),
+            Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
+            Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
+            Some(Item::Revision(rev)) => self.compare_with_revision(rev),
+            Some(Item::Encoding(purpose, choice, _)) => {
+                self.encoding_chosen(purpose, choice);
+            }
+            None => {}
+        }
     }
 
     /// Start the active tab's first parse if it has not started, and say
@@ -5068,6 +5087,8 @@ impl App {
             self.paint(&mut gpu, &layout, &panes);
             self.gpu = Some(gpu);
         }
+        // What changed on screen, for a screen reader if one is running.
+        self.update_access();
         let focused_pane = panes.get(self.groups.focused).copied().unwrap_or(layout);
         // Picker results arriving later wake the loop through the
         // matcher's notify callback (AppEvent::PickerChanged), not by
@@ -6658,17 +6679,9 @@ fn headless_folder_compare(sidebar: &mut Sidebar, left: &Path, right: &Path) {
     }
 }
 
-/// Draw an open picker over everything else.
-fn draw_picker_overlay(
-    gpu: &mut Gpu,
-    ui: &Ui,
-    layout: &Layout,
-    p: &Picker,
-    keymap: &Keymap,
-    blink: bool,
-) {
-    let (rows, selected) = p.rows(keymap);
-    let rows: Vec<(String, String)> = rows.into_iter().map(|r| (r.text, r.detail)).collect();
+/// The picker's count of matches, such as "42 files" ("…" while still
+/// listing), or nothing for pickers that do not list.
+fn picker_status(p: &Picker) -> String {
     let n = p.match_count();
     let noun = match (p.kind, n == 1) {
         (Kind::Palette, true) => "command",
@@ -6688,12 +6701,34 @@ fn draw_picker_overlay(
         (Kind::Recent, false) => "recent files",
     };
     let more = if p.loading() { "…" } else { "" };
-    let status = if matches!(p.kind, Kind::Line | Kind::Name(_) | Kind::Revision) {
+    if matches!(p.kind, Kind::Line | Kind::Name(_) | Kind::Revision) {
         String::new()
     } else {
         format!("{n} {noun}{more}")
-    };
-    let placeholder = match p.kind {
+    }
+}
+
+/// What the picker is, as a screen reader names it.
+fn picker_title(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Palette => "Command palette",
+        Kind::Files => "Go to file",
+        Kind::Line => "Go to line",
+        Kind::Symbols => "Go to symbol",
+        Kind::Tabs => "Compare with tab",
+        Kind::Revision => "Compare with revision",
+        Kind::Encoding(EncodingFor::Reopen) => "Reopen with encoding",
+        Kind::Encoding(EncodingFor::Save) => "Save with encoding",
+        Kind::Recent => "Open recent",
+        Kind::Name(crate::picker::Naming::Workspace) => "Save workspace",
+        Kind::Name(crate::picker::Naming::Search) => "Save search",
+        Kind::Workspaces => "Open workspace",
+    }
+}
+
+/// The hint the picker's empty query field shows.
+fn picker_placeholder(kind: Kind) -> &'static str {
+    match kind {
         Kind::Palette => "Type a command",
         Kind::Files => "Type a file name",
         Kind::Line => "Type a line number",
@@ -6706,7 +6741,22 @@ fn draw_picker_overlay(
         Kind::Name(crate::picker::Naming::Workspace) => "Name the workspace",
         Kind::Name(crate::picker::Naming::Search) => "Name the search",
         Kind::Workspaces => "Type a workspace name",
-    };
+    }
+}
+
+/// Draw an open picker over everything else.
+fn draw_picker_overlay(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    p: &Picker,
+    keymap: &Keymap,
+    blink: bool,
+) {
+    let (rows, selected) = p.rows(keymap);
+    let rows: Vec<(String, String)> = rows.into_iter().map(|r| (r.text, r.detail)).collect();
+    let status = picker_status(p);
+    let placeholder = picker_placeholder(p.kind);
     let pv = PickerView {
         input: &p.input,
         placeholder,
@@ -6843,6 +6893,7 @@ impl ApplicationHandler<AppEvent> for App {
         match event {
             AppEvent::PickerChanged => self.tick_picker(),
             AppEvent::OpenFiles(paths) => self.open_from_system(&paths),
+            AppEvent::Access(event) => self.access_event(event, event_loop),
             AppEvent::Menu(id) => {
                 // A held menu shortcut delivers a menu event for every key
                 // repeat, with no repeat flag. Drop events for the same item
@@ -6947,7 +6998,16 @@ impl ApplicationHandler<AppEvent> for App {
             .with_inner_size(LogicalSize::new(960.0, 640.0));
         let attrs = self.restore_geometry(event_loop, with_app_icon(attrs));
 
-        let window = match event_loop.create_window(attrs) {
+        // Created hidden, given its screen reader adapter, then shown: the
+        // adapter must exist before the window is first visible.
+        let proxy = self.proxy.clone();
+        let opened = access::open_window(
+            attrs,
+            |attrs| event_loop.create_window(attrs),
+            |w| self.access.attach(event_loop, w, proxy),
+            |w| w.set_visible(true),
+        );
+        let window = match opened {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 self.fail_start(event_loop, &format!("Could not create a window: {e}"));
@@ -7193,6 +7253,9 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if let Some(window) = &self.window {
+            self.access.window_event(window, &event);
+        }
         if self.window.is_none() || self.gpu.is_none() {
             return;
         }
