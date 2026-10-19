@@ -8,11 +8,16 @@
 //! the action arrives as a menu event instead; either way it runs the same
 //! command.
 
+#[cfg(target_os = "windows")]
+mod paint;
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native {
     use muda::{ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use winit::window::Window;
 
+    #[cfg(target_os = "windows")]
+    use super::paint;
     use crate::action;
     use crate::keymap::Keymap;
 
@@ -139,41 +144,37 @@ mod native {
     }
 
     impl MenuBar {
-        /// Paint the menu bar dark or light to match the theme. Only
-        /// Windows draws a menu bar inside the window; muda paints its dark
-        /// one in fixed greys, so a theme gets its shade rather than its
-        /// exact colours. The drop-down menus stay the system's.
+        /// Paint the menu bar in the theme's colours (Windows draws it
+        /// inside the window; see `paint`). The drop-down menus stay the
+        /// system's. muda's own light or dark bar is set too, for when our
+        /// painter could not be installed or high contrast is on.
         #[cfg(target_os = "windows")]
         #[expect(
             unsafe_code,
             reason = "muda themes a window's menu bar through its raw HWND"
         )]
-        pub fn set_dark(&self, window: &Window, dark: bool) {
-            use muda::MenuTheme;
-            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            let Ok(handle) = window.window_handle() else {
+        pub fn set_colours(&self, window: &Window, theme: &crate::theme::Theme) {
+            let Some(hwnd) = hwnd(window) else {
                 return;
             };
-            let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-                return;
-            };
-            let theme = if dark {
-                MenuTheme::Dark
+            let menu_theme = if theme.is_dark() {
+                muda::MenuTheme::Dark
             } else {
-                MenuTheme::Light
+                muda::MenuTheme::Light
             };
             // SAFETY: the handle comes from the live winit window borrowed
             // for this call, the same window `attach` gave the menu, so it
             // is the valid HWND `set_theme_for_hwnd` requires.
-            if let Err(e) = unsafe { self.menu.set_theme_for_hwnd(handle.hwnd.get(), theme) } {
+            if let Err(e) = unsafe { self.menu.set_theme_for_hwnd(hwnd as isize, menu_theme) } {
                 log::warn!("menu bar theme: {e}");
             }
+            paint::set_colours(hwnd, paint::Colours::from_theme(&theme.ui));
         }
 
         /// Nothing to paint: the macOS menu bar belongs to the system.
         #[cfg(target_os = "macos")]
         #[expect(clippy::unused_self, reason = "same signature as the Windows version")]
-        pub fn set_dark(&self, _window: &Window, _dark: bool) {}
+        pub fn set_colours(&self, _window: &Window, _theme: &crate::theme::Theme) {}
 
         /// Show the keymap's current shortcuts, after the config changed.
         pub fn update(&self, keymap: &Keymap) {
@@ -338,18 +339,30 @@ mod native {
         Some(())
     }
 
+    /// The window's Win32 handle.
     #[cfg(target_os = "windows")]
-    #[expect(unsafe_code, reason = "muda attaches to a window through its raw HWND")]
-    fn attach(menu: &Menu, window: &Window) -> Option<()> {
+    fn hwnd(window: &Window) -> Option<windows_sys::Win32::Foundation::HWND> {
         use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let RawWindowHandle::Win32(handle) = window.window_handle().ok()?.as_raw() else {
             return None;
         };
+        Some(handle.hwnd.get() as windows_sys::Win32::Foundation::HWND)
+    }
+
+    #[cfg(target_os = "windows")]
+    #[expect(unsafe_code, reason = "muda attaches to a window through its raw HWND")]
+    fn attach(menu: &Menu, window: &Window) -> Option<()> {
+        let hwnd = hwnd(window)?;
         // SAFETY: the handle comes from a live winit window. The app owns
         // both and declares the menu bar before the window, so the menu is
         // dropped (and detached) first and never outlives the HWND, which is
         // what `init_for_hwnd` requires.
-        unsafe { menu.init_for_hwnd(handle.hwnd.get()) }.ok()
+        unsafe { menu.init_for_hwnd(hwnd as isize) }.ok()?;
+        // After muda's, so our painter sees the bar's messages first.
+        if !paint::install(hwnd) {
+            log::warn!("menu bar: could not install the theme painter");
+        }
+        Some(())
     }
 }
 
@@ -380,7 +393,7 @@ impl MenuBar {
         clippy::unused_self,
         reason = "same signature as the native menu bar's"
     )]
-    pub fn set_dark(&self, _window: &winit::window::Window, _dark: bool) {}
+    pub fn set_colours(&self, _window: &winit::window::Window, _theme: &crate::theme::Theme) {}
 }
 
 /// No native menus on this platform; the command palette covers them.

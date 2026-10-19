@@ -1255,11 +1255,6 @@ impl App {
         self.title_key = Some(key);
     }
 
-    /// Tell the operating system whether the theme is light or dark, so
-    /// the parts of the window it draws follow Nimbus rather than the
-    /// system appearance: the title bar everywhere, and on macOS the
-    /// prompts (unsaved changes and the rest), which `rfd` shows as sheets
-    /// on this window and so inherit its appearance.
     /// Attach the menu bar to the new window, keep the window, and give
     /// its title bar and menus the theme's colours.
     fn window_ready(&mut self, window: Arc<Window>) {
@@ -1275,6 +1270,10 @@ impl App {
         self.update_title();
     }
 
+    /// Tell the operating system whether the theme is light or dark, so
+    /// the parts of the window it draws follow Nimbus rather than the
+    /// system appearance: the title bar everywhere (on Windows 11 in the
+    /// theme's exact colours), and on Windows the menu bar too.
     fn sync_window_theme(&self) {
         if let Some(window) = &self.window {
             window.set_theme(Some(window_theme(&self.theme)));
@@ -1302,7 +1301,7 @@ impl App {
                 window.set_border_color(Some(rgb(ui.picker_border)));
             }
             if let Some(menu) = &self.menu_bar {
-                menu.set_dark(window, self.theme.is_dark());
+                menu.set_colours(window, &self.theme);
             }
         }
     }

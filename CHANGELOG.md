@@ -54,7 +54,8 @@ section before tagging.
   in the tab bar's colour with the title centred, and the system keeps
   only its window buttons; on Windows 11 the system bar is coloured to
   match; elsewhere it follows the theme's light or dark. The Windows
-  menu bar (File, Edit, ...) turns dark with a dark theme too.
+  menu bar (File, Edit, ...) is painted in the tab bar's colours too;
+  its drop-down menus stay the system's.
 - Questions and messages ("Save changes before closing?", "Could not
   save", replacing a file in the tree and the rest) open inside the
   window in the theme's colours, on every system, instead of as system
