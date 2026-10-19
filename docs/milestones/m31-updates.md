@@ -44,10 +44,10 @@ a password prompt or a Gatekeeper or SmartScreen warning.
       ready says "Nimbus X.Y.Z is ready; restart to finish". The
       download shows its progress in the status bar and can be
       cancelled; the editor stays usable throughout.
-- [ ] **Proposed: how automatic.** Nothing downloads until the person
-      runs Install Update; the startup check (when on) only tells them.
-      A config key `auto_update = "notify" | "download" | "install"`
-      leaves room for the other two steps without promising them now.
+- [ ] **On request only** (owner, 2026-10-19): nothing downloads until
+      the person runs Install Update; the startup check (when on) only
+      tells them. Downloading in the background and installing on quit
+      were declined for now; a config key could add them later.
 - [ ] **Proposed: the check stays off by default.** `check_updates`
       keeps its default of `false`. Install Update still works on
       demand after a manual Check for Updates.

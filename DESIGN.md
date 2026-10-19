@@ -609,11 +609,11 @@ which is contained inside `render`.
 ## 9. Open questions
 
 Open for M31 (updates), drafted on 2026-10-18; the plan's **Proposed**
-items are the defaults until they are answered:
+items are the defaults until they are answered. Answered on
+2026-10-19: updates install on request only (nothing downloads until
+the person runs Install Update); background download and install on
+quit were declined for now. Still open:
 
-- How automatic: download only when the person runs Install Update
-  (proposed), download in the background and ask to restart, or install
-  on quit with no question.
 - Whether `check_updates` stays off by default (proposed) now that a
   found update can be installed in one step.
 - Installs owned by Homebrew or a `.deb`: hand them back to `brew` and
