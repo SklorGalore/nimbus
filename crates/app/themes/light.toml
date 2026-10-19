@@ -41,6 +41,7 @@ minimap_slider = "#6b738529"
 whitespace = "#9aa0ad80"
 guide = "#e4e0d6"
 guide_active = "#bdb7aa"
+hidden_char = "#d43c3c66"
 
 [syntax]
 attribute = "#0184bc"
