@@ -285,6 +285,8 @@ pub enum Command<'a> {
     ReloadConfig,
     /// Open the config file in a tab, creating it if needed.
     OpenConfig,
+    /// Open the first menu of the menu bar Nimbus draws (Windows).
+    OpenMenuBar,
     /// Ask GitHub whether a newer release exists.
     CheckUpdates,
     /// Open the latest release's page in the browser.

@@ -46,6 +46,9 @@ pub struct Gpu {
     captured: Option<Capture>,
     /// What each frame is cleared to: straight RGBA, as theme colours are.
     background: [f32; 4],
+    /// Pixels kept at the top for a title bar the app draws
+    /// ([`Gpu::set_inset_top`]).
+    inset_top: f32,
 }
 
 /// Which painter draws the frames.
@@ -512,7 +515,7 @@ impl Gpu {
     ) -> Self {
         let atlas = Atlas::new(&device, &queue);
         let globals = Globals::new(&device, config.format.is_srgb());
-        globals.set_viewport(&queue, config.width, config.height);
+        globals.set_viewport(&queue, config.width, config.height, 0.0);
         // A GPU atlas always has its pages; `new` above made them.
         let pipelines = atlas.gpu().map(|pages| Pipelines {
             rect: RectPipeline::new(&device, config.format, &globals),
@@ -547,6 +550,7 @@ impl Gpu {
             capture_requested: false,
             captured: None,
             background: [BACKGROUND.r, BACKGROUND.g, BACKGROUND.b, BACKGROUND.a].map(to_f32),
+            inset_top: 0.0,
         }
     }
 
@@ -557,9 +561,36 @@ impl Gpu {
             return;
         }
         match &mut self.painter {
-            Painter::Wgpu(w) => w.resize(width, height),
+            Painter::Wgpu(w) => w.resize(width, height, self.inset_top),
             Painter::Cpu(cpu) => cpu.resize(width, height),
         }
+    }
+
+    /// Keep `px` pixels at the top of the window for a title bar the app
+    /// draws itself (macOS, where the window's content runs up under the
+    /// system's buttons). Everything drawn after this moves down by `px`:
+    /// y = 0 is just below the bar, and the bar is drawn at negative y.
+    /// Clips given to [`Gpu::begin_layer`] move with it, so the app lays
+    /// out the window as if it were `px` shorter
+    /// ([`Gpu::content_size`]) and nothing else changes. Both painters
+    /// apply it: the GPU in its shaders, the CPU as it fills pixels.
+    pub fn set_inset_top(&mut self, px: f32) {
+        let px = px.max(0.0).round();
+        if (px - self.inset_top).abs() < f32::EPSILON {
+            return;
+        }
+        self.inset_top = px;
+        if let Painter::Wgpu(w) = &self.painter {
+            w.pipelines
+                .globals
+                .set_viewport(&w.queue, w.config.width, w.config.height, px);
+        }
+    }
+
+    /// The top inset set by [`Gpu::set_inset_top`], in pixels.
+    #[must_use]
+    pub fn inset_top(&self) -> f32 {
+        self.inset_top
     }
 }
 
@@ -572,7 +603,7 @@ fn to_f32(v: f64) -> f32 {
 }
 
 impl Wgpu {
-    fn resize(&mut self, width: u32, height: u32) {
+    fn resize(&mut self, width: u32, height: u32, top: f32) {
         let (width, height) = clamp_to_device(&self.device, width, height);
         if width == self.config.width && height == self.config.height {
             return;
@@ -582,7 +613,7 @@ impl Wgpu {
         self.configure();
         self.pipelines
             .globals
-            .set_viewport(&self.queue, width, height);
+            .set_viewport(&self.queue, width, height, top);
     }
 
     /// The clear colour for `background` (straight RGBA): an sRGB target
@@ -882,8 +913,9 @@ impl Gpu {
             reason = "window pixel coordinates, clamped to be non-negative"
         )]
         let to_px = |v: f32| v.max(0.0).round() as u32;
+        let top = self.inset_top;
         self.frame
-            .begin_layer(clip.map(|[x, y, w, h]| [to_px(x), to_px(y), to_px(w), to_px(h)]));
+            .begin_layer(clip.map(|[x, y, w, h]| [to_px(x), to_px(y + top), to_px(w), to_px(h)]));
     }
 
     /// The current layer's clip, in the form [`Gpu::begin_layer`] takes
@@ -897,9 +929,10 @@ impl Gpu {
             reason = "window pixel coordinates, far below 2^24"
         )]
         let to_f = |v: u32| v as f32;
+        let top = self.inset_top;
         self.frame
             .clip()
-            .map(|[x, y, w, h]| [to_f(x), to_f(y), to_f(w), to_f(h)])
+            .map(|[x, y, w, h]| [to_f(x), to_f(y) - top, to_f(w), to_f(h)])
     }
 
     /// Queue a filled rectangle for this frame. Within a layer, rectangles
@@ -1035,6 +1068,20 @@ impl Gpu {
         }
     }
 
+    /// The size the app lays out: the surface less the top inset
+    /// ([`Gpu::set_inset_top`]), in physical pixels.
+    #[must_use]
+    pub fn content_size(&self) -> (u32, u32) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a whole, non-negative number of pixels"
+        )]
+        let top = self.inset_top as u32;
+        let (width, height) = self.size();
+        (width, height.saturating_sub(top))
+    }
+
     /// Current surface size in physical pixels, as `(width, height)`.
     #[must_use]
     pub fn size(&self) -> (u32, u32) {
@@ -1067,8 +1114,12 @@ impl Gpu {
                     log::error!("CPU painter given a GPU atlas; frame skipped");
                     return Ok(FrameStatus::Retry);
                 };
-                let (status, captured) =
-                    cpu.render(&mut self.frame, pages, self.background, capture);
+                let (status, captured) = cpu.render(
+                    &mut self.frame,
+                    pages,
+                    (self.background, self.inset_top),
+                    capture,
+                );
                 self.captured = captured.or(self.captured.take());
                 status
             }
@@ -1183,6 +1234,29 @@ mod tests {
             .count();
         assert!(light > 500, "{light} text pixels");
         assert!(gpu.stats().compatibility);
+    }
+
+    #[test]
+    fn compat_mode_moves_everything_down_by_the_inset() {
+        let font = Font::bundled().unwrap();
+        let mut gpu = Gpu::compat_headless(font, 28.0, (8, 8));
+        gpu.set_background([0.0, 0.0, 0.0, 1.0]);
+        gpu.set_inset_top(3.0);
+        assert_eq!(gpu.content_size(), (8, 5));
+        gpu.begin_frame();
+        // A title bar at negative y, then a rect clipped to the content.
+        gpu.push_rect([0.0, -3.0], [8.0, 3.0], [1.0, 0.0, 0.0, 1.0]);
+        gpu.begin_layer(Some([0.0, 0.0, 8.0, 1.0]));
+        assert_eq!(gpu.clip(), Some([0.0, 0.0, 8.0, 1.0]));
+        gpu.push_rect([0.0, 0.0], [8.0, 8.0], [0.0, 0.0, 1.0, 1.0]);
+        assert!(gpu.request_capture());
+        gpu.render().unwrap();
+        let cap = gpu.take_capture().unwrap();
+        let row = |y: usize| cap.rgba.get(y * 8 * 4..y * 8 * 4 + 4).unwrap().to_vec();
+        assert_eq!(row(0), [255, 0, 0, 255]);
+        assert_eq!(row(2), [255, 0, 0, 255]);
+        assert_eq!(row(3), [0, 0, 255, 255]);
+        assert_eq!(row(4)[..3], [0, 0, 0]);
     }
 
     /// `cargo test --release -p nimbus-render -- --ignored --nocapture

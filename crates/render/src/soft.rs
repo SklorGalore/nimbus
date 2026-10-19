@@ -161,7 +161,7 @@ impl Cpu {
         &mut self,
         frame: &mut FrameBuilder,
         pages: &CpuPages,
-        background: [f32; 4],
+        (background, top): ([f32; 4], f32),
         capture: bool,
     ) -> (FrameStatus, Option<Capture>) {
         frame.finish();
@@ -183,6 +183,7 @@ impl Cpu {
                     pixels: &mut buffer,
                     width,
                     height,
+                    top,
                 };
                 let captured = paint(canvas, frame, pages, background, shaped, capture);
                 if let Err(e) = buffer.present() {
@@ -196,6 +197,7 @@ impl Cpu {
                     pixels,
                     width,
                     height,
+                    top,
                 };
                 let captured = paint(canvas, frame, pages, background, shaped, capture);
                 (FrameStatus::Presented, captured)
@@ -222,6 +224,10 @@ pub(crate) struct Canvas<'a> {
     pub(crate) pixels: &'a mut [u32],
     pub(crate) width: u32,
     pub(crate) height: u32,
+    /// How far everything moves down for a title bar the app draws
+    /// (`Gpu::set_inset_top`), as the shaders' `globals.top` does. Clips
+    /// already include it.
+    pub(crate) top: f32,
 }
 
 /// Paint one frame and, when asked, read it back.
@@ -307,8 +313,9 @@ fn span(lo: f32, hi: f32, within: &Range<u32>) -> Range<usize> {
 
 fn fill_rect(canvas: &mut Canvas<'_>, clip: &ClipBox, rect: &RectInstance) {
     let (pos, size) = (rect.pos, rect.size);
+    let y = pos[1] + canvas.top;
     let xs = span(pos[0], pos[0] + size[0], &clip.x);
-    let ys = span(pos[1], pos[1] + size[1], &clip.y);
+    let ys = span(y, y + size[1], &clip.y);
     if xs.is_empty() {
         return;
     }
@@ -393,8 +400,9 @@ fn blend_glyph(
     shaped: &[f32; 256],
 ) {
     let (pos, size) = (glyph.pos, glyph.size);
+    let y = pos[1] + canvas.top;
     let xs = span(pos[0], pos[0] + size[0], &clip.x);
-    let ys = span(pos[1], pos[1] + size[1], &clip.y);
+    let ys = span(y, y + size[1], &clip.y);
     if xs.is_empty() || ys.is_empty() {
         return;
     }
@@ -404,7 +412,7 @@ fn blend_glyph(
     let tx0 = (f64::from(glyph.uv_min[0]) * atlas_side).round() as usize;
     let ty0 = (f64::from(glyph.uv_min[1]) * atlas_side).round() as usize;
     let x0 = f64::from(pos[0]).round() as usize;
-    let y0 = f64::from(pos[1]).round() as usize;
+    let y0 = f64::from(y).round() as usize;
     let stride = canvas.width as usize;
     let atlas = ATLAS_SIZE as usize;
     let [red, green, blue, alpha] = glyph.color;
@@ -494,6 +502,7 @@ mod tests {
             pixels,
             width,
             height,
+            top: 0.0,
         }
     }
 
@@ -786,7 +795,7 @@ mod tests {
         let atlas = Atlas::in_memory();
         let mut f = FrameBuilder::default();
         f.push_rect([1.0, 0.0], [1.0, 1.0], [1.0, 0.5, 0.0, 1.0]);
-        let (status, cap) = cpu.render(&mut f, atlas.cpu().unwrap(), BLACK, true);
+        let (status, cap) = cpu.render(&mut f, atlas.cpu().unwrap(), (BLACK, 0.0), true);
         assert_eq!(status, FrameStatus::Presented);
         let cap = cap.unwrap();
         assert_eq!((cap.width, cap.height), (2, 1));

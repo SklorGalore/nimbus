@@ -81,8 +81,8 @@ The tree can create, rename and remove files:
 | Move to Trash | `Delete`; also `Cmd+Backspace` on macOS | Moves the selected file or folder to the system's trash (the Recycle Bin on Windows), where you can restore it from. |
 | Reveal in Finder / Explorer / File Manager | (palette, menu) | Shows the selected item in your system's file manager. On Linux it opens the folder holding it. With the sidebar hidden, it reveals the active tab's file. |
 
-On macOS and Windows, **right-click** a row for a menu with all five. On
-Linux there is no context menu; run the commands from the palette.
+**Right-click** a row for a menu with all five, or run them from the
+palette.
 
 - A new file or folder goes into the selected folder, or next to the
   selected file, or at the top of the project when nothing is selected.
@@ -297,7 +297,12 @@ otherwise. Files over 16 MB are not previewed.
 ## Menus
 
 On macOS and Windows, Nimbus has a menu bar: File, Edit, Selection, View
-and Help (and the Nimbus application menu on macOS). The File menu also
+and Help (and the Nimbus application menu on macOS). On Windows Nimbus
+draws it, and its menus, in the theme's colours: `F10` opens it from the
+keyboard, the arrow keys move between items and menus, `Enter` runs an
+item, a letter runs the first item starting with it, and `Esc` or a
+click elsewhere closes it. A menu taller than the window scrolls: with
+the mouse wheel, the arrow keys, or the ▲ and ▼ at its ends. The File menu also
 has Open Recent, Reopen Closed Tab, Reopen Last Session, Save with Encoding and Reopen with Encoding. The menus run the
 same commands as the keys and the palette, and show your current
 shortcuts, including ones you changed in the config. Linux has no menu
