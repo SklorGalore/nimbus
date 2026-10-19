@@ -6,6 +6,11 @@ section before tagging.
 
 ## Unreleased
 
+### Added
+
+- The release signing key, `minisign.pub`, is in the repository and
+  printed in the README, so `SHA256SUMS.minisig` can be checked.
+
 ## 1.1.0
 
 ### Added

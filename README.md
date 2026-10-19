@@ -195,6 +195,15 @@ and `minisign.pub` from the root of this repository:
 minisign -V -p minisign.pub -m SHA256SUMS
 ```
 
+The key is:
+
+```
+RWQP3Q/4Mc3fpXtWGJHvMnuFQsX7WPR3tW8cPRKRzPeF+B8DlSwzqodi
+```
+
+so `minisign -V -P RWQP3Q/4Mc3fpXtWGJHvMnuFQsX7WPR3tW8cPRKRzPeF+B8DlSwzqodi -m SHA256SUMS`
+works without a copy of the repository.
+
 ### Updates
 
 Nimbus never connects to the network unless you ask it to. Run "Check

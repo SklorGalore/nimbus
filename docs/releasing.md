@@ -23,8 +23,9 @@ released code.
 The release workflow ([`release.yml`](../.github/workflows/release.yml))
 runs on the tag. It builds every platform, makes a draft release with
 the packages, the Homebrew cask, the winget manifest and `SHA256SUMS`
-attached, and signs the checksums; publish it on GitHub when it looks
-right.
+attached. Sign `SHA256SUMS` on the Mac (below), then publish the draft
+on GitHub when it looks right. Never publish a release without its
+`SHA256SUMS.minisig`.
 
 ## Hotfixes
 
@@ -41,12 +42,33 @@ The packaging steps are `scripts/bundle-macos.sh`,
 `scripts/appimage-linux.sh`, `packaging/windows/nimbus.iss` and
 `scripts/manifests.sh`. The app icon is drawn by `scripts/make-icons.py`.
 
-Signing `SHA256SUMS` needs a one-time setup: run `minisign -G -W` (no
-password, since the key lives in a secret), commit the public key as
-`minisign.pub`, and put the secret key file's contents in the
-repository's `MINISIGN_SECRET_KEY` Actions secret. Until then the
-workflow says the signing step was skipped and the release has no
-`.minisig`.
+The release key is a minisign key made on the owner's Mac with a
+password (`minisign -G`). Its public half is `minisign.pub` at the
+repository root (key ID `A5DFCD31F80FDD0F`); the secret half never goes
+into GitHub, so a compromised account or workflow cannot sign a release
+(`docs/milestones/m26-security.md`). Keep an offline copy of the secret
+key file. Until M26 adds `scripts/sign-release.sh`, sign each draft by
+hand, after the workflow has attached everything:
+
+```sh
+v=X.Y.Z
+mkdir -p ~/nimbus-release/$v && cd ~/nimbus-release/$v
+gh release download v$v --repo SklorGalore/nimbus --clobber \
+  --pattern '*.zip' --pattern '*.tar.gz' --pattern '*.dmg' \
+  --pattern '*.deb' --pattern '*.AppImage' --pattern '*-setup.exe' \
+  --pattern SHA256SUMS
+shasum -a 256 -c SHA256SUMS                 # every line must say OK
+minisign -S -m SHA256SUMS -t "Nimbus $v SHA256SUMS"   # asks for the password
+minisign -V -p /path/to/nimbus/minisign.pub -m SHA256SUMS
+gh release upload v$v SHA256SUMS.minisig --repo SklorGalore/nimbus
+```
+
+The trusted comment must be exactly `Nimbus X.Y.Z SHA256SUMS`: the
+updater (M31) reads the version from it. The same steps sign an already
+published release (1.0.0 and 1.0.1 shipped without signatures).
+
+The workflow's own signing step stays off: leave the
+`MINISIGN_SECRET_KEY` secret unset. M26 removes that step.
 
 The cask and winget manifest are attached for copying on: the cask goes
 in a tap (`Casks/nimbus.rb` in a `homebrew-TAP` repository) and the
