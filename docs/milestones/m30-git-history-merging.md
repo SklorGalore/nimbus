@@ -1,7 +1,7 @@
-# M29 — Git window: history tools and merging
+# M30 — Git window: history tools and merging
 
 **Status: planned (2026-10-18).** Last of the git window plans
-(M26–M29).
+(M27–M30).
 
 ## Goal
 

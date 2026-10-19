@@ -1,7 +1,7 @@
-# M28 — Git window: branches and remotes
+# M29 — Git window: branches and remotes
 
 **Status: planned (2026-10-18).** Third of the git window plans
-(M26–M29).
+(M27–M30).
 
 ## Goal
 
@@ -41,12 +41,12 @@ helper, ahead/behind.
 
 **Deferred**: adding and removing remotes (git's command line does it),
 pull requests and any hosting service's API (unscheduled), automatic
-background fetch (open question in M29 Results if wanted).
+background fetch (open question in M30 Results if wanted).
 
 ## Design
 
 **Long operations are cancellable children.** Fetch, pull and push use
-M26's streaming call with no timeout; `--progress` output on stderr is
+M27's streaming call with no timeout; `--progress` output on stderr is
 parsed for the percentage, and Cancel kills the child (git leaves the
 repository consistent when a fetch or push is interrupted).
 
@@ -84,7 +84,7 @@ with a Stash and Switch button when the refusal is about local changes.
 |---|---|
 | An SSH host-key prompt cannot go through askpass | It is shown as git's error with the command to run once in a terminal |
 | Credential helpers differ by platform | Nothing Nimbus-specific: git calls the user's own helper |
-| A pull leaves conflicts | The window switches to M29's conflict list; until M29 lands, conflicted files open in the merge view and the status says to finish in a terminal |
+| A pull leaves conflicts | The window switches to M30's conflict list; until M30 lands, conflicted files open in the merge view and the status says to finish in a terminal |
 
 ## Results
 

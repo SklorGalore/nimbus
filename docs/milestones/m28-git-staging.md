@@ -1,7 +1,7 @@
-# M27 — Git window: staging and committing
+# M28 — Git window: staging and committing
 
 **Status: planned (2026-10-18).** Second of the git window plans
-(M26–M29); builds on M26's read-only window.
+(M27–M30); builds on M27's read-only window.
 
 ## Goal
 

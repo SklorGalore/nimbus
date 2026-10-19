@@ -52,19 +52,19 @@ preview images, HTML export), was dropped whole (`DESIGN.md` §9).
 | 24 | [International text](m24-international-text.md) | Fallback fonts per script and language, variable fonts, tested East Asian encodings behind their feature, editable mapped files in single-byte encodings | What M16 and M17 deferred; the riskiest piece (the piece table) last |
 | 25 | [Command line](m25-command-line.md) | Install the `nimbus` command from the palette, open files in the running window, `--wait` | Added at the owner's request on 2026-10-18; groups the palette action with the two command-line items that were unscheduled |
 
-## Order, M26–M29 (the git window)
+## Order, M27–M30 (the git window)
 
 Drafted on 2026-10-18 at the owner's request, after a feasibility study
 and the owner's choice of *window mode* (`nimbus --git`) over git inside
 the editor or a separate app; approved the same day in this order,
-after M25, with five answers (`DESIGN.md` §9).
+after M25, with five answers; on 2026-10-19 they moved up one number when the owner put security (M26) first (`DESIGN.md` §9).
 
 | # | Plan | One line | Why here |
 |---|---|---|---|
-| 26 | [Git window: viewing](m26-git-viewer.md) | `--git`, the window layout, changes, history with a graph, commit diffs; read-only | Proves the idea and the git layer before anything writes to a repository |
-| 27 | [Git window: staging and committing](m27-git-staging.md) | Stage files, hunks and lines; discard with undo; commit and amend | The daily loop; needs M26's diffs |
-| 28 | [Git window: branches and remotes](m28-git-branches-remotes.md) | Branches, tags, stashes; fetch, pull, push; askpass | Needs M26's streaming calls; can swap with M27 |
-| 29 | [Git window: history tools and merging](m29-git-history-merging.md) | Blame, file history, search; merge, rebase, cherry-pick, revert with the merge view | Last: the conflict flow sits on everything above |
+| 27 | [Git window: viewing](m27-git-viewer.md) | `--git`, the window layout, changes, history with a graph, commit diffs; read-only | Proves the idea and the git layer before anything writes to a repository |
+| 28 | [Git window: staging and committing](m28-git-staging.md) | Stage files, hunks and lines; discard with undo; commit and amend | The daily loop; needs M27's diffs |
+| 29 | [Git window: branches and remotes](m29-git-branches-remotes.md) | Branches, tags, stashes; fetch, pull, push; askpass | Needs M27's streaming calls; can swap with M28 |
+| 30 | [Git window: history tools and merging](m30-git-history-merging.md) | Blame, file history, search; merge, rebase, cherry-pick, revert with the merge view | Last: the conflict flow sits on everything above |
 
 ## Where each deferred item went
 
@@ -112,7 +112,7 @@ join a milestone above as a stretch task or make a short milestone of
 its own later.
 
 - **Interactive rebase in the git window** (reorder, squash, reword,
-  drop): left out of M29 by the owner on 2026-10-18 for a later plan of
+  drop): left out of M30 by the owner on 2026-10-18 for a later plan of
   its own once the git window has been used.
 
 Items scheduled on 2026-10-18 moved to the M16–M21 and M22–M24 tables above; what is
@@ -143,7 +143,7 @@ debugging, terminals and git in the *editor* beyond M9's `--diff` and
 `--merge` and M18's Compare with HEAD (M14's per-file symbols come from
 the syntax tree, not a server; M6's git status colours stay out). A git
 client is no longer a non-goal: on 2026-10-18 the owner chose a separate
-git window, M26–M29; collaborative editing; rich
+git window, M27–M30; collaborative editing; rich
 text and proportional fonts in the editor area; bidirectional text;
 multiple windows (M13's groups are columns in one window); a native menu
 bar on Linux. If one of these is reconsidered, it is a DESIGN.md decision

@@ -1,6 +1,6 @@
-# M26 — Git window: viewing
+# M27 — Git window: viewing
 
-**Status: planned (2026-10-18).** The first of four plans (M26–M29) for a
+**Status: planned (2026-10-18).** The first of four plans (M27–M30) for a
 git client built from Nimbus's own parts, written at the owner's request
 after a feasibility study
 showed that the hard half (diff, merge, text) already exists.
@@ -8,7 +8,7 @@ The owner chose *window mode*: the same `nimbus` binary opens a window
 laid out for git with `nimbus --git [DIR]`, the way `--diff` and
 `--merge` open their views today. This milestone is read-only: it shows
 a repository and changes nothing in it. The owner answered the plans'
-open questions the same day (`DESIGN.md` §9): the four run after M25,
+open questions the same day (`DESIGN.md` §9): the four run after M25 and M26 (security),
 and the graph is drawn with smooth curves.
 
 ## Goal
@@ -34,7 +34,7 @@ files and diffs, fast on very large repositories.
 - [ ] **Changes**: selecting Changes lists staged and unstaged files
       (added, modified, deleted, renamed, conflicted, untracked) and
       shows each file's diff against the index or HEAD in the compare
-      view, highlighted. Read-only in M26; staging arrives in M27.
+      view, highlighted. Read-only in M27; staging arrives in M28.
 - [ ] **History**: every commit reachable from all branches and tags,
       newest first, with a graph of smooth, anti-aliased branch lines
       (curves where a branch forks or joins) in the left of each row,
@@ -64,8 +64,8 @@ files and diffs, fast on very large repositories.
 history with graph, commit details; refresh on change; `bench/gen.sh
 git`; a manual chapter (`docs/manual/git.md`).
 
-**Deferred**: everything that changes the repository (M27–M29); blame
-and file history (M29); searching history (M29); submodule, worktree
+**Deferred**: everything that changes the repository (M28–M30); blame
+and file history (M30); searching history (M30); submodule, worktree
 and LFS screens (unscheduled; git itself still handles them).
 
 ## Design
