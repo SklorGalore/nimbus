@@ -7,6 +7,7 @@ mod access;
 mod action;
 mod app;
 mod bmp;
+mod caption;
 mod columns;
 mod compare;
 mod compare_panel;

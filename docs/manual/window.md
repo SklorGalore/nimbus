@@ -308,6 +308,14 @@ same commands as the keys and the palette, and show your current
 shortcuts, including ones you changed in the config. Linux has no menu
 bar; the command palette lists every command instead.
 
+On Windows the menus share one strip at the top with the window's title
+and its minimise, maximise and close buttons, all drawn by Nimbus in the
+theme's colours. Drag the strip to move the window (to a screen edge or
+corner to snap it), double-click it to maximise or restore, and
+right-click it for the window menu. Drag any edge or corner of the window
+to resize it. Windows 11's snap layouts appear with `Win+Z` rather than
+by hovering over the maximise button.
+
 ## Groups: tabs side by side
 
 Split Right (`Cmd+\` / `Ctrl+\`) opens a new **group** to the right of

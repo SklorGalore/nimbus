@@ -476,7 +476,11 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
 - **Menus**: the system menu bar with `muda` on macOS, where it sits at the
   top of the screen. On Windows Nimbus draws the menu bar and its
   drop-downs itself, in the theme's colours, and right-click menus are
-  drawn by Nimbus everywhere (`menu/drawn.rs`). On Linux, `muda` needs GTK,
+  drawn by Nimbus everywhere (`menu/drawn.rs`). The Windows window has no
+  system frame (`with_decorations(false)`, keeping the shadow): the menu
+  bar shares its strip with the title and window buttons Nimbus draws,
+  and the app moves and resizes the window through winit's
+  `drag_window` and `drag_resize_window` (`caption.rs`). On Linux, `muda` needs GTK,
   which we avoid, so Linux relies on the command palette.
 - **Clipboard**: `arboard`. **File dialogs**: `rfd`.
 - **Config**: one TOML file in the platform config directory (from `dirs`):
