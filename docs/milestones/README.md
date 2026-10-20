@@ -24,6 +24,9 @@ repeated in each file:
 - Release binary size recorded in Results.
 - `DESIGN.md` updated, with a decision-log line, for any decision that changed.
 - No new `unsafe`, `unwrap` or crate-wide lint allows unless the plan says so.
+- Once compatibility mode exists (M23), anything new the GPU renderer
+  draws (a new primitive or pipeline) is drawn by the CPU painter too,
+  in the same change, and the screenshot test passes in both modes.
 
 | # | Plan | Status |
 |---|---|---|
@@ -52,6 +55,13 @@ repeated in each file:
 | 22 | [Screen readers](m22-screen-readers.md) | Next |
 | 23 | [Library upgrades](m23-library-upgrades.md) | Planned, waiting on stable releases |
 | 24 | [International text](m24-international-text.md) | Planned |
+| 25 | [Command line](m25-command-line.md) | Planned |
+| 26 | [Security](m26-security.md) | Planned |
+| 27 | [Git window: viewing](m27-git-viewer.md) | Planned |
+| 28 | [Git window: staging and committing](m28-git-staging.md) | Planned |
+| 29 | [Git window: branches and remotes](m29-git-branches-remotes.md) | Planned |
+| 30 | [Git window: history tools and merging](m30-git-history-merging.md) | Planned |
+| 31 | [Updates](m31-updates.md) | Planned |
 
 **Next** is the milestone to start; **Planned** plans are approved and
 queued in table order. M10–M15 were drafted after M8 and approved, with
@@ -62,6 +72,9 @@ same day with their order and eight answers (`DESIGN.md` §9 and §10).
 M22–M24, the plans after 1.0, were drafted and approved on 2026-10-18
 with their order and answers; a fourth draft, Writing prose, was
 dropped (`DESIGN.md` §9 and §10).
+M27–M30, a git window opened with `nimbus --git`, were drafted on
+2026-10-18 at the owner's request and approved the same day with five
+answers (`DESIGN.md` §9 and §10); they run after M25 and M26 (security).
 [`backlog.md`](backlog.md) maps every deferred item to the plan that
 picks it up, and lists what stays unscheduled. A plan becomes **In progress** when its first task lands and
 **Done** when its checklist is ticked and its Results filled in.

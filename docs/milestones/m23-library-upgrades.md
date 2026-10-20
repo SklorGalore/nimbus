@@ -9,13 +9,16 @@ emoji picker bug waits on winit too. Approved the same day: it follows
 M22 whenever the releases arrive (`DESIGN.md` §9). Finder "Open With"
 was in this plan until the owner chose to fix it in 1.0.1 with a small
 `objc2` open-files listener, since winit 0.31.0-beta.3 still does not
-pass those files on.
+pass those files on. Compatibility mode (drawing without a GPU, worked
+under the name Cumulus) joined the plan on 2026-10-18 at the owner's
+request; unlike the upgrades it waits on no release and can go first.
 
 ## Goal
 
 Bring the text and window libraries forward once they are stable, and
 fix the macOS emoji picker that needs the newer winit, with every
-upgrade measured against the numbers it replaces.
+upgrade measured against the numbers it replaces. And keep Nimbus
+running on machines with no usable GPU, instead of exiting at startup.
 
 ## Done when
 
@@ -33,15 +36,30 @@ upgrade measured against the numbers it replaces.
       (`Ctrl+Cmd+Space`) arrives in the buffer.
 - [ ] **wgpu current**: whatever wgpu release is current when the
       milestone starts, with the same before-and-after numbers.
+- [ ] **Compatibility mode**: when the GPU cannot be opened, Nimbus
+      starts anyway, drawing on the CPU, and says once that it is in
+      compatibility mode; `--compat` (and `compat = true` in the config)
+      forces it. The screenshot test also passes in compatibility mode
+      within a small per-pixel tolerance, and a frame of a full
+      1600x1000 window paints in under 16 ms in release on the owner's
+      Mac. The painter draws every primitive the GPU renderer has when
+      it lands.
 
 ## Scope
 
 **In**: the three upgrades, one commit each; the emoji picker fix they
-unlock.
+unlock; compatibility mode.
 
 **Deferred**: anything the new winit offers beyond the two fixes (for
 example its new window or IME features) becomes a backlog line, not
-part of the upgrade.
+part of the upgrade. A terminal version of Nimbus, for SSH sessions
+with no display, was weighed for compatibility mode and left out; the
+name Cumulus is kept free for it.
+
+**Out**: wgpu's own CPU drivers (WARP on Windows, llvmpipe on Linux) as
+a middle step. The owner chose GPU, then our painter, and nothing in
+between: one fewer startup path to test, and the same look on every
+machine without a GPU.
 
 ## Design
 
@@ -61,6 +79,51 @@ oracle suite and the fuzz targets are what make that safe.
 its message; a regression over 10 % is reverted and the upgrade waits.
 This is M21's rule, kept.
 
+**Compatibility mode is a second painter, not a second renderer.**
+Every frame is already built on the CPU as two flat lists in
+`FrameBuilder` (`render/src/frame.rs`): solid rectangles
+(`RectInstance`) and glyph bitmaps placed on whole pixels
+(`GlyphInstance`, one atlas texel per screen pixel), in clipped layers.
+swash already rasterizes the glyphs on the CPU. The GPU's only work is
+filling those rectangles, blending the bitmaps in the text colour and
+presenting. The Cumulus painter does the same with two loops over a
+`Vec<u32>` of pixels, layer by layer with the clip applied, and shows
+the result with `softbuffer` (a small crate that puts a pixel buffer in
+a winit window on all three systems, with no `unsafe` on our side).
+Everything above `FrameBuilder`, which is all of `app`, does not know
+which painter runs.
+
+- **The atlas keeps its pages in memory.** Today glyph bitmaps go
+  straight into GPU textures (`Atlas::insert` calls `write_texture`).
+  In compatibility mode the same packer places them in two CPU pages (4
+  MB coverage, 16 MB colour, the colour page made on the first emoji
+  as now), and `GlyphInstance`'s `uv` coordinates index those pages.
+- **Blending matches the shader.** The painter does what `glyph.wgsl`
+  and `rect.wgsl` do: coverage shaped by the same gamma adjustment,
+  premultiplied colour blended in gamma space as
+  `out = src + dst × (1 − src.a)`, colour glyphs used as stored. So a
+  compatibility screenshot differs from the GPU one only by rounding.
+  `--linear-blend` is ignored in compatibility mode.
+- **Switching is automatic.** `GpuContext::open` failing (or the surface
+  failing to configure) starts the painter instead of exiting, and a
+  one-time notice in the status bar says Nimbus is in compatibility
+  mode and why. The F12 overlay names the painter. The name users see is
+  "compatibility mode" (owner's choice); Cumulus is only the code's
+  name for it.
+- **It keeps up with the renderer.** The painter covers every primitive
+  the GPU renderer has when it lands (today rectangles and glyph
+  bitmaps). A later milestone that adds a primitive, such as the git client's
+  smooth commit-graph curves (M27), adds it to the painter in the same change
+  and checks it against the GPU screenshot (a standing requirement in
+  `docs/milestones/README.md`).
+- **Headless renders can use it.** `--headless --compat` renders with
+  no GPU at all, which would let CI on Linux check pixels.
+- **Cost.** A 1600x1000 window is 1.6 million pixels, so a full frame is
+  a few milliseconds on one core (estimate), and a Retina window has four
+  times that. Rendering is already on demand, so this is paid only on
+  input. If the budget is missed, the painter redraws only the rows
+  that changed, then splits the frame into bands across threads.
+
 **The emoji picker is checked, not patched.** The bug is winit 0.30
 dropping text inserted without a preceding compose. If 0.31 fixes it,
 the task is a manual check and a note; if not, a report upstream and the
@@ -74,12 +137,21 @@ item stays in the backlog. A patched copy of winit stays out.
    `--smoke`.
 3. Emoji picker check on the Mac (owner).
 4. wgpu current, if newer than 30.
-5. Point release; Results.
+5. Compatibility mode (does not wait on a release, so it may go first):
+   CPU atlas pages, the painter and its blending tests against small
+   hand-made frames, `softbuffer` presenting, the automatic switch and
+   notice, `--compat` and the config key, the screenshot test in both
+   modes, the frame-time benchmark.
+6. Point release; Results.
 
 ## Concepts
 
 - **Byte-indexed ropes**: what ropey 2 changes and why our code gets
   shorter.
+- **Software rendering**: what a GPU does for a frame (fill, blend,
+  present), and why our simple frames make doing it on the CPU cheap.
+- **Alpha blending by hand**: mixing a glyph's coverage with the
+  background, the same formula the shader uses.
 
 ## Risks
 
@@ -87,6 +159,8 @@ item stays in the backlog. A patched copy of winit stays out.
 |---|---|
 | A stable release does not arrive for months | The plan waits; later milestones go ahead of it. Nothing else depends on it except M22's adapter version, which follows winit |
 | winit 0.31 changes the event loop enough to touch most of `app.rs` | One commit with no behaviour change, reviewed on its own; the screenshot test and `--smoke` show nothing moved |
+| Compatibility mode is too slow on a large Retina window | Redraw only changed rows, then paint in bands on several threads; scrolling may still be less smooth than on a GPU, which the notice says |
+| `softbuffer` misbehaves on one system (for example Wayland) | Report upstream; on that system compatibility mode is limited to `--headless` until fixed |
 
 ## Results
 

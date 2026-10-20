@@ -1,0 +1,47 @@
+name: Back-merge main
+
+# Git flow: whatever lands on main (a hotfix or a release) must also reach
+# development, or the next release would undo it. After every push to
+# main, this opens a pull request from main into development, unless one
+# is already open (an open one picks up new main commits by itself) or
+# development already has everything on main.
+#
+# The pull request's head is main itself, so it shows main's CI results.
+# If it conflicts, resolve it on a branch instead: branch from
+# development, merge main into it, and open that as the pull request
+# (CONTRIBUTING.md, "Releases and hotfixes").
+#
+# Needs Settings > Actions > General > "Allow GitHub Actions to create and
+# approve pull requests" turned on.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  open-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open a pull request from main into development
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          open=$(gh pr list --base development --head main --state open --json number --jq 'length')
+          if [ "$open" != "0" ]; then
+            echo "A pull request from main into development is already open."
+            exit 0
+          fi
+          ahead=$(gh api "repos/$GH_REPO/compare/development...main" --jq '.ahead_by')
+          if [ "$ahead" = "0" ]; then
+            echo "development already has everything on main."
+            exit 0
+          fi
+          gh pr create --base development --head main \
+            --title "Merge main into development" \
+            --body "main has $ahead commit(s) that development lacks, such as a hotfix or a release. Merge this with a merge commit (not squash) so development keeps main's history. If it conflicts, see the comment at the top of .github/workflows/back-merge.yml."

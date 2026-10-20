@@ -38,7 +38,7 @@ alternative of encodings first declined.
 | 20 | [Reading aids](m20-reading-aids.md) | Sticky scroll, a windowed minimap, a proportional UI font, Markdown preview | What M13 and M14 deferred; needs M13's splits and M14's fold regions |
 | 21 | [Foundations and 1.0](m21-foundations-and-1-0.md) | Ropey 2, winit and wgpu upgrades, fuzzing and soak in CI, a crash record, 1.0.0 | Last, so 1.0 packages everything above |
 
-## Order, M22–M24 (after 1.0)
+## Order, M22–M25 (after 1.0)
 
 Drafted on 2026-10-18, after 1.0, from what M21 and the earlier plans
 deferred and the unscheduled list below; approved the same day in this
@@ -48,8 +48,23 @@ preview images, HTML export), was dropped whole (`DESIGN.md` §9).
 | # | Plan | One line | Why here |
 |---|---|---|---|
 | 22 | [Screen readers](m22-screen-readers.md) | An AccessKit tree for the editor and chrome, built only when a screen reader asks | The owner named it the first milestone after 1.0; `accesskit_winit` 0.34 works on winit 0.30, so it need not wait |
-| 23 | [Library upgrades](m23-library-upgrades.md) | Ropey 2, winit 0.31, current wgpu; the emoji picker | Waits on stable releases; goes whenever they arrive, ahead of whatever is next |
+| 23 | [Library upgrades](m23-library-upgrades.md) | Ropey 2, winit 0.31, current wgpu; the emoji picker; compatibility mode without a GPU | Waits on stable releases (compatibility mode does not); goes whenever they arrive, ahead of whatever is next |
 | 24 | [International text](m24-international-text.md) | Fallback fonts per script and language, variable fonts, tested East Asian encodings behind their feature, editable mapped files in single-byte encodings | What M16 and M17 deferred; the riskiest piece (the piece table) last |
+| 25 | [Command line](m25-command-line.md) | Install the `nimbus` command from the palette, open files in the running window, `--wait` | Added at the owner's request on 2026-10-18; groups the palette action with the two command-line items that were unscheduled |
+
+## Order, M27–M30 (the git window)
+
+Drafted on 2026-10-18 at the owner's request, after a feasibility study
+and the owner's choice of *window mode* (`nimbus --git`) over git inside
+the editor or a separate app; approved the same day in this order,
+after M25, with five answers; on 2026-10-19 they moved up one number when the owner put security (M26) first (`DESIGN.md` §9).
+
+| # | Plan | One line | Why here |
+|---|---|---|---|
+| 27 | [Git window: viewing](m27-git-viewer.md) | `--git`, the window layout, changes, history with a graph, commit diffs; read-only | Proves the idea and the git layer before anything writes to a repository |
+| 28 | [Git window: staging and committing](m28-git-staging.md) | Stage files, hunks and lines; discard with undo; commit and amend | The daily loop; needs M27's diffs |
+| 29 | [Git window: branches and remotes](m29-git-branches-remotes.md) | Branches, tags, stashes; fetch, pull, push; askpass | Needs M27's streaming calls; can swap with M28 |
+| 30 | [Git window: history tools and merging](m30-git-history-merging.md) | Blame, file history, search; merge, rebase, cherry-pick, revert with the merge view | Last: the conflict flow sits on everything above |
 
 ## Where each deferred item went
 
@@ -67,7 +82,7 @@ preview images, HTML export), was dropped whole (`DESIGN.md` §9).
 | Session restore | M8, DESIGN.md §2 | M12 |
 | Split views | M8 (M6 prepared the layout) | M13 |
 | Code signing and notarisation, installers | M8 | M15 |
-| Auto-update | M8 | M15, as an on-demand check; in-place updates stay deferred |
+| Auto-update | M8 | M15, as an on-demand check; in-place updates in M31 (owner, 2026-10-18) |
 | Linux run by hand (Wayland, X11) | M8 | M15 |
 | Bracket matching misled by strings | M8 known limitation | M14 |
 | Diff options (ignore whitespace), folder compare, git revisions | M9 | Unscheduled, below |
@@ -81,6 +96,8 @@ preview images, HTML export), was dropped whole (`DESIGN.md` §9).
 | Proportional fonts in UI chrome | DESIGN.md §2 | M20 |
 | Ropey 2.0 | DESIGN.md §4.1 | M21, then M23 (still beta at 1.0) |
 | winit 0.31, macOS emoji picker | M21 | M23 |
+| Running without a GPU (compatibility mode) | 1.0 exits when no GPU opens | M23 |
+| Opening files in the running window, `--wait` | Unscheduled (owner, 2026-10-18) | M25 |
 | Finder "Open With" | M21 | 1.0.1, with an `objc2` open-files listener (owner, 2026-10-18) |
 | Screen-reader support (AccessKit) | M21 | M22 |
 | Hot keys the desktop grabs on Linux (a manual note) | Unscheduled | M22 |
@@ -94,6 +111,10 @@ Small or speculative items, kept so they are not forgotten. Each could
 join a milestone above as a stretch task or make a short milestone of
 its own later.
 
+- **Interactive rebase in the git window** (reorder, squash, reword,
+  drop): left out of M30 by the owner on 2026-10-18 for a later plan of
+  its own once the git window has been used.
+
 Items scheduled on 2026-10-18 moved to the M16–M21 and M22–M24 tables above; what is
 left is small or still speculative.
 
@@ -102,15 +123,6 @@ left is small or still speculative.
   100,000 keystrokes keep about 10 MB. Merging a contiguous typing run
   into one edit would cut that to the text itself; `undo_oracle.rs`
   covers coalescing.
-- **Open in the running window** (owner, 2026-10-18): `nimbus FILE`
-  starts a second window today, since nothing hands files to a Nimbus
-  that is already open. Passing them to the running one as new tabs
-  fits the one-window non-goal (`DESIGN.md` §2) better; it needs a small local
-  socket or pipe per user, checked before the window is created.
-- **`--wait`** (owner, 2026-10-18): stay running until the files given
-  on the command line are closed, so git can use `nimbus --wait` as its
-  commit editor. Pairs with the item above, where the waiting process
-  is the one that handed its files to the running window.
 - **Autosave of unsaved work** for crash recovery: the owner decided
   against it when approving M12 (it would write the user's text
   somewhere they did not choose); it stays here in case that changes.
@@ -127,10 +139,11 @@ left is small or still speculative.
 
 Unchanged from DESIGN.md §2, and no draft reaches for them: Vim
 keybindings or any modal layer; plugins or a scripting language; LSP,
-debugging, terminals and git integration beyond M9's `--diff` and
-`--merge` and M18's Compare with HEAD, the one exception the owner
-chose on 2026-10-18 (M14's per-file symbols come from the syntax tree,
-not a server; M6's git status colours stay out); collaborative editing; rich
+debugging, terminals and git in the *editor* beyond M9's `--diff` and
+`--merge` and M18's Compare with HEAD (M14's per-file symbols come from
+the syntax tree, not a server; M6's git status colours stay out). A git
+client is no longer a non-goal: on 2026-10-18 the owner chose a separate
+git window, M27–M30; collaborative editing; rich
 text and proportional fonts in the editor area; bidirectional text;
 multiple windows (M13's groups are columns in one window); a native menu
 bar on Linux. If one of these is reconsidered, it is a DESIGN.md decision

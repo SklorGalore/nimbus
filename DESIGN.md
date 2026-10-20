@@ -37,10 +37,14 @@ after a rebuild, in each milestone's Results.
 
 - Vim keybindings or any modal layer.
 - Plugins or a scripting language.
-- LSP, debugging, terminals, git integration. One exception, chosen on
-  2026-10-18: M18's "Compare with HEAD" runs `git show` as a subprocess
-  to open a file's committed version in the compare view. Nothing else
-  runs git.
+- LSP, debugging, terminals. Git in the *editor* stays limited to M18's
+  "Compare with HEAD", which runs git as a subprocess to open a file's
+  committed version in the compare view.
+- Git client: no longer a non-goal. On 2026-10-18 the owner reversed the
+  old "no git integration" rule for a separate *git window*: `nimbus
+  --git [DIR]` opens a window laid out for git, in its own process,
+  built from the same crates and views (M27–M30). Git is still driven
+  only as a subprocess from `app/git.rs`; no git library is linked.
 - Collaborative editing.
 - Rich text, or proportional fonts in the editor area. UI chrome gets a
   proportional font setting in M20.
@@ -463,7 +467,8 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
   expanded folders, the sidebar's mode) are remembered in `state.toml`
   beside the config. Nimbus never writes the user's `config.toml`.
   `nimbus FOLDER` and `nimbus` alone restore a session; `nimbus FILE` and
-  `--no-session` neither restore nor save one.
+  `--no-session` neither restore nor save one, and neither does any run
+  with `remember_workspace = false` (recents and window state still kept).
 - **Find / replace** (`Primary+F`, `Primary+H` on Windows and Linux,
   `Primary+Alt+F` on macOS where `Cmd+H` hides the app): an inline bar at the
   top of the view, incremental, with match count and regex and case toggles.
@@ -584,8 +589,15 @@ introduces and points at the code.
 | 20 | Reading aids | **Done** | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
 | 21 | Foundations and 1.0 | **Done** | Fuzzing, a soak run, a crash record, version 1.0 (ropey 2 and winit 0.31 wait for stable releases) | [m21](docs/milestones/m21-foundations-and-1-0.md) |
 | 22 | Screen readers | Next | Use Nimbus with VoiceOver, NVDA or Orca | [m22](docs/milestones/m22-screen-readers.md) |
-| 23 | Library upgrades | Planned, waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker | [m23](docs/milestones/m23-library-upgrades.md) |
+| 23 | Library upgrades | Planned, waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
 | 24 | International text | Planned | CJK and other scripts in the right fonts, variable fonts, editable huge files in single-byte encodings | [m24](docs/milestones/m24-international-text.md) |
+| 25 | Command line | Planned | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
+| 26 | Security | Planned | Signed releases with the key off GitHub; protected branches and tags; pinned workflows; reviewed dependencies; untrusted files stay data | [m26](docs/milestones/m26-security.md) |
+| 27 | Git window: viewing | Planned | `nimbus --git`: changes, history with a branch graph, any commit's diffs | [m27](docs/milestones/m27-git-viewer.md) |
+| 28 | Git window: staging and committing | Planned | Stage files, hunks or lines; discard safely; commit and amend | [m28](docs/milestones/m28-git-staging.md) |
+| 29 | Git window: branches and remotes | Planned | Branches, tags, stashes; fetch, pull and push with your own credentials | [m29](docs/milestones/m29-git-branches-remotes.md) |
+| 30 | Git window: history tools and merging | Planned | Blame, file history, search; merge, rebase, cherry-pick and revert with the merge view | [m30](docs/milestones/m30-git-history-merging.md) |
+| 31 | Updates | Planned | Install a newer release from inside Nimbus, verified against the signed `SHA256SUMS`, and restart into it | [m31](docs/milestones/m31-updates.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
@@ -595,7 +607,14 @@ M9–M15 deferred and approved the same day (§9, §10). Every milestone
 through M21 has landed; M21 made the 1.0 release.
 M22–M24 are the plans after 1.0, drafted on 2026-10-18 from what 1.0
 and the earlier plans deferred and approved the same day (§9, §10); M22
-is Next, and M23 goes whenever its releases are stable.
+is Next, and M23 goes whenever its releases are stable. M25 (command
+line) was added the same day at the owner's request.
+M26 (security) was drafted the same evening at the owner's request
+and goes before the git client (M27–M30) and updates (M31) plans
+drafted alongside it; the owner answered its questions the next day (§9).
+M27–M30, a git window built from the same parts (`nimbus --git`),
+were drafted on 2026-10-18 at the owner's request and approved with five
+answers (§9); they run after M25 and M26 (security).
 
 M1 and M2 carry the most risk: they are where wgpu and swash either work or
 fight us. If M1's atlas takes much longer than planned, the fallback is to
@@ -604,7 +623,45 @@ which is contained inside `render`.
 
 ## 9. Open questions
 
-None open. The questions the drafts of M22–M25, the plans after 1.0,
+None open. The questions the M31 (updates) draft raised were answered
+on 2026-10-19: updates install on request only (nothing downloads until
+the person runs Install Update); background download and install on
+quit were declined for now. The startup check becomes on by default
+(`check_updates = true`), reversing M15's default; unattended runs
+never check. Installs owned by Homebrew or a `.deb` are handed back to
+`brew` and `apt` with the command to run, not replaced.
+
+The questions the M26 (security) draft raised were answered
+on 2026-10-19:
+
+- Order: security goes first, as M26, before the git client (M27–M30)
+  and updates (M31), since updates depend on the signing key and the
+  git client on the git rule.
+- The release signing key lives on the owner's Mac with a password and
+  is used by `scripts/sign-release.sh`; it is never an Actions secret.
+- Dependencies are reviewed with `cargo vet` (imported audits, today's
+  versions exempted once), not `cargo deny` alone.
+
+The questions the drafts of M27–M30, the git window, raised
+were answered on 2026-10-18:
+
+- Order: after M25, so "Open in Editor" goes to the running Nimbus
+  through M25's hand-off; running them next, or after M22, was
+  declined.
+- M27: the commit graph is drawn with smooth, anti-aliased curves
+  through a third `render` pipeline (segments and cubic Béziers with a
+  distance shader), with a CPU twin in compatibility mode; straight
+  lines from rects and box-drawing glyphs were declined.
+- M28: discarded changes are recoverable only while the git window is
+  open (objects written, no ref); a Nimbus ref in the user's repository
+  and copies in the trash were declined.
+- M30: interactive rebase is left for a later plan of its own
+  (unscheduled in `backlog.md`), not in M30 and not ruled out.
+- The editor gets no git features of its own (no gutter change bars, no
+  staging from the editor): it keeps "Compare with HEAD" and gains only
+  "Open Git Window".
+
+The questions the drafts of M22–M25, the plans after 1.0,
 raised were answered on 2026-10-18:
 
 - Order: M22 (screen readers) first, on winit 0.30, since
@@ -617,6 +674,11 @@ raised were answered on 2026-10-18:
   `unsafe`. The owner reversed that the same day: winit 0.31.0-beta.3
   still does not pass Finder's files on, so 1.0.1 adds a small `objc2`
   open-files listener in `app`, and Open With leaves M23.
+- M23: compatibility mode (worked as Cumulus) joins the plan: when the
+  GPU fails, Nimbus switches on its own to a CPU painter over the same
+  frame lists and says so once; `--compat` forces it. A separate app
+  and a terminal editor were declined; wgpu's CPU drivers are not used
+  as a middle step; users see "compatibility mode", not Cumulus.
 - Writing prose (drafted as M24: spell checking, a word count, preview
   images, HTML export) was dropped whole; International text moved up
   from M25 to M24. The two dictionary questions fell away with it.
@@ -778,3 +840,12 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | 1.0 ships on ropey 1.6 and winit 0.30: ropey 2 and winit 0.31 are still betas, so both upgrades move to the first point release after they are stable (wgpu 30 is already current) | m21, backlog |
 | 2026-10-18 | M22–M24 approved (after 1.0): screen readers first on winit 0.30; NVDA and Orca covered by tests only; Open With only if winit 0.31 passes the files on (no new `unsafe`); the Writing prose draft dropped (spell checking, word count, preview images, HTML export), International text moved up to M24; East Asian encodings stay behind their feature | §9, m22–m24 |
 | 2026-10-18 | Finder "Open With" moves from M23 to a 1.0.1 fix with a small `objc2` open-files listener in `app` (new `unsafe` outside `render` and the mmap buffer, owner's choice), since winit 0.31.0-beta.3 still does not pass the files on | §9, m23 |
+| 2026-10-18 | M25 Command line added at the owner's request: an "Install `nimbus` Command" palette action (macOS via the system administrator prompt, no `unsafe`), opening files in the running window, `--wait` | m25, backlog |
+| 2026-10-18 | Compatibility mode (Cumulus) joins M23: an automatic CPU painter over `FrameBuilder`'s rects and glyphs, presented with `softbuffer`, with a one-time notice and `--compat`; no wgpu CPU-driver step, no separate app or terminal editor | §9, m23 |
+| 2026-10-18 | The "no git integration" non-goal is reversed for a git window: `nimbus --git [DIR]` (window mode, chosen over git inside the editor and over a separate app), git driven as a subprocess only, no git library; drafted as M27–M30 | §2, §9, m27–m30 |
+| 2026-10-18 | M27–M30 approved: after M25; the commit graph in smooth curves through a third `render` pipeline (CPU twin in compatibility mode); discards recoverable only while the git window is open; interactive rebase left for a later plan; no git features in the editor beyond Compare with HEAD and "Open Git Window" | §9, m27–m30 |
+| 2026-10-19 | The git window plans move from M26–M29 to M27–M30: the owner put the security milestone (M26) first | §8, m27–m30 |
+| 2026-10-19 | Compatibility mode keeps up with the renderer: any new GPU primitive (first, the git client's commit-graph curves in M27) is added to the CPU painter in the same change; a standing requirement in docs/milestones/README.md | m23, milestones README |
+| 2026-10-19 | M26 Security drafted at the owner's request and put before the git client (M27–M30) and updates (M31): no release has been signed yet (`minisign.pub` never committed), so the key comes first, kept on the owner's Mac and used by `scripts/sign-release.sh`, never an Actions secret; actions pinned by SHA, protected branches and `v*` tags, `cargo vet` (chosen over `cargo deny` alone), provenance, a threat model; M31 owns the update check itself | §9, m26 |
+| 2026-10-18 | M31 Updates drafted at the owner's request: Install Update downloads the release package, checks it against the `minisign`-signed `SHA256SUMS` with the key compiled in (version pinned in the trusted comment), swaps it in and restarts with the session; no new trust beyond the release key; needs `minisign.pub` committed first | §8, §9, m31 |
+| 2026-10-19 | M31: updates install on request only; the startup update check becomes on by default (`check_updates = true`), reversing M15's off default; Homebrew and `.deb` installs are handed back to their package manager | §9, m31 |
