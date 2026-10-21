@@ -3,6 +3,11 @@
 //! This file is startup: command-line options, loading the config and the
 //! files to open, and handing over to the event loop in [`app`].
 
+// A GUI program on Windows, so opening Nimbus from the Start menu or
+// Explorer shows no console window; `console.rs` keeps terminal output
+// working. Not in tests, whose output the test runner reads.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 mod access;
 mod action;
 mod app;
@@ -11,6 +16,7 @@ mod columns;
 mod compare;
 mod compare_panel;
 mod config;
+mod console;
 mod crash;
 mod debug;
 mod docs;
@@ -887,6 +893,8 @@ fn headless_context(
 
 fn main() {
     let started = Instant::now();
+    // Before any output, logging included (Windows; see console.rs).
+    console::attach();
     // Logging and argument parsing take microseconds. They come first so the
     // GPU thread's log lines are not lost and `--version` never wakes the GPU.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("nimbus=info"))
@@ -952,6 +960,12 @@ fn main() {
         std::process::exit(code);
     }
 
+    // The editor window lets go of the terminal that started it (Windows),
+    // so Ctrl+C or closing the terminal can't end it. Debug builds and
+    // `RUST_LOG` keep it, for the log lines.
+    if !options.unattended() && !cfg!(debug_assertions) && std::env::var_os("RUST_LOG").is_none() {
+        console::release();
+    }
     let mut builder = EventLoop::<AppEvent>::with_user_event();
     #[cfg(target_os = "macos")]
     {

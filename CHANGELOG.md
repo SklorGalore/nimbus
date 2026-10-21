@@ -94,6 +94,11 @@ section before tagging.
   window in the theme's colours, on every system, instead of as system
   dialogs. `Enter`, `Esc`, `Tab`, the arrow keys and each button's first
   letter answer them. File pickers stay the system's.
+- On Windows, opening Nimbus from the Start menu, Explorer or Open With
+  no longer shows an empty console window beside it. Run from a
+  terminal, `nimbus --version`, `--help` and errors still print there,
+  but the prompt comes back without waiting, as for any windowed
+  program (git still waits for `nimbus --wait`).
 
 ## 1.1.0
 
