@@ -27,6 +27,7 @@ use nimbus_core::{Buffer, LineEnding, Text};
 use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
+use crate::caption::{self, Caption, DRAWS_CAPTION};
 use crate::columns::Click;
 use crate::compare::{Compare, DiffResult, Other, Toggle};
 use crate::compare_panel;
@@ -727,10 +728,11 @@ pub struct App {
     ws: Workspace,
     /// A newer release found, an update downloading or ready (M31).
     updater: updates::Updater,
-    /// The pointer shows the resize cursor.
-    resize_cursor: bool,
-    /// The pointer is over a link in a Markdown preview (M20).
-    link_cursor: bool,
+    /// The pointer's shape: the resize arrows over a divider or the
+    /// window's edge, a hand over a link in a Markdown preview (M20).
+    cursor_icon: CursorIcon,
+    /// The Windows title bar's buttons Nimbus draws.
+    caption: Caption,
     /// Watching has started (after the first frame).
     watching: bool,
     /// A go-to-line waiting for a huge file's lines to be counted.
@@ -897,8 +899,8 @@ impl App {
             zoom_started: None,
             ws: Workspace::new(state, session_root),
             updater: updates::Updater::default(),
-            resize_cursor: false,
-            link_cursor: false,
+            cursor_icon: CursorIcon::Default,
+            caption: Caption::default(),
             watching: false,
             pending_line: None,
             recheck: Vec::new(),
@@ -987,6 +989,7 @@ impl App {
     fn gpu_ready(&mut self, mut gpu: Gpu) {
         gpu.set_tab_width(self.tab_width());
         gpu.set_ligatures(self.config.ligatures);
+        gpu.set_fallback_prefs(fallback_prefs(&self.config));
         let proxy = self.proxy.clone();
         gpu.set_font_notify(Arc::new(move || {
             let _ = proxy.send_event(AppEvent::FontLoaded);
@@ -1006,7 +1009,7 @@ impl App {
         let px = if DRAWS_TITLE_BAR && window.fullscreen().is_none() {
             TITLE_BAR_PT * scale
         } else if DRAWS_MENU_BAR {
-            menu::drawn::bar_height(gpu.metrics().line_height)
+            caption::bar_height(gpu.metrics().line_height, scale)
         } else {
             0.0
         };
@@ -1053,7 +1056,7 @@ impl App {
     /// Look up the configured editor and interface fonts again, for a new
     /// painter: the old one's fonts went with it.
     fn reload_fonts(&mut self) {
-        if !self.config.font.is_empty() {
+        if !self.config.font.is_empty() || self.config.font_weight.is_some() {
             self.load_editor_font();
         }
         if !self.config.ui_font.is_empty() {
@@ -1087,12 +1090,13 @@ impl App {
     /// swaps it in. An empty setting goes back to the bundled font at once.
     fn load_editor_font(&mut self) {
         let name = self.config.font.clone();
+        let weight = self.config.font_weight;
         if name.is_empty() {
-            if let (Some(gpu), Ok(regular)) = (self.gpu.as_mut(), Font::bundled()) {
-                gpu.set_font(nimbus_render::EditorFont {
-                    regular,
-                    bold: Font::bundled_bold().ok(),
-                });
+            if let (Some(gpu), Ok(font)) = (
+                self.gpu.as_mut(),
+                nimbus_render::bundled_editor_font(weight),
+            ) {
+                gpu.set_font(font);
             }
             return;
         }
@@ -1100,7 +1104,7 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("nimbus-font".to_owned())
             .spawn(move || {
-                let found = nimbus_render::find_editor_font(&name);
+                let found = nimbus_render::find_editor_font(&name, weight);
                 let _ = proxy.send_event(AppEvent::EditorFont(name, found));
             });
         if let Err(e) = spawned {
@@ -1123,7 +1127,7 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("nimbus-ui-font".to_owned())
             .spawn(move || {
-                let found = nimbus_render::find_editor_font(&name);
+                let found = nimbus_render::find_editor_font(&name, None);
                 let _ = proxy.send_event(AppEvent::UiFont(name, found));
             });
         if let Err(e) = spawned {
@@ -1377,9 +1381,9 @@ impl App {
             window.set_theme(Some(window_theme(&self.theme)));
             #[cfg(target_os = "windows")]
             {
-                // Windows 11 colours the title bar exactly: the tab bar's
-                // colour, so it runs on into the sidebar and the tabs.
-                // Windows 10 ignores these and keeps the light/dark bar.
+                // Nimbus draws the title bar itself (`crate::caption`);
+                // Windows 11 still draws a thin border round the window,
+                // in the theme's border colour. Windows 10 ignores this.
                 use winit::platform::windows::{Color, WindowExtWindows};
                 let rgb = |c: crate::theme::Color| {
                     let byte = |v: f32| {
@@ -1393,10 +1397,7 @@ impl App {
                     };
                     Color::from_rgb(byte(c[0]), byte(c[1]), byte(c[2]))
                 };
-                let ui = &self.theme.ui;
-                window.set_title_background_color(Some(rgb(ui.tab_bar)));
-                window.set_title_text_color(rgb(ui.text));
-                window.set_border_color(Some(rgb(ui.picker_border)));
+                window.set_border_color(Some(rgb(self.theme.ui.picker_border)));
             }
         }
     }
@@ -1651,6 +1652,7 @@ impl App {
             Command::CompareFile => self.compare_with_file(),
             Command::CompareTab => self.compare_with_tab(),
             Command::CompareHead => self.compare_with_revision("HEAD".to_owned()),
+            Command::OpenGitWindow => self.open_git_window(),
             Command::CompareRevision => {
                 if self.doc().path.is_some() {
                     self.open_picker(Kind::Revision);
@@ -2086,6 +2088,20 @@ impl App {
         }
         self.say(said, false);
         self.changed(false);
+    }
+
+    /// Start the git window (M27) for the workspace's first folder: a
+    /// process of its own, so the editor stays one window.
+    fn open_git_window(&mut self) {
+        let root = self.root.clone();
+        let args = [std::ffi::OsStr::new("--git"), root.as_os_str()];
+        match crate::git_window::start_nimbus(&args) {
+            Ok(()) => self.say(
+                format!("Opening the git window for {}", name_of(&root)),
+                false,
+            ),
+            Err(e) => self.say(format!("Cannot start the git window: {e}"), true),
+        }
     }
 
     /// Compare the active tab's file with `rev` from git, read on a worker
@@ -3186,7 +3202,9 @@ impl App {
     fn save_with(&mut self, choice: Choice) {
         let i = self.active;
         let doc = self.doc();
-        if doc.saves_on_worker() && !choice.encoding.is_utf8() {
+        if doc.saves_on_worker() && !choice.encoding.is_utf8() && !doc.is_transcoded() {
+            // A huge file read as bytes may not be text: only a decoded
+            // copy (M24) can be written in another encoding.
             self.say(
                 format!(
                     "Files over {} MB save only as UTF-8",
@@ -4166,8 +4184,9 @@ impl App {
             ));
             gpu.set_tab_width(self.config.tab_width);
             gpu.set_ligatures(self.config.ligatures);
+            gpu.set_fallback_prefs(fallback_prefs(&self.config));
         }
-        if old.font != self.config.font {
+        if old.font != self.config.font || old.font_weight != self.config.font_weight {
             self.load_editor_font();
         }
         if old.ui_font != self.config.ui_font {
@@ -4720,6 +4739,11 @@ impl App {
             return;
         };
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        // The window's own edges, buttons and title bar work even with a
+        // prompt open; an open menu closes first.
+        if !self.menus.is_open() && self.caption_press(&window, (x, y), now) {
+            return;
+        }
         if let Some(p) = self.prompts.front() {
             // Modal: a click outside its buttons does nothing.
             self.prompt_click = p.click(&window, x, y);
@@ -4738,7 +4762,9 @@ impl App {
             menu::drawn::Click::Ignored => {}
         }
         if y < 0.0 {
-            return; // the title bar: the system drags and zooms the window
+            // The title bar: the system drags and zooms the window on
+            // macOS, and `caption_press` did on Windows.
+            return;
         }
         if self.picker.is_some() {
             self.picker_click(&window, x, y);
@@ -5260,31 +5286,160 @@ impl App {
         }
     }
 
-    /// Show the resize cursor over the sidebar's divider, the usual one
-    /// elsewhere. Only tells the window when it changes.
+    /// Show the resize cursor over the sidebar's divider and the window's
+    /// edges (Windows), a hand over a link, the usual one elsewhere. Only
+    /// tells the window when it changes.
     fn update_cursor_icon(&mut self) {
         let Some(layout) = self.window_layout() else {
             return;
         };
-        let x = to_f32(self.mouse.x);
-        let resize = self.sidebar.resizing
-            || self.groups.dragging.is_some()
+        let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        let dragging = self.sidebar.resizing || self.groups.dragging.is_some();
+        let icon = if dragging
             || self.sidebar.on_divider(&layout, x)
             || (self.groups.len() > 1
-                && Groups::on_divider(&self.group_columns(&layout), x, layout.scale).is_some());
-        let link = !resize && self.over_preview_link();
-        if resize != self.resize_cursor || link != self.link_cursor {
-            self.resize_cursor = resize;
-            self.link_cursor = link;
+                && Groups::on_divider(&self.group_columns(&layout), x, layout.scale).is_some())
+        {
+            CursorIcon::ColResize
+        } else if let caption::Hit::Resize(d) = self.caption_hit(&layout, (x, y)) {
+            CursorIcon::from(d)
+        } else if self.over_preview_link() {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Default
+        };
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
             if let Some(window) = &self.window {
-                window.set_cursor(if resize {
-                    CursorIcon::ColResize
-                } else if link {
-                    CursorIcon::Pointer
-                } else {
-                    CursorIcon::Default
-                });
+                window.set_cursor(icon);
             }
+        }
+    }
+
+    /// The window's state that changes the drawn title bar.
+    fn frame(&self) -> caption::Frame {
+        self.window
+            .as_ref()
+            .map_or_else(caption::Frame::default, |w| caption::Frame {
+                maximized: w.is_maximized(),
+                fullscreen: w.fullscreen().is_some(),
+            })
+    }
+
+    /// What `at` (layout pixels) is in the window's frame: always
+    /// [`caption::Hit::None`] where the system draws the frame.
+    fn caption_hit(&self, layout: &Layout, at: (f32, f32)) -> caption::Hit {
+        if !DRAWS_CAPTION {
+            return caption::Hit::None;
+        }
+        let inset = self.gpu.as_ref().map_or(0.0, Gpu::inset_top);
+        caption::hit(
+            layout,
+            at,
+            inset,
+            self.frame(),
+            menu::drawn::titles_end(layout),
+        )
+    }
+
+    /// A left press at `at` on the window's frame: resize from an edge,
+    /// press a window button, or move the window by the bar (maximise or
+    /// restore on a double-click). Returns whether it was the frame's.
+    fn caption_press(&mut self, layout: &Layout, at: (f32, f32), now: Instant) -> bool {
+        let Some(window) = self.window.clone() else {
+            return false;
+        };
+        match self.caption_hit(layout, at) {
+            caption::Hit::Resize(direction) => {
+                if let Err(e) = window.drag_resize_window(direction) {
+                    log::debug!("window not resized: {e}");
+                }
+            }
+            caption::Hit::Button(button) => {
+                self.caption.pressed = Some(button);
+                self.caption.hover = Some(button);
+                self.changed(false);
+            }
+            caption::Hit::Caption => {
+                if self.caption.double_click(now) {
+                    window.set_maximized(!window.is_maximized());
+                } else if let Err(e) = window.drag_window() {
+                    log::debug!("window not moved: {e}");
+                }
+            }
+            caption::Hit::None => return false,
+        }
+        true
+    }
+
+    /// The left button came up: the window button it went down on, if it
+    /// is still over it (as with the system's buttons, moving off first
+    /// cancels).
+    fn caption_release(&mut self) -> Option<caption::Button> {
+        let pressed = self.caption.pressed.take()?;
+        self.changed(false);
+        let layout = self.window_layout()?;
+        let at = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        (self.caption_hit(&layout, at) == caption::Hit::Button(pressed)).then_some(pressed)
+    }
+
+    /// Do what window button `button` does. Close asks about unsaved
+    /// changes as closing always does; with a prompt already open it waits
+    /// for that answer.
+    fn caption_button(&mut self, button: caption::Button, event_loop: &ActiveEventLoop) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        match button {
+            caption::Button::Minimize => window.set_minimized(true),
+            caption::Button::Maximize => window.set_maximized(!window.is_maximized()),
+            caption::Button::Close if self.prompts.is_empty() => self.quit(event_loop),
+            caption::Button::Close => {}
+        }
+    }
+
+    /// Light the window button under the pointer.
+    fn caption_hover(&mut self) {
+        if !DRAWS_CAPTION {
+            return;
+        }
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
+        let at = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        let hover = match self.caption_hit(&layout, at) {
+            caption::Hit::Button(button) => Some(button),
+            _ => None,
+        };
+        if hover != self.caption.hover {
+            self.caption.hover = hover;
+            self.changed(false);
+        }
+    }
+
+    /// A right press: the system's window menu on the drawn title bar
+    /// (Restore, Move, Size, Minimise, Maximise, Close), else the tree's
+    /// right-click menu when no prompt is open.
+    fn right_pressed(&mut self) {
+        if let Some(layout) = self.window_layout() {
+            let at = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+            if matches!(
+                self.caption_hit(&layout, at),
+                caption::Hit::Caption | caption::Hit::Button(_)
+            ) {
+                if let Some(window) = &self.window {
+                    // Back to window coordinates, which include the bar.
+                    let inset = f64::from(self.gpu.as_ref().map_or(0.0, Gpu::inset_top));
+                    window.show_window_menu(PhysicalPosition::new(
+                        self.mouse.x,
+                        self.mouse.y + inset,
+                    ));
+                }
+                return;
+            }
+        }
+        if self.prompts.is_empty() {
+            self.tree_context_menu();
         }
     }
 
@@ -5567,15 +5722,26 @@ impl App {
             let ui = &self.theme.ui;
             draw_picker_overlay(gpu, ui, layout, p, &self.keymap, self.blink.visible);
         }
+        self.paint_chrome(gpu, layout);
+    }
+
+    /// Draw what goes over everything else: the title bar (macOS), or the
+    /// menu bar with the window's title and buttons (Windows), then an open
+    /// menu and a prompt.
+    fn paint_chrome(&self, gpu: &mut Gpu, layout: &Layout) {
         let ui = &self.theme.ui;
         if DRAWS_MENU_BAR {
             self.menus.draw_bar(gpu, ui, layout, self.window_focused);
+            if DRAWS_CAPTION {
+                let title = (self.title.as_str(), self.window_focused);
+                caption::draw(gpu, ui, layout, title, &self.caption, self.frame());
+            }
         } else {
             view::draw_title_bar(gpu, ui, layout, &self.title, self.window_focused);
         }
-        self.menus.draw_popup(gpu, &self.theme.ui, layout);
+        self.menus.draw_popup(gpu, ui, layout);
         if let Some(p) = self.prompts.front() {
-            p.draw(gpu, &self.theme.ui, layout);
+            p.draw(gpu, ui, layout);
         }
     }
 
@@ -6577,10 +6743,11 @@ fn draw_headless_picker(
 
 /// Give the window the app icon where the window itself carries one.
 ///
-/// Whether Nimbus draws the title bar itself: on macOS, where the system
-/// keeps only its window buttons and leaves the bar to the app. Windows
-/// colours its own bar instead (`sync_window_theme`); Linux leaves the
-/// decorations to the window manager, which only knows light and dark.
+/// Whether Nimbus draws the macOS title bar itself, where the system keeps
+/// only its window buttons and leaves the bar to the app. Windows has its
+/// own drawn bar, with the menus and the window buttons in it
+/// (`crate::caption`); Linux leaves the decorations to the window manager,
+/// which only knows light and dark.
 const DRAWS_TITLE_BAR: bool = cfg!(target_os = "macos");
 
 /// The height of the title bar Nimbus draws, in points: the system's own
@@ -6591,6 +6758,10 @@ pub const TITLE_BAR_PT: f32 = 28.0;
 /// bar with the title hidden: the system still draws the close, minimise
 /// and zoom buttons and still drags the window by the bar, and Nimbus
 /// paints the bar in the theme's colours (`view::draw_title_bar`).
+///
+/// On Windows, leave out the system's frame altogether but keep its
+/// shadow: Nimbus draws the title bar, its buttons and the menus in one
+/// strip, and moves and resizes the window itself (`crate::caption`).
 fn with_drawn_title_bar(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
     #[cfg(target_os = "macos")]
     {
@@ -6600,7 +6771,12 @@ fn with_drawn_title_bar(attrs: winit::window::WindowAttributes) -> winit::window
             .with_fullsize_content_view(true)
             .with_title_hidden(true)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        attrs.with_decorations(false).with_undecorated_shadow(true)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     attrs
 }
 
@@ -6737,20 +6913,45 @@ fn headless_preview(
     Some(p)
 }
 
+/// The fallback fonts the config prefers per script, and the regional
+/// forms for Han: the config's `cjk_language`, else the system's first
+/// preferred language (M24). Reading the system language is one call to
+/// the OS, fast enough for startup.
+fn fallback_prefs(config: &Config) -> nimbus_render::FallbackPrefs {
+    let system = config
+        .cjk_language
+        .is_empty()
+        .then(sys_locale::get_locale)
+        .flatten();
+    nimbus_render::FallbackPrefs {
+        fonts: config
+            .fallback_fonts
+            .iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+            .collect(),
+        cjk: config.cjk_language(system.as_deref()),
+    }
+}
+
 /// The config's tab width, ligatures and font for a headless render. With
 /// no later frame to swap a font into, a configured font is looked up
 /// before drawing.
 fn headless_fonts(gpu: &mut Gpu, config: &Config) {
     gpu.set_tab_width(config.tab_width);
     gpu.set_ligatures(config.ligatures);
+    gpu.set_fallback_prefs(fallback_prefs(config));
     if !config.font.is_empty() {
-        match nimbus_render::find_editor_font(&config.font) {
+        match nimbus_render::find_editor_font(&config.font, config.font_weight) {
             Some(f) => gpu.set_font(f),
             None => log::warn!("font {:?} not found; using the bundled font", config.font),
         }
+    } else if config.font_weight.is_some()
+        && let Ok(f) = nimbus_render::bundled_editor_font(config.font_weight)
+    {
+        gpu.set_font(f);
     }
     if !config.ui_font.is_empty() {
-        match nimbus_render::find_editor_font(&config.ui_font) {
+        match nimbus_render::find_editor_font(&config.ui_font, None) {
             Some(f) => gpu.set_ui_font(Some(f)),
             None => log::warn!(
                 "interface font {:?} not found; using the editor font",
@@ -6780,7 +6981,7 @@ fn headless_gpu(
     };
     headless_fonts(&mut gpu, config);
     if options.menu.is_some() {
-        let bar = menu::drawn::bar_height(gpu.metrics().line_height);
+        let bar = caption::bar_height(gpu.metrics().line_height, to_f32(scale));
         gpu.set_inset_top(bar);
     } else if options.title_bar {
         gpu.set_inset_top(TITLE_BAR_PT * to_f32(scale));
@@ -7055,6 +7256,15 @@ fn draw_headless_chrome(
             menus.open_bar(i, layout, &keymap, true);
         }
         menus.draw_bar(gpu, ui, layout, true);
+        let title = format!("{name} — Nimbus");
+        caption::draw(
+            gpu,
+            ui,
+            layout,
+            (&title, true),
+            &Caption::default(),
+            caption::Frame::default(),
+        );
         menus.draw_popup(gpu, ui, layout);
     } else {
         view::draw_title_bar(gpu, ui, layout, &format!("{name} — Nimbus"), true);
@@ -7454,6 +7664,7 @@ impl App {
         // of the content, below the title bar Nimbus draws on macOS.
         position.y -= f64::from(self.gpu.as_ref().map_or(0.0, Gpu::inset_top));
         self.mouse = position;
+        self.caption_hover();
         if self.menus.is_open() {
             if let Some(layout) = self.window_layout() {
                 let at = (to_f32(position.x), to_f32(position.y));
@@ -7826,7 +8037,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.sync_watch();
             self.update_started();
             // A configured font, looked up once the first frame is up.
-            if !self.config.font.is_empty() {
+            if !self.config.font.is_empty() || self.config.font_weight.is_some() {
                 self.load_editor_font();
             }
             if !self.config.ui_font.is_empty() {
@@ -7913,7 +8124,8 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
 
             WindowEvent::CursorLeft { .. } => {
-                if self.sidebar.search.hover_gone() {
+                let button = self.caption.hover.take().is_some();
+                if self.sidebar.search.hover_gone() || button {
                     self.changed(false);
                 }
             }
@@ -7936,6 +8148,9 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 } else {
                     self.left_released();
+                    if let Some(button) = self.caption_release() {
+                        self.caption_button(button, event_loop);
+                    }
                 }
             }
 
@@ -7943,7 +8158,7 @@ impl ApplicationHandler<AppEvent> for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
                 ..
-            } if self.prompts.is_empty() => self.tree_context_menu(),
+            } => self.right_pressed(),
 
             WindowEvent::MouseWheel { delta, .. } if self.prompts.is_empty() => {
                 self.mouse_wheel(delta);

@@ -44,6 +44,13 @@ jobs:
       # would need changing, so CI never resolves a newer crate by itself.
       - run: cargo clippy --workspace --all-targets --locked
       - run: cargo test --workspace --locked
+      # The East Asian encodings (M24) are behind a feature that is off by
+      # default (DESIGN.md §9); test them with it on, against the fixtures
+      # in crates/app/tests/fixtures/east-asian. One OS is enough: the
+      # tables are encoding_rs's, the same everywhere.
+      - name: Test the East Asian encodings
+        if: runner.os == 'Linux'
+        run: cargo test -p nimbus --features east-asian --locked -- east_asian encod
       # The fuzz targets (fuzz/, outside the workspace) run weekly on
       # nightly (fuzz.yml); type-check them here so a core API change
       # that breaks them shows up on the pull request. Stable is enough

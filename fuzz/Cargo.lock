@@ -1013,6 +1013,7 @@ dependencies = [
  "encoding_rs",
  "libfuzzer-sys",
  "log",
+ "memchr",
  "nimbus-core",
  "nimbus-render",
  "nimbus-syntax",
@@ -1024,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "nimbus-render"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "bytemuck",
  "fontdb",

@@ -8,6 +8,16 @@ section before tagging.
 
 ### Added
 
+- A git window (M27): `nimbus --git [DIR]`, or **Open Git Window** in
+  the palette and View menu, opens a window of its own for the
+  repository: your staged, unstaged and untracked changes, the whole
+  history newest first with its branches drawn as smooth curves, and any
+  commit's message, files and differences in the compare view (merge
+  commits against either parent). It reads only, runs your own `git`
+  with hooks, filesystem monitors and lazy fetches turned off, keeps up
+  as you commit or edit, and opens a file in the running editor with
+  **Open in Editor**. See the manual's new [git window](docs/manual/git.md)
+  chapter.
 - **Install nimbus Command in PATH** in the command palette puts a
   `nimbus` command on your `PATH`: a link in `/usr/local/bin` on macOS
   (asking for your password through macOS when needed), in
@@ -61,6 +71,24 @@ section before tagging.
   (`gh attestation verify FILE --repo SklorGalore/nimbus`), and the
   release binaries carry their dependency list (`cargo audit bin`).
 
+- Chinese, Japanese, Korean, Thai, Indic and other scripts are drawn
+  with a font made for their script (M24): a built-in list per platform
+  (PingFang, Hiragino, Microsoft YaHei, Noto Sans CJK and others), with
+  your own picks first from a new `[fallback_fonts]` table
+  (`han = ["Hiragino Sans"]`). Wide characters are scaled to fit their
+  two cells, so mixed lines stay on the grid.
+- `cjk_language = "ja" | "zh-Hans" | "zh-Hant" | "ko"` picks the
+  regional shapes of Han characters (`骨` looks Japanese to a Japanese
+  reader). By default it follows the system language.
+- `font_weight` (100 to 900) sets the weight of a variable font, or picks
+  the nearest weight of a font family; bold text is drawn 300 heavier.
+- A file of 256 MB or more in another known encoding (Windows-1252,
+  UTF-16, Shift_JIS...) opened with **Reopen with Encoding** or
+  `[encodings]` is now editable instead of read-only: Nimbus decodes it
+  into a private temporary copy and saves back in its encoding.
+- Each East Asian encoding (behind the `east-asian` build feature) has a
+  test file that round-trips, and CI tests with the feature on.
+
 ### Changed
 
 - **The update check at startup is now on by default**
@@ -83,8 +111,12 @@ section before tagging.
   pass `cargo vet`.
 - The title bar takes the theme's colours. On macOS Nimbus draws it,
   in the tab bar's colour with the title centred, and the system keeps
-  only its window buttons; on Windows 11 the system bar is coloured to
-  match; elsewhere it follows the theme's light or dark.
+  only its window buttons. On Windows Nimbus draws the whole title bar:
+  the menus, the title and its own minimise, maximise and close buttons
+  share one strip in the theme's colours. Dragging it moves the window
+  and snaps it to the screen's edges, a double-click maximises, a
+  right-click opens the window menu, and the window's edges resize it.
+  On Linux it follows the theme's light or dark.
 - Nimbus draws the Windows menu bar (File, Edit, ...) and its drop-down
   menus itself, in the theme's colours; `F10` opens it from the keyboard.
   Right-click menus in the file tree are drawn by Nimbus on every
@@ -94,6 +126,14 @@ section before tagging.
   window in the theme's colours, on every system, instead of as system
   dialogs. `Enter`, `Esc`, `Tab`, the arrow keys and each button's first
   letter answer them. File pickers stay the system's.
+- On Windows, opening Nimbus from the Start menu, Explorer or Open With
+  no longer shows an empty console window beside it. Run from a
+  terminal, `nimbus --version`, `--help` and errors still print there,
+  but the prompt comes back without waiting, as for any windowed
+  program (git still waits for `nimbus --wait`).
+- The update check's HTTPS no longer trusts the emSign certificate
+  authorities, which browsers distrusted (RUSTSEC-2026-0381 and
+  RUSTSEC-2026-0382; `rustls-webpki` 0.103.16, `webpki-roots` 1.0.11).
 
 ## 1.1.0
 

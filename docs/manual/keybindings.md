@@ -126,6 +126,7 @@ These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
 | Compare with HEAD | `diff.compareHead` | — | — |
 | Compare with Revision… | `diff.compareRevision` | — | — |
 | Compare Folders… | `diff.compareFolders` | — | — |
+| Open Git Window | `git.openWindow` | — | — |
 | Ignore Whitespace (Off, Ends, All) | `diff.ignoreWhitespace` | — | — |
 | Ignore Case in Compare | `diff.ignoreCase` | — | — |
 | Ignore Blank Lines in Compare | `diff.ignoreBlankLines` | — | — |

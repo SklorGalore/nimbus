@@ -194,6 +194,10 @@ pub struct Opened {
     /// The rest of a mapped file's line counting, for a worker; `None` when
     /// it was all done at open (or for a rope).
     pub indexing: Option<crate::indexer::Indexing>,
+    /// A huge file in another encoding, decoded into a private UTF-8 copy
+    /// that `mapping` maps (M24): the document never reads the file it is
+    /// named after, and saves encode back into `encoding`.
+    pub transcoded: bool,
 }
 
 /// Why a file could not be opened.
@@ -395,7 +399,26 @@ fn open_decoded(
     backend: Backend,
 ) -> Result<Opened, OpenError> {
     if backend == Backend::Mapped {
-        return open_read_only(path, file, encoding);
+        let started = Instant::now();
+        return match transcode(&file, encoding, skip) {
+            Ok(opened) => {
+                log::debug!(
+                    "open: {} decoded from {} into a private UTF-8 copy in {:?}",
+                    path.display(),
+                    encoding.name(),
+                    started.elapsed()
+                );
+                Ok(opened)
+            }
+            Err(e) => {
+                // No room for the copy, most likely: still show the file.
+                log::warn!(
+                    "open: cannot decode {} into a copy ({e}); read-only",
+                    path.display()
+                );
+                open_read_only(path, file, encoding)
+            }
+        };
     }
     let started = Instant::now();
     let opened = decode_rope(&file, encoding, skip).map_err(OpenError::Io)?;
@@ -407,10 +430,156 @@ fn open_decoded(
     Ok(opened)
 }
 
+/// Decode a huge `file` in `encoding` (after `skip` bytes of byte order
+/// mark) into a private UTF-8 copy in the system's temporary folder, and
+/// map the copy as the document (M24).
+///
+/// M17 left such files read-only: converting one in memory would hold all
+/// of it, and editing its bytes as UTF-8 would mix two encodings in one
+/// file. A copy on disk costs neither: the decoding streams a block at a
+/// time (the same [`Decoding`] reader a rope uses), the copy's lines are
+/// counted as it is written, and from then on the document is an ordinary
+/// mapped UTF-8 document, with M7's piece table, undo and search. Saving
+/// encodes it back into `encoding` beside the real file and renames it
+/// over, never touching the copy (`Document::begin_save`).
+///
+/// The copy costs disk space: about the file's size for single-byte
+/// encodings with mostly ASCII text, up to one and a half times for East
+/// Asian text (two bytes become three) or twice for UTF-16. On Unix its
+/// name is removed as soon as it is created, so it vanishes when the
+/// document closes, even after a crash; on Windows, which cannot remove a
+/// file that is open, it is deleted when the document lets go of it.
+///
+/// # Errors
+///
+/// Returns the error from creating, writing or mapping the copy, for
+/// example when the temporary folder's disk is full. Nothing is left
+/// behind then.
+fn transcode(file: &fs::File, encoding: Encoding, skip: usize) -> std::io::Result<Opened> {
+    let (temp, mut out) = private_temp()?;
+    #[cfg(unix)]
+    let remove_later: Option<PathBuf> = {
+        // Open and nameless from here: the space is freed on close.
+        fs::remove_file(&temp)?;
+        None
+    };
+    #[cfg(not(unix))]
+    let remove_later = Some(temp.clone());
+    let written = write_decoded(file, encoding, skip, &mut out);
+    let (index, lossy) = match written {
+        Ok(done) => done,
+        Err(e) => {
+            drop(out);
+            if let Some(temp) = &remove_later {
+                let _ = fs::remove_file(temp);
+            }
+            return Err(e);
+        }
+    };
+    let mapped = match MappedFile::new(out) {
+        Ok(m) => m,
+        Err(e) => {
+            if let Some(temp) = &remove_later {
+                let _ = fs::remove_file(temp);
+            }
+            return Err(e);
+        }
+    };
+    let mapped = Arc::new(match remove_later {
+        Some(temp) => mapped.delete_on_drop(temp),
+        None => mapped,
+    });
+    let mut sample = vec![0; mapped.len().min(LINE_ENDING_SAMPLE)];
+    mapped.read_at(0, &mut sample)?;
+    let line_ending = LineEnding::detect([&sample]);
+    let source: Arc<dyn Source> = mapped.clone();
+    let buffer = MappedBuffer::with_index(source, index, Limits::default())
+        .map_err(std::io::Error::other)?;
+    Ok(Opened {
+        buffer: buffer.into(),
+        line_ending,
+        bom: skip > 0,
+        encoding,
+        lossy,
+        read_only: None,
+        mapping: Some(mapped),
+        indexing: None,
+        transcoded: true,
+    })
+}
+
+/// Decode `file` from `encoding`, after `skip` bytes, into `out` as UTF-8,
+/// a block at a time, counting its lines on the way. Returns the finished
+/// line index and whether any bytes were not valid in `encoding` (they
+/// become U+FFFD).
+fn write_decoded(
+    file: &fs::File,
+    encoding: Encoding,
+    skip: usize,
+    out: &mut fs::File,
+) -> std::io::Result<(nimbus_core::line_index::LineIndex, bool)> {
+    use nimbus_core::line_index::{LineIndex, Scanner};
+    let mut input = file;
+    input.seek(SeekFrom::Start(skip as u64))?;
+    let mut decoder = encoding.decoder();
+    let mut block = vec![0; DECODE_BLOCK];
+    let mut text = String::new();
+    let mut scanner = Scanner::default();
+    loop {
+        let n = input.read(&mut block)?;
+        let last = n == 0;
+        text.clear();
+        decoder.decode(&block[..n], last, &mut text);
+        scanner.feed(text.as_bytes());
+        out.write_all(text.as_bytes())?;
+        if last {
+            break;
+        }
+    }
+    out.flush()?;
+    scanner.finish();
+    let mut index = LineIndex::new();
+    index
+        .merge(scanner.take_chunk())
+        .map_err(std::io::Error::other)?;
+    Ok((index, decoder.lossy()))
+}
+
+/// A new file in the system's temporary folder that only this user can
+/// read, open for reading and writing. `create_new` never opens a file
+/// someone else put at the name.
+///
+/// # Errors
+///
+/// Returns the error from creating the file, or from the last name tried.
+fn private_temp() -> std::io::Result<(PathBuf, fs::File)> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir();
+    let mut last = std::io::Error::other("no temporary name was free");
+    for _ in 0..16 {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("nimbus-decoded-{}-{n}.txt", std::process::id()));
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = e,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last)
+}
+
 /// Map a huge `file` known to be in `encoding` (by its byte order mark or
-/// an explicit choice) as bytes, read-only: converting it would mean
-/// holding all of it in memory (DESIGN.md §9, M17), and editing its bytes
-/// as UTF-8 would mix two encodings in one file.
+/// an explicit choice) as bytes, read-only: the fallback when it cannot be
+/// decoded into a copy ([`transcode`]), for example with the temporary
+/// folder's disk full.
 fn open_read_only(path: &Path, file: fs::File, encoding: Encoding) -> Result<Opened, OpenError> {
     let mut opened = open_mapped(file)?;
     let name = path.file_name().map_or_else(
@@ -459,6 +628,7 @@ fn decode_rope(file: &fs::File, encoding: Encoding, skip: usize) -> std::io::Res
         read_only: None,
         mapping: None,
         indexing: None,
+        transcoded: false,
     })
 }
 
@@ -530,6 +700,7 @@ fn read_rope(file: &fs::File, limit: u64) -> std::io::Result<Option<Opened>> {
         read_only: None,
         mapping: None,
         indexing: None,
+        transcoded: false,
     }))
 }
 
@@ -550,6 +721,7 @@ fn open_bytes(mut bytes: Vec<u8>) -> Opened {
         read_only: None,
         mapping: None,
         indexing: None,
+        transcoded: false,
     }
 }
 
@@ -589,6 +761,7 @@ fn open_mapped(file: fs::File) -> Result<Opened, OpenError> {
         read_only: None,
         mapping: Some(mapped),
         indexing,
+        transcoded: false,
     })
 }
 
@@ -1358,25 +1531,45 @@ mod tests {
     }
 
     #[test]
-    fn huge_files_in_known_encodings_open_read_only_as_bytes() {
+    fn huge_files_in_known_encodings_open_decoded_and_editable() {
         let dir = TempDir::new("huge-enc");
         let utf16 = dir.0.join("u16.log");
-        fs::write(&utf16, b"\xFF\xFEa\x00").unwrap();
+        fs::write(&utf16, b"\xFF\xFEa\x00\n\x00").unwrap();
         let opened = open_with(&utf16, 0, None).unwrap();
-        assert!(opened.buffer.is_mapped());
+        assert!(opened.buffer.is_mapped() && opened.transcoded && opened.bom);
         assert_eq!(opened.encoding, Encoding::Utf16Le);
-        assert!(opened.read_only.as_deref().unwrap().contains("read-only"));
+        assert_eq!(opened.read_only, None);
+        assert_eq!(opened.buffer.slice(0..opened.buffer.len_bytes()), "a\n");
         let chosen = dir.0.join("w.log");
         fs::write(&chosen, b"caf\xe9 au lait\n").unwrap();
         let opened = open_full(&chosen, 0, None, Some(encoding::WINDOWS_1252)).unwrap();
         assert_eq!(opened.encoding, encoding::WINDOWS_1252);
-        assert!(opened.read_only.is_some());
+        assert!(opened.transcoded && opened.read_only.is_none() && !opened.lossy);
+        assert_eq!(
+            opened.buffer.slice(0..opened.buffer.len_bytes()),
+            "café au lait\n"
+        );
+        assert!(opened.buffer.is_fully_indexed());
         // A guess keeps M7's editable byte path; UTF-8 stays editable too.
         let guessed = open_with(&chosen, 0, None).unwrap();
         assert!(guessed.read_only.is_none() && guessed.encoding.is_utf8());
+        assert!(!guessed.transcoded);
         let fine = dir.0.join("fine.log");
         fs::write(&fine, "café\n").unwrap();
         assert!(open_with(&fine, 0, None).unwrap().read_only.is_none());
+    }
+
+    #[test]
+    fn decoding_a_huge_file_counts_its_lines_and_notes_bad_bytes() {
+        let dir = TempDir::new("huge-utf16-bad");
+        let path = dir.0.join("odd.txt");
+        // "a\nb" then half a UTF-16 unit.
+        fs::write(&path, b"\xFF\xFEa\x00\n\x00b\x00\x00").unwrap();
+        let opened = open_with(&path, 0, None).unwrap();
+        assert!(opened.transcoded && opened.lossy);
+        let text = opened.buffer.slice(0..opened.buffer.len_bytes());
+        assert_eq!(text, "a\nb\u{fffd}");
+        assert_eq!(opened.buffer.len_lines(), 2);
     }
 
     /// `cargo test --release -p nimbus -- --ignored --nocapture encoding_open_bench`

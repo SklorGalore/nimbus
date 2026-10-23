@@ -1,6 +1,6 @@
 # M27 — Git window: viewing
 
-**Status: planned (2026-10-18).** The first of four plans (M27–M30) for a
+**Status: built (2026-10-19); in progress until checked on a Mac with a GPU (see Results).** Planned 2026-10-18. The first of four plans (M27–M30) for a
 git client built from Nimbus's own parts, written at the owner's request
 after a feasibility study
 showed that the hard half (diff, merge, text) already exists.
@@ -19,36 +19,36 @@ files and diffs, fast on very large repositories.
 
 ## Done when
 
-- [ ] **Opening**: `nimbus --git` opens the repository holding the
+- [x] **Opening**: `nimbus --git` opens the repository holding the
       current folder, `nimbus --git DIR` the one holding `DIR`; "Open Git
       Window" in the editor's palette and View menu opens one for the
       workspace's first root. Outside a repository, or with no `git` on
       `PATH`, the window says so in plain words (the `GitError` messages
       from `app/git.rs`) instead of failing. The title is
       "*repo* — Git — Nimbus".
-- [ ] **Layout**: a sidebar on the left (Changes, Branches, Remotes,
+- [x] **Layout**: a sidebar on the left (Changes, Branches, Remotes,
       Tags, Stashes), the history in the middle, and the selected
       commit's details on the right: hash, author, dates, full message,
       changed files, and the compare view for the selected file. Panes
       resize by dragging, as the editor's sidebar does.
-- [ ] **Changes**: selecting Changes lists staged and unstaged files
+- [x] **Changes**: selecting Changes lists staged and unstaged files
       (added, modified, deleted, renamed, conflicted, untracked) and
       shows each file's diff against the index or HEAD in the compare
       view, highlighted. Read-only in M27; staging arrives in M28.
-- [ ] **History**: every commit reachable from all branches and tags,
+- [x] **History**: every commit reachable from all branches and tags,
       newest first, with a graph of smooth, anti-aliased branch lines
       (curves where a branch forks or joins) in the left of each row,
       the subject, author, relative date and ref labels. Selecting a
       branch, tag or remote in the sidebar scrolls to its commit.
-- [ ] **Commit details**: a commit's changed files are listed (renames
+- [x] **Commit details**: a commit's changed files are listed (renames
       shown as old → new), and selecting one shows its diff against the
       first parent in the compare view, with the M18 diff options
       (ignore whitespace, case, blank lines). Merge commits pick the
       parent to compare against.
-- [ ] **Open in Nimbus**: double-clicking a file, or "Open in Editor",
+- [x] **Open in Nimbus**: double-clicking a file, or "Open in Editor",
       opens the working copy in the Nimbus editor that is already
       running, through M25's hand-off (which lands first).
-- [ ] **Live**: committing, checking out or editing files from a
+- [x] **Live**: committing, checking out or editing files from a
       terminal or the editor updates the window within a second, by
       watching `.git` and the working tree.
 - [ ] **Budgets**: first frame under 500 ms in release (git is never
@@ -171,4 +171,59 @@ history without reloading it.
 
 ## Results
 
-_To be filled in when the milestone lands._
+Built 2026-10-19 in a cloud container with no GPU: everything below was
+drawn in compatibility mode (`--headless --compat`); the GPU curve
+pipeline is only validated (naga parses the shader, and a test checks
+it flattens curves like the CPU painter) until it runs on the owner's
+Mac.
+
+| Measure | Result |
+|---|---|
+| 1,000,000-commit repository (`bench/gen.sh git`), open | 22 ms (`rev-parse` and the version check) |
+| First screen of history | 7 ms after open (the HEAD preview, below) |
+| Whole history, first rows / all rows | 3.1 s / 16 s, on a worker, with the first screen showing meanwhile |
+| History memory | 78 bytes a commit, 117 with subjects |
+| Release binary (Linux) | 29.5 MB (budget 35 MB) |
+| First frame, scrolling frame times | Not measured: needs the Mac (`--smoke`, and scrolling the 1M history) |
+
+Run the history numbers with `bench/gen.sh git` and
+`NIMBUS_GIT_REPO=$PWD/bench/out/git-1m cargo test --release -p nimbus --bin nimbus -- --ignored --nocapture git_history_bench`.
+
+What differs from the plan, and surprises:
+
+- **A window of its own, not the editor's `App`.** The git window is a
+  second winit handler, `GitApp` in `app/git_window.rs`, that reuses the
+  renderer, theme, config, key bindings (it interprets the editor's own
+  commands: Up, Down, Next Tab, Copy, Next Change…), the compare view,
+  languages and highlighting, and the watcher. Fitting a different root
+  layout into the editor's 7,000-line `App` would have touched most of
+  it for no gain. Only one action is new: `git.openWindow`.
+- **git walks to the oldest tip before printing a date-ordered log.**
+  With one tip, `git log --date-order` streams at once; with every
+  branch and tag, git first walks down to the oldest starting commit
+  (an old tag such as `v1`), which on the bench repository took 3 s
+  before the first line, over the 1 s budget. So the window first loads
+  HEAD's newest 2,000 commits (7 ms), then the whole history behind it,
+  and swaps it in once it has as many rows; the top right reads
+  "Reading history…" until then.
+- **Refresh reloads instead of appending.** When a branch or tag moves,
+  the history is read again in the background and swapped in when it
+  has caught up, keeping the selection and the row at the top; telling
+  "new commits on top" from "a branch was reset" reliably costs more
+  than reading again.
+- **Lanes cap at 32.** Commits further right draw on a grey overflow
+  lane, as the plan's risk table suggested.
+- **Not yet for screen readers.** The git window does not build an
+  AccessKit tree; M22's description covers the editor only. Left for a
+  later milestone.
+
+To check on the Mac:
+
+- The graph's curves and dots on the GPU look like the compatibility
+  mode screenshots (`nimbus --git` in this repository), at 1x and 2x.
+- `--smoke` first frame of `nimbus --git` and of the editor (the editor
+  draws through the new pipeline too, with zero segments).
+- Scrolling the 1M history (`nimbus --git bench/out/git-1m`) with the
+  F12 overlay on: frame times stay flat.
+- Open in Editor hands the file to a running editor; committing from a
+  terminal updates the window within a second.

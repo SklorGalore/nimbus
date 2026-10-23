@@ -40,7 +40,7 @@ we did not, slowly. CI runs each target for an hour every week
 | `highlight` | Every bundled grammar parses arbitrary text and edits without crashing, and its highlight spans are sorted, apart, in bounds and on character boundaries; Markdown's block outline stays in bounds | none beyond those properties: tree-sitter may recover from broken input differently after an edit |
 | `encoding` | Every offered encoding decodes and encodes the same in pieces as at once, and text that encodes decodes back (UTF-8, UTF-16, Latin-1, single-byte tables) | decoding the whole input at once |
 | `workspace` | Workspace files never crash the reader, write back to the same file after one round, and workspace names stay in `workspaces/` | the file it wrote |
-| `git_output` | git's error text and its config listing (`--show-scope --list`) are read without panics, and the repository-filter check follows its rule | the rule, re-read plainly |
+| `git_output` | git's error text and its config listing (`--show-scope --list`) are read without panics, and the repository-filter check follows its rule; the git window's parsers (status, log, refs, diff-tree, cat-file, commit objects) never panic, and log records split anywhere read the same | the rule, re-read plainly; the records fed whole |
 
 `config`, `theme`, `encoding`, `workspace` and `git_output` compile the
 app's own source files in with `#[path]`, since the app crate is a binary

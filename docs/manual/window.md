@@ -254,6 +254,39 @@ colour is the theme's `hidden_char`.
 The scrollbar fades out a second after you stop scrolling, and comes back
 when you scroll or point at it.
 
+## International text
+
+Nimbus draws its text in one monospace font (Hack, or your `font`).
+When a character is not in it, as with Chinese, Japanese, Korean,
+Devanagari, Thai or emoji, Nimbus finds a system font that has it, a
+moment after the character first appears (it shows as a box until then).
+How that font is chosen:
+
+1. Each character's **script** (Han, kana, Hangul, Cyrillic, Devanagari,
+   ...) comes from Unicode. Punctuation and symbols with no script of
+   their own, such as `。` and `ー`, take the script of the text around
+   them, so a sentence comes from one font.
+2. The fonts in your `[fallback_fonts]` list for that script are tried
+   first, then a built-in list for your system: Hiragino and PingFang on
+   macOS, Yu Gothic, Microsoft YaHei and Malgun Gothic on Windows, Noto
+   CJK and Source Han on Linux, and the system's fonts for Indian scripts,
+   Thai and others.
+3. If none of those has it, the smallest installed font that does is
+   used, preferring colour fonts for emoji.
+
+Chinese characters are shared by Chinese, Japanese and Korean, which
+draw many of them differently: `骨` has a different stroke in Japanese
+and Chinese. `cjk_language` in the [settings](settings.md) picks which
+(by default your system's language).
+
+Each character keeps its place on the grid: East Asian characters take
+two columns, everything else one, and a character drawn wider than its
+columns is drawn smaller to fit rather than pushing the text after it.
+Text in scripts whose letters join or reorder, such as Devanagari, is
+shaped by its font one character cell at a time, so it reads correctly
+but small. Right-to-left scripts (Arabic, Hebrew) and vertical text are
+not supported.
+
 ## Sticky scroll and the minimap
 
 **Sticky scroll** keeps your place in a long file. When the line that
@@ -307,6 +340,14 @@ has Open Recent, Reopen Closed Tab, Reopen Last Session, Save with Encoding and 
 same commands as the keys and the palette, and show your current
 shortcuts, including ones you changed in the config. Linux has no menu
 bar; the command palette lists every command instead.
+
+On Windows the menus share one strip at the top with the window's title
+and its minimise, maximise and close buttons, all drawn by Nimbus in the
+theme's colours. Drag the strip to move the window (to a screen edge or
+corner to snap it), double-click it to maximise or restore, and
+right-click it for the window menu. Drag any edge or corner of the window
+to resize it. Windows 11's snap layouts appear with `Win+Z` rather than
+by hovering over the maximise button.
 
 ## Groups: tabs side by side
 
