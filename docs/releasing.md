@@ -12,6 +12,10 @@ released code.
    (`[workspace.package]`), run `cargo build` so `Cargo.lock` follows,
    and move the `CHANGELOG.md` "Unreleased" notes under a heading for
    that version. Only release fixes go on this branch from here on.
+   That section becomes the GitHub release notes, followed by install
+   and verify instructions the workflow adds; CI fails a pull request
+   into `main` whose `CHANGELOG.md` has no heading for its version, and
+   the release workflow stops before building if the tag has none.
 3. Open a pull request from `release/X.Y.Z` into `main`. Merge it once
    CI passes.
 4. Tag the merge commit on `main` with that version, such as `v1.1.0`,
