@@ -53,14 +53,6 @@ section before tagging.
   messages such as "Saved" spoken as they appear. Nothing is built
   until a screen reader asks. The manual has a new Accessibility
   chapter.
-- The release signing key, `minisign.pub`, is in the repository and
-  printed in the README, so `SHA256SUMS.minisig` can be checked.
-- `scripts/publish-packages.ps1` puts a signed, published release in the
-  Homebrew tap and pushes its Chocolatey package, with the hashes taken
-  from the signed `SHA256SUMS`.
-- The README and manual say how to install with Homebrew
-  (`brew install --cask sklorgalore/nimbus/nimbus`) and Chocolatey
-  (`choco install nimbus`).
 - Bidirectional control characters and zero-width characters are drawn
   as a red box, even with whitespace rendering off, so text whose
   display order differs from its bytes ("Trojan Source") cannot hide.
@@ -143,6 +135,19 @@ section before tagging.
 - The update check's HTTPS no longer trusts the emSign certificate
   authorities, which browsers distrusted (RUSTSEC-2026-0381 and
   RUSTSEC-2026-0382; `rustls-webpki` 0.103.16, `webpki-roots` 1.0.11).
+
+## 1.2.0
+
+### Added
+
+- The release signing key, `minisign.pub`, is in the repository and
+  printed in the README, so `SHA256SUMS.minisig` can be checked.
+- `scripts/publish-packages.sh` puts a signed, published release in the
+  Homebrew tap and opens its winget pull request, with the hashes taken
+  from the signed `SHA256SUMS`.
+- The README and manual say how to install with Homebrew
+  (`brew install --cask sklorgalore/nimbus/nimbus`) and winget
+  (`winget install SklorGalore.Nimbus`).
 
 ## 1.1.0
 
