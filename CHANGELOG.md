@@ -56,11 +56,11 @@ section before tagging.
 - The release signing key, `minisign.pub`, is in the repository and
   printed in the README, so `SHA256SUMS.minisig` can be checked.
 - `scripts/publish-packages.sh` puts a signed, published release in the
-  Homebrew tap and opens its winget pull request, with the hashes taken
+  Homebrew tap and pushes its Chocolatey package, with the hashes taken
   from the signed `SHA256SUMS`.
 - The README and manual say how to install with Homebrew
-  (`brew install --cask sklorgalore/nimbus/nimbus`) and winget
-  (`winget install SklorGalore.Nimbus`).
+  (`brew install --cask sklorgalore/nimbus/nimbus`) and Chocolatey
+  (`choco install nimbus`).
 - Bidirectional control characters and zero-width characters are drawn
   as a red box, even with whitespace rendering off, so text whose
   display order differs from its bytes ("Trojan Source") cannot hide.
