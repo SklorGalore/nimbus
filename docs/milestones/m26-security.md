@@ -54,7 +54,7 @@ What is missing, found while writing this plan:
       `minisign.pub` is committed and also printed in the README and the
       manual; 1.0.x's `SHA256SUMS` are checked against the packages and
       signed after the fact; each new release is signed by
-      `scripts/sign-release.sh` on the owner's Mac (the key file is
+      `scripts/sign-release.ps1` on the owner's Mac (the key file is
       passworded and never leaves it, with an offline backup), whose
       trusted comment is `Nimbus X.Y.Z SHA256SUMS`, the form M31 reads.
       A written plan covers a lost or leaked key (`docs/security.md`).
@@ -126,7 +126,7 @@ lands, a signature is what makes every Nimbus install itself. Signing
 locally keeps a GitHub account or workflow compromise from producing an
 update Nimbus will accept. The flow becomes: tag on the Mac (as now),
 the workflow builds the draft and `SHA256SUMS` (as now, minus the
-signing step), then `scripts/sign-release.sh vX.Y.Z` downloads the
+signing step), then `scripts/sign-release.ps1 vX.Y.Z` downloads the
 draft's packages, recomputes every hash, compares them with
 `SHA256SUMS`, signs it with the trusted comment M31 expects, uploads
 `SHA256SUMS.minisig`, and only then does the owner publish. The key is
@@ -202,7 +202,7 @@ the git rule above.
 ## Tasks
 
 1. Key: generate, commit `minisign.pub`, check and sign 1.0.0 and 1.0.1
-   by hand; `scripts/sign-release.sh`; drop the signing step from
+   by hand; `scripts/sign-release.ps1`; drop the signing step from
    `release.yml`; `docs/releasing.md` and README updated.
 2. Workflows: SHA pins, `permissions` blocks, pinned `appimagetool`
    with its hash, `--locked` everywhere, a `release` environment;

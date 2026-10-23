@@ -41,7 +41,7 @@ keep `development`'s own version if it is higher.
 The packaging steps are `scripts/bundle-macos.ps1`,
 `scripts/dmg-macos.ps1`, `scripts/deb-linux.ps1`,
 `scripts/appimage-linux.ps1`, `packaging/windows/nimbus.iss` and
-`scripts/manifests.sh`. The app icon is drawn by `scripts/make-icons.py`.
+`scripts/manifests.ps1`. The app icon is drawn by `scripts/make-icons.py`.
 
 The release key is a minisign key made on the owner's Mac with a
 password (`minisign -G`). Its public half is `minisign.pub` at the
@@ -54,8 +54,8 @@ Once the workflow has attached everything to the draft, sign it from
 a checkout on the Mac:
 
 ```sh
-scripts/sign-release.sh vX.Y.Z            # key in ~/.minisign/minisign.key
-scripts/sign-release.sh vX.Y.Z PATH/TO/minisign.key
+scripts/sign-release.ps1 vX.Y.Z           # key in ~/.minisign/minisign.key
+scripts/sign-release.ps1 vX.Y.Z PATH/TO/minisign.key
 ```
 
 It downloads the packages and `SHA256SUMS`, refuses to sign unless
@@ -64,6 +64,8 @@ packages on the release, signs (minisign asks for the password), checks
 the signature against `minisign.pub`, and uploads
 `SHA256SUMS.minisig`. A release that already has a signature is left
 alone. Needs `gh` (signed in) and `minisign` (`brew install minisign`).
+Like every script here it runs under PowerShell 7 (`brew install
+powershell`).
 
 The trusted comment must be exactly `Nimbus X.Y.Z SHA256SUMS`: the
 updater (M31) reads the version from it. The script also signs an already
@@ -84,9 +86,9 @@ Once the release is signed and published, put it in the package
 managers from the same checkout:
 
 ```sh
-scripts/publish-packages.sh vX.Y.Z --dry-run   # print the cask and Chocolatey scripts only
-scripts/publish-packages.sh vX.Y.Z             # publish both, after asking
-scripts/publish-packages.sh vX.Y.Z --only homebrew   # or --only chocolatey
+scripts/publish-packages.ps1 vX.Y.Z --dry-run  # print the cask and Chocolatey scripts only
+scripts/publish-packages.ps1 vX.Y.Z            # publish both, after asking
+scripts/publish-packages.ps1 vX.Y.Z --only homebrew   # or --only chocolatey
 ```
 
 It downloads `SHA256SUMS` and `SHA256SUMS.minisig`, refuses to go on
@@ -120,5 +122,5 @@ work, shows the files, and asks before sending anything. Then:
   workflow, with the tag.
 
 Running it again for a version already published changes nothing.
-Needs `gh` (signed in), `minisign`, `curl` and `unzip`. `--dry-run` also works on
-a draft, to look at the files before publishing.
+Needs `gh` (signed in) and `minisign`. `--dry-run` also works on a
+draft, to look at the files before publishing.

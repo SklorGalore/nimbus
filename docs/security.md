@@ -79,7 +79,7 @@ replace its hash too, but cannot make a signature without the key.
   release, and once M31 lands a signature is what makes every Nimbus
   install itself.
 - The release workflow builds the packages and `SHA256SUMS` into a draft;
-  `scripts/sign-release.sh vX.Y.Z` on the Mac downloads them, checks
+  `scripts/sign-release.ps1 vX.Y.Z` on the Mac downloads them, checks
   every hash and that the list is exact, signs with the trusted comment
   `Nimbus X.Y.Z SHA256SUMS` (the form M31 reads), verifies against
   `minisign.pub` and uploads `SHA256SUMS.minisig`. Only then is the

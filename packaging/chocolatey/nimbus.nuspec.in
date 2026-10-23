@@ -2,7 +2,7 @@
 <!--
   Chocolatey package for Nimbus. The release workflow fills in the
   version (.github/workflows/chocolatey.yml) and packs it with
-  `choco pack`; scripts/publish-packages.sh checks the packed files
+  `choco pack`; scripts/publish-packages.ps1 checks the packed files
   against these templates and the signed SHA256SUMS, then pushes it to
   the Chocolatey community repository.
 

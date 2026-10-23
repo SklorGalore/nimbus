@@ -131,7 +131,7 @@ crate with no dependencies by minisign's author, measured for size) and
 added.
 
 **Prerequisite: the signing key.** M26 (security) makes the key, keeps
-it on the owner's Mac with `scripts/sign-release.sh`, and commits
+it on the owner's Mac with `scripts/sign-release.ps1`, and commits
 `minisign.pub`; that, and one release signed with it, has to be done
 before task 3 can be tested end to end. Where the
 secret key lives, its backup, rotation and revocation, and the signing
@@ -220,7 +220,7 @@ untried on real machines._
   a list so a rotated key can sit beside the old one). `verify_sums`
   refuses a version that is not newer, a signature no trusted key made,
   and a trusted comment other than exactly `Nimbus X.Y.Z SHA256SUMS`;
-  only prehashed (`ED`) signatures, which is what `sign-release.sh`
+  only prehashed (`ED`) signatures, which is what `sign-release.ps1`
   makes. Its tests use the owner's real v1.0.0 and v1.0.1 signatures
   (copied into `update/testdata`) and a throwaway test key
   (`make-fixtures.py` makes it and the fake release).

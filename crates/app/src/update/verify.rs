@@ -7,7 +7,7 @@
 //!   together, so a checksum alone proves nothing about who made them.
 //! - A **signature** says the owner made the list. Each release's
 //!   `SHA256SUMS` is signed with `minisign` on the owner's Mac
-//!   (`scripts/sign-release.sh`, M26); the matching public key,
+//!   (`scripts/sign-release.ps1`, M26); the matching public key,
 //!   `minisign.pub` at the root of the repository, is compiled into this
 //!   binary. A changed file, a changed list or a list signed by any
 //!   other key is refused.
@@ -148,7 +148,7 @@ pub fn verify_sums(
         let key = PublicKey::decode(key).map_err(|_| VerifyError::Malformed("built-in key"))?;
         // Prehashed ("ED") signatures only, which minisign has made by
         // default since 0.8; the legacy kind signs the whole file and is
-        // not what scripts/sign-release.sh produces.
+        // not what scripts/sign-release.ps1 produces.
         if key.verify(sums, &signature, false).is_ok() {
             signed = true;
             break;

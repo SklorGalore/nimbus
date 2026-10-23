@@ -1,6 +1,6 @@
 # Homebrew cask for Nimbus. The release workflow fills in the version and
 # the published .dmg's SHA-256 and attaches the result to the release as
-# nimbus.rb; scripts/publish-packages.sh puts it in the tap
+# nimbus.rb; scripts/publish-packages.ps1 puts it in the tap
 # (SklorGalore/homebrew-nimbus, under Casks/nimbus.rb), so
 # `brew install --cask sklorgalore/nimbus/nimbus` installs it.
 #

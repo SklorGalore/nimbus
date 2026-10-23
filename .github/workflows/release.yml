@@ -27,7 +27,7 @@
 #                                       SHA256SUMS (chocolatey.yml)
 #   SHA256SUMS                          each package's SHA-256, made last
 #   SHA256SUMS.minisig                  its signature, added afterwards by
-#                                       scripts/sign-release.sh on the
+#                                       scripts/sign-release.ps1 on the
 #                                       owner's Mac (docs/releasing.md)
 #
 # Hardening (M26, docs/security.md): every token starts read-only and each
@@ -219,7 +219,7 @@ jobs:
   # manifests take their hashes from the same files.
   #
   # SHA256SUMS is signed afterwards on the owner's Mac by
-  # scripts/sign-release.sh, never here: a key in GitHub would let anyone
+  # scripts/sign-release.ps1, never here: a key in GitHub would let anyone
   # who can run a workflow sign an update (M26, docs/security.md).
   checksums:
     name: SHA256SUMS and manifests
@@ -252,7 +252,7 @@ jobs:
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
           cd ..
-          scripts/manifests.sh "$version" dist
+          scripts/manifests.ps1 "$version" dist
           gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS dist/nimbus.rb \
             --repo "$GITHUB_REPOSITORY" --clobber
 
