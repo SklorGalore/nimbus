@@ -111,7 +111,7 @@ owner's Apple M5 Pro.
 |---|---|---|
 | Scroll frame on the 10 MB file, queueing time p50 (`m20_scroll_bench`): neither / sticky / minimap / both | under 1 ms added | 490 µs / 551 µs / 678 µs / 720 µs: both add 0.23 ms |
 | Preview layout of a 1 MB document after an edit (`m20_preview_bench`) | under 50 ms, off the main thread | Mac: median 28.1 ms (min 27.8), first layout 60.3 ms. Container: 76–82 ms, first 190 ms |
-| `--smoke` on the Mac (`bench/smoke.sh`) | under 500 ms warm, unchanged | warm median 119.2 ms (114.7–122.2), cold 706.1 ms after a purge; in line with M19's 115–150 ms warm. The first frame looks up no fonts unless `ui_font` is set, and the preview starts nothing until opened |
+| `--smoke` on the Mac (`bench/smoke.ps1`) | under 500 ms warm, unchanged | warm median 119.2 ms (114.7–122.2), cold 706.1 ms after a purge; in line with M19's 115–150 ms warm. The first frame looks up no fonts unless `ui_font` is set, and the preview starts nothing until opened |
 | Release binary (Linux) | under 35 MB | 26.4 MB; no new dependency |
 
 How the preview number breaks down: about 45 ms reads the blocks from

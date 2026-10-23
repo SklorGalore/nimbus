@@ -32,16 +32,34 @@ regex-syntax = "0.8"
 # link against), so they need that source's dependencies. Optional, so the
 # core targets build without wgpu and the tree-sitter grammars.
 dirs = { version = "7", optional = true }
+# The encoding target (app-encoding) and git target (app-git) compile those
+# app files in the same way.
+encoding_rs = { version = "0.8.42", optional = true }
+log = { version = "0.4.34", optional = true }
+# The git window's parsers (app-git) split git's output with it.
+memchr = { version = "2.8.3", optional = true }
 nimbus-render = { path = "../crates/render", optional = true }
 nimbus-syntax = { path = "../crates/syntax", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 toml = { version = "1", optional = true }
 
 [features]
-# `cargo fuzz run config --features app-config`
-app-config = ["dep:dirs", "dep:serde", "dep:toml"]
+# `cargo fuzz run config --features app-config`. config.rs checks the
+# `[fallback_fonts]` keys and `cjk_language` against nimbus-render (M24).
+app-config = ["dep:dirs", "dep:nimbus-render", "dep:serde", "dep:toml"]
 # `cargo fuzz run theme --features app-theme`
-app-theme = ["app-config", "dep:nimbus-render", "dep:nimbus-syntax"]
+app-theme = ["app-config", "dep:nimbus-syntax"]
+# `cargo fuzz run highlight --features syntax`: every bundled grammar.
+syntax = ["dep:nimbus-syntax"]
+# `cargo fuzz run encoding --features app-encoding`, East Asian encodings
+# included (the app's `east-asian` feature, spelled the same here so the
+# compiled-in encoding.rs sees it).
+app-encoding = ["dep:encoding_rs", "east-asian"]
+east-asian = []
+# `cargo fuzz run workspace --features app-workspace`
+app-workspace = ["app-config", "dep:log"]
+# `cargo fuzz run git_output --features app-git`
+app-git = ["dep:log", "dep:memchr"]
 
 [[bin]]
 name = "buffer"
@@ -86,3 +104,35 @@ test = false
 doc = false
 bench = false
 required-features = ["app-theme"]
+
+[[bin]]
+name = "highlight"
+path = "fuzz_targets/highlight.rs"
+test = false
+doc = false
+bench = false
+required-features = ["syntax"]
+
+[[bin]]
+name = "encoding"
+path = "fuzz_targets/encoding.rs"
+test = false
+doc = false
+bench = false
+required-features = ["app-encoding"]
+
+[[bin]]
+name = "workspace"
+path = "fuzz_targets/workspace.rs"
+test = false
+doc = false
+bench = false
+required-features = ["app-workspace"]
+
+[[bin]]
+name = "git_output"
+path = "fuzz_targets/git_output.rs"
+test = false
+doc = false
+bench = false
+required-features = ["app-git"]

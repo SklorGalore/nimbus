@@ -53,6 +53,13 @@ minimap_slider = "#8a93a633"
 whitespace = "#6b738566"
 guide = "#2f3440"
 guide_active = "#4f5668"
+hidden_char = "#f2736b80"
+graph_1 = "#fabf4c"
+graph_2 = "#8fb4e8"
+graph_3 = "#98c379"
+graph_4 = "#e06c9f"
+graph_5 = "#56b6c2"
+graph_6 = "#b48ead"
 
 [syntax]
 attribute = "#56b6c2"

@@ -162,7 +162,7 @@ instead of no colours (added after the milestone; DESIGN.md §4.2).
   `view.rs` into the theme. The dark theme matches the old constants to
   8 bits.
 - `--theme NAME` overrides the config, for headless checks.
-- `scripts/clippy-cross.sh` runs the Linux and Windows clippy checks from
+- `scripts/clippy-cross.ps1` runs the Linux and Windows clippy checks from
   macOS: grammars are C, and macOS has no C toolchain for those targets.
 
 **Concepts**

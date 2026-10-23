@@ -10,7 +10,7 @@ Nimbus; the steps below get past the warning once.
 | System | What to download | Notes |
 |---|---|---|
 | macOS 11 or later | the `.dmg` (or the `.zip`) | Drag `Nimbus.app` to Applications. The first time, right-click it and choose Open, or run `xattr -d com.apple.quarantine /Applications/Nimbus.app`. With Homebrew, `brew install --cask sklorgalore/nimbus/nimbus` installs it and puts `nimbus` on your `PATH` (from v1.1.0). |
-| Windows | `nimbus-VERSION-windows-x86_64-setup.exe` | SmartScreen says "Windows protected your PC": click "More info", then "Run anyway". The installer adds a Start Menu entry and, if you tick it, "Open with Nimbus" to the right-click menu of files and folder backgrounds. It does not put `nimbus.exe` on your `PATH`. The `.zip` holds the bare `nimbus.exe` if you prefer no installer. With winget, `winget install SklorGalore.Nimbus` runs the same installer (from v1.1.0). |
+| Windows | `nimbus-VERSION-windows-x86_64-setup.exe` | SmartScreen says "Windows protected your PC": click "More info", then "Run anyway". The installer adds a Start Menu entry and, if you tick it, "Open with Nimbus" to the right-click menu of files and folder backgrounds. It does not put `nimbus.exe` on your `PATH`. The `.zip` holds the bare `nimbus.exe` if you prefer no installer. With Chocolatey, `choco install nimbus` in an administrator terminal runs the same installer for all users (from v1.2.0). |
 | Debian, Ubuntu | `nimbus_VERSION_amd64.deb` | `sudo apt install ./nimbus_VERSION_amd64.deb` puts `nimbus` in `/usr/bin` and adds a menu entry. |
 | Other Linux | the `.AppImage`, or the tarball | Make the AppImage executable and run it (it needs FUSE). The tarball is the bare binary: put `nimbus` on your `PATH`, and copy `nimbus.desktop` to `~/.local/share/applications` and `nimbus.png` to `~/.local/share/icons` for a menu entry. |
 
@@ -21,17 +21,28 @@ Nimbus from source.
 ### Using Nimbus from a terminal
 
 Everything in this manual that starts with `nimbus` is typed in a
-terminal. On Linux with the `.deb` the command is already there. On macOS
-the program inside the app is
-`/Applications/Nimbus.app/Contents/MacOS/nimbus`; to type just `nimbus`,
-link it into a folder on your `PATH`, for example:
+terminal. To make the command available, open the command palette
+(`Cmd+Shift+P` / `Ctrl+Shift+P`) and run **Install nimbus Command in PATH**:
 
-```sh
-ln -s /Applications/Nimbus.app/Contents/MacOS/nimbus /usr/local/bin/nimbus
-```
+- **macOS**: it links `/usr/local/bin/nimbus` to the program inside the
+  app. If that folder needs an administrator, macOS asks for your
+  password in its own window; Nimbus never sees it.
+- **Linux**: it links `~/.local/bin/nimbus`. If that folder is not on
+  your `PATH` yet, the message line says so; add it in your shell's
+  profile.
+- **Windows**: it adds the folder holding `nimbus.exe` to your own
+  `PATH`. Terminals opened afterwards find `nimbus`.
 
-On Windows, run `nimbus.exe` from the folder it was installed to, or add
-that folder to your `PATH`.
+The command is a link to Nimbus, not a copy, so it keeps working after
+an update. Homebrew and the `.deb` already put `nimbus` on your `PATH`;
+the action then just says so. If something else is already at the
+link's place, Nimbus asks before replacing it. **Uninstall nimbus
+Command** takes the link (or the `PATH` entry) away again, and leaves
+anything that is not Nimbus's alone.
+
+With Nimbus already open, `nimbus FILE` opens the file as a tab in that
+window and brings it to the front; see
+[One window](command-line.md#one-window).
 
 ## Opening files and folders
 
@@ -131,7 +142,11 @@ Sessions, recent files and the window's position are kept in
   unsaved changes.
 - **Close**: `Cmd+W` / `Ctrl+W` closes a tab, asking first if it has
   unsaved changes (Save, Don't Save, Cancel). Closing the last tab quits.
-  `Cmd+Q` / `Ctrl+Q` quits, asking about each unsaved tab.
+  `Cmd+Q` / `Ctrl+Q` quits, asking about each unsaved tab. Questions like
+  this one open inside the window, in the theme's colours: `Enter` presses
+  the highlighted button, `Esc` cancels, `Tab` or the arrow keys move
+  between buttons, and a button's first letter presses it (`D` for Don't
+  Save).
 - **Settings**: run "Open Config File" from the palette. See
   [Settings](settings.md).
 

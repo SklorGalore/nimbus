@@ -81,8 +81,8 @@ The tree can create, rename and remove files:
 | Move to Trash | `Delete`; also `Cmd+Backspace` on macOS | Moves the selected file or folder to the system's trash (the Recycle Bin on Windows), where you can restore it from. |
 | Reveal in Finder / Explorer / File Manager | (palette, menu) | Shows the selected item in your system's file manager. On Linux it opens the folder holding it. With the sidebar hidden, it reveals the active tab's file. |
 
-On macOS and Windows, **right-click** a row for a menu with all five. On
-Linux there is no context menu; run the commands from the palette.
+**Right-click** a row for a menu with all five, or run them from the
+palette.
 
 - A new file or folder goes into the selected folder, or next to the
   selected file, or at the top of the project when nothing is selected.
@@ -148,6 +148,11 @@ Nimbus remembers one per project folder by itself (see
   to `.gitignore` unless the project should share it. Opening a folder
   that has one, when this computer has no session for it yet, shows a
   note offering **Open Project Workspace**. It never loads by itself.
+  Because the file comes with whatever you cloned or unpacked, Open
+  Project Workspace opens only what is inside that project: folders and
+  files elsewhere (an absolute path, `../`, or a link pointing out of the
+  project) are skipped, and the message line says how many. Use **Save
+  Workspace As…** for a workspace whose folders are in several places.
 
 A workspace file holds the folders, the sidebar's mode, the folders open
 in the tree, the editor groups and the tabs. Settings stay in
@@ -155,7 +160,7 @@ in the tree, the editor groups and the tabs. Settings stay in
 
 ```toml
 # A Nimbus workspace: its folders and the files it had open.
-roots = [".", "/Users/me/src/shared-lib"]
+roots = [".", "vendor/shared-lib"]
 mode = "files"
 expanded = ["src"]
 
@@ -235,8 +240,52 @@ never. Toggle Indent Guides draws a thin line at each indentation level,
 brighter for the level around the cursor. Both start from
 `render_whitespace` and `indent_guides` in the [settings](settings.md).
 
+Characters that would otherwise draw as nothing are always shown as a
+red box in their cell, whatever the whitespace setting: the controls
+that reorder right-to-left and left-to-right text (U+202A–202E,
+U+2066–2069, U+200E, U+200F, U+061C) and zero-width characters such as
+the zero-width space (U+200B), word joiner (U+2060), a byte order mark
+inside the text (U+FEFF) and the soft hyphen (U+00AD). Code can use them
+to read differently from what it does (the "Trojan Source" trick), or
+to make two names that look the same differ. The zero-width joiner and
+non-joiner are not marked, since emoji and many scripts need them. The
+colour is the theme's `hidden_char`.
+
 The scrollbar fades out a second after you stop scrolling, and comes back
 when you scroll or point at it.
+
+## International text
+
+Nimbus draws its text in one monospace font (Hack, or your `font`).
+When a character is not in it, as with Chinese, Japanese, Korean,
+Devanagari, Thai or emoji, Nimbus finds a system font that has it, a
+moment after the character first appears (it shows as a box until then).
+How that font is chosen:
+
+1. Each character's **script** (Han, kana, Hangul, Cyrillic, Devanagari,
+   ...) comes from Unicode. Punctuation and symbols with no script of
+   their own, such as `。` and `ー`, take the script of the text around
+   them, so a sentence comes from one font.
+2. The fonts in your `[fallback_fonts]` list for that script are tried
+   first, then a built-in list for your system: Hiragino and PingFang on
+   macOS, Yu Gothic, Microsoft YaHei and Malgun Gothic on Windows, Noto
+   CJK and Source Han on Linux, and the system's fonts for Indian scripts,
+   Thai and others.
+3. If none of those has it, the smallest installed font that does is
+   used, preferring colour fonts for emoji.
+
+Chinese characters are shared by Chinese, Japanese and Korean, which
+draw many of them differently: `骨` has a different stroke in Japanese
+and Chinese. `cjk_language` in the [settings](settings.md) picks which
+(by default your system's language).
+
+Each character keeps its place on the grid: East Asian characters take
+two columns, everything else one, and a character drawn wider than its
+columns is drawn smaller to fit rather than pushing the text after it.
+Text in scripts whose letters join or reorder, such as Devanagari, is
+shaped by its font one character cell at a time, so it reads correctly
+but small. Right-to-left scripts (Arabic, Hebrew) and vertical text are
+not supported.
 
 ## Sticky scroll and the minimap
 
@@ -281,11 +330,24 @@ otherwise. Files over 16 MB are not previewed.
 ## Menus
 
 On macOS and Windows, Nimbus has a menu bar: File, Edit, Selection, View
-and Help (and the Nimbus application menu on macOS). The File menu also
+and Help (and the Nimbus application menu on macOS). On Windows Nimbus
+draws it, and its menus, in the theme's colours: `F10` opens it from the
+keyboard, the arrow keys move between items and menus, `Enter` runs an
+item, a letter runs the first item starting with it, and `Esc` or a
+click elsewhere closes it. A menu taller than the window scrolls: with
+the mouse wheel, the arrow keys, or the ▲ and ▼ at its ends. The File menu also
 has Open Recent, Reopen Closed Tab, Reopen Last Session, Save with Encoding and Reopen with Encoding. The menus run the
 same commands as the keys and the palette, and show your current
 shortcuts, including ones you changed in the config. Linux has no menu
 bar; the command palette lists every command instead.
+
+On Windows the menus share one strip at the top with the window's title
+and its minimise, maximise and close buttons, all drawn by Nimbus in the
+theme's colours. Drag the strip to move the window (to a screen edge or
+corner to snap it), double-click it to maximise or restore, and
+right-click it for the window menu. Drag any edge or corner of the window
+to resize it. Windows 11's snap layouts appear with `Win+Z` rather than
+by hovering over the maximise button.
 
 ## Groups: tabs side by side
 

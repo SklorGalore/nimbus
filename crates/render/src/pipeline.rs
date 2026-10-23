@@ -1,8 +1,10 @@
-//! The two instanced pipelines: solid rectangles and textured glyph quads.
+//! The three instanced pipelines: solid rectangles, anti-aliased curve
+//! segments (the git graph's lines and dots, M27) and textured glyph quads.
 //!
 //! **Instancing**: each pipeline draws with one call of "4 vertices × N
 //! instances". The GPU runs the vertex shader 4·N times; each run reads the
-//! per-instance struct (a [`RectInstance`] or [`GlyphInstance`]) and builds
+//! per-instance struct (a [`RectInstance`], [`SegmentInstance`] or
+//! [`GlyphInstance`]) and builds
 //! one corner of a quad from the vertex index. So a rectangle or a glyph costs
 //! one small struct, not four vertices, and a whole screen of text is a
 //! single draw call.
@@ -16,7 +18,7 @@
 use std::marker::PhantomData;
 use std::ops::Range;
 
-use crate::atlas::Atlas;
+use crate::atlas::GpuPages;
 
 /// One solid rectangle in physical pixels, origin top left.
 #[repr(C)]
@@ -28,6 +30,35 @@ pub struct RectInstance {
     pub size: [f32; 2],
     /// Straight (not premultiplied) RGBA, each 0 to 1.
     pub color: [f32; 4],
+}
+
+/// One stroked cubic Bézier segment, in physical pixels with the origin top
+/// left: a line or curve of the git graph.
+///
+/// A cubic Bézier runs from `p0` to `p3`, pulled towards `p1` as it leaves
+/// `p0` and towards `p2` as it arrives at `p3`, so `p1` and `p2` set the
+/// directions it starts and ends in. That one shape covers everything the
+/// graph needs: a straight line is a cubic whose control points lie on it
+/// (see [`crate::Gpu::push_line`]), a dot is a cubic with all four points at
+/// the centre (see [`crate::Gpu::push_dot`]), and a lane change is an S with
+/// `p1` straight below `p0` and `p2` straight above `p3`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SegmentInstance {
+    /// Start point.
+    pub p0: [f32; 2],
+    /// First control point: the curve leaves `p0` heading towards it.
+    pub p1: [f32; 2],
+    /// Second control point: the curve arrives at `p3` from its direction.
+    pub p2: [f32; 2],
+    /// End point.
+    pub p3: [f32; 2],
+    /// Straight (not premultiplied) RGBA, each 0 to 1, like [`RectInstance`].
+    pub color: [f32; 4],
+    /// Stroke width in pixels; a dot's diameter.
+    pub width: f32,
+    /// Unused; keeps the struct a multiple of 16 bytes.
+    pub pad: [f32; 3],
 }
 
 /// One glyph quad. `size` equals the bitmap size and `pos` is whole pixels,
@@ -54,10 +85,17 @@ pub struct GlyphInstance {
 /// as it is, rather than tinting a coverage mask with the text colour.
 pub const GLYPH_COLOR: u32 = 1;
 
-const _: () = assert!(size_of::<RectInstance>() == 32 && size_of::<GlyphInstance>() == 52);
+const _: () = assert!(
+    size_of::<RectInstance>() == 32
+        && size_of::<SegmentInstance>() == 64
+        && size_of::<GlyphInstance>() == 52
+);
 
 const RECT_ATTRS: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
+const SEGMENT_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Float32
+];
 const GLYPH_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Uint32
 ];
@@ -79,12 +117,15 @@ struct GlobalsUniform {
     /// 1.0 when the target is sRGB (`--linear-blend`): the shaders turn
     /// colours into linear light before blending. 0.0 otherwise.
     linear: f32,
-    pad: f32,
+    /// Pixels at the top of the window kept for a title bar the app draws
+    /// (see [`crate::Gpu::set_inset_top`]): positions shift down by this.
+    top: f32,
 }
 
 /// Group 0: data every shader reads: the viewport size, which the shaders
-/// need to turn pixel positions into clip-space positions, and whether
-/// colours are blended in linear light.
+/// need to turn pixel positions into clip-space positions, the top inset
+/// they shift positions down by, and whether colours are blended in linear
+/// light.
 pub(crate) struct Globals {
     buffer: wgpu::Buffer,
     linear: bool,
@@ -133,11 +174,11 @@ impl Globals {
         clippy::cast_precision_loss,
         reason = "surface sizes are far below 2^24, exact in f32"
     )]
-    pub(crate) fn set_viewport(&self, queue: &wgpu::Queue, width: u32, height: u32) {
+    pub(crate) fn set_viewport(&self, queue: &wgpu::Queue, width: u32, height: u32, top: f32) {
         let u = GlobalsUniform {
             viewport: [width as f32, height as f32],
             linear: if self.linear { 1.0 } else { 0.0 },
-            pad: 0.0,
+            top,
         };
         queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&u));
     }
@@ -191,7 +232,7 @@ impl<T: bytemuck::Pod> InstanceBuffer<T> {
             self.capacity = cap;
             log::debug!("{} instance buffer grown to {cap}", self.label);
         }
-        // Instance structs are 32 or 52 bytes, so the 4-byte copy alignment holds.
+        // Instance structs are 32, 52 or 64 bytes, so the 4-byte copy alignment holds.
         queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(data));
         self.len = len;
     }
@@ -294,6 +335,58 @@ impl RectPipeline {
     }
 }
 
+/// Draws [`SegmentInstance`]s: a quad around each curve whose fragment
+/// shader turns the distance to the curve into anti-aliased coverage (see
+/// `shaders/segment.wgsl`).
+pub(crate) struct SegmentPipeline {
+    pipeline: wgpu::RenderPipeline,
+    pub(crate) instances: InstanceBuffer<SegmentInstance>,
+}
+
+impl SegmentPipeline {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        globals: &Globals,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/segment.wgsl"));
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("segment"),
+            bind_group_layouts: &[Some(&globals.layout)],
+            immediate_size: 0,
+        });
+        Self {
+            pipeline: create_pipeline(
+                device,
+                "segment",
+                &shader,
+                &layout,
+                instance_layout::<SegmentInstance>(&SEGMENT_ATTRS),
+                format,
+            ),
+            // The graph's visible rows make a few hundred at most.
+            instances: InstanceBuffer::new(device, "segments", 256),
+        }
+    }
+
+    /// Draw the instances in `range` (indices into this frame's upload).
+    pub(crate) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        globals: &Globals,
+        range: Range<u32>,
+    ) {
+        let range = range.start.min(self.instances.len)..range.end.min(self.instances.len);
+        if range.is_empty() {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &globals.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.instances.slice());
+        pass.draw(0..4, range);
+    }
+}
+
 /// Draws [`GlyphInstance`]s, sampling coverage or colour from the atlas.
 pub(crate) struct GlyphPipeline {
     pipeline: wgpu::RenderPipeline,
@@ -305,7 +398,7 @@ impl GlyphPipeline {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         globals: &Globals,
-        atlas: &Atlas,
+        atlas: &GpuPages,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/glyph.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -331,7 +424,7 @@ impl GlyphPipeline {
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         globals: &Globals,
-        atlas: &Atlas,
+        atlas: &GpuPages,
         range: Range<u32>,
     ) {
         let range = range.start.min(self.instances.len)..range.end.min(self.instances.len);
@@ -350,6 +443,7 @@ impl GlyphPipeline {
 pub(crate) struct Pipelines {
     pub(crate) globals: Globals,
     pub(crate) rect: RectPipeline,
+    pub(crate) segment: SegmentPipeline,
     pub(crate) glyph: GlyphPipeline,
 }
 
@@ -370,6 +464,17 @@ mod tests {
     #[test]
     fn rect_shader_is_valid_wgsl() {
         validate(include_str!("shaders/rect.wgsl"));
+    }
+
+    #[test]
+    fn segment_shader_is_valid_wgsl() {
+        validate(include_str!("shaders/segment.wgsl"));
+    }
+
+    #[test]
+    fn segment_shader_flattens_like_the_cpu_painter() {
+        let decl = format!("const PIECES: u32 = {}u;", crate::segment::SEGMENT_PIECES);
+        assert!(include_str!("shaders/segment.wgsl").contains(&decl));
     }
 
     #[test]

@@ -103,7 +103,7 @@ after M25, with five answers; on 2026-10-19 they moved up one number when the ow
 | Hot keys the desktop grabs on Linux (a manual note) | Unscheduled | M22 |
 | Spell checking, images in the Markdown preview, export to HTML | M14, M20 | Declined (owner, 2026-10-18); below |
 | Font fallback per script, variable fonts | M16 | M24 |
-| East Asian encodings, transcoding mapped files | M17 | M24 (encodings tested but still behind `east-asian`; mapped files: single-byte encodings only) |
+| East Asian encodings, transcoding mapped files | M17 | M24 (encodings tested but still behind `east-asian`; huge files in any known encoding are decoded into a copy and editable) |
 
 ## Unscheduled
 
@@ -132,8 +132,7 @@ left is small or still speculative.
 - **Spell checking, a word count, images in the Markdown preview,
   exporting it to HTML or PDF**: drafted as M24 (Writing prose) and
   dropped by the owner on 2026-10-18 as not worth it.
-- **Vertical text, editable mapped files in multi-byte encodings** (M24
-  deferred).
+- **Vertical text** (M24 deferred).
 
 ## Still non-goals
 

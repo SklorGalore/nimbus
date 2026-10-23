@@ -27,7 +27,7 @@ fn rss() -> usize {
 #[ignore = "measurement"]
 fn tree_bytes_per_source_byte() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/out/src-10mb.rs");
-    let src = std::fs::read_to_string(path).expect("run bench/gen.sh first");
+    let src = std::fs::read_to_string(path).expect("run bench/gen.ps1 first");
     let buf = RopeBuffer::from_text(&src);
     drop(src);
     // Load the grammar and query outside the measurement.

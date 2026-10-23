@@ -373,11 +373,17 @@ impl Encoder {
                     match result {
                         encoding_rs::EncoderResult::InputEmpty => break,
                         encoding_rs::EncoderResult::OutputFull => {}
-                        encoding_rs::EncoderResult::Unmappable(ch) => {
-                            // The character counts as read.
+                        encoding_rs::EncoderResult::Unmappable(_) => {
+                            // The character counts as read, so it is the
+                            // last one read. It is taken from the text
+                            // rather than from the result: ISO-2022-JP
+                            // reports its escape characters (ESC, SO, SI)
+                            // as U+FFFD, whose length is not theirs (found
+                            // by the `encoding` fuzz target, M26).
+                            let ch = rest[..read].chars().next_back().unwrap_or('\u{FFFD}');
                             return Err(Unmappable {
                                 ch,
-                                at: done - ch.len_utf8(),
+                                at: done.saturating_sub(ch.len_utf8()),
                             });
                         }
                     }
@@ -543,6 +549,16 @@ mod tests {
             assert_eq!(err, expected, "{e:?}");
         }
         assert!(encode(Encoding::Utf16Le, text).is_ok());
+        // ISO-2022-JP cannot write its own escape character, and reports it
+        // as U+FFFD; the error still names the character and its offset.
+        let jis = Encoding::Other(encoding_rs::ISO_2022_JP);
+        assert_eq!(
+            encode(jis, "m\u{1b}\u{1b}").unwrap_err(),
+            Unmappable {
+                ch: '\u{1b}',
+                at: 1
+            }
+        );
     }
 
     #[test]

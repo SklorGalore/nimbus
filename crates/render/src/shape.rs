@@ -226,6 +226,7 @@ impl Shaper {
             .ctx
             .builder(font.face())
             .size(size_px)
+            .normalized_coords(font.coords())
             .features(features)
             .build();
         shaper.add_str(text);
@@ -245,6 +246,85 @@ impl Shaper {
             }
         });
     }
+}
+
+/// One glyph of a grapheme shaped on its own with a fallback font: its id
+/// and its offset from the grapheme's pen position, in pixels (y up).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClusterGlyph {
+    /// Glyph id in the fallback font.
+    pub id: u16,
+    /// Offset right from where the grapheme starts.
+    pub dx: f32,
+    /// Offset up from the baseline.
+    pub dy: f32,
+}
+
+impl Shaper {
+    /// Shape one grapheme the editor font lacks with the fallback `font`
+    /// that has it (M24), as `script` written in `language`, writing its
+    /// glyphs to `out` (cleared first). Returns its advance, or `None` if
+    /// the font lacks part of it after all.
+    ///
+    /// Shaping matters for scripts whose letters change shape or order
+    /// with their neighbours: a Devanagari grapheme such as `स्ते` is
+    /// several glyphs, positioned by the font's rules, not one per
+    /// character. The language picks regional forms: told Japanese, a
+    /// font with a `locl` feature for Japanese draws `骨` the Japanese
+    /// way. Default-ignorable characters the font has no glyph for (a
+    /// zero-width joiner, a variation selector) are left out rather than
+    /// drawn as boxes.
+    pub fn shape_cluster(
+        &mut self,
+        font: &Font,
+        size_px: f32,
+        text: &str,
+        (script, language): (swash::text::Script, Option<swash::text::Language>),
+        out: &mut Vec<ClusterGlyph>,
+    ) -> Option<f32> {
+        out.clear();
+        let mut shaper = self
+            .ctx
+            .builder(font.face())
+            .size(size_px)
+            .script(script)
+            .language(language)
+            .normalized_coords(font.coords())
+            .build();
+        shaper.add_str(text);
+        let mut pen = 0.0_f32;
+        let mut ok = true;
+        shaper.shape_with(|cluster| {
+            let source = text
+                .get(cluster.source.start as usize..cluster.source.end as usize)
+                .unwrap_or("");
+            for glyph in cluster.glyphs {
+                if glyph.id == 0 {
+                    if source.chars().all(is_default_ignorable) {
+                        continue;
+                    }
+                    ok = false;
+                }
+                out.push(ClusterGlyph {
+                    id: glyph.id,
+                    dx: pen + glyph.x,
+                    dy: glyph.y,
+                });
+                pen += glyph.advance;
+            }
+        });
+        (ok && !out.is_empty()).then_some(pen)
+    }
+}
+
+/// Characters that draw nothing on their own and only steer their
+/// neighbours: joiners and variation selectors.
+#[must_use]
+pub fn is_default_ignorable(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x200B..=0x200F | 0x2060..=0x2064 | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF | 0x034F
+    )
 }
 
 /// Place raw shaper glyphs on the column grid: each grapheme at its column
@@ -396,6 +476,37 @@ mod tests {
         };
         Shaper::new().shape_line(&font, 14.0, "\tx", grid, &[], &mut out);
         assert!(close(out[0].x, 2.0 * cell));
+    }
+
+    #[test]
+    fn a_cluster_the_font_has_shapes_with_its_advance() {
+        let font = Font::bundled().unwrap();
+        let mut out = Vec::new();
+        let script = (swash::text::Script::Latin, None);
+        let advance = Shaper::new()
+            .shape_cluster(&font, 14.0, "e\u{301}", script, &mut out)
+            .unwrap();
+        assert_ne!(out, []);
+        assert!(advance > 0.0);
+        assert!(out.iter().all(|g| g.id != 0));
+    }
+
+    #[test]
+    fn a_cluster_the_font_lacks_is_refused() {
+        let font = Font::bundled().unwrap();
+        let mut out = Vec::new();
+        let script = (swash::text::Script::Han, None);
+        assert_eq!(
+            Shaper::new().shape_cluster(&font, 14.0, "漢", script, &mut out),
+            None
+        );
+    }
+
+    #[test]
+    fn variation_selectors_are_ignorable() {
+        assert!(is_default_ignorable('\u{fe0f}'));
+        assert!(is_default_ignorable('\u{200d}'));
+        assert!(!is_default_ignorable('a'));
     }
 
     #[test]

@@ -5,6 +5,12 @@ on:
     branches: [main, development]
   pull_request:
 
+# Every job starts with a token that can only read the repository (M26):
+# a compromised step cannot push, tag or edit releases. A job that needs
+# more asks for it by name.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -18,11 +24,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Linux system deps
         if: runner.os == 'Linux'
@@ -31,8 +40,17 @@ jobs:
           sudo apt-get install -y libwayland-dev libxkbcommon-dev
 
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets
-      - run: cargo test --workspace
+      # --locked: build exactly what Cargo.lock names, and fail if it
+      # would need changing, so CI never resolves a newer crate by itself.
+      - run: cargo clippy --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
+      # The East Asian encodings (M24) are behind a feature that is off by
+      # default (DESIGN.md §9); test them with it on, against the fixtures
+      # in crates/app/tests/fixtures/east-asian. One OS is enough: the
+      # tables are encoding_rs's, the same everywhere.
+      - name: Test the East Asian encodings
+        if: runner.os == 'Linux'
+        run: cargo test -p nimbus --features east-asian --locked -- east_asian encod
       # The fuzz targets (fuzz/, outside the workspace) run weekly on
       # nightly (fuzz.yml); type-check them here so a core API change
       # that breaks them shows up on the pull request. Stable is enough
@@ -40,15 +58,17 @@ jobs:
       # left out: it would build wgpu a second time.
       - name: Check the fuzz targets
         if: runner.os == 'Linux'
-        run: cargo check --manifest-path fuzz/Cargo.toml --bins --features app-config
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins --features app-config,app-encoding,app-workspace,app-git,syntax --locked
 
   # Licences and advisories for every dependency, from deny.toml (M15).
   deny:
     name: cargo deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
 
@@ -56,16 +76,82 @@ jobs:
     name: release binary size
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: |
           sudo apt-get update
           sudo apt-get install -y libwayland-dev libxkbcommon-dev
-      - run: cargo build --release -p nimbus
+      - run: cargo build --release -p nimbus --locked
       - name: Enforce 35 MB budget (DESIGN.md §5)
         shell: bash
         run: |
           size=$(stat -c %s target/release/nimbus)
           echo "nimbus release binary: $((size / 1024 / 1024)) MB ($size bytes)"
           test "$size" -le $((35 * 1024 * 1024))
+
+  # Dependency review (M26): every crate version in Cargo.lock must be
+  # covered by an audit in supply-chain/ (ours, or one imported from
+  # Mozilla, Google and others) or by an exemption recorded at 1.0. A new
+  # crate or a version bump fails here until someone reads its diff
+  # (`cargo vet diff`) and certifies it, or an imported audit covers it.
+  vet:
+    name: cargo vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Install cargo-vet
+        run: cargo install cargo-vet --locked --version 0.10.2
+      # --locked: use the imports as fetched into supply-chain/imports.lock,
+      # so a change on an importer's side cannot pass or fail CI by itself.
+      - run: cargo vet --locked
+
+  # Lints for the workflows themselves (M26): unpinned actions, template
+  # injection from pull request titles, over-broad tokens, cache poisoning
+  # in release jobs. Fails on anything above "low".
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the workflows
+        env:
+          # Read-only; lets zizmor check pins against GitHub (impostor
+          # commits, actions with known vulnerabilities).
+          GH_TOKEN: ${{ github.token }}
+        run: pipx run zizmor==1.31.1 --min-severity medium .github/workflows
+
+  # The maintenance scripts in scripts/ and bench/ are PowerShell 7. Most
+  # run only on the owner's Mac or at release time, so a syntax error
+  # would otherwise surface late; this parses every one of them.
+  scripts:
+    name: PowerShell scripts parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Parse every .ps1
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in git ls-files '*.ps1') {
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$null, [ref]$errors)
+            foreach ($e in $errors) {
+              "::error file=$file,line=$($e.Extent.StartLineNumber)::$($e.Message)"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }

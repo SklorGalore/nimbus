@@ -8,6 +8,138 @@ section before tagging.
 
 ### Added
 
+- A git window (M27): `nimbus --git [DIR]`, or **Open Git Window** in
+  the palette and View menu, opens a window of its own for the
+  repository: your staged, unstaged and untracked changes, the whole
+  history newest first with its branches drawn as smooth curves, and any
+  commit's message, files and differences in the compare view (merge
+  commits against either parent). It reads only, runs your own `git`
+  with hooks, filesystem monitors and lazy fetches turned off, keeps up
+  as you commit or edit, and opens a file in the running editor with
+  **Open in Editor**. See the manual's new [git window](docs/manual/git.md)
+  chapter.
+- **Install nimbus Command in PATH** in the command palette puts a
+  `nimbus` command on your `PATH`: a link in `/usr/local/bin` on macOS
+  (asking for your password through macOS when needed), in
+  `~/.local/bin` on Linux, or Nimbus's folder added to your `PATH` on
+  Windows. **Uninstall nimbus Command** takes it away. Something else
+  already there is never replaced without asking.
+- With Nimbus open, `nimbus FILE` opens the file in that window and
+  brings it to the front instead of starting a second Nimbus.
+- `nimbus --wait FILE` returns when the file's tab is closed, so
+  `git config --global core.editor "nimbus --wait"` works.
+
+- Nimbus can update itself (M31). After a check finds a newer release,
+  **Install Update** downloads the package for your system in the
+  background, checks that `SHA256SUMS` is signed by the release key
+  built into Nimbus for exactly that version and that the package
+  matches its SHA-256, and unpacks it beside the running copy;
+  **Restart to Update** (or quitting) puts it in place and starts it
+  with your session. Nothing downloads until you ask. Homebrew and
+  `.deb` installs are left to `brew` and `apt`. **Cancel Update** and
+  **Roll Back Update** undo it, and a new version that fails to open
+  its window is rolled back at the next start.
+- Compatibility mode: on a machine with no usable graphics card (a
+  virtual machine or remote desktop without one, a missing driver)
+  Nimbus now starts anyway and draws on the CPU, saying so once in the
+  status bar, instead of exiting. Frames look the same as on the GPU.
+  `--compat` or `compat = true` in the config forces it, and the F12
+  overlay names the painter. If the graphics card is lost while Nimbus
+  runs, it carries on in compatibility mode rather than closing.
+- Screen readers can read Nimbus: VoiceOver, NVDA, Narrator and Orca
+  see the text as a text field they can move through by character, word
+  and line, the tabs as a tab list, the file tree as a tree, the palette
+  and pickers as lists, labelled find fields with their match count, and
+  messages such as "Saved" spoken as they appear. Nothing is built
+  until a screen reader asks. The manual has a new Accessibility
+  chapter.
+- Bidirectional control characters and zero-width characters are drawn
+  as a red box, even with whitespace rendering off, so text whose
+  display order differs from its bytes ("Trojan Source") cannot hide.
+- `SECURITY.md` says how to report a security problem privately, and
+  `docs/security.md` lists everything Nimbus reads and what each input
+  may do.
+- Each release package has a GitHub build provenance attestation
+  (`gh attestation verify FILE --repo SklorGalore/nimbus`), and the
+  release binaries carry their dependency list (`cargo audit bin`).
+
+- Chinese, Japanese, Korean, Thai, Indic and other scripts are drawn
+  with a font made for their script (M24): a built-in list per platform
+  (PingFang, Hiragino, Microsoft YaHei, Noto Sans CJK and others), with
+  your own picks first from a new `[fallback_fonts]` table
+  (`han = ["Hiragino Sans"]`). Wide characters are scaled to fit their
+  two cells, so mixed lines stay on the grid.
+- `cjk_language = "ja" | "zh-Hans" | "zh-Hant" | "ko"` picks the
+  regional shapes of Han characters (`骨` looks Japanese to a Japanese
+  reader). By default it follows the system language.
+- `font_weight` (100 to 900) sets the weight of a variable font, or picks
+  the nearest weight of a font family; bold text is drawn 300 heavier.
+- A file of 256 MB or more in another known encoding (Windows-1252,
+  UTF-16, Shift_JIS...) opened with **Reopen with Encoding** or
+  `[encodings]` is now editable instead of read-only: Nimbus decodes it
+  into a private temporary copy and saves back in its encoding.
+- Each East Asian encoding (behind the `east-asian` build feature) has a
+  test file that round-trips, and CI tests with the feature on.
+
+### Changed
+
+- The repository's maintenance scripts (`scripts/` and `bench/`) are
+  PowerShell 7 instead of bash and sh, with the same names and arguments.
+  They need `pwsh` 7.4 or later (`brew install powershell` on macOS).
+- Windows releases go to [Chocolatey](https://community.chocolatey.org/packages/nimbus)
+  (`choco install nimbus`) instead of winget. Each release has a
+  `nimbus.X.Y.Z.nupkg`, packed on Windows by a new workflow, and
+  `scripts/publish-packages.ps1` checks its scripts against the signed
+  `SHA256SUMS` before pushing it. Install Update hands a Chocolatey
+  install to `choco upgrade nimbus`, as it does Homebrew's to `brew`.
+- **The update check at startup is now on by default**
+  (`check_updates = true`). Each start asks GitHub's API once, after
+  the window appears, whether a newer release exists: one HTTPS request
+  with a `nimbus/X.Y.Z` user agent and nothing else, and a message only
+  when there is one. Set `check_updates = false` in `config.toml` to
+  turn it off.
+- Open Project Workspace opens only folders and files inside the
+  project: a `.nimbus/workspace.toml` that names paths elsewhere (an
+  absolute path, `../`, or a link pointing out) has them skipped, and
+  the message line says how many.
+- Compare with HEAD no longer lets a repository's own config run
+  programs: git's filesystem monitor, hooks and lazy fetching are off,
+  and a filter program defined in the repository's `.git/config` is not
+  run (the stored file is compared as it is instead).
+- Preview links with an absolute path are no longer followed.
+- Releases are built from the committed `Cargo.lock` (`--locked`), every
+  workflow action is pinned to a commit, and dependency updates must
+  pass `cargo vet`.
+- The title bar takes the theme's colours. On macOS Nimbus draws it,
+  in the tab bar's colour with the title centred, and the system keeps
+  only its window buttons. On Windows Nimbus draws the whole title bar:
+  the menus, the title and its own minimise, maximise and close buttons
+  share one strip in the theme's colours. Dragging it moves the window
+  and snaps it to the screen's edges, a double-click maximises, a
+  right-click opens the window menu, and the window's edges resize it.
+  On Linux it follows the theme's light or dark.
+- Nimbus draws the Windows menu bar (File, Edit, ...) and its drop-down
+  menus itself, in the theme's colours; `F10` opens it from the keyboard.
+  Right-click menus in the file tree are drawn by Nimbus on every
+  system, so Linux has them now too.
+- Questions and messages ("Save changes before closing?", "Could not
+  save", replacing a file in the tree and the rest) open inside the
+  window in the theme's colours, on every system, instead of as system
+  dialogs. `Enter`, `Esc`, `Tab`, the arrow keys and each button's first
+  letter answer them. File pickers stay the system's.
+- On Windows, opening Nimbus from the Start menu, Explorer or Open With
+  no longer shows an empty console window beside it. Run from a
+  terminal, `nimbus --version`, `--help` and errors still print there,
+  but the prompt comes back without waiting, as for any windowed
+  program (git still waits for `nimbus --wait`).
+- The update check's HTTPS no longer trusts the emSign certificate
+  authorities, which browsers distrusted (RUSTSEC-2026-0381 and
+  RUSTSEC-2026-0382; `rustls-webpki` 0.103.16, `webpki-roots` 1.0.11).
+
+## 1.2.0
+
+### Added
+
 - The release signing key, `minisign.pub`, is in the repository and
   printed in the README, so `SHA256SUMS.minisig` can be checked.
 - `scripts/publish-packages.sh` puts a signed, published release in the

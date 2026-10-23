@@ -54,9 +54,11 @@ then `[tables]`.
 | `tab_width` | whole number, 1 to 16 | `4` | How many columns a tab character is drawn as. This does not decide what the Tab key inserts; see `[indent]`. |
 | `soft_wrap` | `true` or `false` | `false` | Whether new tabs start with soft wrap on. Languages can override it with `wrap` in `[editor.LANGUAGE]`; Markdown wraps unless told not to. |
 | `theme` | text | `"dark"` | `"dark"`, `"light"`, or the name of your own theme in `themes/NAME.toml`. An unknown name falls back to dark with a warning. |
-| `check_updates` | `true` or `false` | `false` | Ask GitHub once at each start whether a newer release exists. Off by default, so Nimbus never contacts the network unless you ask. See [Updates](troubleshooting.md#checking-for-updates). |
+| `check_updates` | `true` or `false` | `true` | Ask GitHub once at each start whether a newer release exists: one HTTPS request, and a message only when there is one. `false` turns it off. Nothing is downloaded until you run Install Update. See [Updates](troubleshooting.md#checking-for-updates). |
 | `font` | text | `""` (empty) | The editor font: an installed font's name (`"JetBrains Mono"`) or a font file's path (`.ttf`, `.otf`, `.ttc`). Empty is the bundled Hack Nerd Font Mono. It loads just after the window appears; a name that is not found keeps Hack and says so. |
 | `ligatures` | `true` or `false` | `false` | Join `->`, `!=`, `=>` and friends into one glyph, in a font that has ligatures (Hack has none). Columns stay the same, and a ligature splits apart where the cursor or a selection edge falls inside it. |
+| `font_weight` | number, 100 to 900, or a name | unset | How heavy to draw the editor font: `300` or `"light"`, `400` or `"regular"`, `"medium"` (500), `"semibold"` (600), `"bold"` (700) and the rest of the CSS names. A variable font (one file covering every weight, such as `JetBrains Mono` from its variable release) draws at exactly this weight, with bold text three steps heavier. A family of separate files uses the nearest weight it has. The bundled Hack has regular and bold only, so 600 or more draws everything bold. Unset is the font's regular weight. |
+| `cjk_language` | `"ja"`, `"zh-Hans"`, `"zh-Hant"`, `"ko"` or `""` | `""` (empty) | Which regional shapes Chinese characters take. Japanese, Simplified and Traditional Chinese and Korean share one set of characters but draw many of them differently (`骨`, `直`, `写`), so this picks the fonts tried first for them and tells those fonts which forms to use. Empty follows your system's language, and a system in any other language gets `"zh-Hans"`. Kana is always drawn from Japanese fonts and Hangul from Korean ones. |
 | `remember_zoom` | `true` or `false` | `true` | Keep the size Zoom In and Zoom Out left (in `state.toml`) for the next start. `false` starts every session at `font_size`. Changing `font_size` in the file always wins. |
 | `remember_workspace` | `true` or `false` | `true` | Reopen the last session when you start Nimbus: `nimbus` alone brings back the last project's tabs, split views and tree, and `nimbus FOLDER` that folder's. `false` starts every run with one empty tab and saves no session, like `--no-session`, but recent files, the window position and the zoom are still remembered. `--workspace NAME` and Reopen Last Session still open what you ask for. Read at startup. |
 | `render_whitespace` | `"selection"`, `"all"` or `"none"` | `"selection"` | Draw spaces as `·` and tabs as `→`: only inside a selection, everywhere, or never. Toggle Render Whitespace in the palette cycles it for the session. |
@@ -65,6 +67,31 @@ then `[tables]`.
 | `minimap` | `true` or `false` | `false` | Show a map of the lines around the view at the right edge of the text. Toggle Minimap in the palette switches it for the session. |
 | `minimap_width` | number, 40 to 400 | `100` | The minimap's width in points. It never takes more than half the text area. |
 | `ui_font` | text | `""` (empty) | A proportional font, by name (`"Inter"`, `"SF Pro"`) or file path, for the sidebar, tabs, status bar, palette, pickers and the Markdown preview. The text you edit stays in the monospace `font`. Empty draws all of these in the editor font. Like `font`, it loads just after the window appears. |
+| `compat` | `true` or `false` | `false` | Draw on the CPU instead of the graphics card (compatibility mode), as `--compat` does, for a card or driver that draws wrongly. Nimbus switches to compatibility mode by itself when there is no usable graphics card. Read at startup. |
+
+### `[fallback_fonts]`
+
+Fonts to try first for characters the editor font does not have, by
+script, before Nimbus's built-in list for your system. Each key is a
+script and each value a list of installed fonts' names, tried in order;
+a font that is not installed is skipped.
+
+```toml
+[fallback_fonts]
+han = ["Hiragino Sans"]        # Chinese characters
+kana = ["Hiragino Sans"]       # Japanese hiragana and katakana
+hangul = ["Apple SD Gothic Neo"]
+cyrillic = ["PT Mono"]
+devanagari = ["Kohinoor Devanagari"]
+emoji = ["Noto Color Emoji"]
+symbols = ["Apple Symbols"]    # punctuation and symbols outside any script
+```
+
+Keys are `han`, `kana`, `hangul`, `emoji`, `symbols`, or a script's
+name in lower case (`greek`, `cyrillic`, `arabic`, `devanagari`,
+`bengali`, `tamil`, `thai`, `khmer`, `ethiopic`, ...). See
+[International text](window.md#international-text) for how a font is
+chosen.
 
 ### `[keys]`
 
@@ -181,13 +208,20 @@ This is the file "Open Config File" writes:
 # tab_width = 4
 # soft_wrap = false
 # theme = "dark"            # or "light", or NAME for themes/NAME.toml here
-# check_updates = false     # true: ask GitHub for a newer release at startup
+# check_updates = true      # false: do not ask GitHub for a newer release at startup
 
 # The editor font: an installed font's name or a font file's path. Empty is
 # the bundled Hack Nerd Font Mono. ligatures joins -> != => and friends in
 # fonts that have them (Fira Code, JetBrains Mono, Cascadia Code).
 # font = "JetBrains Mono"
 # ligatures = false
+# The weight to draw it at: 100 to 900 or a name ("light", "regular",
+# "medium", "semibold", "bold"). A variable font takes any weight; a family
+# of separate files uses its nearest. Unset is the font's regular weight.
+# font_weight = 450
+# Which regional shapes Chinese characters take: "ja", "zh-Hans",
+# "zh-Hant" or "ko". Empty follows the system language.
+# cjk_language = ""
 # Zoom (View > Zoom In/Out, Primary+= and Primary+-) is remembered between
 # sessions; false starts every session at font_size.
 # remember_zoom = true
@@ -204,6 +238,10 @@ This is the file "Open Config File" writes:
 # Markdown preview, by name or path. Empty uses the editor font. The text
 # stays monospace.
 # ui_font = "Inter"
+# Draw on the CPU instead of the GPU (compatibility mode), for a GPU or
+# driver that misdraws. Nimbus does this by itself when there is no usable
+# GPU. Restart to apply.
+# compat = false
 
 # Key bindings: action id = list of chords. "Primary" is Cmd on macOS and
 # Ctrl elsewhere. An empty list unbinds the action. The command palette
@@ -211,6 +249,14 @@ This is the file "Open Config File" writes:
 # [keys]
 # "view.toggleWrap" = ["Alt+W"]
 # "file.quickOpen" = ["Primary+P", "Primary+E"]
+
+# Fonts for characters the editor font lacks, tried before the built-in
+# list for each script. Keys: han, kana, hangul, emoji, symbols, or a script
+# name such as cyrillic, greek, devanagari, thai. A font that is not
+# installed is skipped.
+# [fallback_fonts]
+# han = ["Hiragino Sans"]
+# hangul = ["Apple SD Gothic Neo"]
 
 # Languages: a file name or "*.ext" pattern = language. Built-in languages
 # are rust, markdown, json, toml, yaml, python, javascript, typescript and

@@ -139,7 +139,7 @@ in `app`; its atomic-write path keeps its existing tests).
 keystrokes, an undo every 50, a find every 2,500 and a save every 10,000
 into the typing, samples resident memory with `ps` every 1,000
 keystrokes (no new dependency and no `unsafe`), and exits 1 if it grew
-more than 10 MB from the first sample to the last. `bench/soak.sh` runs
+more than 10 MB from the first sample to the last. `bench/soak.ps1` runs
 100,000 keystrokes on a scratch copy of the 100 MB file.
 
 Owner's runs on the M5 Pro, 2026-10-18 (p50 latency 8.25 ms, p99
@@ -177,7 +177,7 @@ winit 0.31 (`backlog.md`).
 
 **Startup and size.** Nothing was added to the startup path except
 reading one possibly missing file (`crash.log`). Owner's
-`bench/smoke.sh` on the M5 Pro, 2026-10-18: cold 764.9 ms (first run
+`bench/smoke.ps1` on the M5 Pro, 2026-10-18: cold 764.9 ms (first run
 after a fresh build); warm 140.1, 147.9, 133.8 and 133.5 ms, median
 136.9 ms, within the 500 ms budget. M20 recorded 119 ms warm; the
 difference is within the 115–150 ms spread seen on this machine across

@@ -6,7 +6,7 @@
 //! not in `main`. Nothing redraws on a timer except the cursor blink (and
 //! short retries), so an idle editor uses no CPU.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+use rfd::FileDialog;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
@@ -27,6 +27,7 @@ use nimbus_core::{Buffer, LineEnding, Text};
 use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 use nimbus_syntax::state::{Job, JobResult, MAX_HIGHLIGHT_BYTES, Off};
 
+use crate::caption::{self, Caption, DRAWS_CAPTION};
 use crate::columns::Click;
 use crate::compare::{Compare, DiffResult, Other, Toggle};
 use crate::compare_panel;
@@ -46,10 +47,12 @@ use crate::input::{self, Command, Motion, Resolved};
 use crate::io;
 use crate::keymap::{Chord, Keymap, chord_label};
 use crate::languages::Languages;
+use crate::menu::drawn::{DRAWS_MENU_BAR, Menus};
 use crate::menu::{self, MenuBar};
 use crate::merge_view::{Inputs, MergeView, Merged, Shape, Take};
 use crate::minimap;
 use crate::picker::{self, EncodingFor, Item, Kind, Picker};
+use crate::prompt::{self, Answer, Button, Prompt};
 use crate::replace_files::{self, Replacement};
 use crate::saver::{self, ReplacePolicy, SaveEvent, SaveStep};
 use crate::search_panel::{Focus, Reply};
@@ -63,13 +66,17 @@ use crate::view::{self, Decorations, Layout, PickerView, Preedit, StatusItem, Ta
 use crate::watch::{Change, Watch};
 use crate::{MergeArgs, Options, effective_scale, print_err, print_out, save_screenshot, to_f32};
 
+mod access;
 mod geometry;
+mod handoff;
 mod preview_tab;
 mod tail;
 mod tree_ops;
+mod updates;
 mod workspace;
 mod workspaces;
 
+pub use updates::UpdateOnQuit;
 pub use workspace::Startup;
 use workspace::{Pending, Workspace, configure_tabs, startup_message};
 
@@ -122,6 +129,8 @@ pub enum AppEvent {
     /// A check for updates finished; `true` when it was the startup
     /// check, which stays quiet unless a newer release exists.
     Update(Result<update::Outcome, UpdateError>, bool),
+    /// Progress or the end of preparing an update (M31).
+    Installing(updates::UpdateEvent),
     /// A Fold All or Fold Level N scan finished on a worker (M13).
     Folded(folding::FoldResult),
     /// `git` read a file at a revision for Compare with HEAD (M18).
@@ -137,6 +146,16 @@ pub enum AppEvent {
         expect(dead_code, reason = "only macOS sends it")
     )]
     OpenFiles(Vec<PathBuf>),
+    /// A later `nimbus` command handed over these files and folders, and,
+    /// with `--wait`, the connection to answer once they close (M25,
+    /// `instance.rs`).
+    Handoff(Vec<PathBuf>, Option<crate::instance::Waiter>),
+    /// Install or Uninstall `nimbus` Command finished on its worker: what
+    /// to say, and whether it is an error (M25, `path_command.rs`).
+    Installed(Result<String, String>),
+    /// A screen reader asked for the accessibility tree, asked the app to
+    /// do something, or stopped (M22, `app/access.rs`).
+    Access(accesskit_winit::WindowEvent),
 }
 
 /// A file read at a git revision on a worker (M18).
@@ -296,6 +315,13 @@ pub struct Tab {
     /// tab's save: the history's top id then, so the question is not asked
     /// again when the quit goes on, unless the text changed since.
     discard_at: Option<u64>,
+    /// The answer "Save" to "save changes before closing?", as the
+    /// history's top id then: the close or quit that asked goes on by
+    /// saving, without asking again, unless the text changed since.
+    save_at: Option<u64>,
+    /// Questions about the next save already answered "go ahead": it runs
+    /// again after each answer, and must not ask the same thing twice.
+    approved: Approved,
     /// A compare view on this tab (M9): the other side and the diff.
     pub compare: Option<Box<Compare>>,
     /// A merge view on this tab (M9): the inputs and the regions of the
@@ -341,6 +367,8 @@ impl Tab {
             noted_size: false,
             after_save: AfterSave::default(),
             discard_at: None,
+            save_at: None,
+            approved: Approved::default(),
             compare: None,
             merge: None,
             preview: None,
@@ -421,6 +449,8 @@ enum Saved {
     Started,
     /// Not saved: failed, or the user cancelled the dialog.
     No,
+    /// A prompt is open; the save runs again once it is answered.
+    Asking,
 }
 
 /// The answer to "save changes before closing?".
@@ -432,6 +462,87 @@ enum Discard {
     Cancel,
     /// A save is under way; go ahead once it has finished.
     Wait,
+    /// A prompt is open; whatever asked runs again once it is answered.
+    Asking,
+}
+
+/// Questions about a save the user has said yes to (see [`Tab::approved`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct Approved {
+    /// Save a merge with conflicts left in it.
+    conflicts: bool,
+    /// Write U+FFFD where unreadable bytes were.
+    lossy: bool,
+}
+
+/// What asked a question that interrupts it: run again once the question
+/// is answered, so the answer takes effect where the question came from.
+/// The outermost operation wins: a close that saves resumes the close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resume {
+    /// Save the tab showing this document.
+    Save(DocId),
+    /// Close the tab showing this document.
+    CloseTab(DocId),
+    /// Close the focused group's tabs.
+    CloseGroup,
+    /// Quit.
+    Quit,
+}
+
+/// What an open prompt's answer goes on to do (the `then` of its
+/// [`Prompt`]).
+#[derive(Debug, Clone)]
+enum Asked {
+    /// A message: nothing follows.
+    Notice,
+    /// "Save changes before closing?" about this document.
+    Discard(DocId, Resume),
+    /// "Save a merge with conflicts left?"
+    Conflicts(DocId, Resume),
+    /// "Write U+FFFD for the unreadable bytes?"
+    Lossy(DocId, Resume),
+    /// "Save as UTF-8 instead?"
+    Utf8(DocId, Resume),
+    /// "Reopen in this encoding and lose the unsaved changes?"
+    Reopen(DocId, Encoding),
+    /// "Replace the file this rename lands on?"
+    Replace { from: PathBuf, to: PathBuf },
+    /// "Move this to the trash, losing unsaved changes in its tabs?"
+    Trash(PathBuf),
+    /// "Replace what is there with the `nimbus` command?" (M25), for an
+    /// install (`true`) or uninstall.
+    InstallCommand(bool, crate::path_command::Step),
+}
+
+/// The buttons of "Save changes before closing?".
+const SAVE_DONT_CANCEL: [Button; 3] = [
+    Button {
+        label: "Don't Save",
+        answer: Answer::No,
+    },
+    Button {
+        label: "Cancel",
+        answer: Answer::Cancel,
+    },
+    Button {
+        label: "Save",
+        answer: Answer::Yes,
+    },
+];
+
+/// Two buttons: Cancel and a default that goes ahead.
+const fn cancel_or(label: &'static str) -> [Button; 2] {
+    [
+        Button {
+            label: "Cancel",
+            answer: Answer::Cancel,
+        },
+        Button {
+            label,
+            answer: Answer::Yes,
+        },
+    ]
 }
 
 /// Cursor blink timing.
@@ -561,6 +672,23 @@ pub struct App {
     /// Jump to the first match once background results arrive.
     find_pending_jump: bool,
     picker: Option<Picker>,
+    /// Prompts drawn in the window (see `prompt.rs`), the front one shown
+    /// and answered first. While any is open, keys and clicks go to it.
+    prompts: VecDeque<Prompt<Asked>>,
+    /// The operation running now that a prompt would interrupt, to run
+    /// again once it is answered.
+    resume: Option<Resume>,
+    /// A prompt button clicked, answered once the click is handled.
+    prompt_click: Option<Answer>,
+    /// The menus Nimbus draws: the Windows menu bar's drop-downs and
+    /// right-click menus.
+    menus: Menus,
+    /// The window title, as given to the system and drawn in the title
+    /// bar Nimbus draws on macOS.
+    title: String,
+    /// The window has the keyboard focus: the drawn title is dimmed
+    /// without it, as the system's is.
+    window_focused: bool,
     message: Option<Message>,
     proxy: EventLoopProxy<AppEvent>,
     /// Search again at this time: edits happened while the find bar was
@@ -598,10 +726,13 @@ pub struct App {
     zoom_started: Option<Instant>,
     /// What is remembered between runs, and the session's bookkeeping.
     ws: Workspace,
-    /// The pointer shows the resize cursor.
-    resize_cursor: bool,
-    /// The pointer is over a link in a Markdown preview (M20).
-    link_cursor: bool,
+    /// A newer release found, an update downloading or ready (M31).
+    updater: updates::Updater,
+    /// The pointer's shape: the resize arrows over a divider or the
+    /// window's edge, a hand over a link in a Markdown preview (M20).
+    cursor_icon: CursorIcon,
+    /// The Windows title bar's buttons Nimbus draws.
+    caption: Caption,
     /// Watching has started (after the first frame).
     watching: bool,
     /// A go-to-line waiting for a huge file's lines to be counted.
@@ -619,6 +750,12 @@ pub struct App {
     /// The open-tab part of a Replace in Files, until its files on disk
     /// are written and the summary can be shown.
     replace_summary: ReplaceSummary,
+    /// The accessibility tree for screen readers (M22): the adapter and
+    /// what was last sent through it.
+    access: access::Access,
+    /// `nimbus --wait` commands waiting for their files' tabs to close
+    /// (M25).
+    waiting: Vec<handoff::Waiting>,
 }
 
 /// Multi-click detection and drag state. winit reports presses, not
@@ -667,7 +804,7 @@ impl App {
     pub fn new(
         options: Options,
         started: Instant,
-        gpu_init: JoinHandle<Result<GpuContext, GpuError>>,
+        gpu_init: Option<JoinHandle<Result<GpuContext, GpuError>>>,
         (config, languages, docs, root): (Config, Languages, Vec<Document>, PathBuf),
         startup: Startup,
         proxy: EventLoopProxy<AppEvent>,
@@ -701,12 +838,8 @@ impl App {
             sidebar.search.focus_query(Some(pattern.clone()));
             started
         });
-        let all_warnings: Vec<String> = warnings
-            .into_iter()
-            .chain(key_warnings)
-            .chain(theme_warnings)
-            .collect();
-        let message = startup_message(all_warnings, note);
+        warnings.extend(key_warnings.into_iter().chain(theme_warnings));
+        let message = startup_message(warnings, note);
         Self {
             options,
             started,
@@ -720,7 +853,7 @@ impl App {
             languages,
             keymap,
             root,
-            gpu_init: Some(gpu_init),
+            gpu_init,
             window: None,
             gpu: None,
             menu_bar: None,
@@ -749,6 +882,12 @@ impl App {
             find_origin: 0,
             find_pending_jump: false,
             picker: None,
+            prompts: VecDeque::new(),
+            resume: None,
+            prompt_click: None,
+            menus: Menus::default(),
+            title: String::new(),
+            window_focused: true,
             message,
             proxy,
             research_at: None,
@@ -759,8 +898,9 @@ impl App {
             watch,
             zoom_started: None,
             ws: Workspace::new(state, session_root),
-            resize_cursor: false,
-            link_cursor: false,
+            updater: updates::Updater::default(),
+            cursor_icon: CursorIcon::Default,
+            caption: Caption::default(),
             watching: false,
             pending_line: None,
             recheck: Vec::new(),
@@ -769,6 +909,8 @@ impl App {
             search_files_at,
             replace_undo: None,
             replace_summary: ReplaceSummary::default(),
+            access: access::Access::default(),
+            waiting: Vec::new(),
         }
     }
 
@@ -847,6 +989,7 @@ impl App {
     fn gpu_ready(&mut self, mut gpu: Gpu) {
         gpu.set_tab_width(self.tab_width());
         gpu.set_ligatures(self.config.ligatures);
+        gpu.set_fallback_prefs(fallback_prefs(&self.config));
         let proxy = self.proxy.clone();
         gpu.set_font_notify(Arc::new(move || {
             let _ = proxy.send_event(AppEvent::FontLoaded);
@@ -854,17 +997,106 @@ impl App {
         self.gpu = Some(gpu);
     }
 
+    /// Keep room at the top for the title bar Nimbus draws, or none: on
+    /// macOS the window's content runs up under the system's title bar
+    /// ([`with_drawn_title_bar`]), except in full screen, where the system
+    /// slides its own bar in over the content.
+    fn sync_title_bar(&mut self) {
+        let (Some(window), Some(gpu)) = (self.window.as_ref(), self.gpu.as_mut()) else {
+            return;
+        };
+        let scale = to_f32(effective_scale(window.scale_factor()));
+        let px = if DRAWS_TITLE_BAR && window.fullscreen().is_none() {
+            TITLE_BAR_PT * scale
+        } else if DRAWS_MENU_BAR {
+            caption::bar_height(gpu.metrics().line_height, scale)
+        } else {
+            0.0
+        };
+        gpu.set_inset_top(px);
+    }
+
+    /// Paint on the CPU from now on (compatibility mode, M23), and say so
+    /// once in the status bar: `why` the GPU could not be used, or `None`
+    /// when `--compat` or the config asked for it.
+    ///
+    /// # Errors
+    ///
+    /// When the window cannot show the CPU's frames either.
+    fn start_compat(&mut self, window: &Arc<Window>, why: Option<&str>) -> Result<(), String> {
+        let font = Font::bundled().map_err(|e| e.to_string())?;
+        let px = self.font_px(effective_scale(window.scale_factor()));
+        let gpu = Gpu::compat(window, font, px).map_err(|e| e.to_string())?;
+        self.gpu_ready(gpu);
+        let text = match why {
+            Some(why) => {
+                log::warn!("compatibility mode: {why}");
+                format!("Compatibility mode: drawing without the GPU ({why})")
+            }
+            None => "Compatibility mode: drawing without the GPU, as asked".to_owned(),
+        };
+        self.notice(text);
+        Ok(())
+    }
+
+    /// The GPU failed mid-session (`e`): carry on painting on the CPU
+    /// rather than exit with unsaved work. `false` when that failed too,
+    /// or the failing painter was already the CPU's.
+    fn gpu_lost(&mut self, window: &Arc<Window>, e: nimbus_render::FrameError) -> bool {
+        log::error!("{e}");
+        let on_gpu = self.gpu.as_ref().is_some_and(|g| !g.compatibility());
+        if !on_gpu || self.start_compat(window, Some(&e.to_string())).is_err() {
+            return false;
+        }
+        self.reload_fonts();
+        window.request_redraw();
+        true
+    }
+
+    /// Look up the configured editor and interface fonts again, for a new
+    /// painter: the old one's fonts went with it.
+    fn reload_fonts(&mut self) {
+        if !self.config.font.is_empty() || self.config.font_weight.is_some() {
+            self.load_editor_font();
+        }
+        if !self.config.ui_font.is_empty() {
+            self.load_ui_font();
+        }
+    }
+
+    /// Show `text` in the status bar after whatever it already shows (for
+    /// example startup warnings), rather than replacing it.
+    fn notice(&mut self, text: String) {
+        let until = Instant::now() + MESSAGE_TIME * 2;
+        match &mut self.message {
+            Some(m) => {
+                m.text.push_str("; ");
+                m.text.push_str(&text);
+                m.until = m.until.max(until);
+            }
+            None => {
+                self.message = Some(Message {
+                    text,
+                    is_error: false,
+                    until,
+                });
+            }
+        }
+        self.changed(false);
+    }
+
     /// Look up the config's `font` on a worker (listing the system's fonts
     /// takes too long for the main thread); [`App::editor_font_arrived`]
     /// swaps it in. An empty setting goes back to the bundled font at once.
     fn load_editor_font(&mut self) {
         let name = self.config.font.clone();
+        let weight = self.config.font_weight;
         if name.is_empty() {
-            if let (Some(gpu), Ok(regular)) = (self.gpu.as_mut(), Font::bundled()) {
-                gpu.set_font(nimbus_render::EditorFont {
-                    regular,
-                    bold: Font::bundled_bold().ok(),
-                });
+            if let (Some(gpu), Ok(font)) = (
+                self.gpu.as_mut(),
+                nimbus_render::bundled_editor_font(weight),
+            ) {
+                gpu.set_font(font);
             }
             return;
         }
@@ -872,7 +1104,7 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("nimbus-font".to_owned())
             .spawn(move || {
-                let found = nimbus_render::find_editor_font(&name);
+                let found = nimbus_render::find_editor_font(&name, weight);
                 let _ = proxy.send_event(AppEvent::EditorFont(name, found));
             });
         if let Err(e) = spawned {
@@ -895,7 +1127,7 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("nimbus-ui-font".to_owned())
             .spawn(move || {
-                let found = nimbus_render::find_editor_font(&name);
+                let found = nimbus_render::find_editor_font(&name, None);
                 let _ = proxy.send_event(AppEvent::UiFont(name, found));
             });
         if let Err(e) = spawned {
@@ -1120,8 +1352,54 @@ impl App {
             return;
         }
         let dirty = if key.1 { "● " } else { "" };
-        window.set_title(&format!("{dirty}{} — Nimbus", self.doc().display_name()));
+        self.title = format!("{dirty}{} — Nimbus", self.doc().display_name());
+        window.set_title(&self.title);
         self.title_key = Some(key);
+    }
+
+    /// Attach the menu bar to the new window, keep the window, and give
+    /// its title bar and menus the theme's colours.
+    fn window_ready(&mut self, window: Arc<Window>) {
+        let proxy = self.proxy.clone();
+        self.menu_bar = menu::install(&self.keymap, move |id| {
+            let _ = proxy.send_event(AppEvent::Menu(id));
+        });
+        log::debug!("startup: menus at {:?}", self.started.elapsed());
+        window.request_redraw();
+        self.window = Some(window);
+        self.sync_window_theme();
+        self.sync_title_bar();
+        self.update_title();
+    }
+
+    /// Tell the operating system whether the theme is light or dark, so
+    /// the parts of the window it draws follow Nimbus rather than the
+    /// system appearance: the title bar everywhere (on Windows 11 in the
+    /// theme's exact colours), and on Windows the menu bar too.
+    fn sync_window_theme(&self) {
+        if let Some(window) = &self.window {
+            window.set_theme(Some(window_theme(&self.theme)));
+            #[cfg(target_os = "windows")]
+            {
+                // Nimbus draws the title bar itself (`crate::caption`);
+                // Windows 11 still draws a thin border round the window,
+                // in the theme's border colour. Windows 10 ignores this.
+                use winit::platform::windows::{Color, WindowExtWindows};
+                let rgb = |c: crate::theme::Color| {
+                    let byte = |v: f32| {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "a colour channel clamped to 0-255"
+                        )]
+                        let b = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                        b
+                    };
+                    Color::from_rgb(byte(c[0]), byte(c[1]), byte(c[2]))
+                };
+                window.set_border_color(Some(rgb(self.theme.ui.picker_border)));
+            }
+        }
     }
 
     /// Something changed what is on screen.
@@ -1179,6 +1457,23 @@ impl App {
         // Edits made from another group since the last frame move this
         // tab's cursors and folds first.
         self.sync_panes();
+        if !self.prompts.is_empty() {
+            self.run_prompt(cmd, event_loop);
+            self.changed(false);
+            return;
+        }
+        if self.menus.is_open() {
+            self.run_menu(cmd, event_loop);
+            self.changed(false);
+            return;
+        }
+        if matches!(cmd, Command::OpenMenuBar) {
+            if DRAWS_MENU_BAR && let Some(layout) = self.window_layout() {
+                self.menus.open_bar(0, &layout, &self.keymap, true);
+                self.changed(false);
+            }
+            return;
+        }
         if self.picker.is_some() && self.run_picker(cmd, event_loop) {
             self.changed(false);
             return;
@@ -1271,6 +1566,7 @@ impl App {
                     "light"
                 };
                 self.theme = Theme::built_in(next).unwrap_or_default();
+                self.sync_window_theme();
                 self.say(format!("Theme: {next}"), false);
             }
             Command::ToggleSidebar => self.toggle_sidebar(),
@@ -1313,6 +1609,10 @@ impl App {
                     false,
                 );
             }
+            Command::RestartToUpdate => {
+                self.restart_to_update(event_loop);
+                return true;
+            }
             _ if cmd.is_setup() => self.run_setup(cmd),
             Command::Close => {
                 self.quit(event_loop);
@@ -1352,6 +1652,7 @@ impl App {
             Command::CompareFile => self.compare_with_file(),
             Command::CompareTab => self.compare_with_tab(),
             Command::CompareHead => self.compare_with_revision("HEAD".to_owned()),
+            Command::OpenGitWindow => self.open_git_window(),
             Command::CompareRevision => {
                 if self.doc().path.is_some() {
                     self.open_picker(Kind::Revision);
@@ -1787,6 +2088,20 @@ impl App {
         }
         self.say(said, false);
         self.changed(false);
+    }
+
+    /// Start the git window (M27) for the workspace's first folder: a
+    /// process of its own, so the editor stays one window.
+    fn open_git_window(&mut self) {
+        let root = self.root.clone();
+        let args = [std::ffi::OsStr::new("--git"), root.as_os_str()];
+        match crate::git_window::start_nimbus(&args) {
+            Ok(()) => self.say(
+                format!("Opening the git window for {}", name_of(&root)),
+                false,
+            ),
+            Err(e) => self.say(format!("Cannot start the git window: {e}"), true),
+        }
     }
 
     /// Compare the active tab's file with `rev` from git, read on a worker
@@ -2690,12 +3005,24 @@ impl App {
     /// saves on a worker: this starts it and returns [`Saved::Started`],
     /// and [`App::save_ended`] finishes.
     fn save(&mut self, i: usize) -> Saved {
+        let saved = self.save_asking(i);
+        if saved != Saved::Asking
+            && let Some(tab) = self.tabs.get_mut(i)
+        {
+            // This save is over: its answers do not carry to the next one.
+            tab.approved = Approved::default();
+        }
+        saved
+    }
+
+    /// [`App::save`], whose questions may leave it [`Saved::Asking`].
+    fn save_asking(&mut self, i: usize) -> Saved {
         if self.tabs[i].merge.as_ref().is_some_and(|m| m.is_pending()) {
             self.say("Still merging; save once the result is in", false);
             return Saved::No;
         }
         if !self.confirm_conflicts(i) {
-            return Saved::No;
+            return Saved::Asking;
         }
         if self.docs[self.tabs[i].doc].path.is_none() {
             return self.save_as(i);
@@ -2705,11 +3032,11 @@ impl App {
             return Saved::Started;
         }
         if let Some(why) = self.docs[self.tabs[i].doc].read_only.clone() {
-            self.dialog(MessageLevel::Error, "Could not save", &why);
+            self.alert("Could not save", why);
             return Saved::No;
         }
         if !self.confirm_lossy(i) {
-            return Saved::No;
+            return Saved::Asking;
         }
         if self.docs[self.tabs[i].doc].saves_on_worker() {
             return self.start_save(i);
@@ -2740,7 +3067,7 @@ impl App {
                 if let Some(u) = e.unencodable().copied() {
                     return self.offer_utf8(i, u);
                 }
-                self.dialog(MessageLevel::Error, "Could not save", &e.to_string());
+                self.alert("Could not save", e.to_string());
                 Saved::No
             }
         }
@@ -2773,38 +3100,28 @@ impl App {
         if self.options.smoke || self.options.screenshot.is_some() {
             return Saved::No;
         }
-        let mut dialog = MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title("Character not in the encoding")
-            .set_description(text)
-            .set_buttons(MessageButtons::OkCancelCustom(
-                "Save as UTF-8".into(),
-                "Cancel".into(),
-            ));
-        if let Some(window) = &self.window {
-            dialog = dialog.set_parent(window.as_ref());
-        }
-        let utf8 = match dialog.show() {
-            MessageDialogResult::Ok => true,
-            MessageDialogResult::Custom(label) => label == "Save as UTF-8",
-            _ => false,
-        };
-        if !utf8 {
-            return Saved::No;
-        }
-        let doc = &mut self.docs[self.tabs[i].doc];
-        doc.encoding = Encoding::Utf8;
-        doc.bom = false;
-        doc.chosen_encoding = Some(Encoding::Utf8);
-        self.save(i)
+        let doc = self.tabs[i].doc;
+        let resume = self.resume.unwrap_or(Resume::Save(doc));
+        self.ask(
+            "Character not in the encoding",
+            text,
+            &cancel_or("Save as UTF-8"),
+            Asked::Utf8(doc, resume),
+        );
+        Saved::Asking
     }
 
     /// A file opened with bytes its encoding could not read (shown as
     /// U+FFFD) asks before its first save, which writes U+FFFD in their
-    /// place. `true` to go on.
+    /// place. `true` to go on; `false` when it asked, and the save runs
+    /// again once the answer is in.
     fn confirm_lossy(&mut self, i: usize) -> bool {
         let doc = &self.docs[self.tabs[i].doc];
-        if !doc.lossy || self.options.smoke || self.options.screenshot.is_some() {
+        if !doc.lossy
+            || self.tabs[i].approved.lossy
+            || self.options.smoke
+            || self.options.screenshot.is_some()
+        {
             return true;
         }
         let text = format!(
@@ -2813,22 +3130,22 @@ impl App {
             doc.display_name(),
             doc.encoding.name()
         );
-        let mut dialog = MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title("Replace unreadable bytes?")
-            .set_description(text)
-            .set_buttons(MessageButtons::YesNo);
-        if let Some(window) = &self.window {
-            dialog = dialog.set_parent(window.as_ref());
-        }
-        matches!(dialog.show(), MessageDialogResult::Yes)
+        let doc = self.tabs[i].doc;
+        let resume = self.resume.unwrap_or(Resume::Save(doc));
+        self.ask(
+            "Replace unreadable bytes?",
+            text,
+            &cancel_or("Save Anyway"),
+            Asked::Lossy(doc, resume),
+        );
+        false
     }
 
     /// An encoding was picked for the active document: read the file again
     /// in it, or save it in it.
     fn encoding_chosen(&mut self, purpose: EncodingFor, choice: Choice) {
         match purpose {
-            EncodingFor::Reopen => self.reopen_with(choice.encoding),
+            EncodingFor::Reopen => self.reopen_with(choice.encoding, false),
             EncodingFor::Save => self.save_with(choice),
         }
     }
@@ -2836,7 +3153,7 @@ impl App {
     /// Read the active file again in `encoding`, asking first if that loses
     /// unsaved changes. The choice sticks: reloading after a change on
     /// disk keeps it.
-    fn reopen_with(&mut self, encoding: Encoding) {
+    fn reopen_with(&mut self, encoding: Encoding, confirmed: bool) {
         if self.doc().path.is_none() {
             self.say("Not saved yet: nothing to reopen", false);
             return;
@@ -2844,23 +3161,24 @@ impl App {
         if self.waits_for_save() {
             return;
         }
-        if self.doc().is_dirty() && !self.options.smoke && self.options.screenshot.is_none() {
+        if self.doc().is_dirty()
+            && !confirmed
+            && !self.options.smoke
+            && self.options.screenshot.is_none()
+        {
             let text = format!(
                 "Reopening {} as {} discards its unsaved changes. Reopen?",
                 self.doc().display_name(),
                 encoding.name()
             );
-            let mut dialog = MessageDialog::new()
-                .set_level(MessageLevel::Warning)
-                .set_title("Unsaved changes")
-                .set_description(text)
-                .set_buttons(MessageButtons::YesNo);
-            if let Some(window) = &self.window {
-                dialog = dialog.set_parent(window.as_ref());
-            }
-            if !matches!(dialog.show(), MessageDialogResult::Yes) {
-                return;
-            }
+            let doc = self.tabs[self.active].doc;
+            self.ask(
+                "Unsaved changes",
+                text,
+                &cancel_or("Reopen"),
+                Asked::Reopen(doc, encoding),
+            );
+            return;
         }
         let id = self.tabs[self.active].doc;
         let before = self.docs[id].chosen_encoding.replace(encoding);
@@ -2884,7 +3202,9 @@ impl App {
     fn save_with(&mut self, choice: Choice) {
         let i = self.active;
         let doc = self.doc();
-        if doc.saves_on_worker() && !choice.encoding.is_utf8() {
+        if doc.saves_on_worker() && !choice.encoding.is_utf8() && !doc.is_transcoded() {
+            // A huge file read as bytes may not be text: only a decoded
+            // copy (M24) can be written in another encoding.
             self.say(
                 format!(
                     "Files over {} MB save only as UTF-8",
@@ -2909,7 +3229,9 @@ impl App {
             Saved::No if (doc.encoding, doc.bom) == (choice.encoding, choice.bom) => {
                 (doc.encoding, doc.bom, doc.chosen_encoding) = before;
             }
-            Saved::No => {}
+            // Asking: a question about the save, which runs again in the
+            // new encoding once answered.
+            Saved::No | Saved::Asking => {}
             Saved::Yes | Saved::Started => doc.chosen_encoding = Some(doc.encoding),
         }
     }
@@ -2934,26 +3256,30 @@ impl App {
         false
     }
 
-    /// Saving a merge with conflicts left asks first. `true` to go on.
+    /// Saving a merge with conflicts left asks first. `true` to go on;
+    /// `false` when it asked, and the save runs again once the answer is
+    /// in.
     fn confirm_conflicts(&mut self, i: usize) -> bool {
         let Some(open) = self.tabs[i].merge.as_ref().map(|m| m.open_conflicts()) else {
             return true;
         };
-        if open == 0 || self.options.smoke || self.options.screenshot.is_some() {
+        if open == 0
+            || self.tabs[i].approved.conflicts
+            || self.options.smoke
+            || self.options.screenshot.is_some()
+        {
             return true;
         }
         let noun = if open == 1 { "conflict" } else { "conflicts" };
-        let mut dialog = MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title("Conflicts left")
-            .set_description(format!(
-                "{open} {noun} not resolved. Save anyway, with conflict markers?"
-            ))
-            .set_buttons(MessageButtons::YesNo);
-        if let Some(window) = &self.window {
-            dialog = dialog.set_parent(window.as_ref());
-        }
-        matches!(dialog.show(), MessageDialogResult::Yes)
+        let doc = self.tabs[i].doc;
+        let resume = self.resume.unwrap_or(Resume::Save(doc));
+        self.ask(
+            "Conflicts left",
+            format!("{open} {noun} not resolved. Save anyway, with conflict markers?"),
+            &cancel_or("Save Anyway"),
+            Asked::Conflicts(doc, resume),
+        );
+        false
     }
 
     /// A `--merge` tab was saved: the exit code follows its conflicts.
@@ -2973,7 +3299,7 @@ impl App {
             Ok(job) => job,
             Err(e) => {
                 log::error!("{e}");
-                self.dialog(MessageLevel::Error, "Could not save", &e.to_string());
+                self.alert("Could not save", e.to_string());
                 return Saved::No;
             }
         };
@@ -2988,10 +3314,9 @@ impl App {
             });
             let step = self.docs[self.tabs[i].doc].save_written(token, failed, Instant::now());
             log::debug!("save of {name} ended before it began: {step:?}");
-            self.dialog(
-                MessageLevel::Error,
+            self.alert(
                 "Could not save",
-                "Could not start saving; nothing was written",
+                "Could not start saving; nothing was written".to_owned(),
             );
             return Saved::No;
         }
@@ -3095,7 +3420,7 @@ impl App {
                 tab.discard_at = None;
             }
             self.say(message.clone(), true);
-            self.dialog(MessageLevel::Error, "Could not save", &message);
+            self.alert("Could not save", message);
         } else {
             log::info!("saved {name}");
             self.say(format!("Saved {name}"), false);
@@ -3182,6 +3507,10 @@ impl App {
             // A huge file: App::save_ended does the above, or goes back to
             // the old name.
             Saved::Started => self.tabs[i].after_save.save_as = Some(SaveAs { old_path: old }),
+            // A question about the save (unreadable bytes, an encoding
+            // that cannot hold the text): it runs again under the new
+            // name once answered.
+            Saved::Asking => {}
             Saved::No => {
                 // Keep pointing at the old file, so the next save does not
                 // silently retry the path that failed.
@@ -3191,16 +3520,203 @@ impl App {
         saved
     }
 
-    fn dialog(&self, level: MessageLevel, title: &str, text: &str) {
-        let mut dialog = MessageDialog::new()
-            .set_level(level)
-            .set_title(title)
-            .set_description(text)
-            .set_buttons(MessageButtons::Ok);
-        if let Some(window) = &self.window {
-            dialog = dialog.set_parent(window.as_ref());
+    /// Show a message with an OK button, such as why a save failed.
+    fn alert(&mut self, title: &str, text: String) {
+        let ok = [Button {
+            label: "OK",
+            answer: Answer::Yes,
+        }];
+        self.ask(title, text, &ok, Asked::Notice);
+    }
+
+    /// Open a prompt in the window. It is answered later, by a key or a
+    /// click, in [`App::prompt_answered`]; until then it takes every key
+    /// and click. A prompt opened while another is showing waits its turn.
+    fn ask(&mut self, title: &str, text: String, buttons: &[Button], then: Asked) {
+        self.prompts
+            .push_back(Prompt::new(title, text, buttons, then));
+        // A half-typed chord, a drag or an open menu must not carry on
+        // underneath.
+        self.pending_chord = None;
+        self.menus.close();
+        self.changed(false);
+    }
+
+    /// A command while a prompt is open: the keys that answer it or move
+    /// its focus. Everything else waits until it is answered.
+    fn run_prompt(&mut self, cmd: Command<'_>, event_loop: &ActiveEventLoop) {
+        let key = match cmd {
+            Command::Newline | Command::Insert(" ") => prompt::Key::Press,
+            Command::Escape => prompt::Key::Escape,
+            Command::Tab | Command::Move(Motion::Right, _) => prompt::Key::Next,
+            Command::Outdent | Command::Move(Motion::Left, _) => prompt::Key::Prev,
+            Command::Insert(text) => match text.chars().next() {
+                Some(c) if text.chars().count() == 1 && c.is_alphabetic() => prompt::Key::Letter(c),
+                _ => return,
+            },
+            _ => return,
+        };
+        let Some(p) = self.prompts.front_mut() else {
+            return;
+        };
+        if let Some(answer) = p.key(key) {
+            self.prompt_answered(answer, event_loop);
         }
-        dialog.show();
+    }
+
+    /// A command while a menu is open: the keys that move in it or choose
+    /// from it. Everything else closes it (Windows menus do the same), and
+    /// a chosen item runs its action.
+    fn run_menu(&mut self, cmd: Command<'_>, event_loop: &ActiveEventLoop) {
+        let key = match cmd {
+            Command::Newline | Command::Insert(" ") => menu::drawn::Key::Press,
+            Command::Escape | Command::OpenMenuBar => menu::drawn::Key::Escape,
+            Command::Move(Motion::Up, _) => menu::drawn::Key::Up,
+            Command::Move(Motion::Down, _) => menu::drawn::Key::Down,
+            Command::Move(Motion::Left, _) => menu::drawn::Key::Left,
+            Command::Move(Motion::Right, _) => menu::drawn::Key::Right,
+            Command::Insert(text) => match text.chars().next() {
+                Some(c) if text.chars().count() == 1 && c.is_alphabetic() => {
+                    menu::drawn::Key::Letter(c)
+                }
+                _ => return,
+            },
+            _ => {
+                self.menus.close();
+                return;
+            }
+        };
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
+        if let Some(id) = self.menus.key(key, &layout, &self.keymap) {
+            self.run_menu_item(id, event_loop);
+        }
+    }
+
+    /// Run the action of a menu item Nimbus drew.
+    fn run_menu_item(&mut self, id: &str, event_loop: &ActiveEventLoop) {
+        if let Some(action) = crate::action::by_id(id) {
+            self.run(action.command, event_loop);
+        }
+    }
+
+    /// The front prompt was answered: close it and do what its answer
+    /// means.
+    fn prompt_answered(&mut self, answer: Answer, event_loop: &ActiveEventLoop) {
+        let Some(p) = self.prompts.pop_front() else {
+            return;
+        };
+        self.changed(false);
+        let go = answer == Answer::Yes;
+        match p.then {
+            Asked::Notice => {}
+            Asked::Discard(doc, resume) => {
+                let Some(i) = self.tab_of(doc) else {
+                    return;
+                };
+                let top = Some(self.docs[doc].history.top_id());
+                match answer {
+                    Answer::Yes => self.tabs[i].save_at = top,
+                    Answer::No => self.tabs[i].discard_at = top,
+                    Answer::Cancel => return self.resume_cancelled(),
+                }
+                self.resume_after(resume, event_loop);
+            }
+            Asked::Conflicts(..) | Asked::Lossy(..) | Asked::Utf8(..) if !go => {
+                self.resume_cancelled();
+            }
+            Asked::Conflicts(doc, resume) => {
+                if let Some(i) = self.tab_of(doc) {
+                    self.tabs[i].approved.conflicts = true;
+                    self.resume_after(resume, event_loop);
+                }
+            }
+            Asked::Lossy(doc, resume) => {
+                if let Some(i) = self.tab_of(doc) {
+                    self.tabs[i].approved.lossy = true;
+                    self.resume_after(resume, event_loop);
+                }
+            }
+            Asked::Utf8(doc, resume) => {
+                if self.tab_of(doc).is_some() {
+                    let d = &mut self.docs[doc];
+                    d.encoding = Encoding::Utf8;
+                    d.bom = false;
+                    d.chosen_encoding = Some(Encoding::Utf8);
+                    self.resume_after(resume, event_loop);
+                }
+            }
+            Asked::Reopen(doc, encoding) => {
+                if go && self.tabs[self.active].doc == doc {
+                    self.reopen_with(encoding, true);
+                }
+            }
+            Asked::Replace { from, to } => self.replace_answered(go, from, to),
+            Asked::Trash(path) => {
+                if go {
+                    self.trash(path);
+                }
+            }
+            Asked::InstallCommand(install, step) => {
+                if go {
+                    self.run_install(install, step);
+                } else {
+                    self.say("Left as it is", false);
+                }
+            }
+        }
+    }
+
+    /// The tab showing document `doc`, if one still does.
+    fn tab_of(&self, doc: DocId) -> Option<usize> {
+        self.tabs.iter().position(|t| t.doc == doc)
+    }
+
+    /// A question was answered "go ahead": run what asked it again.
+    fn resume_after(&mut self, resume: Resume, event_loop: &ActiveEventLoop) {
+        match resume {
+            Resume::Save(doc) => {
+                if let Some(i) = self.tab_of(doc) {
+                    self.save(i);
+                }
+            }
+            Resume::CloseTab(doc) => {
+                if let Some(i) = self.tab_of(doc) {
+                    self.close_tab(i, event_loop);
+                }
+            }
+            Resume::CloseGroup => self.close_group(event_loop),
+            Resume::Quit => self.quit(event_loop),
+        }
+    }
+
+    /// A question was cancelled: whatever asked it stops, and answers
+    /// given on the way ("Don't Save" to an earlier tab of a quit) are
+    /// forgotten, so trying again asks again.
+    fn resume_cancelled(&mut self) {
+        self.saves.quit_after = false;
+        // A Restart to Update waits on the quit this may have stopped.
+        self.quit_cancelled();
+        for tab in &mut self.tabs {
+            tab.discard_at = None;
+            tab.save_at = None;
+            tab.approved = Approved::default();
+        }
+    }
+
+    /// Run `f` as operation `resume` unless an outer operation is already
+    /// running, so a prompt opened inside it resumes the outermost one.
+    fn as_resumable<R>(&mut self, resume: Resume, f: impl FnOnce(&mut Self) -> R) -> R {
+        let outer = self.resume.is_none();
+        if outer {
+            self.resume = Some(resume);
+        }
+        let out = f(self);
+        if outer {
+            self.resume = None;
+        }
+        out
     }
 
     /// Offer to save tab `i` if it has unsaved changes. Returns
@@ -3216,50 +3732,53 @@ impl App {
         if !(doc.is_dirty() || doc.deleted) || unattended {
             return Discard::Yes;
         }
-        if self.tabs[i].discard_at == Some(doc.history.top_id()) {
-            return Discard::Yes; // answered earlier in this quit
+        let top = Some(doc.history.top_id());
+        if self.tabs[i].discard_at == top {
+            return Discard::Yes; // "Don't Save", answered earlier
+        }
+        if self.tabs[i].save_at == top {
+            // "Save", answered earlier.
+            let saved = self.save(i);
+            if saved != Saved::Asking {
+                self.tabs[i].save_at = None;
+            }
+            return match saved {
+                Saved::Yes => Discard::Yes,
+                Saved::Started => Discard::Wait,
+                Saved::No => Discard::Cancel,
+                Saved::Asking => Discard::Asking,
+            };
         }
         self.switch_to(i);
-        let doc = &self.docs[self.tabs[i].doc];
+        let id = self.tabs[i].doc;
+        let doc = &self.docs[id];
         let name = doc.display_name();
         let question = if doc.deleted {
             format!("{name} was deleted on disk. Save it before closing?")
         } else {
             format!("Save changes to {name} before closing?")
         };
-        let mut dialog = MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title("Unsaved changes")
-            .set_description(question)
-            .set_buttons(MessageButtons::YesNoCancelCustom(
-                "Save".into(),
-                "Don't Save".into(),
-                "Cancel".into(),
-            ));
-        if let Some(window) = &self.window {
-            dialog = dialog.set_parent(window.as_ref());
-        }
-        let save = match dialog.show() {
-            MessageDialogResult::Yes => true,
-            MessageDialogResult::Custom(label) if label == "Save" => true,
-            MessageDialogResult::No => false,
-            MessageDialogResult::Custom(label) if label == "Don't Save" => false,
-            _ => return Discard::Cancel, // Cancel or dismissed: keep editing.
-        };
-        if !save {
-            self.tabs[i].discard_at = Some(self.docs[self.tabs[i].doc].history.top_id());
-            return Discard::Yes;
-        }
-        match self.save(i) {
-            Saved::Yes => Discard::Yes,
-            Saved::Started => Discard::Wait,
-            Saved::No => Discard::Cancel,
-        }
+        let resume = self.resume.unwrap_or(Resume::CloseTab(id));
+        self.ask(
+            "Unsaved changes",
+            question,
+            &SAVE_DONT_CANCEL,
+            Asked::Discard(id, resume),
+        );
+        Discard::Asking
     }
 
     /// Close tab `i`, offering to save it. Closing the last tab quits. A
     /// tab whose huge file is being saved closes once that is done.
     fn close_tab(&mut self, i: usize, event_loop: &ActiveEventLoop) {
+        let doc = self.tabs[i].doc;
+        self.as_resumable(Resume::CloseTab(doc), |app| {
+            app.close_tab_now(i, event_loop);
+        });
+    }
+
+    /// [`App::close_tab`], as the operation a prompt resumes.
+    fn close_tab_now(&mut self, i: usize, event_loop: &ActiveEventLoop) {
         // Another tab still shows the document: nothing to ask.
         let discard = if self.shown_elsewhere(i) {
             Discard::Yes
@@ -3268,7 +3787,7 @@ impl App {
         };
         match discard {
             Discard::Yes => {}
-            Discard::Cancel => return,
+            Discard::Cancel | Discard::Asking => return,
             Discard::Wait => {
                 self.tabs[i].after_save.close = true;
                 let name = self.docs[self.tabs[i].doc].display_name();
@@ -3508,6 +4027,11 @@ impl App {
     /// changes as Close Tab does; the group goes with its last tab. The
     /// last group stays.
     fn close_group(&mut self, event_loop: &ActiveEventLoop) {
+        self.as_resumable(Resume::CloseGroup, |app| app.close_group_now(event_loop));
+    }
+
+    /// [`App::close_group`], as the operation a prompt resumes.
+    fn close_group_now(&mut self, event_loop: &ActiveEventLoop) {
         if self.groups.len() == 1 {
             return;
         }
@@ -3516,7 +4040,7 @@ impl App {
             let before = self.tabs.len();
             self.close_tab(i, event_loop);
             if self.tabs.len() == before {
-                return; // cancelled, or waiting on a save
+                return; // cancelled, asking, or waiting on a save
             }
         }
     }
@@ -3576,6 +4100,11 @@ impl App {
     /// ([`App::save_ended`]), without asking again about tabs already
     /// answered.
     fn quit(&mut self, event_loop: &ActiveEventLoop) {
+        self.as_resumable(Resume::Quit, |app| app.quit_now(event_loop));
+    }
+
+    /// [`App::quit`], as the operation a prompt resumes.
+    fn quit_now(&mut self, event_loop: &ActiveEventLoop) {
         for i in 0..self.tabs.len() {
             // A document in two tabs is asked about once.
             if (0..i).any(|j| self.tabs[j].doc == self.tabs[i].doc) {
@@ -3584,12 +4113,11 @@ impl App {
             match self.confirm_discard(i) {
                 Discard::Yes => {}
                 Discard::Cancel => {
-                    self.saves.quit_after = false;
-                    for tab in &mut self.tabs {
-                        tab.discard_at = None;
-                    }
+                    self.resume_cancelled();
                     return;
                 }
+                // Answering the question quits again.
+                Discard::Asking => return,
                 Discard::Wait => {
                     self.saves.quit_after = true;
                     let name = self.docs[self.tabs[i].doc].display_name();
@@ -3616,6 +4144,7 @@ impl App {
         let (theme, theme_warnings) = Theme::load(&config.theme);
         warnings.extend(theme_warnings);
         self.theme = theme;
+        self.sync_window_theme();
         // Language mappings and user languages may have changed; files
         // whose language did not change keep their state.
         let (languages, language_warnings) = Languages::load(&config.languages);
@@ -3655,8 +4184,9 @@ impl App {
             ));
             gpu.set_tab_width(self.config.tab_width);
             gpu.set_ligatures(self.config.ligatures);
+            gpu.set_fallback_prefs(fallback_prefs(&self.config));
         }
-        if old.font != self.config.font {
+        if old.font != self.config.font || old.font_weight != self.config.font_weight {
             self.load_editor_font();
         }
         if old.ui_font != self.config.ui_font {
@@ -3682,6 +4212,11 @@ impl App {
                 spawn_update_check(&self.proxy, false);
             }
             Command::OpenRelease => self.open_release(),
+            Command::InstallOnPath => self.install_command(true),
+            Command::RemoveFromPath => self.install_command(false),
+            Command::InstallUpdate => self.install_update(),
+            Command::CancelUpdate => self.cancel_update(),
+            Command::RollBackUpdate => self.roll_back_update(),
             _ => {}
         }
     }
@@ -3704,13 +4239,18 @@ impl App {
         let current = env!("CARGO_PKG_VERSION");
         match result {
             Ok(update::Outcome::Newer(release)) => {
+                let how = match update::install::detect().refusal(&release.version) {
+                    None => "run Install Update to get it".to_owned(),
+                    Some(_) => "run Open Latest Release Page to get it".to_owned(),
+                };
                 self.say(
                     format!(
-                        "Nimbus {} is available (you have {current}); run Open Latest Release Page to get it",
+                        "Nimbus {} is available (you have {current}); {how}",
                         release.version
                     ),
                     false,
                 );
+                self.updater.available = Some(release);
             }
             Ok(update::Outcome::UpToDate(release)) => {
                 if !at_startup {
@@ -3995,7 +4535,6 @@ impl App {
             | Command::QuickOpen
             | Command::Palette
             | Command::ReloadConfig
-            | Command::OpenConfig
             | Command::CompareSaved
             | Command::CompareFile
             | Command::CompareTab
@@ -4012,12 +4551,8 @@ impl App {
             | Command::NextConflict
             | Command::PrevConflict
             | Command::ResolveMarkers
-            | Command::MergeWithDisk
-            | Command::CheckUpdates
-            | Command::OpenRelease => return false,
-            _ if cmd.is_find_in_files() || cmd.is_layout() || cmd.is_compare_extra() => {
-                return false;
-            }
+            | Command::MergeWithDisk => return false,
+            _ if cmd.leaves_find_field() => return false,
             _ => {
                 let paste = (cmd == Command::Paste)
                     .then(|| self.clipboard_get())
@@ -4204,6 +4739,33 @@ impl App {
             return;
         };
         let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        // The window's own edges, buttons and title bar work even with a
+        // prompt open; an open menu closes first.
+        if !self.menus.is_open() && self.caption_press(&window, (x, y), now) {
+            return;
+        }
+        if let Some(p) = self.prompts.front() {
+            // Modal: a click outside its buttons does nothing.
+            self.prompt_click = p.click(&window, x, y);
+            return;
+        }
+        match self.menus.click(&window, (x, y), &self.keymap) {
+            menu::drawn::Click::Chose(id) => {
+                self.menus.clicked = Some(id);
+                self.changed(false);
+                return;
+            }
+            menu::drawn::Click::Handled | menu::drawn::Click::Closed => {
+                self.changed(false);
+                return;
+            }
+            menu::drawn::Click::Ignored => {}
+        }
+        if y < 0.0 {
+            // The title bar: the system drags and zooms the window on
+            // macOS, and `caption_press` did on Windows.
+            return;
+        }
         if self.picker.is_some() {
             self.picker_click(&window, x, y);
             return;
@@ -4654,7 +5216,11 @@ impl App {
                 (x * cell * lines_per_notch, y * lh * lines_per_notch)
             }
         };
-        if self.sidebar.contains(&window, x) {
+        if self.menus.is_open() {
+            if self.menus.scroll_by(&window, -dy) {
+                self.changed(false);
+            }
+        } else if self.sidebar.contains(&window, x) {
             self.sidebar.wheel(-dy, &window);
         } else if self.preview_wheel(i, -dy, &layout) {
             // A preview scrolls on its own; its source stays put.
@@ -4720,31 +5286,160 @@ impl App {
         }
     }
 
-    /// Show the resize cursor over the sidebar's divider, the usual one
-    /// elsewhere. Only tells the window when it changes.
+    /// Show the resize cursor over the sidebar's divider and the window's
+    /// edges (Windows), a hand over a link, the usual one elsewhere. Only
+    /// tells the window when it changes.
     fn update_cursor_icon(&mut self) {
         let Some(layout) = self.window_layout() else {
             return;
         };
-        let x = to_f32(self.mouse.x);
-        let resize = self.sidebar.resizing
-            || self.groups.dragging.is_some()
+        let (x, y) = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        let dragging = self.sidebar.resizing || self.groups.dragging.is_some();
+        let icon = if dragging
             || self.sidebar.on_divider(&layout, x)
             || (self.groups.len() > 1
-                && Groups::on_divider(&self.group_columns(&layout), x, layout.scale).is_some());
-        let link = !resize && self.over_preview_link();
-        if resize != self.resize_cursor || link != self.link_cursor {
-            self.resize_cursor = resize;
-            self.link_cursor = link;
+                && Groups::on_divider(&self.group_columns(&layout), x, layout.scale).is_some())
+        {
+            CursorIcon::ColResize
+        } else if let caption::Hit::Resize(d) = self.caption_hit(&layout, (x, y)) {
+            CursorIcon::from(d)
+        } else if self.over_preview_link() {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Default
+        };
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
             if let Some(window) = &self.window {
-                window.set_cursor(if resize {
-                    CursorIcon::ColResize
-                } else if link {
-                    CursorIcon::Pointer
-                } else {
-                    CursorIcon::Default
-                });
+                window.set_cursor(icon);
             }
+        }
+    }
+
+    /// The window's state that changes the drawn title bar.
+    fn frame(&self) -> caption::Frame {
+        self.window
+            .as_ref()
+            .map_or_else(caption::Frame::default, |w| caption::Frame {
+                maximized: w.is_maximized(),
+                fullscreen: w.fullscreen().is_some(),
+            })
+    }
+
+    /// What `at` (layout pixels) is in the window's frame: always
+    /// [`caption::Hit::None`] where the system draws the frame.
+    fn caption_hit(&self, layout: &Layout, at: (f32, f32)) -> caption::Hit {
+        if !DRAWS_CAPTION {
+            return caption::Hit::None;
+        }
+        let inset = self.gpu.as_ref().map_or(0.0, Gpu::inset_top);
+        caption::hit(
+            layout,
+            at,
+            inset,
+            self.frame(),
+            menu::drawn::titles_end(layout),
+        )
+    }
+
+    /// A left press at `at` on the window's frame: resize from an edge,
+    /// press a window button, or move the window by the bar (maximise or
+    /// restore on a double-click). Returns whether it was the frame's.
+    fn caption_press(&mut self, layout: &Layout, at: (f32, f32), now: Instant) -> bool {
+        let Some(window) = self.window.clone() else {
+            return false;
+        };
+        match self.caption_hit(layout, at) {
+            caption::Hit::Resize(direction) => {
+                if let Err(e) = window.drag_resize_window(direction) {
+                    log::debug!("window not resized: {e}");
+                }
+            }
+            caption::Hit::Button(button) => {
+                self.caption.pressed = Some(button);
+                self.caption.hover = Some(button);
+                self.changed(false);
+            }
+            caption::Hit::Caption => {
+                if self.caption.double_click(now) {
+                    window.set_maximized(!window.is_maximized());
+                } else if let Err(e) = window.drag_window() {
+                    log::debug!("window not moved: {e}");
+                }
+            }
+            caption::Hit::None => return false,
+        }
+        true
+    }
+
+    /// The left button came up: the window button it went down on, if it
+    /// is still over it (as with the system's buttons, moving off first
+    /// cancels).
+    fn caption_release(&mut self) -> Option<caption::Button> {
+        let pressed = self.caption.pressed.take()?;
+        self.changed(false);
+        let layout = self.window_layout()?;
+        let at = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        (self.caption_hit(&layout, at) == caption::Hit::Button(pressed)).then_some(pressed)
+    }
+
+    /// Do what window button `button` does. Close asks about unsaved
+    /// changes as closing always does; with a prompt already open it waits
+    /// for that answer.
+    fn caption_button(&mut self, button: caption::Button, event_loop: &ActiveEventLoop) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        match button {
+            caption::Button::Minimize => window.set_minimized(true),
+            caption::Button::Maximize => window.set_maximized(!window.is_maximized()),
+            caption::Button::Close if self.prompts.is_empty() => self.quit(event_loop),
+            caption::Button::Close => {}
+        }
+    }
+
+    /// Light the window button under the pointer.
+    fn caption_hover(&mut self) {
+        if !DRAWS_CAPTION {
+            return;
+        }
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
+        let at = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+        let hover = match self.caption_hit(&layout, at) {
+            caption::Hit::Button(button) => Some(button),
+            _ => None,
+        };
+        if hover != self.caption.hover {
+            self.caption.hover = hover;
+            self.changed(false);
+        }
+    }
+
+    /// A right press: the system's window menu on the drawn title bar
+    /// (Restore, Move, Size, Minimise, Maximise, Close), else the tree's
+    /// right-click menu when no prompt is open.
+    fn right_pressed(&mut self) {
+        if let Some(layout) = self.window_layout() {
+            let at = (to_f32(self.mouse.x), to_f32(self.mouse.y));
+            if matches!(
+                self.caption_hit(&layout, at),
+                caption::Hit::Caption | caption::Hit::Button(_)
+            ) {
+                if let Some(window) = &self.window {
+                    // Back to window coordinates, which include the bar.
+                    let inset = f64::from(self.gpu.as_ref().map_or(0.0, Gpu::inset_top));
+                    window.show_window_menu(PhysicalPosition::new(
+                        self.mouse.x,
+                        self.mouse.y + inset,
+                    ));
+                }
+                return;
+            }
+        }
+        if self.prompts.is_empty() {
+            self.tree_context_menu();
         }
     }
 
@@ -4834,24 +5529,8 @@ impl App {
         let (rows, _) = picker.rows(&self.keymap);
         match view::picker_row_at(layout, rows.len(), x, y) {
             Some(row) => {
-                picker.selected = picker.scroll + row;
-                let chosen = picker.chosen();
-                let kind = picker.kind;
-                self.picker = None;
-                match chosen {
-                    Some(Item::Name(name)) => self.name_chosen(kind, &name),
-                    Some(Item::Workspace(name)) => self.open_named_workspace(&name),
-                    Some(Item::File(path) | Item::Recent(path)) => self.open_path(&path),
-                    Some(Item::Action(a)) => self.pending_action = Some(a.command),
-                    Some(Item::Line(n)) => self.go_to_line(n),
-                    Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
-                    Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
-                    Some(Item::Revision(rev)) => self.compare_with_revision(rev),
-                    Some(Item::Encoding(purpose, choice, _)) => {
-                        self.encoding_chosen(purpose, choice);
-                    }
-                    None => {}
-                }
+                let n = picker.scroll + row;
+                self.picker_choose(n);
             }
             None => {
                 if !view::picker_contains(layout, rows.len(), x, y) {
@@ -4860,6 +5539,33 @@ impl App {
             }
         }
         self.changed(false);
+    }
+
+    /// Choose the picker's match `n` (counted from the first match), as a
+    /// click on its row does, and close the picker. A command chosen this
+    /// way runs once the click (or screen reader request) is handled.
+    fn picker_choose(&mut self, n: usize) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        picker.selected = n;
+        let chosen = picker.chosen();
+        let kind = picker.kind;
+        self.picker = None;
+        match chosen {
+            Some(Item::Name(name)) => self.name_chosen(kind, &name),
+            Some(Item::Workspace(name)) => self.open_named_workspace(&name),
+            Some(Item::File(path) | Item::Recent(path)) => self.open_path(&path),
+            Some(Item::Action(a)) => self.pending_action = Some(a.command),
+            Some(Item::Line(n)) => self.go_to_line(n),
+            Some(Item::Symbol(s, _)) => self.go_to_byte(s.start),
+            Some(Item::Tab(i, _)) => self.compare_with_tab_index(i),
+            Some(Item::Revision(rev)) => self.compare_with_revision(rev),
+            Some(Item::Encoding(purpose, choice, _)) => {
+                self.encoding_chosen(purpose, choice);
+            }
+            None => {}
+        }
     }
 
     /// Start the active tab's first parse if it has not started, and say
@@ -5016,6 +5722,27 @@ impl App {
             let ui = &self.theme.ui;
             draw_picker_overlay(gpu, ui, layout, p, &self.keymap, self.blink.visible);
         }
+        self.paint_chrome(gpu, layout);
+    }
+
+    /// Draw what goes over everything else: the title bar (macOS), or the
+    /// menu bar with the window's title and buttons (Windows), then an open
+    /// menu and a prompt.
+    fn paint_chrome(&self, gpu: &mut Gpu, layout: &Layout) {
+        let ui = &self.theme.ui;
+        if DRAWS_MENU_BAR {
+            self.menus.draw_bar(gpu, ui, layout, self.window_focused);
+            if DRAWS_CAPTION {
+                let title = (self.title.as_str(), self.window_focused);
+                caption::draw(gpu, ui, layout, title, &self.caption, self.frame());
+            }
+        } else {
+            view::draw_title_bar(gpu, ui, layout, &self.title, self.window_focused);
+        }
+        self.menus.draw_popup(gpu, ui, layout);
+        if let Some(p) = self.prompts.front() {
+            p.draw(gpu, ui, layout);
+        }
     }
 
     /// Tell the IME where the cursor is, so its candidate window appears
@@ -5028,11 +5755,12 @@ impl App {
                 .as_ref()
                 .map_or(0, |p| nimbus_core::column::line_width(&p.text, tab_width)),
         );
+        let top = self.gpu.as_ref().map_or(0.0, Gpu::inset_top);
         #[expect(
             clippy::cast_possible_truncation,
             reason = "on-screen pixel coordinates fit in i32"
         )]
-        let area = [r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32];
+        let area = [r[0] as i32, (r[1] + top) as i32, r[2] as i32, r[3] as i32];
         if self.ime_area != Some(area) {
             window.set_ime_cursor_area(
                 PhysicalPosition::new(area[0], area[1]),
@@ -5068,6 +5796,8 @@ impl App {
             self.paint(&mut gpu, &layout, &panes);
             self.gpu = Some(gpu);
         }
+        // What changed on screen, for a screen reader if one is running.
+        self.update_access();
         let focused_pane = panes.get(self.groups.focused).copied().unwrap_or(layout);
         // Picker results arriving later wake the loop through the
         // matcher's notify callback (AppEvent::PickerChanged), not by
@@ -5113,8 +5843,9 @@ impl App {
                 return;
             }
             Err(e) => {
-                log::error!("{e}");
-                event_loop.exit();
+                if !self.gpu_lost(&window, e) {
+                    event_loop.exit();
+                }
                 return;
             }
         }
@@ -6012,6 +6743,55 @@ fn draw_headless_picker(
 
 /// Give the window the app icon where the window itself carries one.
 ///
+/// Whether Nimbus draws the macOS title bar itself, where the system keeps
+/// only its window buttons and leaves the bar to the app. Windows has its
+/// own drawn bar, with the menus and the window buttons in it
+/// (`crate::caption`); Linux leaves the decorations to the window manager,
+/// which only knows light and dark.
+const DRAWS_TITLE_BAR: bool = cfg!(target_os = "macos");
+
+/// The height of the title bar Nimbus draws, in points: the system's own
+/// title bar height on macOS, so the window buttons sit centred in it.
+pub const TITLE_BAR_PT: f32 = 28.0;
+
+/// On macOS, let the window's content run up under a transparent title
+/// bar with the title hidden: the system still draws the close, minimise
+/// and zoom buttons and still drags the window by the bar, and Nimbus
+/// paints the bar in the theme's colours (`view::draw_title_bar`).
+///
+/// On Windows, leave out the system's frame altogether but keep its
+/// shadow: Nimbus draws the title bar, its buttons and the menus in one
+/// strip, and moves and resizes the window itself (`crate::caption`).
+fn with_drawn_title_bar(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        attrs
+            .with_titlebar_transparent(true)
+            .with_fullsize_content_view(true)
+            .with_title_hidden(true)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        attrs.with_decorations(false).with_undecorated_shadow(true)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    attrs
+}
+
+/// The system appearance that matches `theme`: winit passes it to the
+/// window (`NSWindow.appearance` on macOS, the immersive dark mode
+/// attribute on Windows, the GTK theme variant on X11 and the decoration
+/// colours on Wayland).
+fn window_theme(theme: &Theme) -> winit::window::Theme {
+    if theme.is_dark() {
+        winit::window::Theme::Dark
+    } else {
+        winit::window::Theme::Light
+    }
+}
+
 /// On Windows the icon embedded in `nimbus.exe` (by `build.rs`, resource
 /// 1 in `assets/icon/nimbus.rc`) shows in Explorer, but a window starts
 /// with none: without this its title bar and Alt-Tab entry show a blank
@@ -6066,7 +6846,8 @@ pub fn layout_for(gpu: &Gpu, scale: f32, doc: &Document, find: &FindBar) -> Layo
 
 /// As [`layout_for`], for a gutter wide enough for `lines` lines.
 pub fn layout_for_lines(gpu: &Gpu, scale: f32, lines: usize, find: &FindBar) -> Layout {
-    let (w, h) = gpu.size();
+    // Below the title bar Nimbus draws on macOS, if any.
+    let (w, h) = gpu.content_size();
     let bar_rows = match (find.open, find.replace_mode) {
         (false, _) => 0,
         (true, false) => 1,
@@ -6132,20 +6913,45 @@ fn headless_preview(
     Some(p)
 }
 
+/// The fallback fonts the config prefers per script, and the regional
+/// forms for Han: the config's `cjk_language`, else the system's first
+/// preferred language (M24). Reading the system language is one call to
+/// the OS, fast enough for startup.
+fn fallback_prefs(config: &Config) -> nimbus_render::FallbackPrefs {
+    let system = config
+        .cjk_language
+        .is_empty()
+        .then(sys_locale::get_locale)
+        .flatten();
+    nimbus_render::FallbackPrefs {
+        fonts: config
+            .fallback_fonts
+            .iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+            .collect(),
+        cjk: config.cjk_language(system.as_deref()),
+    }
+}
+
 /// The config's tab width, ligatures and font for a headless render. With
 /// no later frame to swap a font into, a configured font is looked up
 /// before drawing.
 fn headless_fonts(gpu: &mut Gpu, config: &Config) {
     gpu.set_tab_width(config.tab_width);
     gpu.set_ligatures(config.ligatures);
+    gpu.set_fallback_prefs(fallback_prefs(config));
     if !config.font.is_empty() {
-        match nimbus_render::find_editor_font(&config.font) {
+        match nimbus_render::find_editor_font(&config.font, config.font_weight) {
             Some(f) => gpu.set_font(f),
             None => log::warn!("font {:?} not found; using the bundled font", config.font),
         }
+    } else if config.font_weight.is_some()
+        && let Ok(f) = nimbus_render::bundled_editor_font(config.font_weight)
+    {
+        gpu.set_font(f);
     }
     if !config.ui_font.is_empty() {
-        match nimbus_render::find_editor_font(&config.ui_font) {
+        match nimbus_render::find_editor_font(&config.ui_font, None) {
             Some(f) => gpu.set_ui_font(Some(f)),
             None => log::warn!(
                 "interface font {:?} not found; using the editor font",
@@ -6159,22 +6965,27 @@ fn headless_fonts(gpu: &mut Gpu, config: &Config) {
 /// config's fonts; `None` after saying why the bundled font could not be
 /// read.
 fn headless_gpu(
-    context: GpuContext,
+    context: Option<GpuContext>,
     config: &Config,
     (scale, size): (f64, (u32, u32)),
-    linear_blend: bool,
+    options: &Options,
 ) -> Option<Gpu> {
     let font = Font::bundled()
         .map_err(|e| print_err(&format!("nimbus: {e}")))
         .ok()?;
-    let mut gpu = Gpu::headless(
-        context,
-        font,
-        to_f32(config.font_size * scale),
-        size,
-        linear_blend,
-    );
+    let px = to_f32(config.font_size * scale);
+    let mut gpu = match context {
+        Some(context) => Gpu::headless(context, font, px, size, options.linear_blend),
+        // Compatibility mode (M23): no GPU at all.
+        None => Gpu::compat_headless(font, px, size),
+    };
     headless_fonts(&mut gpu, config);
+    if options.menu.is_some() {
+        let bar = caption::bar_height(gpu.metrics().line_height, to_f32(scale));
+        gpu.set_inset_top(bar);
+    } else if options.title_bar {
+        gpu.set_inset_top(TITLE_BAR_PT * to_f32(scale));
+    }
     Some(gpu)
 }
 
@@ -6307,13 +7118,15 @@ pub fn paint_status(gpu: &mut Gpu, layout: &Layout, scene: &mut Scene<'_>) {
 
 /// `--headless WxH --screenshot FILE`: render the first frame into an
 /// off-screen texture, with no window, and save it. Works with the screen
-/// locked or no display attached. Returns the process exit code.
+/// locked or no display attached. With no `context` the frame is painted on
+/// the CPU (compatibility mode), with no GPU at all. Returns the process
+/// exit code.
 pub fn run_headless(
     options: &Options,
     config: &Config,
     (docs, root, more_roots): (Vec<Document>, PathBuf, Vec<PathBuf>),
     size: (u32, u32),
-    context: GpuContext,
+    context: Option<GpuContext>,
 ) -> i32 {
     let labels = headless_labels(&docs);
     let mut doc = docs.into_iter().next().unwrap_or_else(Document::untitled);
@@ -6325,7 +7138,7 @@ pub fn run_headless(
     };
     // No window to ask: default to a Retina scale, or NIMBUS_SCALE.
     let scale = effective_scale(2.0);
-    let Some(mut gpu) = headless_gpu(context, config, (scale, size), options.linear_blend) else {
+    let Some(mut gpu) = headless_gpu(context, config, (scale, size), options) else {
         return 1;
     };
     let mut view = View::default();
@@ -6402,6 +7215,7 @@ pub fn run_headless(
         if let Some(spec) = &options.picker {
             draw_headless_picker(&mut gpu, ui, &layout, (spec, &root), &doc, config);
         }
+        draw_headless_chrome(&mut gpu, (ui, &config.keys), &layout, &doc, options);
         // Nested languages are parsed a few per frame; keep painting
         // until none is left over, as the window would on redraws.
         if doc.syntax.injections_pending() {
@@ -6418,6 +7232,47 @@ pub fn run_headless(
         return 1;
     }
     i32::from(!save_screenshot(path, gpu.take_capture().as_ref()))
+}
+
+/// With `--headless`: the title bar Nimbus draws on macOS (`--title-bar`),
+/// or the menu bar it draws on Windows with a menu open (`--menu NAME`),
+/// and the question closing `doc` would ask (`--prompt`), for checking how
+/// they look in a theme.
+fn draw_headless_chrome(
+    gpu: &mut Gpu,
+    (ui, keys): (&Ui, &std::collections::HashMap<String, Vec<String>>),
+    layout: &Layout,
+    doc: &Document,
+    options: &Options,
+) {
+    let name = doc.display_name();
+    if let Some(open) = &options.menu {
+        let keymap = Keymap::new(keys).0;
+        let mut menus = Menus::default();
+        let found = menu::LAYOUT
+            .iter()
+            .position(|(title, _)| title.eq_ignore_ascii_case(open));
+        if let Some(i) = found {
+            menus.open_bar(i, layout, &keymap, true);
+        }
+        menus.draw_bar(gpu, ui, layout, true);
+        let title = format!("{name} — Nimbus");
+        caption::draw(
+            gpu,
+            ui,
+            layout,
+            (&title, true),
+            &Caption::default(),
+            caption::Frame::default(),
+        );
+        menus.draw_popup(gpu, ui, layout);
+    } else {
+        view::draw_title_bar(gpu, ui, layout, &format!("{name} — Nimbus"), true);
+    }
+    if options.prompt {
+        let question = format!("Save changes to {name} before closing?");
+        Prompt::new("Unsaved changes", question, &SAVE_DONT_CANCEL, ()).draw(gpu, ui, layout);
+    }
 }
 
 /// Warnings on stderr, for headless runs with no message line to show them.
@@ -6658,17 +7513,9 @@ fn headless_folder_compare(sidebar: &mut Sidebar, left: &Path, right: &Path) {
     }
 }
 
-/// Draw an open picker over everything else.
-fn draw_picker_overlay(
-    gpu: &mut Gpu,
-    ui: &Ui,
-    layout: &Layout,
-    p: &Picker,
-    keymap: &Keymap,
-    blink: bool,
-) {
-    let (rows, selected) = p.rows(keymap);
-    let rows: Vec<(String, String)> = rows.into_iter().map(|r| (r.text, r.detail)).collect();
+/// The picker's count of matches, such as "42 files" ("…" while still
+/// listing), or nothing for pickers that do not list.
+fn picker_status(p: &Picker) -> String {
     let n = p.match_count();
     let noun = match (p.kind, n == 1) {
         (Kind::Palette, true) => "command",
@@ -6688,12 +7535,34 @@ fn draw_picker_overlay(
         (Kind::Recent, false) => "recent files",
     };
     let more = if p.loading() { "…" } else { "" };
-    let status = if matches!(p.kind, Kind::Line | Kind::Name(_) | Kind::Revision) {
+    if matches!(p.kind, Kind::Line | Kind::Name(_) | Kind::Revision) {
         String::new()
     } else {
         format!("{n} {noun}{more}")
-    };
-    let placeholder = match p.kind {
+    }
+}
+
+/// What the picker is, as a screen reader names it.
+fn picker_title(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Palette => "Command palette",
+        Kind::Files => "Go to file",
+        Kind::Line => "Go to line",
+        Kind::Symbols => "Go to symbol",
+        Kind::Tabs => "Compare with tab",
+        Kind::Revision => "Compare with revision",
+        Kind::Encoding(EncodingFor::Reopen) => "Reopen with encoding",
+        Kind::Encoding(EncodingFor::Save) => "Save with encoding",
+        Kind::Recent => "Open recent",
+        Kind::Name(crate::picker::Naming::Workspace) => "Save workspace",
+        Kind::Name(crate::picker::Naming::Search) => "Save search",
+        Kind::Workspaces => "Open workspace",
+    }
+}
+
+/// The hint the picker's empty query field shows.
+fn picker_placeholder(kind: Kind) -> &'static str {
+    match kind {
         Kind::Palette => "Type a command",
         Kind::Files => "Type a file name",
         Kind::Line => "Type a line number",
@@ -6706,7 +7575,22 @@ fn draw_picker_overlay(
         Kind::Name(crate::picker::Naming::Workspace) => "Name the workspace",
         Kind::Name(crate::picker::Naming::Search) => "Name the search",
         Kind::Workspaces => "Type a workspace name",
-    };
+    }
+}
+
+/// Draw an open picker over everything else.
+fn draw_picker_overlay(
+    gpu: &mut Gpu,
+    ui: &Ui,
+    layout: &Layout,
+    p: &Picker,
+    keymap: &Keymap,
+    blink: bool,
+) {
+    let (rows, selected) = p.rows(keymap);
+    let rows: Vec<(String, String)> = rows.into_iter().map(|r| (r.text, r.detail)).collect();
+    let status = picker_status(p);
+    let placeholder = picker_placeholder(p.kind);
     let pv = PickerView {
         input: &p.input,
         placeholder,
@@ -6775,8 +7659,21 @@ impl App {
 
     /// The pointer moved: carry on whatever drag is under way, then
     /// update what hovering shows.
-    fn cursor_moved(&mut self, position: PhysicalPosition<f64>) {
+    fn cursor_moved(&mut self, mut position: PhysicalPosition<f64>) {
+        // In the coordinates everything is laid out in: y = 0 is the top
+        // of the content, below the title bar Nimbus draws on macOS.
+        position.y -= f64::from(self.gpu.as_ref().map_or(0.0, Gpu::inset_top));
         self.mouse = position;
+        self.caption_hover();
+        if self.menus.is_open() {
+            if let Some(layout) = self.window_layout() {
+                let at = (to_f32(position.x), to_f32(position.y));
+                if self.menus.hover(&layout, at, &self.keymap) {
+                    self.changed(false);
+                }
+            }
+            return;
+        }
         if self.sidebar.resizing {
             if let Some(layout) = self.window_layout() {
                 self.sidebar.drag_to(&layout, to_f32(position.x));
@@ -6843,6 +7740,12 @@ impl ApplicationHandler<AppEvent> for App {
         match event {
             AppEvent::PickerChanged => self.tick_picker(),
             AppEvent::OpenFiles(paths) => self.open_from_system(&paths),
+            AppEvent::Handoff(paths, waiter) => self.handed_off(&paths, waiter),
+            AppEvent::Installed(result) => match result {
+                Ok(note) => self.say(note, false),
+                Err(why) => self.say(why, true),
+            },
+            AppEvent::Access(event) => self.access_event(event, event_loop),
             AppEvent::Menu(id) => {
                 // A held menu shortcut delivers a menu event for every key
                 // repeat, with no repeat flag. Drop events for the same item
@@ -6918,6 +7821,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.changed(false);
             }
             AppEvent::Update(result, at_startup) => self.update_checked(result, at_startup),
+            AppEvent::Installing(event) => self.update_event(event),
             AppEvent::Search(batch) => {
                 if !self.find.receive(batch) {
                     return;
@@ -6944,10 +7848,20 @@ impl ApplicationHandler<AppEvent> for App {
 
         let attrs = Window::default_attributes()
             .with_title(format!("{} — Nimbus", self.doc().display_name()))
-            .with_inner_size(LogicalSize::new(960.0, 640.0));
-        let attrs = self.restore_geometry(event_loop, with_app_icon(attrs));
+            .with_inner_size(LogicalSize::new(960.0, 640.0))
+            .with_theme(Some(window_theme(&self.theme)));
+        let attrs = self.restore_geometry(event_loop, with_drawn_title_bar(with_app_icon(attrs)));
 
-        let window = match event_loop.create_window(attrs) {
+        // Created hidden, given its screen reader adapter, then shown: the
+        // adapter must exist before the window is first visible.
+        let proxy = self.proxy.clone();
+        let opened = access::open_window(
+            attrs,
+            |attrs| event_loop.create_window(attrs),
+            |w| self.access.attach(event_loop, w, proxy),
+            |w| w.set_visible(true),
+        );
+        let window = match opened {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 self.fail_start(event_loop, &format!("Could not create a window: {e}"));
@@ -6957,21 +7871,6 @@ impl ApplicationHandler<AppEvent> for App {
 
         log::debug!("startup: window created at {:?}", self.started.elapsed());
 
-        // Join the GPU thread started in `main`. By now it has usually
-        // finished, so this rarely waits.
-        let context = match self.gpu_init.take().map(JoinHandle::join) {
-            Some(Ok(Ok(context))) => context,
-            Some(Ok(Err(e))) => {
-                self.fail_start(event_loop, &format!("Could not start the GPU: {e}"));
-                return;
-            }
-            Some(Err(_)) | None => {
-                self.fail_start(event_loop, "GPU setup thread did not complete");
-                return;
-            }
-        };
-        log::debug!("startup: gpu joined at {:?}", self.started.elapsed());
-
         let font = match Font::bundled() {
             Ok(f) => f,
             Err(e) => {
@@ -6980,17 +7879,27 @@ impl ApplicationHandler<AppEvent> for App {
             }
         };
         let scale = effective_scale(window.scale_factor());
-        match Gpu::new(
-            &window,
-            context,
-            font,
-            self.font_px(scale),
-            self.options.linear_blend,
-        ) {
+        let px = self.font_px(scale);
+        // Join the GPU thread started in `main`. By now it has usually
+        // finished, so this rarely waits. Without a GPU, or when asked,
+        // Nimbus paints on the CPU instead (compatibility mode, M23).
+        let gpu = match self.gpu_init.take().map(JoinHandle::join) {
+            _ if self.options.compat || self.config.compat => Err(None),
+            Some(Ok(Ok(context))) => {
+                log::debug!("startup: gpu joined at {:?}", self.started.elapsed());
+                Gpu::new(&window, context, font, px, self.options.linear_blend)
+                    .map_err(|e| Some(format!("could not set up drawing: {e}")))
+            }
+            Some(Ok(Err(e))) => Err(Some(e.to_string())),
+            Some(Err(_)) | None => Err(Some("GPU setup did not complete".to_owned())),
+        };
+        match gpu {
             Ok(gpu) => self.gpu_ready(gpu),
-            Err(e) => {
-                self.fail_start(event_loop, &format!("Could not set up drawing: {e}"));
-                return;
+            Err(why) => {
+                if let Err(e) = self.start_compat(&window, why.as_deref()) {
+                    self.fail_start(event_loop, &format!("Could not set up drawing: {e}"));
+                    return;
+                }
             }
         }
 
@@ -6999,14 +7908,7 @@ impl ApplicationHandler<AppEvent> for App {
         window.set_ime_allowed(true);
 
         log::info!("window + gpu ready in {:?}", self.started.elapsed());
-        let proxy = self.proxy.clone();
-        self.menu_bar = menu::install(&window, &self.keymap, move |id| {
-            let _ = proxy.send_event(AppEvent::Menu(id));
-        });
-        log::debug!("startup: menus at {:?}", self.started.elapsed());
-        window.request_redraw();
-        self.window = Some(window);
-        self.update_title();
+        self.window_ready(window);
         if let Some(pattern) = self.options.find.clone() {
             self.open_find(false);
             let _ = self.find.find.ed().insert(&pattern);
@@ -7117,6 +8019,9 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.waiting.is_empty() {
+            self.check_waiting();
+        }
         if self.frames > 0 {
             // Huge files count their lines in the background, started
             // after the first frame so the disk is not shared with it.
@@ -7130,8 +8035,9 @@ impl ApplicationHandler<AppEvent> for App {
             // event stream for each folder), so not before the first frame.
             self.watching = true;
             self.sync_watch();
+            self.update_started();
             // A configured font, looked up once the first frame is up.
-            if !self.config.font.is_empty() {
+            if !self.config.font.is_empty() || self.config.font_weight.is_some() {
                 self.load_editor_font();
             }
             if !self.config.ui_font.is_empty() {
@@ -7193,6 +8099,9 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if let Some(window) = &self.window {
+            self.access.window_event(window, &event);
+        }
         if self.window.is_none() || self.gpu.is_none() {
             return;
         }
@@ -7201,6 +8110,9 @@ impl ApplicationHandler<AppEvent> for App {
             log::trace!("window event: {event:?}");
         }
         match event {
+            // A prompt is open: it is answered first (it may be this
+            // quit's own question).
+            WindowEvent::CloseRequested if !self.prompts.is_empty() => {}
             WindowEvent::CloseRequested => self.quit(event_loop),
 
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
@@ -7212,7 +8124,8 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
 
             WindowEvent::CursorLeft { .. } => {
-                if self.sidebar.search.hover_gone() {
+                let button = self.caption.hover.take().is_some();
+                if self.sidebar.search.hover_gone() || button {
                     self.changed(false);
                 }
             }
@@ -7224,11 +8137,20 @@ impl ApplicationHandler<AppEvent> for App {
             } => {
                 if state == ElementState::Pressed {
                     self.mouse_down(now);
+                    if let Some(answer) = self.prompt_click.take() {
+                        self.prompt_answered(answer, event_loop);
+                    }
+                    if let Some(id) = self.menus.clicked.take() {
+                        self.run_menu_item(id, event_loop);
+                    }
                     if let Some(cmd) = self.pending_action.take() {
                         self.run(cmd, event_loop);
                     }
                 } else {
                     self.left_released();
+                    if let Some(button) = self.caption_release() {
+                        self.caption_button(button, event_loop);
+                    }
                 }
             }
 
@@ -7236,15 +8158,23 @@ impl ApplicationHandler<AppEvent> for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
                 ..
-            } => self.tree_context_menu(),
+            } => self.right_pressed(),
 
-            WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
+            WindowEvent::MouseWheel { delta, .. } if self.prompts.is_empty() => {
+                self.mouse_wheel(delta);
+            }
 
             // A file dragged in from the desktop opens; a folder joins the
             // workspace (M19).
-            WindowEvent::DroppedFile(path) => self.open_from_system(&[path]),
+            WindowEvent::DroppedFile(path) if self.prompts.is_empty() => {
+                self.open_from_system(&[path]);
+            }
 
             WindowEvent::Focused(false) => {
+                self.window_focused = false;
+                // As system menus do, an open menu closes with the window
+                // in the background.
+                self.menus.close();
                 // Show the cursor solid in the background; it may have been
                 // in the off phase of a blink.
                 self.blink.stop();
@@ -7252,6 +8182,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
             WindowEvent::Occluded(true) => self.blink.stop(),
             WindowEvent::Focused(true) => {
+                self.window_focused = true;
                 self.blink.reset(now);
                 self.changed(false);
             }
@@ -7264,6 +8195,7 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.set_font_size(px);
                 }
+                self.sync_title_bar();
                 self.changed(false);
             }
 
@@ -7271,6 +8203,8 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
                 }
+                // Entering or leaving full screen arrives as a resize.
+                self.sync_title_bar();
                 self.changed(false);
             }
 

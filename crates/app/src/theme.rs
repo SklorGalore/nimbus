@@ -138,6 +138,22 @@ ui_colors! {
     guide,
     /// The indent guide enclosing the cursor.
     guide_active,
+    /// The box marking a character that would otherwise be invisible: a
+    /// bidirectional control or a zero-width character (M26).
+    hidden_char,
+    /// The git window's history graph (M27): lane colours, used in turn
+    /// from the leftmost lane.
+    graph_1,
+    /// The second lane colour.
+    graph_2,
+    /// The third lane colour.
+    graph_3,
+    /// The fourth lane colour.
+    graph_4,
+    /// The fifth lane colour.
+    graph_5,
+    /// The sixth lane colour.
+    graph_6,
 }
 
 /// A loaded theme.
@@ -321,6 +337,21 @@ impl Theme {
         lookup(&self.syntax, capture).and_then(|l| l.color)
     }
 
+    /// Whether the theme is dark, judged from its background's brightness
+    /// rather than its `base`, so a user theme that starts from `dark` but
+    /// paints a pale background counts as light.
+    ///
+    /// The window frame and native dialogs come from the operating system,
+    /// which only knows "light" or "dark"; this is the answer Nimbus gives
+    /// it so the title bar matches the editor instead of the system setting.
+    #[must_use]
+    pub fn is_dark(&self) -> bool {
+        // Rec. 709 luma of the sRGB values: a cheap "how bright does this
+        // look" that is plenty for a yes/no answer.
+        let [r, g, b, _] = self.ui.background;
+        0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5
+    }
+
     /// The look of `capture` in capture table `table`, once
     /// [`Theme::capture_looks`] has resolved that table; `None` (the text
     /// colour) before, or for a capture the theme does not name.
@@ -439,6 +470,20 @@ mod tests {
         assert!(close(ui.text, [0.85, 0.87, 0.91, 1.0]));
         assert!(close(ui.cursor, [0.98, 0.749, 0.298, 1.0]));
         assert!(close(ui.tab_accent, ui.cursor));
+    }
+
+    #[test]
+    fn darkness_follows_the_background() {
+        assert!(Theme::built_in("dark").unwrap().is_dark());
+        assert!(!Theme::built_in("light").unwrap().is_dark());
+        // A user theme on the dark base with a pale background is light.
+        let (pale, warnings) = Theme::parse(
+            "pale",
+            "base = \"dark\"\n[ui]\nbackground = \"#f4f1e8\"\n",
+            &Theme::built_in("dark").unwrap(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!pale.is_dark());
     }
 
     #[test]

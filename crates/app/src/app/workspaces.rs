@@ -170,10 +170,25 @@ impl App {
         let root = self.sidebar.tree.root().to_path_buf();
         let path = workspace_file::local(&root);
         let session = self.snapshot_session(root.clone());
+        // A project's own file opens only what is inside the project
+        // (`workspace_file::load_local`), so say so for folders elsewhere.
+        let outside = session
+            .roots
+            .iter()
+            .filter(|r| !r.starts_with(&root))
+            .count();
+        let note = if outside > 0 {
+            format!(
+                "; its {outside} folder(s) outside {} will not reopen from it: Save Workspace As keeps them",
+                folder_name(&root)
+            )
+        } else {
+            String::new()
+        };
         match workspace_file::save(&path, &session, Some(&root)) {
             Ok(()) => self.say(
                 format!(
-                    "Saved {}/{} in {}; add {}/ to .gitignore unless the project should share it",
+                    "Saved {}/{} in {}; add {}/ to .gitignore unless the project should share it{note}",
                     workspace_file::LOCAL_DIR,
                     workspace_file::LOCAL_FILE,
                     folder_name(&root),
@@ -201,8 +216,13 @@ impl App {
             );
             return;
         }
-        match workspace_file::load(&path, Some(&root)) {
-            Ok(session) => self.switch_session(&session, None, &format!("{name}'s workspace")),
+        match workspace_file::load_local(&path, &root) {
+            Ok((session, 0)) => self.switch_session(&session, None, &format!("{name}'s workspace")),
+            Ok((session, n)) => self.switch_session(
+                &session,
+                None,
+                &format!("{name}'s workspace ({n} path(s) outside {name} skipped)"),
+            ),
             Err(e) => self.say(format!("Cannot open the project's workspace: {e}"), true),
         }
     }

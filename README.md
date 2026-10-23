@@ -145,7 +145,7 @@ Download Nimbus from the
 
 > [!NOTE]
 > From v1.0.0 on, each release also has a macOS `.dmg` and Homebrew
-> cask, a Windows installer and winget manifest, and a Linux `.deb` and
+> cask, a Windows installer and Chocolatey package, and a Linux `.deb` and
 > AppImage.
 
 The builds are not code-signed yet, so macOS and Windows show a warning
@@ -161,7 +161,7 @@ On Windows, when SmartScreen says "Windows protected your PC", click
 [installation guide](docs/manual/getting-started.md#installing) covers
 each package in detail.
 
-### With Homebrew or winget
+### With Homebrew or Chocolatey
 
 On macOS with [Homebrew](https://brew.sh):
 
@@ -173,28 +173,30 @@ This also puts the `nimbus` command on your `PATH`. The app is not
 signed, so the first launch still needs right-click > Open or the
 `xattr` command above.
 
-On Windows with winget:
+On Windows with [Chocolatey](https://chocolatey.org), from an
+administrator terminal:
 
 ```powershell
-winget install SklorGalore.Nimbus
+choco install nimbus
 ```
 
-`brew upgrade --cask nimbus` and `winget upgrade SklorGalore.Nimbus`
-install newer releases. Both package managers carry releases from
-v1.1.0 on, and a winget release appears there once Microsoft's
-reviewers accept it, which can take a few days after the release.
+`brew upgrade --cask nimbus` and `choco upgrade nimbus` install newer
+releases. Homebrew carries releases from v1.1.0 on and Chocolatey from
+v1.2.0 on; a Chocolatey release appears once its moderators approve
+it, which can take a few days after the release.
 
 ### Running from a terminal
 
-On macOS, the command-line binary is inside the app bundle. Homebrew
-links it for you; otherwise link it into a folder on your `PATH`:
+Run **Install nimbus Command in PATH** from the command palette
+(`Cmd+Shift+P` on macOS, `Ctrl+Shift+P` elsewhere). On macOS it links
+`/usr/local/bin/nimbus` to the app, asking for your password if that
+folder needs it; on Linux it links `~/.local/bin/nimbus`; on Windows it
+adds Nimbus's folder to your `PATH`. Homebrew and the `.deb` already put
+the command there.
 
-```sh
-ln -s /Applications/Nimbus.app/Contents/MacOS/nimbus /usr/local/bin/nimbus
-```
-
-On Windows and Linux, put `nimbus.exe` or `nimbus` in a folder on your
-`PATH`.
+With Nimbus open, `nimbus FILE` opens the file in that window, and
+`git config --global core.editor "nimbus --wait"` makes Nimbus git's
+editor ([Command line](docs/manual/command-line.md)).
 
 ### Verifying a download
 
@@ -227,12 +229,28 @@ RWQP3Q/4Mc3fpXtWGJHvMnuFQsX7WPR3tW8cPRKRzPeF+B8DlSwzqodi
 so `minisign -V -P RWQP3Q/4Mc3fpXtWGJHvMnuFQsX7WPR3tW8cPRKRzPeF+B8DlSwzqodi -m SHA256SUMS`
 works without a copy of the repository.
 
+Releases from 1.1.0 on also carry a build provenance attestation for
+each package: GitHub's own record of the commit and workflow that built
+it. With the [GitHub CLI](https://cli.github.com):
+
+```sh
+gh attestation verify Nimbus-1.1.0-macos.dmg --repo SklorGalore/nimbus
+```
+
+Found a security problem? Please report it privately, as
+[SECURITY.md](SECURITY.md) describes.
+
 ### Updates
 
-Nimbus never connects to the network unless you ask it to. Run "Check
-for Updates" from the command palette to see whether a newer release is
-available, or turn on the check at startup as described in
-[checking for updates](docs/manual/troubleshooting.md#checking-for-updates).
+At each start Nimbus asks GitHub once whether a newer release exists:
+one HTTPS request to GitHub's API with a `nimbus/X.Y.Z` user agent and
+nothing else, and a message only when there is one. Set
+`check_updates = false` in `config.toml` to turn it off. Nothing is
+downloaded until you run "Install Update", which fetches the package,
+checks its signature against the key above and its SHA-256, and puts it
+in place when you run "Restart to Update" (Homebrew and `.deb` installs
+are left to `brew` and `apt`). See
+[updates](docs/manual/troubleshooting.md#installing-an-update).
 
 ## Usage
 
@@ -364,9 +382,13 @@ cargo test --workspace                                          # all tests
 cargo fmt --all --check                                         # formatting
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets  # lints, as CI runs them
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp  # render without a window
-bench/gen.sh                                                    # generate large test files
-scripts/screenshots.sh                                          # remake the README and manual screenshots
+bench/gen.ps1                                                   # generate large test files
+scripts/screenshots.ps1                                         # remake the README and manual screenshots
 ```
+
+The scripts in `scripts/` and `bench/` need
+[PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)
+(`brew install powershell` on macOS).
 
 The lints are strict: no `unwrap`, `expect` or `panic!` outside tests,
 documentation on every public item, and `unsafe` only where it is
@@ -399,10 +421,10 @@ milestone lands on development, move its line up to "Available now". -->
   interface font
 - Languages, second pass: better Markdown and embedded code
 - Foundations for 1.0: fuzzing, a soak test and a crash record
+- Screen-reader support: VoiceOver, NVDA, Narrator and Orca
 
 **After 1.0**
 
-- Screen-reader support
 - Newer versions of the text and window libraries (ropey 2, winit 0.31)
   once they are stable
 - Compatibility mode: Nimbus keeps working on machines without a usable
@@ -411,6 +433,8 @@ milestone lands on development, move its line up to "Available now". -->
   reviewed dependencies
 - A git window (`nimbus --git`): your changes, history and branches,
   staging, commits and merges, built on Nimbus's compare and merge views
+  (viewing is in development: changes, history with a branch graph and
+  any commit's differences)
 - Updates from inside Nimbus: install a newer release in one step,
   checked against the release signature first
 

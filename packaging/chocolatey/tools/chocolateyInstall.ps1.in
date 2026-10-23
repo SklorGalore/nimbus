@@ -1,0 +1,20 @@
+# Installs Nimbus with the release's Inno Setup installer. The release
+# workflow fills in the version and the installer's SHA-256 from the
+# release's SHA256SUMS (packaging/chocolatey).
+$ErrorActionPreference = 'Stop'
+
+$packageArgs = @{
+  packageName    = $env:ChocolateyPackageName
+  fileType       = 'exe'
+  url64bit       = 'https://github.com/SklorGalore/nimbus/releases/download/v@VERSION@/nimbus-@VERSION@-windows-x86_64-setup.exe'
+  checksum64     = '@SHA256@'
+  checksumType64 = 'sha256'
+  softwareName   = 'Nimbus*'
+  # Inno Setup: no windows, no restart, the default tasks ("Open with
+  # Nimbus" on the right-click menu, no desktop icon), and for all users
+  # under Program Files, since Chocolatey runs as an administrator.
+  silentArgs     = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /ALLUSERS'
+  validExitCodes = @(0)
+}
+
+Install-ChocolateyPackage @packageArgs

@@ -1,6 +1,8 @@
 # M25 — Command line
 
-**Status: planned (2026-10-18).** Written on 2026-10-18 at the owner's
+**Status: in progress (2026-10-19).** Built on 2026-10-19; the boxes
+are ticked once the owner has tried it on the Mac (see Results).
+Written on 2026-10-18 at the owner's
 request: an "Install `nimbus` Command" palette action like VS Code's,
 grouped with the two backlog items it pairs with, opening files in the
 Nimbus that is already running and `--wait` for git. Together they make
@@ -114,4 +116,68 @@ then exits, leaving the window open only if other tabs remain.
 
 ## Results
 
-_To be filled in when the milestone lands._
+Built on 2026-10-19 in `instance.rs` (the doorbell), `path_command.rs` (the
+two actions), `app/handoff.rs` (the running Nimbus's side) and `main.rs`
+(knocking before the GPU thread starts). The boxes stay unticked until
+the owner has checked them on the Mac; the Linux container has no
+display, so no window was opened here.
+
+**Measured (Linux, release build, in the container):**
+
+| What | Result | Budget |
+|---|---|---|
+| Startup cost of the check when no Nimbus runs (knock, make `run/`, bind) | about 0.1–0.2 ms (config and files loaded at 0.33–0.51 ms, against 0.24–0.55 ms before) | under 5 ms |
+| `nimbus a.rs b.rs` handing over to a listener, whole process from start to exit | 5.5–10.5 ms (10 runs, against a stand-in listener that answers like Nimbus) | under 100 ms to the new tab |
+| `--wait` against the stand-in, which says `done` after 1 s | returns after 1.006 s, exit code 0 | |
+| Release binary (Linux) | 28,875,776 bytes, +42 KB | under 35 MB |
+| New `unsafe` | none | none |
+
+Tests: the wire format (round trip, refused records, relative paths,
+wrong token, caps on size and count, non-Unicode paths), a real hand-off
+and `--wait` over the socket, a stale socket after a crash, an open
+`run/` folder refused, and installing, finding, refusing to replace and
+uninstalling links in a temporary folder. Strict clippy 1.99 passes for
+Linux, Windows and macOS targets.
+
+**For the owner to check on the Mac:**
+
+1. Install nimbus Command in PATH from the palette: the password prompt
+   appears (unless `/usr/local/bin` is writable), `ls -l
+   /usr/local/bin/nimbus` shows the link, and running it again says it
+   is already installed. Uninstall removes it. A Homebrew install says
+   the command is already there.
+2. With Nimbus open, `nimbus a.rs b.rs` in Terminal adds two tabs and
+   **brings the window to the front**. This is the part most likely to
+   need a follow-up: macOS 14 and later can refuse to let an app bring
+   itself forward unless the active app yields.
+3. `git config --global core.editor "nimbus --wait"` and `git commit`,
+   once with Nimbus open and once with it closed: the commit waits until
+   the message tab is closed, and Nimbus stays open afterwards.
+4. `bench/smoke.ps1`: `first-frame-ms` unchanged.
+
+**Surprises and changes from the plan:**
+
+- A `--wait` that starts a new Nimbus does not wait in its own process,
+  which would leave git hanging until every tab closed. It starts Nimbus
+  in the background and hands the files to it like any `--wait`, so the
+  command returns when the message tab closes and the window stays. git
+  sets `GIT_DIR`, `GIT_INDEX_FILE` and friends for its editor; the new
+  Nimbus is started without them, or its own Compare with HEAD would
+  use the commit's index.
+- Only a plain `nimbus [FILE|FOLDER]... [--wait]` hands its files over.
+  Any other option (`--theme`, `--diff`, `--workspace`, …) describes a
+  window, so it opens its own, as before; `--merge` and the testing
+  flags never take part.
+- The socket lives in `run/` beside the config rather than the state
+  folder, so a Nimbus run with `NIMBUS_CONFIG_DIR` (tests, screenshots)
+  never takes or hands files to the owner's.
+- Windows: a loopback port with a random 128-bit token in `%APPDATA%`
+  instead of a named pipe, which `std` lacks and which needs `unsafe` or
+  the `interprocess` crate. The user `PATH` is edited by a PowerShell
+  script (`-EncodedCommand`, so no quoting goes wrong) instead of `reg`
+  or the `winreg` crate, because it can also tell running programs the
+  environment changed. Neither adds a crate. Not yet tried on Windows.
+- An `AppImage` runs from a temporary mount, so on Linux the link points
+  at the `.AppImage` file (`$APPIMAGE`). A macOS app still running from
+  Gatekeeper's temporary copy (App Translocation) is refused with a note
+  to move it into Applications first.

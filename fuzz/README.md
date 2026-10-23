@@ -37,12 +37,21 @@ we did not, slowly. CI runs each target for an hour every week
 | `merge` | Three-way merge chunks, and the merge view's regions through takes and edits | `merge_oracle.rs` |
 | `config` | `Config::parse` never panics, and its range-checked settings are in range | none: no panic is the property |
 | `theme` | `Theme::parse` never panics, and every colour it gives is a real one | none: no panic is the property |
+| `highlight` | Every bundled grammar parses arbitrary text and edits without crashing, and its highlight spans are sorted, apart, in bounds and on character boundaries; Markdown's block outline stays in bounds | none beyond those properties: tree-sitter may recover from broken input differently after an edit |
+| `encoding` | Every offered encoding decodes and encodes the same in pieces as at once, and text that encodes decodes back (UTF-8, UTF-16, Latin-1, single-byte tables) | decoding the whole input at once |
+| `workspace` | Workspace files never crash the reader, write back to the same file after one round, and workspace names stay in `workspaces/` | the file it wrote |
+| `git_output` | git's error text and its config listing (`--show-scope --list`) are read without panics, and the repository-filter check follows its rule; the git window's parsers (status, log, refs, diff-tree, cat-file, commit objects) never panic, and log records split anywhere read the same | the rule, re-read plainly; the records fed whole |
 
-`config` and `theme` compile the app's own `config.rs` and `theme.rs` in
-with `#[path]`, since the app crate is a binary with no library to link.
-They need those files' dependencies, so they sit behind features
-(`app-config`, `app-theme`); the other targets build without wgpu or the
-tree-sitter grammars.
+`config`, `theme`, `encoding`, `workspace` and `git_output` compile the
+app's own source files in with `#[path]`, since the app crate is a binary
+with no library to link (`workspace` adds small stand-ins for the two
+app modules `state.rs` names). They need those files' dependencies, so
+they sit behind features (`app-config`, `app-theme`, `app-encoding`,
+`app-workspace`, `app-git`), as does `highlight` (`syntax`, for the
+grammars); `buffer`, `diff`, `search` and `merge` build without wgpu or
+the tree-sitter grammars. The M26 targets (`highlight` and after) were
+added because each reads input someone else wrote: a file, a cloned
+repository's workspace file or git config.
 
 This crate is not part of the root workspace (its `Cargo.toml` has its own
 `[workspace]` table), so `cargo build` and `cargo test` at the root never
@@ -83,6 +92,10 @@ cargo +nightly fuzz run buffer                          # until it finds somethi
 cargo +nightly fuzz run buffer -- -max_total_time=300   # five minutes
 cargo +nightly fuzz run config --features app-config -- -max_total_time=300
 cargo +nightly fuzz run theme --features app-theme -- -max_total_time=300
+cargo +nightly fuzz run highlight --features syntax -- -max_total_time=300
+cargo +nightly fuzz run encoding --features app-encoding -- -max_total_time=300
+cargo +nightly fuzz run workspace --features app-workspace -- -max_total_time=300
+cargo +nightly fuzz run git_output --features app-git -- -max_total_time=300
 cargo +nightly fuzz list                                # the target names
 ```
 

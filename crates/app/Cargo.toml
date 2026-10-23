@@ -5,6 +5,8 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
+accesskit = "0.25"
+accesskit_winit = "0.34"
 arboard = { version = "3", default-features = false }
 dirs = "7"
 encoding_rs = "0.8.42"
@@ -14,14 +16,17 @@ ignore = "0.4"
 log = "0.4.34"
 memchr = "2.8.3"
 memmap2 = "0.9"
+minisign-verify = "0.3"
 nimbus-core = { version = "0.7.2", path = "../core" }
-nimbus-render = { version = "0.3.0", path = "../render" }
+nimbus-render = { version = "0.6.0", path = "../render" }
 nimbus-syntax = { version = "0.3.0", path = "../syntax" }
 notify = "8.2.0"
 nucleo = "0.5"
 regex = "1"
 rfd = "0.17"
+ring = { version = "0.17", default-features = false }
 serde = { version = "1", features = ["derive"] }
+sys-locale = "0.3.2"
 toml = "1"
 trash = "5.2.9"
 unicode-segmentation = "1.13.3"
@@ -40,15 +45,18 @@ east-asian = []
 [lints]
 workspace = true
 
-[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-muda = { version = "0.21", default-features = false }
-
-# The open-files method added to winit's app delegate (open_with.rs). The
-# same versions winit 0.30 already links, so they add almost nothing.
+# The macOS menu bar (menu.rs) and the open-files method added to winit's
+# app delegate (open_with.rs). The objc2 crates are the versions winit 0.30
+# already links, so they add almost nothing. Windows menus are drawn by
+# Nimbus (menu/drawn.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21", default-features = false }
 objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
 objc2-foundation = { version = "0.2.2", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSString", "NSURL", "NSObject"] }
 
 [build-dependencies]
 embed-resource = "3.0.12"
+
+[dev-dependencies]
+accesskit_consumer = "0.39"

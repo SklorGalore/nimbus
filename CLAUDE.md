@@ -15,13 +15,13 @@ cargo build                              # debug build (deps are built at opt-le
 cargo run -- --smoke                     # open window, exit after first frame, print first-frame-ms=
 cargo build --release && ./target/release/nimbus --smoke   # the startup number that matters
 RUST_LOG=nimbus=debug ./target/release/nimbus --smoke       # same, with per-phase startup times
-bench/smoke.sh                                              # release build, purge, then 1 cold + 4 warm --smoke times (sudo)
+bench/smoke.ps1                                             # release build, purge, then 1 cold + 4 warm --smoke times (sudo)
 cargo run -- --screenshot /tmp/frame.bmp                    # save the first frame; convert with `sips -s format png`
 NIMBUS_SCALE=1 cargo run -- --screenshot /tmp/1x.bmp         # debug builds: render at another scale factor
 ./target/release/nimbus FILE --bench-typing 300            # type 300 chars through the edit path; prints latency percentiles
-bench/soak.sh [N]                                           # M21 soak: N (100,000) keystrokes with undo, find and saves on a copy of the 100 MB file; fails if memory grows over 20 MB
-bench/gen.sh                                                # 10 MB / 100 MB test files in bench/out (also: logs, longline, sizes, diff, difflogs)
-bench/gen.sh diff && cargo run --release -- --diff bench/out/src-10mb.rs bench/out/src-10mb-edited.rs   # the compare view on the 10 MB bench pair
+bench/soak.ps1 [N]                                          # M21 soak: N (100,000) keystrokes with undo, find and saves on a copy of the 100 MB file; fails if memory grows over 20 MB
+bench/gen.ps1                                               # 10 MB / 100 MB test files in bench/out (also: logs, longline, sizes, diff, difflogs)
+bench/gen.ps1 diff && cargo run --release -- --diff bench/out/src-10mb.rs bench/out/src-10mb-edited.rs  # the compare view on the 10 MB bench pair
 NIMBUS_DIFF_FILES=$PWD/bench/out/src-10mb.rs:$PWD/bench/out/src-10mb-edited.rs cargo test --release -p nimbus-core -- --ignored --nocapture compare_bench   # time a comparison
 NIMBUS_DIFF_FILES=$PWD/bench/out/src-10mb.rs:$PWD/bench/out/src-10mb-edited.rs cargo test --release -p nimbus -- --ignored --nocapture typing_bench --test-threads 1   # keystroke cost in the compare and merge views (absolute paths: tests run in crates/app)
 cargo run -- --diff DIR_A DIR_B                               # folder compare in the sidebar's Compare mode (M18)
@@ -30,34 +30,44 @@ cargo test --release -p nimbus -- --ignored --nocapture folder_compare        # 
 cargo run -- --merge BASE LOCAL REMOTE -o OUT --headless 1600x900 --screenshot /tmp/m.bmp   # render a three-way merge (exit code 0 only when OUT is saved with no conflicts)
 cargo run --release -- --merge examples/merge/{base,local,remote}.rs -o /tmp/merged.rs   # small sample inputs for the merge views by eye (examples/README.md)
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp   # render with no window (works with the screen locked)
-scripts/screenshots.sh [NAME...]                             # remake assets/screenshots/ for the README and manual (headless, own config); look before committing
+scripts/screenshots.ps1 [NAME...]                            # remake assets/screenshots/ for the README and manual (headless, own config); look before committing
 cargo run -- FILE --wrap --find PATTERN                     # start with soft wrap on and the find bar searching
 cargo run -- FILE --theme light --headless 1600x1000 --screenshot /tmp/l.bmp   # override the config's theme
+cargo run -- FILE --theme light --headless 1400x800 --prompt --title-bar --screenshot /tmp/q.bmp   # the in-app "Save changes?" prompt and the macOS title bar Nimbus draws
+cargo run -- FILE --headless 1400x800 --menu Edit --screenshot /tmp/m.bmp   # the Windows menu bar Nimbus draws, with a menu open
 NIMBUS_CONFIG_DIR=/tmp/cfg cargo run -- FILE --headless 1600x1000 --screenshot /tmp/c.bmp   # use another config folder (themes/, languages/, queries/); never write to the owner's real one
 cargo run -- FOLDER a.rs b.rs                              # several tabs; a folder sets the file opener's root
 cargo run -- . --headless 1600x900 --picker files:main --screenshot /tmp/p.bmp   # render a picker (palette|files|line|symbols[:query])
 cargo test --release -p nimbus-core -- --ignored --nocapture # opt-in benchmarks (e.g. wrapping a 1 MB line)
-bench/gen.sh logs && ./target/release/nimbus bench/out/log-4gb.log --headless 1400x700 --screenshot /tmp/l.bmp --wait-index   # huge-file check (mapped buffer, all lines counted first)
+bench/gen.ps1 logs && ./target/release/nimbus bench/out/log-4gb.log --headless 1400x700 --screenshot /tmp/l.bmp --wait-index  # huge-file check (mapped buffer, all lines counted first)
 ./target/release/nimbus FILE --backend rope|mapped ...      # force a buffer backend (measurement)
 cargo run -- FILE --debug-overlay --headless 1400x500 --screenshot /tmp/d.bmp   # the F12 overlay, shown from the start
 cargo run -- README.md --preview --headless 1200x1100 --screenshot /tmp/p.bmp   # M20: the Markdown preview instead of the text
 cargo test --release -p nimbus --bin nimbus -- --ignored --nocapture m20_preview_bench   # preview layout time for a 1 MB document
+cargo test --release -p nimbus --bin nimbus -- --ignored --nocapture access_typing_bench   # M22: keystroke cost of the screen-reader description on a 10 MB text (budget 1 ms)
 NIMBUS_BENCH_FILE=$PWD/bench/out/src-10mb.rs cargo test --release -p nimbus -- --ignored --nocapture m20_scroll_bench   # scroll frame cost with sticky scroll and the minimap on vs off (needs a GPU)
 cargo run -- FILE --linear-blend --headless 1400x500 --screenshot /tmp/lin.bmp  # M16 experiment: blend text in linear light (sRGB target)
+cargo run -- FILE --compat --headless 1600x1000 --screenshot /tmp/c.bmp   # M23 compatibility mode: paint on the CPU, no GPU at all (also the automatic fallback)
+cargo test --release -p nimbus-render -- --ignored --nocapture compat_frame_bench   # CPU frame time at 1600x1000 and 3200x2000 (budget 16 ms at 1600x1000)
 NIMBUS_BENCH_FILE=$PWD/bench/out/src-10mb.rs cargo test --release -p nimbus -- --ignored --nocapture m16_typing_bench   # keystroke cost with whitespace, guides and ligatures on vs off (needs a GPU)
 cargo run -- FILE --cursors 4,19,33 --headless 900x300 --screenshot /tmp/m.bmp  # several cursors (byte offsets; the last is primary)
-bench/gen.sh sizes && bench/threshold.sh                    # rope vs mapped open time and memory at 64-512 MB
-cargo test --release -p nimbus-syntax -- --ignored --nocapture --test-threads 1   # keystroke and first-parse cost, tree memory (needs bench/gen.sh)
-cargo +nightly fuzz run buffer -- -max_total_time=300             # M21 fuzz targets (buffer, diff, merge, search; config/theme need --features app-config/app-theme); fuzz/README.md
+bench/gen.ps1 sizes && bench/threshold.ps1                  # rope vs mapped open time and memory at 64-512 MB
+cargo test --release -p nimbus-syntax -- --ignored --nocapture --test-threads 1   # keystroke and first-parse cost, tree memory (needs bench/gen.ps1)
+cargo +nightly fuzz run buffer -- -max_total_time=300             # fuzz targets (buffer, diff, merge, search; config, theme, highlight, encoding, workspace, git_output need features); fuzz/README.md
+cargo vet                                                    # M26: every crate version reviewed, imported or exempted (supply-chain/); docs/security.md
+uvx zizmor --min-severity medium .github/workflows           # M26: lint the workflows as CI does
+scripts/pin-actions.ps1                                     # pin new actions to commit SHAs and appimagetool to its SHA-256 (needs github.com)
 cargo test --workspace
 python3 scripts/make-icons.py                               # redraw the app icon (PNG, .icns via iconutil, .ico) into assets/icon
-scripts/bundle-macos.sh target/release/nimbus VERSION OUT_DIR  # Nimbus.app and its zip; releases: push a tag vX.Y.Z matching Cargo.toml (.github/workflows/release.yml)
+scripts/bundle-macos.ps1 target/release/nimbus VERSION OUT_DIR  # Nimbus.app and its zip; releases: push a tag vX.Y.Z matching Cargo.toml (.github/workflows/release.yml)
 NIMBUS_UPDATE_SCREENSHOT=1 cargo test -p nimbus --test screenshot   # remake the screenshot test's reference after an intended drawing change; look at it before committing
 # Without a Mac: put the remake-screenshot label on the pull request (or run the "Screenshot reference" workflow once it is on main); the image is in the run's artifact and, gzipped and base64, in its log
 cargo test -p nimbus-core <test_name>    # single test in one crate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets   # strict lints from Cargo.toml; CI fails on any warning
 ```
+
+The scripts in `scripts/` and `bench/` are PowerShell 7 (`pwsh`, 7.4 or later; macOS: `brew install powershell`). On macOS and Linux they run directly through their `#!/usr/bin/env pwsh` line; on Windows run them as `pwsh scripts\NAME.ps1`. New scripts follow the same header: `#Requires -Version 7.4`, `$ErrorActionPreference = 'Stop'`, `$PSNativeCommandUseErrorActionPreference = $true` (a failing program stops the script, like `set -e`) and `Set-StrictMode -Version Latest`. Anything a script prints to stdout is its result (the packaging scripts print only the file they made), so send progress to stderr. PowerShell splits an argument shaped like `-name:value` in two when it starts a script, which `fake-ar.ps1` has to undo.
 
 On-screen `--smoke` and `--screenshot` need an unlocked screen with the window visible; they give up after 10 s otherwise. Prefer `--headless` for unattended rendering checks. Don't launch windowed test runs while the owner may be using the machine without saying so: windows appear on their screen and their input skews measurements.
 
@@ -73,8 +83,8 @@ RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets
 # per target; check the other two before pushing (targets installed via rustup).
 # The script stands in for the C compiler the tree-sitter build scripts need,
 # which macOS lacks for these targets; clippy never links, so that is enough:
-scripts/clippy-cross.sh x86_64-unknown-linux-gnu
-scripts/clippy-cross.sh x86_64-pc-windows-msvc
+scripts/clippy-cross.ps1 x86_64-unknown-linux-gnu
+scripts/clippy-cross.ps1 x86_64-pc-windows-msvc
 ```
 
 The set is `clippy::pedantic` plus `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `dbg_macro`, `print_stdout`, `print_stderr`, `undocumented_unsafe_blocks`, `missing_docs`, and `unsafe_code = "deny"`. Don't weaken the table to get a change through.
@@ -83,7 +93,7 @@ Rules behind those lints:
 - **No panics in normal paths.** No `unwrap`, `expect`, `panic!`, `todo!`, or `unimplemented!` outside tests. Return errors, or log and degrade, as `app` does for GPU and window failures. Release builds use `panic = "abort"`, so a panic loses the user's unsaved work.
 - **Silencing a lint needs a reason.** Use `#[expect(clippy::lint_name, reason = "...")]` on the narrowest item, never a crate-wide allow. `expect` fails once the lint stops firing, so stale suppressions get cleaned up. The `print_out` and `print_err` helpers in `crates/app/src/main.rs` are the model: all intended terminal output goes through them.
 - **Document every public item.** Public functions that return `Result` need a `# Errors` section, and ones that can panic need `# Panics`. Doc comments should explain *why* and the concept involved, because the owner is learning the stack from them.
-- **`unsafe` is a last resort.** It is expected only in `render`, the mmap buffer, the Windows menu handles and the macOS open-files delegate (`app`'s `open_with.rs`, 1.0.1). Each block needs a `// SAFETY:` comment stating the invariant that makes it sound, and the module needs `#[expect(unsafe_code, reason = "...")]` to lift the workspace deny.
+- **`unsafe` is a last resort.** It is expected only in `render`, the mmap buffer, the macOS open-files delegate (`app`'s `open_with.rs`, 1.0.1) and the Windows console calls (`app`'s `console.rs`). Each block needs a `// SAFETY:` comment stating the invariant that makes it sound, and the module needs `#[expect(unsafe_code, reason = "...")]` to lift the workspace deny.
 - **Errors are typed per crate.** Library crates (`core`, `syntax`, `render`) expose their own error enums that implement `Display` and `Error`, like `GpuError`. No `anyhow` or `Box<dyn Error>` in library APIs. `app` may flatten errors for logging.
 - **No `dbg!` or stray `println!`.** Use `log::debug!` or `log::trace!` instead; they cost nothing when filtered out.
 - **Hot paths do not allocate per frame or per keystroke.** Reuse buffers such as instance `Vec`s with `clear()` rather than building new ones. Prefer borrowing (`&str`, `Cow`) over cloning `String`s out of the buffer.
@@ -99,7 +109,7 @@ Do most work inline. Spawn a subagent only for the cases in the table below; eac
 | Confirm a dependency's API before using it (wgpu, winit, swash, ropey, tree-sitter, muda, nucleo) | `Explore`, model `haiku` | `low` | Ask for exact signatures and enum variants from `~/.cargo/registry/src/*/<crate>-<version>/`, not prose. Keeps crate source out of the main context. This repo has already hit API drift once. |
 | Locate code across several crates ("where is the cursor clamped", "every caller of `Buffer::line`") | `Explore` | `low`, or `medium` if the answer spans more than three files | Say "medium" or "very thorough" for breadth. |
 | Turn a milestone task with real design uncertainty into an implementation plan: atlas packing and upload (M1), movement and IME (M2), anchored scrolling with soft wrap (M3), first parse plus replayed edits (M5), piece table and sparse index (M7), multi-cursor edit application (M8) | `Plan` | `high` | Give it the milestone doc and the `DESIGN.md` sections. Review the plan before writing code; don't forward it unread. |
-| Implement two or more independent, well-specified tasks from the same milestone at once (for example the M1 atlas packer and font metrics, or the M2 property tests and `bench/gen.sh`) | `general-purpose` with `isolation: "worktree"` | `medium` | Only when the tasks touch disjoint files. Never for tasks that edit the same module. |
+| Implement two or more independent, well-specified tasks from the same milestone at once (for example the M1 atlas packer and font metrics, or the M2 property tests and `bench/gen.ps1`) | `general-purpose` with `isolation: "worktree"` | `medium` | Only when the tasks touch disjoint files. Never for tasks that edit the same module. |
 | Property tests and oracles for buffers, undo, search chunking or the line index | `general-purpose` | `high` | Tests that compare against a `String` oracle are where data-loss bugs get caught. |
 | Anything in `unsafe` code, atomic save, the mmap backend, or cross-thread version checks | `general-purpose` | `xhigh` | Ask it to state the invariant each piece of code relies on. |
 | End-of-milestone review | `/code-review` skill | `high`; `xhigh` for M2, M7 and M8 | M2 adds save, M7 adds `unsafe` and mmap, M8 adds multi-cursor edits. |
@@ -121,7 +131,7 @@ Cargo workspace; crates live in `crates/`, each package named `nimbus-<dir>` exc
 
 - `core`: text buffers, edits, undo, cursors, search. No I/O, no GPU, no workspace deps. Must stay testable headlessly.
 - `syntax`: tree-sitter highlighting. Depends on `core`. `SyntaxState` (one per `Document`) must see every edit, undo and redo included, through `SyntaxState::edit`; a missed edit leaves the tree describing other text. It starts no threads: it returns `Job`s that the app runs (`spawn_syntax` in `app.rs`). Each grammar is a cargo feature; the Rust highlights query is vendored in `crates/syntax/queries/`. Files over 16 MB skip tree-sitter for the line-by-line rules in `lexical.rs`, whose checkpoints `Lexical::edit` must also see every edit of (it does, through `SyntaxState::edit`).
-- `render`: owns the wgpu surface and, later, the glyph atlas, layout, and the two instanced pipelines (rects and glyph quads). Depends on `core`.
+- `render`: owns the wgpu surface, the glyph atlas, layout, and the two instanced pipelines (rects and glyph quads). Depends on `core`. Compatibility mode (M23, `soft.rs`) paints the same `FrameBuilder` lists on the CPU and shows them with `softbuffer` when no GPU can be opened, with the atlas pages kept in memory; any new GPU primitive must be added to that painter in the same change, and the screenshot test checks it on every OS against the Mac's GPU reference.
 - `app`: winit `ApplicationHandler`, editor state, UI chrome, keymap, config. Depends on everything. The sidebar (`sidebar.rs` over the arena tree in `tree.rs`) lists folders on workers when first expanded; `watch.rs` watches only listed folders and open files' folders, non-recursively, starting after the first frame. Nimbus never writes `config.toml`; remembered window state goes in `state.toml`. A `Document` records its file's size and mtime at open and save (`Stamp`) so watch events for our own saves are ignored.
 
 Dependencies only point downward. Don't add a dependency from `core` onto any other workspace crate, and don't put GPU or windowing types in `core`.
@@ -143,7 +153,7 @@ The project uses wgpu 30, whose API differs from older examples and from model t
 
 ## CI
 
-`.github/workflows/ci.yml` runs fmt, clippy, and tests on macOS, Ubuntu, and Windows, plus the release-size check. Linux needs `libwayland-dev` and `libxkbcommon-dev`. Remote: `github.com/SklorGalore/nimbus` (private).
+`.github/workflows/ci.yml` runs fmt, clippy, and tests on macOS, Ubuntu, and Windows, plus the release-size check, `cargo deny`, `cargo vet` and `zizmor` (M26: a new or bumped crate needs `cargo vet certify` or an imported audit; a new action must be pinned to a SHA). Linux needs `libwayland-dev` and `libxkbcommon-dev`. Remote: `github.com/SklorGalore/nimbus` (private).
 
 ## Branches
 

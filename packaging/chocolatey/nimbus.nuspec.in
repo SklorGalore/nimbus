@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Chocolatey package for Nimbus. The release workflow fills in the
+  version (.github/workflows/chocolatey.yml) and packs it with
+  `choco pack`; scripts/publish-packages.ps1 checks the packed files
+  against these templates and the signed SHA256SUMS, then pushes it to
+  the Chocolatey community repository.
+
+  The package holds no binaries: tools/chocolateyInstall.ps1 downloads
+  the release's Inno Setup installer and checks its SHA-256.
+-->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>nimbus</id>
+    <version>@VERSION@</version>
+    <title>Nimbus</title>
+    <authors>SklorGalore</authors>
+    <owners>SklorGalore</owners>
+    <projectUrl>https://github.com/SklorGalore/nimbus</projectUrl>
+    <projectSourceUrl>https://github.com/SklorGalore/nimbus</projectSourceUrl>
+    <packageSourceUrl>https://github.com/SklorGalore/nimbus/tree/main/packaging/chocolatey</packageSourceUrl>
+    <docsUrl>https://github.com/SklorGalore/nimbus/blob/main/docs/manual/README.md</docsUrl>
+    <bugTrackerUrl>https://github.com/SklorGalore/nimbus/issues</bugTrackerUrl>
+    <releaseNotes>https://github.com/SklorGalore/nimbus/releases/tag/v@VERSION@</releaseNotes>
+    <iconUrl>https://raw.githubusercontent.com/SklorGalore/nimbus/main/assets/icon/nimbus-1024.png</iconUrl>
+    <licenseUrl>https://github.com/SklorGalore/nimbus/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <copyright>SklorGalore</copyright>
+    <tags>nimbus editor text-editor code-editor gpu foss</tags>
+    <summary>A fast, lightweight, modeless text editor with its own GPU text renderer</summary>
+    <description>Nimbus is a fast, lightweight, modeless text editor with its own GPU text renderer. It opens a 4 GB log in a fraction of a second, edits with several cursors, highlights nine languages, compares and merges files and folders, and previews Markdown.
+
+The package runs the release's installer for all users (under Program Files) and adds "Open with Nimbus" to the right-click menu. Upgrade with `choco upgrade nimbus`.</description>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

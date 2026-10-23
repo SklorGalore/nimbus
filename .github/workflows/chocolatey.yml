@@ -1,0 +1,87 @@
+# The Chocolatey package (nimbus-VERSION.nupkg) for a release.
+#
+# Release runs this after SHA256SUMS exists. It can also be run by hand
+# (Actions > Chocolatey package > Run workflow) for a release made before
+# this workflow existed; the templates then come from the branch it runs
+# on.
+#
+# The package holds no binaries: its install script downloads the
+# release's Inno Setup installer and checks the SHA-256 that SHA256SUMS
+# gives it. The .nupkg is attached to the release but is not in
+# SHA256SUMS (it is made after it); scripts/publish-packages.ps1 instead
+# checks that its scripts are exactly the templates in
+# packaging/chocolatey filled in from the signed SHA256SUMS, then pushes
+# it to the Chocolatey community repository from the owner's machine.
+# No Chocolatey API key is kept in GitHub.
+
+name: Chocolatey package
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag, like v1.2.0
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, like v1.2.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  pack:
+    name: Pack the Chocolatey package
+    runs-on: windows-latest
+    permissions:
+      contents: write # attach the .nupkg to the release
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fill in the templates and pack
+        shell: pwsh
+        run: |
+          if ($env:TAG -notmatch '^v\d+\.\d+\.\d+$') { throw "the tag must look like v1.2.3, not '$env:TAG'" }
+          $version = $env:TAG.Substring(1)
+          $setup = "nimbus-$version-windows-x86_64-setup.exe"
+          New-Item -ItemType Directory -Force dl | Out-Null
+          gh release download $env:TAG --repo $env:GITHUB_REPOSITORY --dir dl --pattern SHA256SUMS --pattern $setup
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The installer's hash as SHA256SUMS lists it (a name may start
+          # with "*", binary mode), checked against the file itself.
+          $hash = $null
+          foreach ($line in Get-Content dl/SHA256SUMS) {
+            $fields = $line -split '\s+', 2
+            if ($fields.Count -eq 2 -and ($fields[1] -replace '^\*', '') -eq $setup) { $hash = $fields[0].ToLower() }
+          }
+          if (-not $hash) { throw "SHA256SUMS has no line for $setup" }
+          $actual = (Get-FileHash -Algorithm SHA256 "dl/$setup").Hash.ToLower()
+          if ($hash -ne $actual) { throw "$setup is $actual, but SHA256SUMS says $hash" }
+
+          # Fill in byte for byte (LF, no BOM), as publish-packages.ps1 does.
+          $src = 'packaging/chocolatey'
+          $out = 'choco/nimbus'
+          New-Item -ItemType Directory -Force "$out/tools" | Out-Null
+          function Fill($from, $to) {
+            $text = [IO.File]::ReadAllText((Resolve-Path $from))
+            $text = $text.Replace('@VERSION@', $version).Replace('@SHA256@', $hash)
+            [IO.File]::WriteAllText((Join-Path $PWD $to), $text, [Text.UTF8Encoding]::new($false))
+          }
+          Fill "$src/nimbus.nuspec.in" "$out/nimbus.nuspec"
+          Fill "$src/tools/chocolateyInstall.ps1.in" "$out/tools/chocolateyInstall.ps1"
+          Fill "$src/tools/chocolateyUninstall.ps1" "$out/tools/chocolateyUninstall.ps1"
+          Get-Content "$out/tools/chocolateyInstall.ps1"
+
+          # Chocolatey is on every windows-latest runner.
+          choco pack "$out/nimbus.nuspec" --outputdirectory choco
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release upload $env:TAG "choco/nimbus.$version.nupkg" --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

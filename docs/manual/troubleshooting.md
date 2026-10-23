@@ -2,22 +2,63 @@
 
 ## Checking for updates
 
-Nimbus never contacts the network unless you ask it to.
+Nimbus asks GitHub once at each start, after the window appears, whether
+a newer release exists. That is one HTTPS request to GitHub's API with a
+`nimbus/X.Y.Z` user agent and nothing else; it says nothing unless a
+newer release exists. Set `check_updates = false` in `config.toml` to
+turn it off. Unattended runs (`--headless`, `--smoke`, `--screenshot`)
+never check.
 
 - **Check for Updates** (palette, or Help menu on macOS and Windows)
-  asks GitHub for the latest release and says in the message line
-  whether it is newer than the version you are running ("Nimbus 0.7.0 is
-  available (you have 0.6.0)…") or that you are up to date. If GitHub
-  cannot be reached within 10 seconds, it says so.
+  runs the check now and says in the message line whether a newer
+  release exists ("Nimbus 1.2.0 is available (you have 1.1.0)…") or
+  that you are up to date. If GitHub cannot be reached within 10
+  seconds, it says so.
 - **Open Latest Release Page** opens the releases page in your browser.
-- Set `check_updates = true` in `config.toml` to run the check once at
-  each start, after the window appears. The start-up check says nothing
-  unless a newer release exists.
 
-Nimbus never downloads or installs anything itself. To update, download
-the new package and install it the way you did the first time (see
-[Getting started](getting-started.md#installing)). Your settings in the
-config folder are kept.
+## Installing an update
+
+Nothing is downloaded until you ask.
+
+1. After a check finds a newer release, run **Install Update** (palette
+   or Help menu). Nimbus downloads the package for your system in the
+   background; the message line shows how far it has got, and you can
+   keep editing. **Cancel Update** stops it.
+2. Before anything is unpacked, Nimbus proves the release is the
+   owner's: the release's `SHA256SUMS` must carry a signature by the key
+   built into Nimbus (the one in `minisign.pub`), the signature must name
+   exactly that version, the version must be newer than yours, and the
+   package must match its SHA-256 in the signed list. If any check
+   fails, the download is deleted and the message line says why. A
+   release with no signature is never installed.
+3. When it says "Nimbus X.Y.Z is ready", run **Restart to Update**. It
+   asks about unsaved tabs the way quitting does, puts the new version
+   in place and starts it with your session. If you quit instead, the
+   new version is put in place as Nimbus quits, and the next start is
+   the new one.
+
+Where the new version goes:
+
+| Installed from | What Install Update does |
+|---|---|
+| The macOS zip or DMG (`Nimbus.app` you dragged to Applications) | Unpacks the new `Nimbus.app` beside it and swaps the two. A file Nimbus downloads itself is not quarantined, so there is no Gatekeeper prompt. |
+| The Windows installer | Runs the new installer silently after Nimbus quits. It installs for your user only, so there is no administrator prompt, and it starts Nimbus again when asked to restart. |
+| The AppImage | Replaces the AppImage file. |
+| The Linux tarball | Replaces the `nimbus` binary, when its folder is writable. |
+| Homebrew | Nothing: it tells you to run `brew upgrade --cask nimbus`, so Homebrew's record stays right. |
+| Chocolatey | Nothing: it tells you to run `choco upgrade nimbus` from an administrator terminal, so Chocolatey's record stays right. |
+| The `.deb` | Nothing: it tells you to install the new `.deb` with `sudo apt install ./nimbus_X.Y.Z_amd64.deb`. |
+| A folder Nimbus cannot write, the Windows zip, or a build from source | Nothing: use Open Latest Release Page (or `git pull` and `cargo build` for a build from source). |
+
+Your settings in the config folder are kept.
+
+**Rolling back.** On macOS and Linux the version an update replaced is
+kept beside the new one (`Nimbus.app.previous`, `nimbus.previous`) until
+the next update. **Roll Back Update** puts it back at the next start
+(or at once with Restart to Update). If a new version fails to open its
+window, the next start puts the previous version back by itself and
+says so. Windows keeps no previous version; install an older release
+from the releases page instead.
 
 ## When a file changes on disk
 
@@ -65,12 +106,21 @@ find-bar keys apply only while the find bar is open.
 language with a symbol list, under 16 MB, and finished parsing. The
 message line says which of these is missing.
 
-**Nimbus will not start, or the window is blank.** Run it from a
-terminal to see the error. Nimbus draws with your graphics card through
-Vulkan, Metal, DirectX 12 or OpenGL; if the default choice does not
-work with your driver, try another, for example
+**The status bar says "Compatibility mode".** Nimbus could not use the
+graphics card (a virtual machine or remote desktop without one, or a
+missing driver), so it draws on the CPU instead; the message says why.
+Everything works as usual, and the frames look the same, though
+scrolling a very large window can be less smooth. The F12 overlay's
+`painter` line says which one is drawing.
+
+**Nimbus will not start, or the window is blank or draws wrongly.** Run
+it from a terminal to see the error. Nimbus draws with your graphics
+card through Vulkan, Metal, DirectX 12 or OpenGL; if the default choice
+does not work with your driver, try another, for example
 `WGPU_BACKEND=gl nimbus` on Linux or `WGPU_BACKEND=dx12 nimbus` on
-Windows.
+Windows. Or leave the graphics card out: `nimbus --compat`, or
+`compat = true` in the [config](settings.md#top-level), draws on the
+CPU.
 
 **Accented letters look wrong (`Ã©` for `é`, or `�`).** Nimbus guessed
 the file's encoding wrong. Click the encoding in the status bar, choose

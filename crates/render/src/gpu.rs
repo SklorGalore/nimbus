@@ -1,4 +1,5 @@
-//! The window's GPU connection: instance, adapter, device, queue and surface.
+//! The window's GPU connection: instance, adapter, device, queue and surface,
+//! or, in compatibility mode (M23), the CPU painter in `soft.rs` instead.
 
 use std::sync::Arc;
 
@@ -7,7 +8,10 @@ use winit::window::Window;
 use crate::atlas::Atlas;
 use crate::font::{Font, Metrics};
 use crate::frame::FrameBuilder;
-use crate::pipeline::{Globals, GlyphPipeline, Pipelines, RectPipeline};
+use crate::pipeline::{
+    Globals, GlyphPipeline, Pipelines, RectPipeline, SegmentInstance, SegmentPipeline,
+};
+use crate::soft::{CompatError, Cpu};
 use crate::text::{ColorRun, LineStyle, TextRenderer};
 use crate::ui::UiFont;
 
@@ -25,18 +29,12 @@ pub const BACKGROUND: wgpu::Color = wgpu::Color {
 
 /// Everything needed to draw into one window.
 ///
-/// `wgpu` concepts in one breath: an `Instance` is the API entry point, an
-/// `Adapter` is a physical GPU, a `Device` is our logical connection to it
-/// (used to create resources), a `Queue` is where we submit work, and a
-/// `Surface` is the window's drawable area, configured with a size and pixel
-/// format.
+/// Despite the name, frames are painted by one of two painters: the GPU
+/// through wgpu, or the CPU in compatibility mode (M23) when no GPU can be
+/// opened. Both are fed the same [`FrameBuilder`], so callers never need
+/// to know which one runs ([`Gpu::compatibility`] says, for the overlay).
 pub struct Gpu {
-    /// Where frames go: a window's surface, or an off-screen texture.
-    target: Target,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    pipelines: Pipelines,
+    painter: Painter,
     atlas: Atlas,
     text: TextRenderer,
     /// The interface font (M20), when `ui_font` names one and it has
@@ -46,8 +44,33 @@ pub struct Gpu {
     /// Set by [`Gpu::request_capture`]; the next frame is copied back.
     capture_requested: bool,
     captured: Option<Capture>,
-    /// What each frame is cleared to.
-    background: wgpu::Color,
+    /// What each frame is cleared to: straight RGBA, as theme colours are.
+    background: [f32; 4],
+    /// Pixels kept at the top for a title bar the app draws
+    /// ([`Gpu::set_inset_top`]).
+    inset_top: f32,
+}
+
+/// Which painter draws the frames.
+enum Painter {
+    Wgpu(Box<Wgpu>),
+    Cpu(Cpu),
+}
+
+/// The wgpu painter.
+///
+/// `wgpu` concepts in one breath: an `Instance` is the API entry point, an
+/// `Adapter` is a physical GPU, a `Device` is our logical connection to it
+/// (used to create resources), a `Queue` is where we submit work, and a
+/// `Surface` is the window's drawable area, configured with a size and pixel
+/// format.
+struct Wgpu {
+    /// Where frames go: a window's surface, or an off-screen texture.
+    target: Target,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    pipelines: Pipelines,
     /// The swapchain reported Suboptimal; reconfigure after presenting.
     /// Reconfiguring while a frame is acquired is an error in wgpu.
     reconfigure: bool,
@@ -72,10 +95,20 @@ fn srgb_to_linear(c: f64) -> f64 {
 
 impl Gpu {
     /// Whether frames blend in linear light (the `--linear-blend`
-    /// experiment took effect).
+    /// experiment took effect). Never in compatibility mode.
     #[must_use]
     pub fn linear_blend(&self) -> bool {
-        self.config.format.is_srgb()
+        match &self.painter {
+            Painter::Wgpu(w) => w.config.format.is_srgb(),
+            Painter::Cpu(_) => false,
+        }
+    }
+
+    /// Whether frames are painted on the CPU (compatibility mode) rather
+    /// than by the GPU.
+    #[must_use]
+    pub fn compatibility(&self) -> bool {
+        matches!(self.painter, Painter::Cpu(_))
     }
 }
 
@@ -134,7 +167,9 @@ pub struct Capture {
     pub rgba: Vec<u8>,
 }
 
-/// Failures while setting up the GPU for a window. All are fatal at startup.
+/// Failures while setting up the GPU for a window. Any of them starts
+/// compatibility mode instead, except [`GpuError::Compat`], which is
+/// compatibility mode failing too and is fatal at startup.
 #[derive(Debug)]
 pub enum GpuError {
     /// No GPU (or software fallback) can present to this window.
@@ -145,6 +180,8 @@ pub enum GpuError {
     Device(wgpu::RequestDeviceError),
     /// The adapter cannot present to this surface in any format.
     Unsupported,
+    /// Compatibility mode could not show its frames in the window either.
+    Compat(CompatError),
 }
 
 impl std::fmt::Display for GpuError {
@@ -154,6 +191,7 @@ impl std::fmt::Display for GpuError {
             GpuError::Surface(e) => write!(f, "could not create surface: {e}"),
             GpuError::Device(e) => write!(f, "could not open GPU device: {e}"),
             GpuError::Unsupported => write!(f, "surface is not supported by the adapter"),
+            GpuError::Compat(e) => write!(f, "compatibility mode: {e}"),
         }
     }
 }
@@ -167,9 +205,11 @@ pub struct FrameStats {
     pub glyphs: usize,
     /// How full the glyph atlas is, from 0 to 1.
     pub atlas: f32,
-    /// GPU memory the colour (emoji) atlas page takes: 0 until the first
+    /// Memory the colour (emoji) atlas page takes: 0 until the first
     /// colour glyph is drawn, then 16 MB.
     pub color_page_bytes: u64,
+    /// Frames are painted on the CPU (compatibility mode).
+    pub compatibility: bool,
 }
 
 /// Unrecoverable (from inside `render`) per-frame failures.
@@ -386,13 +426,42 @@ impl Gpu {
             config.format
         );
 
-        Ok(Self::assemble(
+        Ok(Self::assemble_wgpu(
             Target::Surface(surface),
             device,
             queue,
             config,
             (font, font_size_px),
         ))
+    }
+
+    /// Paint `window` on the CPU (compatibility mode, M23), for when the GPU
+    /// could not be opened or `--compat` asks for it. Everything else
+    /// behaves as with [`Gpu::new`].
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError::Compat`] if the window cannot show a pixel buffer.
+    pub fn compat(window: &Arc<Window>, font: Font, font_size_px: f32) -> Result<Self, GpuError> {
+        let cpu = Cpu::window(window).map_err(GpuError::Compat)?;
+        let (width, height) = cpu.size();
+        log::info!("compatibility mode: painting {width}x{height} on the CPU");
+        Ok(Self::assemble(
+            Painter::Cpu(cpu),
+            Atlas::in_memory(),
+            (font, font_size_px),
+        ))
+    }
+
+    /// Render without a window or a GPU, painting `width × height` frames
+    /// on the CPU, as [`Gpu::compat`] does for a window.
+    #[must_use]
+    pub fn compat_headless(font: Font, font_size_px: f32, (width, height): (u32, u32)) -> Self {
+        Self::assemble(
+            Painter::Cpu(Cpu::offscreen(width, height)),
+            Atlas::in_memory(),
+            (font, font_size_px),
+        )
     }
 
     /// Render without a window, into an off-screen `width × height` texture.
@@ -428,7 +497,7 @@ impl Gpu {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         let texture = offscreen_texture(&device, width, height, format);
-        Self::assemble(
+        Self::assemble_wgpu(
             Target::Offscreen(texture),
             device,
             queue,
@@ -437,37 +506,51 @@ impl Gpu {
         )
     }
 
-    fn assemble(
+    fn assemble_wgpu(
         target: Target,
         device: wgpu::Device,
         queue: wgpu::Queue,
         config: wgpu::SurfaceConfiguration,
-        (font, font_size_px): (Font, f32),
+        font: (Font, f32),
     ) -> Self {
-        let atlas = Atlas::new(&device);
+        let atlas = Atlas::new(&device, &queue);
         let globals = Globals::new(&device, config.format.is_srgb());
-        globals.set_viewport(&queue, config.width, config.height);
-        let pipelines = Pipelines {
+        globals.set_viewport(&queue, config.width, config.height, 0.0);
+        // A GPU atlas always has its pages; `new` above made them.
+        let pipelines = atlas.gpu().map(|pages| Pipelines {
             rect: RectPipeline::new(&device, config.format, &globals),
-            glyph: GlyphPipeline::new(&device, config.format, &globals, &atlas),
+            segment: SegmentPipeline::new(&device, config.format, &globals),
+            glyph: GlyphPipeline::new(&device, config.format, &globals, pages),
             globals,
+        });
+        let Some(pipelines) = pipelines else {
+            log::error!("GPU atlas has no pages; painting on the CPU");
+            let cpu = Cpu::offscreen(config.width, config.height);
+            return Self::assemble(Painter::Cpu(cpu), Atlas::in_memory(), font);
         };
-        let text = TextRenderer::new(font, font_size_px, DEFAULT_TAB_WIDTH);
-
-        Self {
+        let wgpu = Wgpu {
             target,
             device,
             queue,
             config,
             pipelines,
+            reconfigure: false,
+        };
+        Self::assemble(Painter::Wgpu(Box::new(wgpu)), atlas, font)
+    }
+
+    fn assemble(painter: Painter, atlas: Atlas, (font, font_size_px): (Font, f32)) -> Self {
+        let text = TextRenderer::new(font, font_size_px, DEFAULT_TAB_WIDTH);
+        Self {
+            painter,
             atlas,
             text,
             ui_font: None,
             frame: FrameBuilder::default(),
             capture_requested: false,
             captured: None,
-            background: BACKGROUND,
-            reconfigure: false,
+            background: [BACKGROUND.r, BACKGROUND.g, BACKGROUND.b, BACKGROUND.a].map(to_f32),
+            inset_top: 0.0,
         }
     }
 
@@ -477,6 +560,50 @@ impl Gpu {
             // Minimised. Keep the old config; rendering is skipped until restored.
             return;
         }
+        match &mut self.painter {
+            Painter::Wgpu(w) => w.resize(width, height, self.inset_top),
+            Painter::Cpu(cpu) => cpu.resize(width, height),
+        }
+    }
+
+    /// Keep `px` pixels at the top of the window for a title bar the app
+    /// draws itself (macOS, where the window's content runs up under the
+    /// system's buttons). Everything drawn after this moves down by `px`:
+    /// y = 0 is just below the bar, and the bar is drawn at negative y.
+    /// Clips given to [`Gpu::begin_layer`] move with it, so the app lays
+    /// out the window as if it were `px` shorter
+    /// ([`Gpu::content_size`]) and nothing else changes. Both painters
+    /// apply it: the GPU in its shaders, the CPU as it fills pixels.
+    pub fn set_inset_top(&mut self, px: f32) {
+        let px = px.max(0.0).round();
+        if (px - self.inset_top).abs() < f32::EPSILON {
+            return;
+        }
+        self.inset_top = px;
+        if let Painter::Wgpu(w) = &self.painter {
+            w.pipelines
+                .globals
+                .set_viewport(&w.queue, w.config.width, w.config.height, px);
+        }
+    }
+
+    /// The top inset set by [`Gpu::set_inset_top`], in pixels.
+    #[must_use]
+    pub fn inset_top(&self) -> f32 {
+        self.inset_top
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "colour channels from 0 to 1, where f32 is plenty"
+)]
+fn to_f32(v: f64) -> f32 {
+    v as f32
+}
+
+impl Wgpu {
+    fn resize(&mut self, width: u32, height: u32, top: f32) {
         let (width, height) = clamp_to_device(&self.device, width, height);
         if width == self.config.width && height == self.config.height {
             return;
@@ -486,39 +613,58 @@ impl Gpu {
         self.configure();
         self.pipelines
             .globals
-            .set_viewport(&self.queue, width, height);
+            .set_viewport(&self.queue, width, height, top);
     }
 
-    /// Draw the queued frame into `texture`, capturing it if requested.
-    fn render_to(&mut self, texture: &wgpu::Texture) {
+    /// The clear colour for `background` (straight RGBA): an sRGB target
+    /// takes it in linear light.
+    fn clear_color(&self, background: [f32; 4]) -> wgpu::Color {
+        let [r, g, b, a] = background.map(f64::from);
+        let lin = |c: f64| {
+            if self.config.format.is_srgb() {
+                srgb_to_linear(c)
+            } else {
+                c
+            }
+        };
+        wgpu::Color {
+            r: lin(r),
+            g: lin(g),
+            b: lin(b),
+            a,
+        }
+    }
+
+    /// Draw `frame` into `texture`, and read it back when `capture` is set.
+    fn render_to(
+        &mut self,
+        texture: &wgpu::Texture,
+        frame: &mut FrameBuilder,
+        (atlas, background): (&Atlas, [f32; 4]),
+        capture: bool,
+    ) -> Option<Capture> {
+        let Some(pages) = atlas.gpu() else {
+            log::error!("GPU painter given an atlas in memory; frame skipped");
+            return None;
+        };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame"),
             });
-        self.frame.record(
+        let clear = self.clear_color(background);
+        frame.record(
             &self.device,
             &self.queue,
             &mut encoder,
-            (
-                &view,
-                [self.config.width, self.config.height],
-                self.background,
-            ),
+            (&view, [self.config.width, self.config.height], clear),
             &mut self.pipelines,
-            &self.atlas,
+            pages,
         );
-        let readback = if self.capture_requested {
-            self.capture_requested = false;
-            Some(self.record_readback(&mut encoder, texture))
-        } else {
-            None
-        };
+        let readback = capture.then(|| self.record_readback(&mut encoder, texture));
         self.queue.submit(std::iter::once(encoder.finish()));
-        if let Some((buffer, padded_row)) = readback {
-            self.captured = self.finish_readback(&buffer, padded_row);
-        }
+        readback.and_then(|(buffer, padded_row)| self.finish_readback(&buffer, padded_row))
     }
 
     /// Apply `self.config` to the target: reconfigure the window surface,
@@ -615,19 +761,27 @@ impl Gpu {
             rgba,
         })
     }
+}
 
+impl Gpu {
     /// Change the font's pixel size, for a scale-factor or font-size change.
     /// Clears the glyph cache and atlas when the size actually changes.
     pub fn set_font_size(&mut self, size_px: f32) {
-        self.text.set_size(size_px, &mut self.atlas, &self.queue);
+        self.text.set_size(size_px, &mut self.atlas);
     }
 
     /// Draw the editor with `font` instead of the bundled one, bold text from
     /// `font.bold` (or the regular weight). The atlas is refilled and the
     /// grid measured again, so the caller should lay out and redraw.
     pub fn set_font(&mut self, font: crate::EditorFont) {
-        self.text
-            .set_font(font.regular, font.bold, &mut self.atlas, &self.queue);
+        self.text.set_font(font.regular, font.bold, &mut self.atlas);
+    }
+
+    /// Prefer these fallback fonts per script and draw Han ideographs in
+    /// `prefs.cjk`'s regional forms (M24: the config's `fallback_fonts`
+    /// and `cjk_language`). Characters already found are looked up again.
+    pub fn set_fallback_prefs(&mut self, prefs: crate::FallbackPrefs) {
+        self.text.set_fallback_prefs(prefs);
     }
 
     /// Let the font draw ligatures (`ligatures = true` in the config). Off
@@ -702,7 +856,6 @@ impl Gpu {
             return self.push_ui_text(origin, text, color);
         }
         self.text.push_ui_styled(
-            &self.queue,
             &mut self.atlas,
             &mut self.frame,
             (origin, color),
@@ -717,26 +870,25 @@ impl Gpu {
     /// x where it ends.
     pub fn push_ui_text(&mut self, origin: [f32; 2], text: &str, color: [f32; 4]) -> f32 {
         let ui = self.ui_font();
-        self.text.push_ui_line(
-            &self.queue,
-            &mut self.atlas,
-            &mut self.frame,
-            origin,
-            text,
-            color,
-            &ui,
-        )
+        self.text
+            .push_ui_line(&mut self.atlas, &mut self.frame, origin, text, color, &ui)
     }
 
     /// Copy the next rendered frame back from the GPU; collect it with
     /// [`Gpu::take_capture`]. Returns `false` if this surface cannot be
     /// copied from or uses a pixel format the capture does not handle.
+    /// Frames painted on the CPU can always be captured.
     pub fn request_capture(&mut self) -> bool {
-        let readable = self.config.usage.contains(wgpu::TextureUsages::COPY_SRC)
-            && matches!(
-                self.config.format.remove_srgb_suffix(),
-                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
-            );
+        let readable = match &self.painter {
+            Painter::Wgpu(w) => {
+                w.config.usage.contains(wgpu::TextureUsages::COPY_SRC)
+                    && matches!(
+                        w.config.format.remove_srgb_suffix(),
+                        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+                    )
+            }
+            Painter::Cpu(_) => true,
+        };
         self.capture_requested = readable;
         readable
     }
@@ -749,27 +901,13 @@ impl Gpu {
     /// The colour each frame is cleared to, as straight RGBA in the same
     /// space as rectangle colours.
     pub fn set_background(&mut self, color: [f32; 4]) {
-        let [r, g, b, a] = color.map(f64::from);
-        // An sRGB target takes the clear colour in linear light.
-        let lin = |c: f64| {
-            if self.config.format.is_srgb() {
-                srgb_to_linear(c)
-            } else {
-                c
-            }
-        };
-        self.background = wgpu::Color {
-            r: lin(r),
-            g: lin(g),
-            b: lin(b),
-            a,
-        };
+        self.background = color;
     }
 
     /// Start a new frame, discarding anything queued for the previous one.
     pub fn begin_frame(&mut self) {
         self.frame.clear();
-        self.text.begin_frame(&mut self.atlas, &self.queue);
+        self.text.begin_frame(&mut self.atlas);
     }
 
     /// Start a new layer drawn above everything queued so far, clipped to
@@ -782,8 +920,9 @@ impl Gpu {
             reason = "window pixel coordinates, clamped to be non-negative"
         )]
         let to_px = |v: f32| v.max(0.0).round() as u32;
+        let top = self.inset_top;
         self.frame
-            .begin_layer(clip.map(|[x, y, w, h]| [to_px(x), to_px(y), to_px(w), to_px(h)]));
+            .begin_layer(clip.map(|[x, y, w, h]| [to_px(x), to_px(y + top), to_px(w), to_px(h)]));
     }
 
     /// The current layer's clip, in the form [`Gpu::begin_layer`] takes
@@ -797,15 +936,53 @@ impl Gpu {
             reason = "window pixel coordinates, far below 2^24"
         )]
         let to_f = |v: u32| v as f32;
+        let top = self.inset_top;
         self.frame
             .clip()
-            .map(|[x, y, w, h]| [to_f(x), to_f(y), to_f(w), to_f(h)])
+            .map(|[x, y, w, h]| [to_f(x), to_f(y) - top, to_f(w), to_f(h)])
     }
 
     /// Queue a filled rectangle for this frame. Within a layer, rectangles
     /// draw under text.
     pub fn push_rect(&mut self, pos: [f32; 2], size: [f32; 2], color: [f32; 4]) {
         self.frame.push_rect(pos, size, color);
+    }
+
+    /// Queue a stroked cubic Bézier curve from `points[0]` to `points[3]`,
+    /// with `points[1]` and `points[2]` as its control points, `width`
+    /// pixels wide, anti-aliased. Within a layer, segments draw over
+    /// rectangles and under text, in the order pushed.
+    pub fn push_curve(&mut self, points: [[f32; 2]; 4], width: f32, color: [f32; 4]) {
+        let [p0, p1, p2, p3] = points;
+        self.frame.push_segment(SegmentInstance {
+            p0,
+            p1,
+            p2,
+            p3,
+            color,
+            width,
+            pad: [0.0; 3],
+        });
+    }
+
+    /// Queue a straight line from `from` to `to`: a curve whose control
+    /// points sit a third and two thirds of the way along, so it bends
+    /// nowhere and moves along at an even pace.
+    pub fn push_line(&mut self, from: [f32; 2], to: [f32; 2], width: f32, color: [f32; 4]) {
+        let at = |t: f32| {
+            [
+                from[0] + (to[0] - from[0]) * t,
+                from[1] + (to[1] - from[1]) * t,
+            ]
+        };
+        self.push_curve([from, at(1.0 / 3.0), at(2.0 / 3.0), to], width, color);
+    }
+
+    /// Queue a filled round dot: a curve of zero length, whose stroke is a
+    /// disc `diameter` pixels across. A smaller dot pushed after a bigger
+    /// one in another colour makes a ring.
+    pub fn push_dot(&mut self, center: [f32; 2], diameter: f32, color: [f32; 4]) {
+        self.push_curve([center; 4], diameter, color);
     }
 
     /// Queue one line of text with its top-left corner at `origin`, in
@@ -844,7 +1021,6 @@ impl Gpu {
         clip_left: f32,
     ) {
         self.text.push_line(
-            &self.queue,
             &mut self.atlas,
             &mut self.frame,
             origin,
@@ -863,14 +1039,8 @@ impl Gpu {
     /// skipping shaping: for markers drawn many times a frame, such as the
     /// dots of visible whitespace.
     pub fn push_char(&mut self, origin: [f32; 2], ch: char, color: [f32; 4]) {
-        self.text.push_char(
-            &self.queue,
-            &mut self.atlas,
-            &mut self.frame,
-            origin,
-            ch,
-            color,
-        );
+        self.text
+            .push_char(&mut self.atlas, &mut self.frame, origin, ch, color);
     }
 
     /// Call `notify` (from a worker thread) when a fallback font arrives
@@ -901,13 +1071,31 @@ impl Gpu {
             glyphs: self.frame.glyph_count(),
             atlas: self.atlas.occupancy(),
             color_page_bytes: self.atlas.color_bytes(),
+            compatibility: self.compatibility(),
         }
+    }
+
+    /// The size the app lays out: the surface less the top inset
+    /// ([`Gpu::set_inset_top`]), in physical pixels.
+    #[must_use]
+    pub fn content_size(&self) -> (u32, u32) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a whole, non-negative number of pixels"
+        )]
+        let top = self.inset_top as u32;
+        let (width, height) = self.size();
+        (width, height.saturating_sub(top))
     }
 
     /// Current surface size in physical pixels, as `(width, height)`.
     #[must_use]
     pub fn size(&self) -> (u32, u32) {
-        (self.config.width, self.config.height)
+        match &self.painter {
+            Painter::Wgpu(w) => (w.config.width, w.config.height),
+            Painter::Cpu(cpu) => cpu.size(),
+        }
     }
 
     /// Draw the queued frame: clear to the background, then rectangles, then text.
@@ -920,6 +1108,50 @@ impl Gpu {
     /// Returns a [`FrameError`] when the surface is lost or acquiring the frame
     /// raised a validation error. Neither can be fixed by retrying.
     pub fn render(&mut self) -> Result<FrameStatus, FrameError> {
+        let capture = std::mem::take(&mut self.capture_requested);
+        let status = match &mut self.painter {
+            Painter::Wgpu(w) => {
+                let (status, captured) =
+                    w.render(&mut self.frame, (&self.atlas, self.background), capture)?;
+                self.captured = captured.or(self.captured.take());
+                status
+            }
+            Painter::Cpu(cpu) => {
+                let Some(pages) = self.atlas.cpu() else {
+                    log::error!("CPU painter given a GPU atlas; frame skipped");
+                    return Ok(FrameStatus::Retry);
+                };
+                let (status, captured) = cpu.render(
+                    &mut self.frame,
+                    pages,
+                    (self.background, self.inset_top),
+                    capture,
+                );
+                self.captured = captured.or(self.captured.take());
+                status
+            }
+        };
+        log::debug!(
+            "frame: {} glyphs, atlas {:.1}% full",
+            self.frame.glyph_count(),
+            self.atlas.occupancy() * 100.0
+        );
+        Ok(match status {
+            FrameStatus::Presented if self.text.needs_redraw() => FrameStatus::Incomplete,
+            other => other,
+        })
+    }
+}
+
+impl Wgpu {
+    /// Acquire the window's next texture (or use the off-screen one), draw
+    /// into it and present it. Returns the frame read back when `capture`.
+    fn render(
+        &mut self,
+        frame: &mut FrameBuilder,
+        scene: (&Atlas, [f32; 4]),
+        capture: bool,
+    ) -> Result<(FrameStatus, Option<Capture>), FrameError> {
         use wgpu::CurrentSurfaceTexture as T;
 
         let acquire_started = std::time::Instant::now();
@@ -927,32 +1159,32 @@ impl Gpu {
             Target::Surface(surface) => surface,
             Target::Offscreen(texture) => {
                 let texture = texture.clone();
-                self.render_to(&texture);
-                return Ok(FrameStatus::Presented);
+                let captured = self.render_to(&texture, frame, scene, capture);
+                return Ok((FrameStatus::Presented, captured));
             }
         };
-        let frame = match surface.get_current_texture() {
-            T::Success(frame) => frame,
-            T::Suboptimal(frame) => {
+        let next = match surface.get_current_texture() {
+            T::Success(next) => next,
+            T::Suboptimal(next) => {
                 // Still usable this frame; reconfigure once it is presented.
                 self.reconfigure = true;
-                frame
+                next
             }
             T::Outdated => {
                 // Swapchain no longer matches the surface (e.g. a resize
                 // race). No frame is held, so reconfiguring now is safe.
                 self.configure();
-                return Ok(FrameStatus::Retry);
+                return Ok((FrameStatus::Retry, None));
             }
-            T::Timeout => return Ok(FrameStatus::Retry),
-            T::Occluded => return Ok(FrameStatus::Hidden),
+            T::Timeout => return Ok((FrameStatus::Retry, None)),
+            T::Occluded => return Ok((FrameStatus::Hidden, None)),
             T::Lost => return Err(FrameError::SurfaceLost),
             T::Validation => return Err(FrameError::Validation),
         };
 
         log::trace!("frame acquired in {:?}", acquire_started.elapsed());
-        self.render_to(&frame.texture);
-        self.queue.present(frame);
+        let captured = self.render_to(&next.texture, frame, scene, capture);
+        self.queue.present(next);
         if std::mem::take(&mut self.reconfigure) {
             self.configure();
         }
@@ -960,15 +1192,106 @@ impl Gpu {
             "frame presented {:?} after acquire began",
             acquire_started.elapsed()
         );
-        log::debug!(
-            "frame: {} glyphs, atlas {:.1}% full",
-            self.frame.glyph_count(),
-            self.atlas.occupancy() * 100.0
-        );
-        Ok(if self.text.needs_redraw() {
-            FrameStatus::Incomplete
-        } else {
-            FrameStatus::Presented
-        })
+        Ok((FrameStatus::Presented, captured))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Queue a frame shaped like a full editor window: a background, a
+    /// current-line highlight, a translucent selection, a gutter, and
+    /// `rows` lines of code-like text.
+    fn editor_frame(gpu: &mut Gpu, (width, height): (u32, u32)) {
+        #[expect(clippy::cast_precision_loss, reason = "a window size")]
+        let (w, h) = (width as f32, height as f32);
+        let lh = gpu.metrics().line_height.ceil();
+        gpu.begin_frame();
+        gpu.set_background([0.1, 0.11, 0.13, 1.0]);
+        gpu.push_rect([0.0, 0.0], [80.0, h], [0.12, 0.13, 0.15, 1.0]);
+        gpu.push_rect([80.0, lh * 5.0], [w - 80.0, lh], [0.2, 0.2, 0.25, 1.0]);
+        gpu.begin_layer(Some([80.0, 0.0, w - 80.0, h]));
+        gpu.push_rect([200.0, lh * 8.0], [600.0, lh * 4.0], [0.3, 0.5, 0.9, 0.35]);
+        let line = "    let mut counts = HashMap::new(); // a fairly long line of code to draw ok";
+        let mut y = 0.0;
+        while y < h {
+            gpu.push_text_line([90.0, y], line, [0.85, 0.85, 0.8, 1.0]);
+            y += lh;
+        }
+    }
+
+    #[test]
+    fn compat_mode_paints_text_without_a_gpu() {
+        let font = Font::bundled().unwrap();
+        let mut gpu = Gpu::compat_headless(font, 28.0, (400, 200));
+        assert!(gpu.compatibility() && !gpu.linear_blend());
+        editor_frame(&mut gpu, (400, 200));
+        assert!(gpu.request_capture());
+        assert_eq!(gpu.render().unwrap(), FrameStatus::Presented);
+        let cap = gpu.take_capture().unwrap();
+        assert_eq!((cap.width, cap.height), (400, 200));
+        // Text pixels are lighter than anything else in the frame.
+        let light = cap
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[0] > 150)
+            .count();
+        assert!(light > 500, "{light} text pixels");
+        assert!(gpu.stats().compatibility);
+    }
+
+    #[test]
+    fn compat_mode_moves_everything_down_by_the_inset() {
+        let font = Font::bundled().unwrap();
+        let mut gpu = Gpu::compat_headless(font, 28.0, (8, 8));
+        gpu.set_background([0.0, 0.0, 0.0, 1.0]);
+        gpu.set_inset_top(3.0);
+        assert_eq!(gpu.content_size(), (8, 5));
+        gpu.begin_frame();
+        // A title bar at negative y, then a rect clipped to the content.
+        gpu.push_rect([0.0, -3.0], [8.0, 3.0], [1.0, 0.0, 0.0, 1.0]);
+        gpu.begin_layer(Some([0.0, 0.0, 8.0, 1.0]));
+        assert_eq!(gpu.clip(), Some([0.0, 0.0, 8.0, 1.0]));
+        gpu.push_rect([0.0, 0.0], [8.0, 8.0], [0.0, 0.0, 1.0, 1.0]);
+        assert!(gpu.request_capture());
+        gpu.render().unwrap();
+        let cap = gpu.take_capture().unwrap();
+        let row = |y: usize| cap.rgba.get(y * 8 * 4..y * 8 * 4 + 4).unwrap().to_vec();
+        assert_eq!(row(0), [255, 0, 0, 255]);
+        assert_eq!(row(2), [255, 0, 0, 255]);
+        assert_eq!(row(3), [0, 0, 255, 255]);
+        assert_eq!(row(4)[..3], [0, 0, 0]);
+    }
+
+    /// `cargo test --release -p nimbus-render -- --ignored --nocapture
+    /// compat_frame_bench`: the M23 budget is under 16 ms for a full
+    /// 1600x1000 frame. Also times a Retina-sized 3200x2000 frame.
+    #[test]
+    #[ignore = "benchmark; run in release"]
+    fn compat_frame_bench() {
+        for size in [(1600, 1000), (3200, 2000)] {
+            let font = Font::bundled().unwrap();
+            let mut gpu = Gpu::compat_headless(font, 28.0, size);
+            let mut times = Vec::new();
+            for _ in 0..50 {
+                editor_frame(&mut gpu, size);
+                let t = std::time::Instant::now();
+                gpu.render().unwrap();
+                times.push(t.elapsed());
+            }
+            times.sort();
+            println!(
+                "compat frame {}x{}: p50 {:?}, p90 {:?}, worst {:?} ({} glyphs)",
+                size.0,
+                size.1,
+                times[25],
+                times[45],
+                times[49],
+                gpu.stats().glyphs
+            );
+        }
     }
 }

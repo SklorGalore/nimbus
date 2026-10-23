@@ -39,8 +39,13 @@ the repository instead.
 12. [Keyboard shortcuts and commands](keybindings.md): every command with
     its id and default keys on each platform.
 13. [Command line](command-line.md): every option `nimbus` accepts.
-14. [Updates and troubleshooting](troubleshooting.md): checking for new
-    versions, files changing on disk, logs and environment variables.
+14. [Updates and troubleshooting](troubleshooting.md): checking for and
+    installing new versions, files changing on disk, logs and environment variables.
+15. [Accessibility](accessibility.md): screen readers, reaching every
+    panel from the keyboard, and keys your system may take first.
+16. [The git window](git.md): `nimbus --git`, your uncommitted changes,
+    the history with its branch graph, and any commit's files and
+    differences.
 
 ## A note on keys
 

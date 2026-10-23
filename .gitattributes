@@ -1,0 +1,17 @@
+# The screenshot test's sample must have the same bytes on every system:
+# a CRLF checkout on Windows moves the test's cursor and changes the
+# status bar's line-ending label, so the frame no longer matches.
+crates/app/tests/screenshot/sample.rs text eol=lf
+*.bmp binary
+
+# Signed test fixtures must keep their exact bytes: a checkout that turns
+# LF into CRLF (Windows with core.autocrlf) breaks their signatures.
+crates/app/src/update/testdata/** -text
+
+# PowerShell scripts start through their `#!/usr/bin/env pwsh` line on
+# macOS and Linux, which a CRLF line end would break.
+*.ps1 text eol=lf
+
+# The Chocolatey package's scripts are compared byte for byte against the
+# packed copy (scripts/publish-packages.ps1), so they keep LF everywhere.
+packaging/chocolatey/** text eol=lf

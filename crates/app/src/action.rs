@@ -367,6 +367,18 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::OpenConfig,
         Keys::NONE,
     ),
+    // The menu bar Nimbus draws on Windows; F10 opens it, as in other
+    // Windows programs. Does nothing where the system draws the menus.
+    act(
+        "app.menuBar",
+        "Open Menu Bar",
+        Command::OpenMenuBar,
+        Keys {
+            all: &[],
+            mac: &[],
+            other: &["F10"],
+        },
+    ),
     act(
         "app.checkUpdates",
         "Check for Updates",
@@ -377,6 +389,44 @@ pub const ACTIONS: &[ActionInfo] = &[
         "app.openRelease",
         "Open Latest Release Page",
         Command::OpenRelease,
+        Keys::NONE,
+    ),
+    // Command line (M25).
+    act(
+        "app.installCommand",
+        "Install nimbus Command in PATH",
+        Command::InstallOnPath,
+        Keys::NONE,
+    ),
+    act(
+        "app.uninstallCommand",
+        "Uninstall nimbus Command",
+        Command::RemoveFromPath,
+        Keys::NONE,
+    ),
+    // Updates (M31).
+    act(
+        "app.installUpdate",
+        "Install Update",
+        Command::InstallUpdate,
+        Keys::NONE,
+    ),
+    act(
+        "app.restartToUpdate",
+        "Restart to Update",
+        Command::RestartToUpdate,
+        Keys::NONE,
+    ),
+    act(
+        "app.cancelUpdate",
+        "Cancel Update",
+        Command::CancelUpdate,
+        Keys::NONE,
+    ),
+    act(
+        "app.rollBackUpdate",
+        "Roll Back Update",
+        Command::RollBackUpdate,
         Keys::NONE,
     ),
     // Compare (M9).
@@ -403,6 +453,13 @@ pub const ACTIONS: &[ActionInfo] = &[
         "diff.compareHead",
         "Compare with HEAD",
         Command::CompareHead,
+        Keys::NONE,
+    ),
+    // The git window (M27).
+    act(
+        "git.openWindow",
+        "Open Git Window",
+        Command::OpenGitWindow,
         Keys::NONE,
     ),
     act(

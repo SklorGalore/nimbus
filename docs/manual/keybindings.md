@@ -109,6 +109,12 @@ These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
 | Open Config File | `app.openConfig` | — | — |
 | Check for Updates | `app.checkUpdates` | — | — |
 | Open Latest Release Page | `app.openRelease` | — | — |
+| Install nimbus Command in PATH | `app.installCommand` | — | — |
+| Uninstall nimbus Command | `app.uninstallCommand` | — | — |
+| Install Update | `app.installUpdate` | — | — |
+| Restart to Update | `app.restartToUpdate` | — | — |
+| Cancel Update | `app.cancelUpdate` | — | — |
+| Roll Back Update | `app.rollBackUpdate` | — | — |
 
 ### Compare and merge
 
@@ -120,6 +126,7 @@ These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
 | Compare with HEAD | `diff.compareHead` | — | — |
 | Compare with Revision… | `diff.compareRevision` | — | — |
 | Compare Folders… | `diff.compareFolders` | — | — |
+| Open Git Window | `git.openWindow` | — | — |
 | Ignore Whitespace (Off, Ends, All) | `diff.ignoreWhitespace` | — | — |
 | Ignore Case in Compare | `diff.ignoreCase` | — | — |
 | Ignore Blank Lines in Compare | `diff.ignoreBlankLines` | — | — |

@@ -16,7 +16,7 @@ and add a line to the decision log (§10).
 |---|---|---|---|
 | Fast startup | First frame in < 500 ms, total time from the top of `main` | `nimbus --smoke` prints `first-frame-ms` | M1: 116–132 ms warm, of which about 3 ms is ours |
 | Typing latency | Keystroke to pixels in < 1 frame (≤ 8 ms at 120 Hz) | Frame timer in debug overlay | — |
-| Huge files | Open a 4 GB log, scroll and search it, under 1 s to interactive | Bench file from `bench/gen.sh` | — |
+| Huge files | Open a 4 GB log, scroll and search it, under 1 s to interactive | Bench file from `bench/gen.ps1` | — |
 | Low footprint | Opening a file adds at most 1.5× its size over an empty window (rope backend); mapped files (M7) add roughly nothing. Syntax highlighting is not counted (§4.2). Total reported, not budgeted. Single binary < 35 MB | `vmmap` physical footprint after settling; CI size job | M2: 45 MB empty, 58 MB with a 10 MB file (1.3×); 7.5 MB binary |
 | Modeless editing | Type to insert; Cmd/Ctrl shortcuts; mouse works | — | — |
 
@@ -50,7 +50,8 @@ after a rebuild, in each milestone's Results.
   proportional font setting in M20.
 - Bidirectional and right-to-left text. Decided at approval; the renderer
   assumes left-to-right runs.
-- Multiple windows. One window with tabs.
+- Multiple windows. One window with tabs; since M25 a later `nimbus`
+  command hands its files to the open window (`instance.rs`).
 - Native menu bar on Linux (§4.4).
 
 ## 3. Platform
@@ -472,8 +473,15 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
 - **Find / replace** (`Primary+F`, `Primary+H` on Windows and Linux,
   `Primary+Alt+F` on macOS where `Cmd+H` hides the app): an inline bar at the
   top of the view, incremental, with match count and regex and case toggles.
-- **Menus**: native menu bar with `muda` on macOS and Windows. On Linux,
-  `muda` needs GTK, which we avoid, so Linux relies on the command palette.
+- **Menus**: the system menu bar with `muda` on macOS, where it sits at the
+  top of the screen. On Windows Nimbus draws the menu bar and its
+  drop-downs itself, in the theme's colours, and right-click menus are
+  drawn by Nimbus everywhere (`menu/drawn.rs`). The Windows window has no
+  system frame (`with_decorations(false)`, keeping the shadow): the menu
+  bar shares its strip with the title and window buttons Nimbus draws,
+  and the app moves and resizes the window through winit's
+  `drag_window` and `drag_resize_window` (`caption.rs`). On Linux, `muda` needs GTK,
+  which we avoid, so Linux relies on the command palette.
 - **Clipboard**: `arboard`. **File dialogs**: `rfd`.
 - **Config**: one TOML file in the platform config directory (from `dirs`):
   `~/Library/Application Support/nimbus/config.toml` on macOS,
@@ -509,7 +517,7 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
 - **Runtime**: a debug overlay (`F12`, M8, with a log-only version from M2)
   shows frame time, keystroke-to-present latency, atlas occupancy, buffer
   backend and background task status.
-- **Benchmarks**: `bench/gen.sh` (M2) generates 10 MB, 100 MB, 1 GB and
+- **Benchmarks**: `bench/gen.ps1` (M2) generates 10 MB, 100 MB, 1 GB and
   4 GB files. `criterion` benches cover buffer operations and line layout.
 - **Release profile**: `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`,
   `panic = "abort"`, `strip = true`.
@@ -547,7 +555,7 @@ it.
 | `regex` | 1 | search | M3 |
 | `crossbeam-channel` | 0.5 | background to main thread | M3 |
 | `serde`, `toml`, `dirs` | 1, 1, 7 | config | M4 |
-| `muda` | 0.21 | native menus (macOS, Windows) | M4 |
+| `muda` | 0.21 | the macOS menu bar | M4 |
 | `rfd` | 0.17 | file dialogs | M4 |
 | `ignore`, `nucleo` | 0.4, 0.5 | project walking, fuzzy matching | M4 |
 | `tree-sitter` + grammar crates | 0.27 | syntax | M5 |
@@ -557,6 +565,7 @@ it.
 | `imara-diff` | 0.2 | line diff (Myers) over our own tokens | M9 |
 | `ureq` | 3 | HTTPS for the update check; rustls with the system's certificate store | M15 |
 | `trash` | 5 | the system trash for Delete in the tree | M12 |
+| `sys-locale` | 0.3 | the system language, the default for `cjk_language` | M24 |
 
 ## 8. Milestones
 
@@ -589,15 +598,15 @@ introduces and points at the code.
 | 20 | Reading aids | **Done** | Sticky scroll, minimap, a proportional UI font, Markdown preview | [m20](docs/milestones/m20-reading-aids.md) |
 | 21 | Foundations and 1.0 | **Done** | Fuzzing, a soak run, a crash record, version 1.0 (ropey 2 and winit 0.31 wait for stable releases) | [m21](docs/milestones/m21-foundations-and-1-0.md) |
 | 22 | Screen readers | Next | Use Nimbus with VoiceOver, NVDA or Orca | [m22](docs/milestones/m22-screen-readers.md) |
-| 23 | Library upgrades | Planned, waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
-| 24 | International text | Planned | CJK and other scripts in the right fonts, variable fonts, editable huge files in single-byte encodings | [m24](docs/milestones/m24-international-text.md) |
-| 25 | Command line | Planned | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
-| 26 | Security | Planned | Signed releases with the key off GitHub; protected branches and tags; pinned workflows; reviewed dependencies; untrusted files stay data | [m26](docs/milestones/m26-security.md) |
-| 27 | Git window: viewing | Planned | `nimbus --git`: changes, history with a branch graph, any commit's diffs | [m27](docs/milestones/m27-git-viewer.md) |
+| 23 | Library upgrades | In progress: compatibility mode built, upgrades waiting on releases | Ropey 2 and winit 0.31 once stable; the macOS emoji picker; compatibility mode for machines without a GPU | [m23](docs/milestones/m23-library-upgrades.md) |
+| 24 | International text | In progress: built; the typing benchmark and checks on the owner's Mac wait | CJK and other scripts in the right fonts, variable fonts, editable huge files in other encodings | [m24](docs/milestones/m24-international-text.md) |
+| 25 | Command line | In progress | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
+| 26 | Security | In progress | Signed releases with the key off GitHub; protected branches and tags; pinned workflows; reviewed dependencies; untrusted files stay data | [m26](docs/milestones/m26-security.md) |
+| 27 | Git window: viewing | In progress | `nimbus --git`: changes, history with a branch graph, any commit's diffs | [m27](docs/milestones/m27-git-viewer.md) |
 | 28 | Git window: staging and committing | Planned | Stage files, hunks or lines; discard safely; commit and amend | [m28](docs/milestones/m28-git-staging.md) |
 | 29 | Git window: branches and remotes | Planned | Branches, tags, stashes; fetch, pull and push with your own credentials | [m29](docs/milestones/m29-git-branches-remotes.md) |
 | 30 | Git window: history tools and merging | Planned | Blame, file history, search; merge, rebase, cherry-pick and revert with the merge view | [m30](docs/milestones/m30-git-history-merging.md) |
-| 31 | Updates | Planned | Install a newer release from inside Nimbus, verified against the signed `SHA256SUMS`, and restart into it | [m31](docs/milestones/m31-updates.md) |
+| 31 | Updates | **Done** | Install a newer release from inside Nimbus, verified against the signed `SHA256SUMS`, and restart into it | [m31](docs/milestones/m31-updates.md) |
 
 M10–M15 were drafted after M8 from the items earlier plans deferred;
 `docs/milestones/backlog.md` maps each item to its plan. The owner
@@ -638,7 +647,7 @@ on 2026-10-19:
   and updates (M31), since updates depend on the signing key and the
   git client on the git rule.
 - The release signing key lives on the owner's Mac with a password and
-  is used by `scripts/sign-release.sh`; it is never an Actions secret.
+  is used by `scripts/sign-release.ps1`; it is never an Actions secret.
 - Dependencies are reviewed with `cargo vet` (imported audits, today's
   versions exempted once), not `cargo deny` alone.
 
@@ -684,6 +693,20 @@ raised were answered on 2026-10-18:
   from M25 to M24. The two dictionary questions fell away with it.
 - M24: the East Asian encodings stay behind the `east-asian` cargo
   feature, off by default, though offering them would cost about 1 KB.
+- M24, as built: a huge file in a known other encoding is decoded into a
+  private UTF-8 copy on disk and mapped, instead of the plan's decode
+  step inside the piece table. Positions are UTF-8 byte offsets, and a
+  Windows-1252 byte such as `é` is two bytes in UTF-8, so "one byte, one
+  character" did not keep offsets after all; the copy keeps the piece
+  table untouched and works for every encoding, so multi-byte encodings
+  (UTF-16, Shift_JIS) are editable too. Cost: disk space for the copy
+  and a pause to decode (about a second per GB).
+- M24, as built: Han follows `cjk_language`, else the system language
+  (`sys-locale`); a system in any other language gets Simplified
+  Chinese. Graphemes a fallback font draws are shaped one cell at a
+  time with their script and language, not as whole runs, which keeps
+  the grid rule simple; joining across cells (Arabic) stays out with
+  right-to-left text.
 
 The questions the drafts of M16–M21 raised were answered on
 2026-10-18, when the owner approved the six plans and their order:
@@ -846,6 +869,12 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | M27–M30 approved: after M25; the commit graph in smooth curves through a third `render` pipeline (CPU twin in compatibility mode); discards recoverable only while the git window is open; interactive rebase left for a later plan; no git features in the editor beyond Compare with HEAD and "Open Git Window" | §9, m27–m30 |
 | 2026-10-19 | The git window plans move from M26–M29 to M27–M30: the owner put the security milestone (M26) first | §8, m27–m30 |
 | 2026-10-19 | Compatibility mode keeps up with the renderer: any new GPU primitive (first, the git client's commit-graph curves in M27) is added to the CPU painter in the same change; a standing requirement in docs/milestones/README.md | m23, milestones README |
-| 2026-10-19 | M26 Security drafted at the owner's request and put before the git client (M27–M30) and updates (M31): no release has been signed yet (`minisign.pub` never committed), so the key comes first, kept on the owner's Mac and used by `scripts/sign-release.sh`, never an Actions secret; actions pinned by SHA, protected branches and `v*` tags, `cargo vet` (chosen over `cargo deny` alone), provenance, a threat model; M31 owns the update check itself | §9, m26 |
+| 2026-10-19 | M26 Security drafted at the owner's request and put before the git client (M27–M30) and updates (M31): no release has been signed yet (`minisign.pub` never committed), so the key comes first, kept on the owner's Mac and used by `scripts/sign-release.ps1`, never an Actions secret; actions pinned by SHA, protected branches and `v*` tags, `cargo vet` (chosen over `cargo deny` alone), provenance, a threat model; M31 owns the update check itself | §9, m26 |
 | 2026-10-18 | M31 Updates drafted at the owner's request: Install Update downloads the release package, checks it against the `minisign`-signed `SHA256SUMS` with the key compiled in (version pinned in the trusted comment), swaps it in and restarts with the session; no new trust beyond the release key; needs `minisign.pub` committed first | §8, §9, m31 |
+| 2026-10-19 | M26 built (in progress until the owner's GitHub settings land): git's checkout filters are skipped when the repository's own config names a filter program, instead of the plan's `safe.directory` check, which a clone the user owns always passes; a project's `.nimbus/workspace.toml` drops outside roots as well as tabs and folders (named workspaces keep them); the zero-width joiner and non-joiner are not marked as hidden characters, since emoji and scripts need them | m26, docs/security.md |
 | 2026-10-19 | M31: updates install on request only; the startup update check becomes on by default (`check_updates = true`), reversing M15's off default; Homebrew and `.deb` installs are handed back to their package manager | §9, m31 |
+| 2026-10-19 | M31 built: the replaced version is kept until the next update (so Roll Back Update has something to restore) instead of being deleted at the new version's first frame; a version that never draws its first frame is rolled back at the next start; Windows restarts into the last session; builds from source are never replaced | §9, m31 |
+| 2026-10-19 | M22: the screen-reader description (AccessKit) is built only while a reader is active and the window is created hidden until the adapter exists; the editor is one text field holding a window of 200 lines or 256 KB either side of the cursor (not of the view, so a reader's place survives scrolling), one text run per visual row, rebuilt near its edges; not yet described: Search results, the Compare panel, compare and merge rows, preview headings, unfocused groups | §9, m22 |
+| 2026-10-19 | M24 built (in progress until the typing benchmark and the owner's Mac checks): fallback fonts per script (`fallback_fonts`, built-in lists per platform, then M8's rule), `cjk_language` defaulting to the system language and else Simplified Chinese, fallback graphemes shaped per cell with script and language, `font_weight` for variable and static fonts; huge files in another encoding are decoded into a private UTF-8 copy and edited mapped, in every encoding rather than single-byte only, saving back in their encoding; new dependency `sys-locale` | §7, §9, m24 |
+| 2026-10-19 | M25 built (in progress until checked on the owner's Mac): the single-instance socket is `run/` beside the config (so `NIMBUS_CONFIG_DIR` isolates it); only a plain `nimbus [FILE\|FOLDER]... [--wait]` hands off, any other option starts its own window; `--wait` with no Nimbus open starts one in the background (git's `GIT_*` variables removed) and waits on it, so the editor outlives the commit; Windows uses a loopback port with a random token in `%APPDATA%` instead of a named pipe (no crate, no `unsafe`), and edits the user `PATH` through PowerShell, which also tells running programs it changed | §2, m25, docs/security.md |
+| 2026-10-19 | M27 built (in progress until checked on the owner's Mac): the git window is its own winit handler (`GitApp`) reusing the renderer, theme, key bindings, compare view and watcher, not the editor's `App` with another layout; the history first loads HEAD's newest 2,000 commits, because `git log --date-order` with every ref walks to the oldest tip before printing (3 s on a million commits), then the whole history swapped in; a moved ref reloads the history rather than appending; lanes cap at 32; render gains a segment pipeline (lines, cubic curves, dots) with its CPU twin | m27 |
