@@ -171,6 +171,13 @@ fn bar_titles(layout: &Layout) -> impl Iterator<Item = (f32, f32)> + '_ {
     })
 }
 
+/// Where the bar's last title ends: the window's own title and buttons
+/// go to the right of it (`crate::caption`).
+#[must_use]
+pub fn titles_end(layout: &Layout) -> f32 {
+    bar_titles(layout).last().map_or(0.0, |(x, w)| x + w)
+}
+
 impl Menus {
     /// Whether a menu is open (and so takes keys and clicks first).
     #[must_use]

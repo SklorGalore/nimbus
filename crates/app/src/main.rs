@@ -12,6 +12,7 @@ mod access;
 mod action;
 mod app;
 mod bmp;
+mod caption;
 mod columns;
 mod compare;
 mod compare_panel;
@@ -28,6 +29,7 @@ mod find_files;
 mod folder_compare;
 mod folding;
 mod git;
+mod git_window;
 mod groups;
 mod indexer;
 mod input;
@@ -167,6 +169,12 @@ pub struct Options {
     /// [FILE|FOLDER]... [--wait]` hands its files to a running Nimbus;
     /// other options say how a window should start, so they start one.
     pub flagged: bool,
+    /// `--git [DIR]`: open the git window (M27) for the repository
+    /// holding `DIR` (the first file argument) or the current folder.
+    pub git: bool,
+    /// `--git-select WHAT`: with `--git --headless`, show `changes` or the
+    /// commit whose hash starts with `WHAT` instead of the newest one.
+    pub git_select: Option<String>,
 }
 
 impl Options {
@@ -191,7 +199,7 @@ impl Options {
     /// matters.
     #[must_use]
     pub fn serves(&self) -> bool {
-        !self.unattended() && self.merge.is_none()
+        !self.unattended() && self.merge.is_none() && !self.git
     }
 }
 
@@ -265,7 +273,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]] [--prompt] [--title-bar] [--menu NAME]] [--debug-overlay] [--preview] [--linear-blend] [--compat] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--wait] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]] [--prompt] [--title-bar] [--menu NAME]] [--debug-overlay] [--preview] [--linear-blend] [--compat] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--git [DIR]] [--wait] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -368,6 +376,8 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
         "--debug-overlay" => o.debug_overlay = true,
         "--linear-blend" => o.linear_blend = true,
         "--compat" => o.compat = true,
+        "--git" => o.git = true,
+        "--git-select" => o.git_select = args.next().and_then(|w| w.into_string().ok()),
         "--preview" => o.preview = true,
         "--cursors" => o.cursors = numbers(args.next()),
         "--picker" => o.picker = args.next().and_then(|p| p.into_string().ok()),
@@ -802,7 +812,7 @@ fn wait_in_new_nimbus(dir: &Path, request: &instance::Request) -> i32 {
 /// Start `command` in a process group of its own (Unix) or detached from
 /// this console (Windows), so Ctrl+C in the terminal that ran `nimbus
 /// --wait` stops the waiting, not the editor.
-fn detach(command: &mut std::process::Command) {
+pub(crate) fn detach(command: &mut std::process::Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -891,6 +901,29 @@ fn headless_context(
     None
 }
 
+/// The git window (M27), with its own layout and event loop, instead of
+/// the editor; never returns.
+fn run_git(
+    options: Options,
+    started: Instant,
+    gpu_init: Option<
+        std::thread::JoinHandle<Result<nimbus_render::GpuContext, nimbus_render::GpuError>>,
+    >,
+    (config, languages): (config::Config, Languages),
+    warnings: &[String],
+) -> ! {
+    if let Some(size) = options.headless {
+        for w in warnings {
+            print_err(&format!("nimbus: {w}"));
+        }
+        let context = headless_context(gpu_init, options.compat || config.compat);
+        let code = git_window::run_headless(&options, (&config, languages), size, context);
+        std::process::exit(code);
+    }
+    let code = git_window::run(options, started, gpu_init, (config, languages), warnings);
+    std::process::exit(code);
+}
+
 fn main() {
     let started = Instant::now();
     // Before any output, logging included (Windows; see console.rs).
@@ -934,6 +967,9 @@ fn main() {
     let (languages, language_warnings) = Languages::load(&config.languages);
     warnings.extend(language_warnings);
     warnings.extend(io::set_encoding_rules(&config.encodings));
+    if options.git {
+        run_git(options, started, gpu_init, (config, languages), &warnings);
+    }
     let (docs, root, more_roots) = open_files(&options, &languages);
     let (root, startup) = plan_startup(
         &options,

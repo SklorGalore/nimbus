@@ -8,7 +8,9 @@ use winit::window::Window;
 use crate::atlas::Atlas;
 use crate::font::{Font, Metrics};
 use crate::frame::FrameBuilder;
-use crate::pipeline::{Globals, GlyphPipeline, Pipelines, RectPipeline};
+use crate::pipeline::{
+    Globals, GlyphPipeline, Pipelines, RectPipeline, SegmentInstance, SegmentPipeline,
+};
 use crate::soft::{CompatError, Cpu};
 use crate::text::{ColorRun, LineStyle, TextRenderer};
 use crate::ui::UiFont;
@@ -517,6 +519,7 @@ impl Gpu {
         // A GPU atlas always has its pages; `new` above made them.
         let pipelines = atlas.gpu().map(|pages| Pipelines {
             rect: RectPipeline::new(&device, config.format, &globals),
+            segment: SegmentPipeline::new(&device, config.format, &globals),
             glyph: GlyphPipeline::new(&device, config.format, &globals, pages),
             globals,
         });
@@ -936,6 +939,43 @@ impl Gpu {
     /// draw under text.
     pub fn push_rect(&mut self, pos: [f32; 2], size: [f32; 2], color: [f32; 4]) {
         self.frame.push_rect(pos, size, color);
+    }
+
+    /// Queue a stroked cubic Bézier curve from `points[0]` to `points[3]`,
+    /// with `points[1]` and `points[2]` as its control points, `width`
+    /// pixels wide, anti-aliased. Within a layer, segments draw over
+    /// rectangles and under text, in the order pushed.
+    pub fn push_curve(&mut self, points: [[f32; 2]; 4], width: f32, color: [f32; 4]) {
+        let [p0, p1, p2, p3] = points;
+        self.frame.push_segment(SegmentInstance {
+            p0,
+            p1,
+            p2,
+            p3,
+            color,
+            width,
+            pad: [0.0; 3],
+        });
+    }
+
+    /// Queue a straight line from `from` to `to`: a curve whose control
+    /// points sit a third and two thirds of the way along, so it bends
+    /// nowhere and moves along at an even pace.
+    pub fn push_line(&mut self, from: [f32; 2], to: [f32; 2], width: f32, color: [f32; 4]) {
+        let at = |t: f32| {
+            [
+                from[0] + (to[0] - from[0]) * t,
+                from[1] + (to[1] - from[1]) * t,
+            ]
+        };
+        self.push_curve([from, at(1.0 / 3.0), at(2.0 / 3.0), to], width, color);
+    }
+
+    /// Queue a filled round dot: a curve of zero length, whose stroke is a
+    /// disc `diameter` pixels across. A smaller dot pushed after a bigger
+    /// one in another colour makes a ring.
+    pub fn push_dot(&mut self, center: [f32; 2], diameter: f32, color: [f32; 4]) {
+        self.push_curve([center; 4], diameter, color);
     }
 
     /// Queue one line of text with its top-left corner at `origin`, in
