@@ -47,10 +47,16 @@ does not overwrite your session.
 | `--git-select WHAT` | With `--git`: start with `changes` or the commit whose hash starts with `WHAT` selected (for screenshots and tests). |
 | `--wait` | Return only when the files' tabs are closed (or Nimbus quits). For tools that wait for an editor, such as git: see [Nimbus as git's editor](#nimbus-as-gits-editor). |
 | `--version`, `-V` | Print the version (`nimbus 0.10.0`) and exit. |
-| `--help`, `-h` | Print a one-line usage summary and exit. |
+| `--help`, `-h` | Print the everyday options, grouped, with examples, and exit. `nimbus --help all` adds the options for testing and measuring. |
 
 An unknown option, or an option missing its value, prints an error and
-exits with code 2. A file that cannot be opened (a device, a file you
+exits with code 2. A near miss names the option you probably meant:
+
+```
+$ nimbus --hepl
+nimbus: unknown option --hepl (did you mean --help?)
+Run nimbus --help to see every option.
+``` A file that cannot be opened (a device, a file you
 may not read) prints the reason, shows it in a dialog, and exits with
 code 1.
 
@@ -110,7 +116,8 @@ export EDITOR="nimbus --wait"
 
 These options exist to check rendering and speed, mostly for working on
 Nimbus itself. They are listed so that you recognise them; you do not
-need them for everyday use.
+need them for everyday use, and `nimbus --help` shows them only as
+`nimbus --help all`.
 
 | Option | What it does |
 |---|---|
@@ -128,6 +135,7 @@ need them for everyday use.
 | `--prompt` | With `--headless`: draw the "Save changes before closing?" question over the frame. |
 | `--title-bar` | With `--headless`: draw the title bar Nimbus draws on macOS, on any system. |
 | `--menu NAME` | With `--headless`: draw the menu bar Nimbus draws on Windows, on any system, with the menu `NAME` (`File`, `Edit`, ...) open. |
+| `--linear-blend` | Blend text in linear light, an experiment from milestone 16. |
 
 ## Exit codes
 
