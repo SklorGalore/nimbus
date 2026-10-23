@@ -7,7 +7,7 @@
 **A fast, lightweight text editor for macOS, Linux and Windows, with its own GPU text renderer.**
 
 [![CI](https://github.com/SklorGalore/nimbus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SklorGalore/nimbus/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/badge/latest%20release-v1.0.0-blue)](https://github.com/SklorGalore/nimbus/releases)
+[![Latest release](https://img.shields.io/github/v/release/SklorGalore/nimbus?label=latest%20release&color=blue)](https://github.com/SklorGalore/nimbus/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#installation)
