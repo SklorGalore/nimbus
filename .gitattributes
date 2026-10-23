@@ -11,3 +11,7 @@ crates/app/src/update/testdata/** -text
 # PowerShell scripts start through their `#!/usr/bin/env pwsh` line on
 # macOS and Linux, which a CRLF line end would break.
 *.ps1 text eol=lf
+
+# The Chocolatey package's scripts are compared byte for byte against the
+# packed copy (scripts/publish-packages.sh), so they keep LF everywhere.
+packaging/chocolatey/** text eol=lf

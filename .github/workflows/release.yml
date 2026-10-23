@@ -21,8 +21,10 @@
 #                                       Menu entry, "Open with Nimbus"
 #   nimbus-VERSION-windows-x86_64.zip   nimbus.exe (icon embedded) and the
 #                                       icon file, for no installer
-#   nimbus.rb, winget-manifest.zip      Homebrew cask and winget manifest,
-#                                       filled in from the packages above
+#   nimbus.rb                           Homebrew cask, filled in from the
+#                                       packages above
+#   nimbus.VERSION.nupkg                Chocolatey package, made after
+#                                       SHA256SUMS (chocolatey.yml)
 #   SHA256SUMS                          each package's SHA-256, made last
 #   SHA256SUMS.minisig                  its signature, added afterwards by
 #                                       scripts/sign-release.sh on the
@@ -251,6 +253,16 @@ jobs:
           cat SHA256SUMS
           cd ..
           scripts/manifests.sh "$version" dist
-          (cd dist/winget && zip -q ../winget-manifest.zip ./*.yaml)
-          gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS dist/nimbus.rb dist/winget-manifest.zip \
+          gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS dist/nimbus.rb \
             --repo "$GITHUB_REPOSITORY" --clobber
+
+  # The Chocolatey package needs a Windows runner for `choco pack`, and the
+  # installer's hash from SHA256SUMS, so it is made last.
+  chocolatey:
+    name: Chocolatey package
+    needs: checksums
+    permissions:
+      contents: write # attach the .nupkg to the release
+    uses: ./.github/workflows/chocolatey.yml
+    with:
+      tag: ${{ github.ref_name }}

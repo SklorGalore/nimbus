@@ -94,6 +94,12 @@ section before tagging.
 - The repository's maintenance scripts (`scripts/` and `bench/`) are
   PowerShell 7 instead of bash and sh, with the same names and arguments.
   They need `pwsh` 7.4 or later (`brew install powershell` on macOS).
+- Windows releases go to [Chocolatey](https://community.chocolatey.org/packages/nimbus)
+  (`choco install nimbus`) instead of winget. Each release has a
+  `nimbus.X.Y.Z.nupkg`, packed on Windows by a new workflow, and
+  `scripts/publish-packages.sh` checks its scripts against the signed
+  `SHA256SUMS` before pushing it. Install Update hands a Chocolatey
+  install to `choco upgrade nimbus`, as it does Homebrew's to `brew`.
 - **The update check at startup is now on by default**
   (`check_updates = true`). Each start asks GitHub's API once, after
   the window appears, whether a newer release exists: one HTTPS request
