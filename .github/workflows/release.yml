@@ -160,6 +160,9 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - name: Install cargo-auditable
+        # bash on every OS: Windows would otherwise run this in PowerShell,
+        # where $CARGO_AUDITABLE_VERSION is an (empty) PowerShell variable.
+        shell: bash
         run: cargo install cargo-auditable --locked --version "$CARGO_AUDITABLE_VERSION"
 
       - name: macOS app, zip and dmg
@@ -184,7 +187,9 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwayland-dev libxkbcommon-dev
+          # desktop-file-utils: appimagetool runs desktop-file-validate on
+          # nimbus.desktop and stops if it is missing.
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev desktop-file-utils
           version="${GITHUB_REF_NAME#v}"
           cargo auditable build --release --locked -p nimbus
           name="nimbus-$version-linux-x86_64"
