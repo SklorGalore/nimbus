@@ -339,16 +339,20 @@ impl GitApp {
         if font.is_empty() && ui_font.is_empty() {
             return;
         }
+        // The editor font takes `font_weight` (M24); the ui font keeps its
+        // regular face, as in the editor window.
+        let weight = self.config.font_weight;
         let proxy = self.proxy.clone();
         let spawned = std::thread::Builder::new()
             .name("nimbus-font".to_owned())
             .spawn(move || {
-                let find = |name: &str| {
+                let find = |name: &str, weight| {
                     (!name.is_empty())
-                        .then(|| nimbus_render::find_editor_font(name))
+                        .then(|| nimbus_render::find_editor_font(name, weight))
                         .flatten()
                 };
-                let _ = proxy.send_event(GitEvent::Fonts(Box::new((find(&font), find(&ui_font)))));
+                let fonts = (find(&font, weight), find(&ui_font, None));
+                let _ = proxy.send_event(GitEvent::Fonts(Box::new(fonts)));
             });
         if let Err(e) = spawned {
             log::warn!("could not look up fonts: {e}");

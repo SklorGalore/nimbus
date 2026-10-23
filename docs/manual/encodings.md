@@ -53,7 +53,7 @@ for example `CRLF   Windows-1252`:
 | `LF` or `CRLF` | The line ending most lines use. Click it to change the file's line endings. |
 | `UTF-8`, `UTF-8 BOM`, `UTF-16 LE`, `UTF-16 BE`, `Windows-1252`, `ISO-8859-1`, `Mac Roman`, … | The encoding the file was read in, and is saved in. Click it for Reopen with Encoding and Save with Encoding. |
 | `Not UTF-8` | The file is held as bytes (step 5 above). |
-| `Read-only` | A huge file in another encoding; see [Huge files](#huge-files-in-another-encoding). |
+| `Read-only` | A huge file in another encoding that could not be decoded into a copy; see [Huge files](#huge-files-in-another-encoding). |
 
 A huge memory-mapped UTF-8 file shows no encoding item (or `BOM`, if it
 starts with one), because Nimbus never reads it all to check.
@@ -87,10 +87,10 @@ encodings Reopen offers, the list has `UTF-8 BOM` (UTF-8 with a byte
 order mark), and UTF-16 is written with a mark, as Windows expects. If
 the save fails, the file keeps its old encoding.
 
-Two kinds of file cannot be converted:
-
-- Files of 256 MB or more save only as UTF-8.
-- A file held as bytes (`Not UTF-8`) saves only as it is.
+A file held as bytes (`Not UTF-8`), of any size, cannot be converted: it
+saves only as it is. A file of 256 MB or more converts only if it was
+opened in a known encoding (see below); one opened as UTF-8 saves only as
+UTF-8.
 
 ## Saving
 
@@ -193,15 +193,22 @@ since that guess is unreliable: choose them yourself.
 
 ## Huge files in another encoding
 
-Converting a file means holding all of it in memory, so files of 256 MB
-or more are never converted. What happens depends on how Nimbus knows the
-encoding:
+Converting a file in memory means holding all of it there, so files of
+256 MB or more are handled differently. What happens depends on how
+Nimbus knows the encoding:
 
 - **Known** (a UTF-16 byte order mark, `--encoding`, `[encodings]`, or
-  Reopen with Encoding): the file opens **read-only**, its bytes shown as
-  they are. The status bar shows the encoding and `Read-only`, and
-  typing or saving says why. Editing those bytes as UTF-8 would mix two
-  encodings in one file.
+  Reopen with Encoding): Nimbus decodes the file into a private UTF-8
+  copy in your system's temporary folder and opens that copy, so the
+  file is fully editable, as any huge file is. Saving encodes the text
+  back into the file's encoding and replaces the file; Save with
+  Encoding works too. The copy takes disk space while the tab is open
+  (about the file's size, up to twice it for UTF-16 or one and a half
+  times for East Asian text) and is deleted when the tab closes.
+  Decoding takes a moment (roughly a second per gigabyte), during which
+  the window waits. If the copy cannot be made, for example because the
+  disk is full, the file opens **read-only** instead, its bytes shown as
+  they are, and the status bar says why.
 - **Guessed** (it looks like Windows-1252): the file is held as bytes
   (`Not UTF-8`) and stays editable, as any huge file is. Its bytes are
   written back unchanged.

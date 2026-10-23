@@ -456,8 +456,13 @@ pub struct Document {
     /// next save asks first, since it writes U+FFFD in their place.
     pub lossy: bool,
     /// Why the text cannot be edited or saved, when it cannot: a huge file
-    /// in another encoding, shown as bytes.
+    /// in another encoding that could not be decoded into a copy, shown as
+    /// bytes.
     pub read_only: Option<String>,
+    /// A huge file in another encoding, read through a private UTF-8 copy
+    /// (M24, [`io::Opened::transcoded`]): saving encodes it back, and the
+    /// copy is never the file on disk.
+    transcoded: bool,
     /// Increments on every change to the text. Background work (search,
     /// parsing) records the version it read, so stale results can be
     /// recognised and dropped.
@@ -824,6 +829,15 @@ impl Document {
         Ok(d)
     }
 
+    /// [`Document::open_mapped`] in a chosen `encoding`, as "Reopen with
+    /// Encoding" opens a huge file (M24: decoded into a private copy).
+    #[cfg(test)]
+    pub fn open_mapped_as(path: &Path, encoding: Encoding) -> Result<Self, OpenError> {
+        let mut d = Self::open_by(path, |p| io::open_full(p, 0, None, Some(encoding)))?;
+        d.chosen_encoding = Some(encoding);
+        Ok(d)
+    }
+
     /// [`Document::open`], reading the file with `open`.
     fn open_by(
         path: &Path,
@@ -843,6 +857,7 @@ impl Document {
                 read_only: None,
                 mapping: None,
                 indexing: None,
+                transcoded: false,
             },
             Err(e) => return Err(e),
         };
@@ -855,6 +870,7 @@ impl Document {
             encoding: opened.encoding,
             lossy: opened.lossy,
             read_only: opened.read_only,
+            transcoded: opened.transcoded,
             disk,
             canonical: Some(io::canonical(path)),
             ..Self::default()
@@ -943,15 +959,12 @@ impl Document {
         }
         if let Some(mapping) = &self.mapping {
             // A document still reading the temp file of a save that could
-            // not replace this file is not reading this file: cutting it
-            // short takes nothing from under the document.
-            let truncated = mapping.temp_path().is_none() && stamp.len < mapping.file_len();
-            if grew
-                && !truncated
-                && self.tail == Tail::Following
-                && mapping.temp_path().is_none()
-                && !self.is_dirty()
-            {
+            // not replace this file, or a decoded copy of it, is not
+            // reading this file: cutting it short takes nothing from under
+            // the document.
+            let own = mapping.temp_path().is_none() && !self.transcoded;
+            let truncated = own && stamp.len < mapping.file_len();
+            if grew && !truncated && self.tail == Tail::Following && own && !self.is_dirty() {
                 let now = Instant::now();
                 if let Some(at) = self.extended_at
                     && now.duration_since(at) < tail::EXTEND_GAP
@@ -1075,6 +1088,7 @@ impl Document {
         self.encoding = opened.encoding;
         self.lossy = opened.lossy;
         self.read_only = opened.read_only;
+        self.transcoded = opened.transcoded;
         self.disk = disk;
         self.reloaded_at = Some(Instant::now());
         self.history = History::default();
@@ -1166,11 +1180,12 @@ impl Document {
     /// holds text decoded from the file's encoding. A piece table held in
     /// memory holds a small file that is not UTF-8 nor any text encoding
     /// Nimbus recognises. A huge mapped file's bytes are never checked as a
-    /// whole, so nothing is claimed for it unless its start was not UTF-8
-    /// (it is then read-only).
+    /// whole, so nothing is claimed for it unless it was opened in another
+    /// encoding (it is then decoded into a copy, M24, or read-only if that
+    /// failed).
     #[must_use]
     pub fn encoding_label(&self) -> Option<&'static str> {
-        if self.read_only.is_some() {
+        if self.read_only.is_some() || self.transcoded {
             return Some(self.encoding.name());
         }
         match (self.buffer.is_mapped(), self.mapping.is_some(), self.bom) {
@@ -1356,8 +1371,9 @@ impl Document {
         if let Some(why) = &self.read_only {
             return Err(refuse(why));
         }
-        if !self.encoding.is_utf8() {
-            // Huge files are written as they are, never converted.
+        if !self.encoding.is_utf8() && !self.transcoded {
+            // A huge file read as bytes is written as it is, never
+            // converted: its bytes may not be text at all.
             return Err(refuse("files this large save only as UTF-8"));
         }
         // No undo step may stay open to absorb edits made after the save.
@@ -1366,8 +1382,12 @@ impl Document {
             .mapping
             .as_ref()
             .is_some_and(|m| m.temp_path().is_none())
+            && !self.transcoded
             && self.canonical.as_deref() == Some(io::canonical(&path).as_path());
-        let job = SaveJob::new(path, self.buffer.snapshot(), self.bom);
+        let mut job = SaveJob::new(path, self.buffer.snapshot(), self.bom);
+        if !self.encoding.is_utf8() {
+            job = job.encoded(self.encoding);
+        }
         self.saving = Some(Saving {
             token: job.token,
             version: self.version,
@@ -1406,6 +1426,9 @@ impl Document {
                 return SaveStep::Failed(e);
             }
         };
+        if written.is_encoded() {
+            return self.replace_encoded(written);
+        }
         let (new, index) = match self.check_written(&mut written) {
             Ok(mapped) => mapped,
             Err(e) => {
@@ -1446,6 +1469,45 @@ impl Document {
         } else {
             self.replace_now()
         }
+    }
+
+    /// A save of a decoded copy (M24) written in the file's own encoding:
+    /// rename it over the target and keep reading the copy, which still
+    /// holds the document's text. Nothing to switch to and no old mapping
+    /// to wait for: the document never mapped the target. The undo
+    /// history is kept, since every piece still refers to the copy.
+    fn replace_encoded(&mut self, written: Written) -> SaveStep {
+        let Some(saving) = self.saving.take() else {
+            return SaveStep::Stale;
+        };
+        if saving.version != self.version {
+            // Dropping `written` deletes its file.
+            return SaveStep::Failed(SaveError {
+                step: "replacing the file",
+                source: std::io::Error::other("the document changed while it was saved"),
+            });
+        }
+        let (temp, target, meta) = written.into_parts();
+        match (saving.policy.rename)(&temp, &target) {
+            Ok(()) => {
+                self.mark_saved(&meta);
+                SaveStep::Saved
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp);
+                SaveStep::Failed(SaveError {
+                    step: "replacing the file",
+                    source: e,
+                })
+            }
+        }
+    }
+
+    /// Whether the document reads a private UTF-8 copy of a huge file in
+    /// another encoding (M24), rather than the file itself.
+    #[must_use]
+    pub fn is_transcoded(&self) -> bool {
+        self.transcoded
     }
 
     /// Map the written file, checking it is this document's text.
@@ -1498,6 +1560,8 @@ impl Document {
         self.history = History::default();
         self.saved_at = NOT_SAVED;
         self.stop_indexing();
+        // Saved as UTF-8, a decoded copy's text is now the file itself.
+        self.transcoded = false;
         let old = self.mapping.replace(Arc::clone(new));
         // Every line is counted now: the highlighter's line-based state
         // may change.
@@ -3054,6 +3118,92 @@ mod tests {
         assert_eq!(err.unencodable().map(|u| u.offset), Some(0));
         assert!(d.is_dirty());
         assert_eq!(std::fs::read(&path).unwrap(), b"\x80 caf\xe9\n");
+    }
+
+    /// M24: each East Asian encoding, built with `--features east-asian`,
+    /// round-trips through "Reopen with Encoding" (`Document::open_as`, as
+    /// `--encoding` and the `[encodings]` table also open), saving
+    /// unchanged and edited, and "Save with Encoding" from UTF-8. The
+    /// fixtures are in `tests/fixtures/east-asian`.
+    #[cfg(feature = "east-asian")]
+    #[test]
+    fn east_asian_fixtures_round_trip() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/east-asian");
+        let cases = [
+            (
+                "shift_jis.txt",
+                "shift_jis",
+                "日本語のテキスト、カタカナとひらがな。\n半角ｶﾅ ①\n",
+                "追記：",
+            ),
+            (
+                "euc-jp.txt",
+                "euc-jp",
+                "日本語のテキスト、カタカナとひらがな。\n漢字かな交じり文\n",
+                "追記：",
+            ),
+            (
+                "gbk.txt",
+                "gbk",
+                "简体中文文本，用于测试。\n编码：GBK\n",
+                "新增：",
+            ),
+            (
+                "gb18030.txt",
+                "gb18030",
+                "简体中文文本，用于测试。\n四字节字符：𠀀 😀\n",
+                "新增：",
+            ),
+            (
+                "big5.txt",
+                "big5",
+                "繁體中文文字，用於測試。\n編碼：Big5\n",
+                "新增：",
+            ),
+            (
+                "euc-kr.txt",
+                "euc-kr",
+                "한국어 텍스트입니다.\n인코딩: EUC-KR\n",
+                "추가: ",
+            ),
+        ];
+        for (file, label, text, more) in cases {
+            let encoding = Encoding::from_label(label).unwrap();
+            assert!(Encoding::all().contains(&encoding), "{label} not offered");
+            let rs = encoding_rs::Encoding::for_label(label.as_bytes()).unwrap();
+            let original = std::fs::read(fixtures.join(file)).unwrap();
+            let dir = TempDir::new("east-asian");
+            let path = dir.0.join(file);
+            std::fs::write(&path, &original).unwrap();
+
+            // Reopen with Encoding: the exact text, nothing lost.
+            let mut d = Solo::of(Document::open_as(&path, encoding).unwrap());
+            let len = d.buffer.len_bytes();
+            assert_eq!(d.buffer.slice(0..len), text, "{file}");
+            assert!(!d.lossy, "{file}");
+            assert_eq!(d.encoding_label(), Some(encoding.name()));
+            // Saved unchanged: the same bytes.
+            d.save().unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), original, "{file}");
+            // Edited and saved: the new text in the same encoding.
+            d.ed().click(0, false);
+            d.ed().insert(more).unwrap();
+            d.save().unwrap();
+            let edited = format!("{more}{text}");
+            let (expected, _, unmappable) = rs.encode(&edited);
+            assert!(!unmappable);
+            assert_eq!(std::fs::read(&path).unwrap(), expected.as_ref(), "{file}");
+
+            // Save with Encoding: a UTF-8 file saved in this encoding is
+            // the fixture's bytes.
+            let utf8 = dir.0.join("utf8.txt");
+            std::fs::write(&utf8, text).unwrap();
+            let mut d = Solo::of(Document::open(&utf8).unwrap());
+            assert!(d.encoding.is_utf8());
+            d.doc.encoding = encoding;
+            d.save().unwrap();
+            assert_eq!(std::fs::read(&utf8).unwrap(), original, "{file}");
+        }
     }
 
     fn cursors(d: &mut Solo, at: &[usize]) {

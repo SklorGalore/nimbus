@@ -83,6 +83,7 @@ use nimbus_core::Snapshot;
 use nimbus_core::line_index::{LineIndex, Scanner};
 use nimbus_core::{Source, Text};
 
+use crate::encoding::Encoding;
 use crate::io::{self, SaveError, step};
 use crate::mapping::MappedFile;
 
@@ -173,6 +174,10 @@ pub struct SaveJob {
     path: PathBuf,
     snapshot: Box<dyn Snapshot>,
     bom: bool,
+    /// Write the text in this encoding rather than as it is (M24: a
+    /// decoded copy of a huge file saved back in the file's encoding).
+    /// `None` for UTF-8 bytes as they are.
+    encoding: Option<Encoding>,
     cancel: Arc<AtomicBool>,
     /// Bytes read and written at a time: [`io::SAVE_CHUNK`]; smaller in
     /// tests, so a few bytes cross many chunk boundaries.
@@ -206,10 +211,14 @@ pub struct Written {
     /// watcher sees the save as its own.
     pub meta: Metadata,
     /// Line index of the document's bytes as written (after any byte order
-    /// mark), complete.
+    /// mark), complete; empty for an encoded save, which is never mapped.
     index: LineIndex,
     /// The document's length in bytes.
     pub len: usize,
+    /// Written in another encoding than the document's UTF-8: the file is
+    /// not the document's bytes, so it replaces the target without the
+    /// document switching to it ([`Written::into_parts`]).
+    encoded: bool,
 }
 
 impl Drop for Written {
@@ -222,6 +231,26 @@ impl Drop for Written {
 }
 
 impl Written {
+    /// Whether the file was written in another encoding (see
+    /// [`SaveJob::encoded`]), so it must not be mapped as the document.
+    #[must_use]
+    pub fn is_encoded(&self) -> bool {
+        self.encoded
+    }
+
+    /// The temp file, its target and its metadata, for a caller that
+    /// renames it into place itself. From here the caller owns the file:
+    /// dropping these no longer deletes it.
+    #[must_use]
+    pub fn into_parts(mut self) -> (PathBuf, PathBuf, Metadata) {
+        drop(self.file.take());
+        (
+            std::mem::take(&mut self.temp),
+            std::mem::take(&mut self.target),
+            self.meta.clone(),
+        )
+    }
+
     /// Map the temp file (leaving out a byte order mark if `bom`), with its
     /// finished line index. From here the mapping owns the temp file: it
     /// is deleted when the mapping is dropped, until
@@ -271,9 +300,20 @@ impl SaveJob {
             path,
             snapshot,
             bom,
+            encoding: None,
             cancel: Arc::new(AtomicBool::new(false)),
             chunk: io::SAVE_CHUNK,
         }
+    }
+
+    /// Write the text encoded in `encoding` (with its byte order mark if
+    /// the job has `bom`), for a decoded copy saved back in its file's
+    /// encoding (M24). Such a file is not the document's bytes, so the
+    /// document keeps reading its copy afterwards.
+    #[must_use]
+    pub fn encoded(mut self, encoding: Encoding) -> Self {
+        self.encoding = Some(encoding).filter(|e| !e.is_utf8());
+        self
     }
 
     /// Read and write `chunk` bytes at a time instead of
@@ -305,6 +345,7 @@ impl SaveJob {
             path,
             snapshot,
             bom,
+            encoding,
             cancel,
             chunk,
             ..
@@ -315,14 +356,18 @@ impl SaveJob {
         let target = std::fs::canonicalize(&path).unwrap_or(path);
         let (temp, mut file) = io::create_temp(&target)?;
         let total = snapshot.len_bytes();
-        let written = write(
-            &mut file,
-            &target,
-            &*snapshot,
-            (bom, chunk),
-            &cancel,
-            &mut progress,
-        );
+        let written = match encoding {
+            Some(encoding) => write_encoded(&mut file, &target, &*snapshot, (encoding, bom, chunk))
+                .map(|meta| (LineIndex::new(), meta)),
+            None => write(
+                &mut file,
+                &target,
+                &*snapshot,
+                (bom, chunk),
+                &cancel,
+                &mut progress,
+            ),
+        };
         // The old file must not stay open on this thread's account: on
         // Windows the rename waits until nothing maps it.
         drop(snapshot);
@@ -334,6 +379,7 @@ impl SaveJob {
                 meta,
                 index,
                 len: total,
+                encoded: encoding.is_some(),
             }),
             Err(e) => {
                 drop(file);
@@ -413,6 +459,26 @@ fn write(
     // anyone else after this point looks different. Renaming keeps both.
     let meta = file.metadata().map_err(step("reading back the file"))?;
     Ok((index, meta))
+}
+
+/// Write `text` into `file` (a new temp file for `target`) encoded in
+/// `encoding`, after its byte order mark if `bom`, and flush it to disk
+/// (M24). Returns the file's metadata.
+fn write_encoded(
+    file: &mut File,
+    target: &Path,
+    text: &dyn Text,
+    (encoding, bom, chunk): (Encoding, bool, usize),
+) -> Result<Metadata, SaveError> {
+    use std::io::Write as _;
+    io::copy_permissions(file, target)?;
+    if bom && let Some(mark) = encoding.bom() {
+        file.write_all(mark)
+            .map_err(step("writing the temporary file"))?;
+    }
+    io::write_encoded(file, text, encoding, chunk)?;
+    file.sync_all().map_err(step("flushing to disk"))?;
+    file.metadata().map_err(step("reading back the file"))
 }
 
 /// Drop `old`, the mapping of a file a save has just replaced, on a
@@ -1102,5 +1168,83 @@ mod tests {
         );
         assert!(d.buffer.is_fully_indexed());
         println!("{} lines", d.buffer.len_lines());
+    }
+
+    /// M24: a huge file in Windows-1252 opens decoded into a private UTF-8
+    /// copy, edits like any mapped document, and saves back in
+    /// Windows-1252 beside the real file, which it then replaces. The
+    /// document keeps reading its copy, with its undo history.
+    #[test]
+    fn a_huge_single_byte_file_is_edited_and_saved_in_its_encoding() {
+        let dir = TempDir::new("transcoded-1252");
+        let path = dir.0.join("f");
+        std::fs::write(&path, b"caf\xe9\nna\xefve\n").unwrap();
+        let mut d =
+            Solo::of(Document::open_mapped_as(&path, crate::encoding::WINDOWS_1252).unwrap());
+        assert!(d.buffer.is_mapped() && d.is_transcoded() && d.saves_on_worker());
+        assert_eq!(d.read_only, None);
+        assert_eq!(d.encoding_label(), Some("Windows-1252"));
+        assert_eq!(raw(&d), "café\nnaïve\n".as_bytes());
+        assert!(d.buffer.is_fully_indexed());
+        #[cfg(unix)]
+        assert_eq!(d.backing_file().unwrap().temp_path(), None, "nameless copy");
+
+        d.ed().click(0, false);
+        d.ed().insert("€ ").unwrap();
+        assert!(matches!(save(&mut d), SaveStep::Saved));
+        assert_eq!(std::fs::read(&path).unwrap(), b"\x80 caf\xe9\nna\xefve\n");
+        assert!(!d.is_dirty() && d.is_transcoded());
+        assert_eq!(dir.others("f"), Vec::<String>::new(), "no temp file left");
+        // The history survives: undo, and save again.
+        d.ed().undo().unwrap();
+        assert!(matches!(save(&mut d), SaveStep::Saved));
+        assert_eq!(std::fs::read(&path).unwrap(), b"caf\xe9\nna\xefve\n");
+
+        // A character Windows-1252 cannot hold stops the save, naming it,
+        // and changes nothing on disk.
+        d.ed().insert("日").unwrap();
+        let SaveStep::Failed(e) = save(&mut d) else {
+            panic!("saved a character Windows-1252 lacks");
+        };
+        assert!(e.unencodable().is_some());
+        assert!(d.is_dirty() && !d.is_saving());
+        assert_eq!(std::fs::read(&path).unwrap(), b"caf\xe9\nna\xefve\n");
+        assert_eq!(dir.others("f"), Vec::<String>::new(), "no temp file left");
+    }
+
+    /// M24's oracle check on a decoded copy: random edits, undo and redo on
+    /// a huge UTF-16 file with a byte order mark (which can hold every
+    /// character the edits type), mirrored on a UTF-8 oracle; each save
+    /// writes exactly the oracle in UTF-16 with its mark.
+    #[test]
+    fn random_edits_to_a_decoded_copy_save_exactly() {
+        let dir = TempDir::new("transcoded-oracle");
+        let path = dir.0.join("f");
+        let text = "line one\nlíne twö\n日本語\r\nend";
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        std::fs::write(&path, &bytes).unwrap();
+        let mut d = Solo::of(Document::open_mapped(&path).unwrap());
+        assert!(d.is_transcoded() && d.bom);
+        assert_eq!(d.encoding, crate::encoding::Encoding::Utf16Le);
+        let mut oracle = text.as_bytes().to_vec();
+        assert_eq!(raw(&d), oracle);
+        let mut rng = Rng(0x2400_1252);
+        for round in 0..6 {
+            edit_randomly(&mut d, &mut oracle, &mut rng, 40);
+            assert_eq!(raw(&d), oracle, "round {round}");
+            assert!(matches!(save(&mut d), SaveStep::Saved), "round {round}");
+            let expected: Vec<u8> = [0xFF, 0xFE]
+                .into_iter()
+                .chain(
+                    String::from_utf8(oracle.clone())
+                        .unwrap()
+                        .encode_utf16()
+                        .flat_map(u16::to_le_bytes),
+                )
+                .collect();
+            assert_eq!(std::fs::read(&path).unwrap(), expected, "round {round}");
+            assert!(!d.is_dirty() && d.is_transcoded());
+        }
     }
 }
