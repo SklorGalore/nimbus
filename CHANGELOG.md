@@ -83,8 +83,12 @@ section before tagging.
   pass `cargo vet`.
 - The title bar takes the theme's colours. On macOS Nimbus draws it,
   in the tab bar's colour with the title centred, and the system keeps
-  only its window buttons; on Windows 11 the system bar is coloured to
-  match; elsewhere it follows the theme's light or dark.
+  only its window buttons. On Windows Nimbus draws the whole title bar:
+  the menus, the title and its own minimise, maximise and close buttons
+  share one strip in the theme's colours. Dragging it moves the window
+  and snaps it to the screen's edges, a double-click maximises, a
+  right-click opens the window menu, and the window's edges resize it.
+  On Linux it follows the theme's light or dark.
 - Nimbus draws the Windows menu bar (File, Edit, ...) and its drop-down
   menus itself, in the theme's colours; `F10` opens it from the keyboard.
   Right-click menus in the file tree are drawn by Nimbus on every
