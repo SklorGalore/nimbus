@@ -43,7 +43,7 @@ pub enum Plan {
 }
 
 /// A change to make.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
     /// Make `link` point at `target`, replacing what is there when
     /// `replace` (only after the user agreed).

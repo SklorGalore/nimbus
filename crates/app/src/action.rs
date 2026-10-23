@@ -367,6 +367,18 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::OpenConfig,
         Keys::NONE,
     ),
+    // The menu bar Nimbus draws on Windows; F10 opens it, as in other
+    // Windows programs. Does nothing where the system draws the menus.
+    act(
+        "app.menuBar",
+        "Open Menu Bar",
+        Command::OpenMenuBar,
+        Keys {
+            all: &[],
+            mac: &[],
+            other: &["F10"],
+        },
+    ),
     act(
         "app.checkUpdates",
         "Check for Updates",

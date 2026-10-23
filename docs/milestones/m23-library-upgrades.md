@@ -108,7 +108,9 @@ which painter runs.
   premultiplied colour blended in gamma space as
   `out = src + dst × (1 − src.a)`, colour glyphs used as stored. So a
   compatibility screenshot differs from the GPU one only by rounding.
-  `--linear-blend` is ignored in compatibility mode.
+  `--linear-blend` is ignored in compatibility mode. Positions move down
+  by the top inset (`Gpu::set_inset_top`, the title bar Nimbus draws on
+  macOS) as the shaders' `globals.top` does, and layer clips with them.
 - **Switching is automatic.** `GpuContext::open` failing (or the surface
   failing to configure) starts the painter instead of exiting, and a
   one-time notice in the status bar says Nimbus is in compatibility

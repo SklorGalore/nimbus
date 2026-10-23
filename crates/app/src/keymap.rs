@@ -453,8 +453,8 @@ impl Keymap {
     /// A two-chord binding has no accelerator: menus show one key.
     #[must_use]
     #[cfg_attr(
-        all(not(test), not(any(target_os = "macos", target_os = "windows"))),
-        expect(dead_code, reason = "only native menus use it; Linux has none")
+        all(not(test), not(target_os = "macos")),
+        expect(dead_code, reason = "only the macOS menu bar uses it")
     )]
     pub fn accelerator(&self, id: &str) -> Option<String> {
         let (binding, text) = self.primary.get(id)?;

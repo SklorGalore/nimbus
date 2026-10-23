@@ -45,12 +45,12 @@ east-asian = []
 [lints]
 workspace = true
 
-[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-muda = { version = "0.21", default-features = false }
-
-# The open-files method added to winit's app delegate (open_with.rs). The
-# same versions winit 0.30 already links, so they add almost nothing.
+# The macOS menu bar (menu.rs) and the open-files method added to winit's
+# app delegate (open_with.rs). The objc2 crates are the versions winit 0.30
+# already links, so they add almost nothing. Windows menus are drawn by
+# Nimbus (menu/drawn.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21", default-features = false }
 objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
 objc2-foundation = { version = "0.2.2", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSString", "NSURL", "NSObject"] }
