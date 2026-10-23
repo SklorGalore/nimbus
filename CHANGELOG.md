@@ -4,7 +4,11 @@ One section per release, newest first. The release workflow puts the
 tagged version's section into the GitHub release notes, so write the
 section before tagging.
 
-## Unreleased
+## 1.3.1
+
+1.3.0 was tagged but never published: its Linux and Windows release
+builds failed. 1.3.1 is the same release with the release workflow
+fixed.
 
 ### Added
 
