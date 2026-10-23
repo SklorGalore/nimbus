@@ -399,6 +399,17 @@ pub fn claim(dir: &Path) -> Option<Doorbell> {
             token: None,
             file,
         }),
+        // A path longer than `SUN_LEN` (a very long config folder): this
+        // Nimbus still runs, but later ones cannot hand their files to it,
+        // so say so where the owner will see it.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+            log::warn!(
+                "single-instance socket {} not made, so other nimbus runs open their own windows: {e}",
+                file.display()
+            );
+            None
+        }
+        // Usually another Nimbus bound it first, which is expected.
         Err(e) => {
             log::debug!("single-instance socket {}: {e}", file.display());
             None
@@ -559,8 +570,18 @@ mod tests {
     }
 
     /// A fresh run folder for one test.
+    ///
+    /// On Unix it sits under `/tmp` rather than `$TMPDIR`: a socket's whole
+    /// path must fit in `SUN_LEN` (104 bytes on macOS), and some
+    /// environments (sandboxes, CI runners) set a `$TMPDIR` long enough to
+    /// break that.
     fn run_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
+        let base = if cfg!(unix) {
+            PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let dir = base
             .join(format!("nimbus-instance-{tag}-{}", std::process::id()))
             .join("run");
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
