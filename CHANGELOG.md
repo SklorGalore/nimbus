@@ -10,9 +10,8 @@ section before tagging.
 
 - Seeing the default settings: **Show Default Config** in the palette
   opens every setting with its default value in a read-only
-  `default-config.toml` tab, and `nimbus --default-config` prints the
-  same text. It is made from the built-in defaults, so it cannot go out
-  of date.
+  `default-config.toml` tab. It is made from the built-in defaults, so
+  it cannot go out of date.
 - A git window (M27): `nimbus --git [DIR]`, or **Open Git Window** in
   the palette and View menu, opens a window of its own for the
   repository: your staged, unstaged and untracked changes, the whole

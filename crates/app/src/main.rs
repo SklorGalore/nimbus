@@ -273,7 +273,7 @@ pub fn to_f32(v: f64) -> f32 {
 }
 
 /// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]] [--prompt] [--title-bar] [--menu NAME]] [--debug-overlay] [--preview] [--linear-blend] [--compat] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--git [DIR]] [--wait] [--default-config] [--version]";
+const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]] [--prompt] [--title-bar] [--menu NAME]] [--debug-overlay] [--preview] [--linear-blend] [--compat] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--git [DIR]] [--wait] [--version]";
 
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
@@ -462,10 +462,6 @@ fn file_flag(
         }
         "--version" | "-V" => {
             print_out(&format!("nimbus {}", env!("CARGO_PKG_VERSION")));
-            std::process::exit(0);
-        }
-        "--default-config" => {
-            print_out(config::defaults_text().trim_end());
             std::process::exit(0);
         }
         "--help" | "-h" => {

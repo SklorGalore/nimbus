@@ -487,8 +487,8 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # detect = true
 "#;
 
-/// Every setting with its built-in default, as config text, for
-/// `nimbus --default-config` and "Show Default Config".
+/// Every setting with its built-in default, as config text, for the
+/// "Show Default Config" palette action.
 ///
 /// Unlike [`TEMPLATE`], whose lines are commented examples, each value
 /// here is read from [`Config::default`] and written out live, so the text

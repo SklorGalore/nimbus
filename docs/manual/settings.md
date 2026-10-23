@@ -46,19 +46,11 @@ then `[tables]`.
 
 ## Seeing the defaults
 
-To see every setting with the value Nimbus uses when you leave it out:
-
-- Run **Show Default Config** from the command palette. It opens
-  `default-config.toml` in a read-only tab, coloured as TOML. Copy the
-  lines you want to change into your own `config.toml`. The tab has no
-  file behind it, so it cannot be saved and is not kept in the session.
-- Or run `nimbus --default-config` in a terminal. It prints the same text
-  and exits, without opening a window:
-
-  ```sh
-  nimbus --default-config | less
-  nimbus --default-config > ~/defaults.toml
-  ```
+To see every setting with the value Nimbus uses when you leave it out,
+run **Show Default Config** from the command palette. It opens
+`default-config.toml` in a read-only tab, coloured as TOML. Copy the
+lines you want to change into your own `config.toml`. The tab has no
+file behind it, so it cannot be saved and is not kept in the session.
 
 The text is made from the defaults built into the version you run, so
 it is always current, and it is valid config: copying it whole into
