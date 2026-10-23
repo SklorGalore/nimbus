@@ -126,6 +126,9 @@ section before tagging.
   window in the theme's colours, on every system, instead of as system
   dialogs. `Enter`, `Esc`, `Tab`, the arrow keys and each button's first
   letter answer them. File pickers stay the system's.
+- The update check's HTTPS no longer trusts the emSign certificate
+  authorities, which browsers distrusted (RUSTSEC-2026-0381 and
+  RUSTSEC-2026-0382; `rustls-webpki` 0.103.16, `webpki-roots` 1.0.11).
 
 ## 1.1.0
 

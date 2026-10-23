@@ -1,6 +1,12 @@
 
 # cargo-vet audits file
 
+[[audits.rustls-webpki]]
+who = "Claude Code (cloud session for SklorGalore)"
+criteria = "safe-to-deploy"
+delta = "0.103.15 -> 0.103.16"
+notes = "Security fix for RUSTSEC-2026-0381/0382. The diff only removes the emSign roots or rejects certificate paths through the distrusted emSign intermediate keys (data files plus one check in path building). No build script, unsafe code, I/O or new dependencies."
+
 [[audits.sys-locale]]
 who = "Claude Code, reviewing for Skylar (SklorGalore)"
 criteria = "safe-to-deploy"
@@ -8,7 +14,7 @@ version = "0.3.2"
 notes = "Read all of src/ (777 lines). No build script, proc macro or dependencies on our targets. FFI only to read the user's preferred languages: CFLocaleCopyPreferredLanguages on Apple (array released on drop), GetUserPreferredUILanguages on Windows (two-call buffer sizing), LANG/LC_* environment variables on other Unix. No file, network or process access."
 
 [[audits.webpki-roots]]
-who = "Claude Code, reviewing for Skylar (SklorGalore)"
+who = "Claude Code (cloud session for SklorGalore)"
 criteria = "safe-to-deploy"
 delta = "1.0.9 -> 1.0.11"
-notes = "Diffed src/, tests/ and Cargo.toml: the only source change removes the emSign root certificates (RUSTSEC-2026-0381) from the generated TrustAnchor list; the rest is the version number and the crate's own Cargo.lock. No build script, no new dependencies, no code."
+notes = "Security fix for RUSTSEC-2026-0381/0382. The diff only removes the emSign roots or rejects certificate paths through the distrusted emSign intermediate keys (data files plus one check in path building). No build script, unsafe code, I/O or new dependencies."
