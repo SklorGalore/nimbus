@@ -37,9 +37,13 @@
 #
 # Needs gh (signed in as an account that can push to the tap), minisign,
 # curl and unzip. The Chocolatey push needs your API key from
-# https://community.chocolatey.org/account: set CHOCOLATEY_API_KEY, or
-# paste it when asked (it is not echoed or saved). NIMBUS_REPO overrides
-# the repository (default SklorGalore/nimbus).
+# https://community.chocolatey.org/account. It comes from
+# CHOCOLATEY_API_KEY if set, else from the macOS Keychain item
+# "chocolatey-api-key" if there is one (save it once with
+# `security add-generic-password -a "$USER" -s chocolatey-api-key -w`,
+# which prompts for the key), else you paste it when asked. It is never
+# echoed or saved. NIMBUS_REPO overrides the repository (default
+# SklorGalore/nimbus).
 #
 # Written for macOS's /bin/sh, which is bash 3.2: no bash 4 features,
 # and no case statements inside $(...).
@@ -272,6 +276,14 @@ publish_chocolatey() {
 	echo "$nupkg matches the signed SHA256SUMS."
 
 	key=${CHOCOLATEY_API_KEY:-}
+	if [ -z "$key" ] && command -v security >/dev/null 2>&1; then
+		# macOS may ask once to let the terminal read the item.
+		if key=$(security find-generic-password -a "${USER:-$(id -un)}" -s chocolatey-api-key -w 2>/dev/null); then
+			echo "Using the API key from the Keychain item chocolatey-api-key."
+		else
+			key=
+		fi
+	fi
 	if [ -z "$key" ]; then
 		printf 'Chocolatey API key (https://community.chocolatey.org/account): '
 		stty -echo 2>/dev/null || true

@@ -105,9 +105,14 @@ work, shows the files, and asks before sending anything. Then:
   holds only the package files and that its install and uninstall
   scripts are byte for byte the templates in `packaging/chocolatey`
   filled in from the signed `SHA256SUMS` (they carry the installer's URL
-  and hash), and pushes it to the community repository. It asks for
-  your API key from <https://community.chocolatey.org/account> unless
-  `CHOCOLATEY_API_KEY` is set, and never saves it. Chocolatey's
+  and hash), and pushes it to the community repository. It needs
+  your API key from <https://community.chocolatey.org/account>: from
+  `CHOCOLATEY_API_KEY` if set, else from the Keychain item
+  `chocolatey-api-key`, else it asks. It never echoes or saves the key.
+  Save it in the Keychain once with
+  `security add-generic-password -a "$USER" -s chocolatey-api-key -w`,
+  which prompts for it, so it stays out of your shell history and
+  dotfiles. Chocolatey's
   automatic checks run first, then a moderator approves the package
   (the first version is reviewed most closely); people install it with
   `choco install nimbus`. For a release made before the Chocolatey
