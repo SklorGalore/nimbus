@@ -155,3 +155,26 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+
+  # A pull request into main is a release or a hotfix. The release
+  # workflow takes the GitHub release notes from the CHANGELOG section
+  # for the version in Cargo.toml, so that section must exist before the
+  # tag (1.2.0 and 1.3.0 were tagged with their notes still under
+  # "Unreleased" and came out empty).
+  changelog:
+    name: changelog has this version
+    if: github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: CHANGELOG.md has a section for the Cargo.toml version
+        shell: bash
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if ! grep -qE "^## ${version//./\\.}( |$)" CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::no '## $version' heading; move the Unreleased notes under it before tagging v$version"
+            exit 1
+          fi
+          echo "CHANGELOG.md has ## $version"
