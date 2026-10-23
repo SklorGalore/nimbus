@@ -42,6 +42,12 @@ whitespace = "#9aa0ad80"
 guide = "#e4e0d6"
 guide_active = "#bdb7aa"
 hidden_char = "#d43c3c66"
+graph_1 = "#b86e00"
+graph_2 = "#2f6fbf"
+graph_3 = "#3f8a3a"
+graph_4 = "#c0396b"
+graph_5 = "#16838f"
+graph_6 = "#7c4fa8"
 
 [syntax]
 attribute = "#0184bc"

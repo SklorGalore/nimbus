@@ -8,6 +8,16 @@ section before tagging.
 
 ### Added
 
+- A git window (M27): `nimbus --git [DIR]`, or **Open Git Window** in
+  the palette and View menu, opens a window of its own for the
+  repository: your staged, unstaged and untracked changes, the whole
+  history newest first with its branches drawn as smooth curves, and any
+  commit's message, files and differences in the compare view (merge
+  commits against either parent). It reads only, runs your own `git`
+  with hooks, filesystem monitors and lazy fetches turned off, keeps up
+  as you commit or edit, and opens a file in the running editor with
+  **Open in Editor**. See the manual's new [git window](docs/manual/git.md)
+  chapter.
 - **Install nimbus Command in PATH** in the command palette puts a
   `nimbus` command on your `PATH`: a link in `/usr/local/bin` on macOS
   (asking for your password through macOS when needed), in
@@ -101,8 +111,12 @@ section before tagging.
   pass `cargo vet`.
 - The title bar takes the theme's colours. On macOS Nimbus draws it,
   in the tab bar's colour with the title centred, and the system keeps
-  only its window buttons; on Windows 11 the system bar is coloured to
-  match; elsewhere it follows the theme's light or dark.
+  only its window buttons. On Windows Nimbus draws the whole title bar:
+  the menus, the title and its own minimise, maximise and close buttons
+  share one strip in the theme's colours. Dragging it moves the window
+  and snaps it to the screen's edges, a double-click maximises, a
+  right-click opens the window menu, and the window's edges resize it.
+  On Linux it follows the theme's light or dark.
 - Nimbus draws the Windows menu bar (File, Edit, ...) and its drop-down
   menus itself, in the theme's colours; `F10` opens it from the keyboard.
   Right-click menus in the file tree are drawn by Nimbus on every

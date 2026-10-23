@@ -36,6 +36,8 @@ dirs = { version = "7", optional = true }
 # app files in the same way.
 encoding_rs = { version = "0.8.42", optional = true }
 log = { version = "0.4.34", optional = true }
+# The git window's parsers (app-git) split git's output with it.
+memchr = { version = "2.8.3", optional = true }
 nimbus-render = { path = "../crates/render", optional = true }
 nimbus-syntax = { path = "../crates/syntax", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
@@ -57,7 +59,7 @@ east-asian = []
 # `cargo fuzz run workspace --features app-workspace`
 app-workspace = ["app-config", "dep:log"]
 # `cargo fuzz run git_output --features app-git`
-app-git = ["dep:log"]
+app-git = ["dep:log", "dep:memchr"]
 
 [[bin]]
 name = "buffer"

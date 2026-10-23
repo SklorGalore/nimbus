@@ -57,7 +57,7 @@ repeated in each file:
 | 24 | [International text](m24-international-text.md) | In progress: built; the typing benchmark and the Mac checks wait |
 | 25 | [Command line](m25-command-line.md) | In progress |
 | 26 | [Security](m26-security.md) | In progress |
-| 27 | [Git window: viewing](m27-git-viewer.md) | Planned |
+| 27 | [Git window: viewing](m27-git-viewer.md) | In progress: built; checks on a Mac with a GPU to go |
 | 28 | [Git window: staging and committing](m28-git-staging.md) | Planned |
 | 29 | [Git window: branches and remotes](m29-git-branches-remotes.md) | Planned |
 | 30 | [Git window: history tools and merging](m30-git-history-merging.md) | Planned |

@@ -4,8 +4,13 @@
 //! filter program. Git runs inside folders the user did not create, and
 //! its output can carry anything a repository's config holds.
 //!
-//! Neither may panic; the error text is at most two lines; and the filter
-//! check agrees with a plain re-reading of the rule: a line whose scope is
+//! The git window's parsers (M27) read the same untrusted output:
+//! `status`, `log`, `for-each-ref`, `diff-tree`, `cat-file` and a commit
+//! object. None of them may panic on any bytes, and feeding log records
+//! in two pieces gives the same records as feeding them whole.
+//!
+//! Neither of the first two may panic; the error text is at most two
+//! lines; and the filter check agrees with a plain re-reading of the rule: a line whose scope is
 //! `local` or `worktree` and whose key is `filter.NAME.smudge` or
 //! `filter.NAME.process`.
 //!
@@ -16,7 +21,11 @@
 
 use libfuzzer_sys::fuzz_target;
 
-#[allow(dead_code, reason = "the app's module, of which this uses a part")]
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the app's module, of which this uses a part"
+)]
 #[path = "../../crates/app/src/git.rs"]
 mod git;
 
@@ -36,7 +45,33 @@ fuzz_target!(|data: &[u8]| {
             && (key.ends_with(".smudge") || key.ends_with(".process"))
     });
     assert_eq!(git::names_repo_filter(data), expected);
+
+    let _ = git::parse::status(data);
+    let _ = git::parse::refs(data);
+    let _ = git::parse::diff_tree(data);
+    let _ = git::parse::batch(data, 3);
+    let commit = git::parse::commit(data);
+    let _ = git::parse::date(commit.author.time, commit.author.offset);
+    let mut ago = String::new();
+    git::parse::ago(&mut ago, commit.author.time, commit.committer.time);
+    let text = String::from_utf8_lossy(data);
+    let _ = git::parse::version(&text);
+    let _ = git::parse::LogRecord::parse(&text);
+    let whole = records(&[data]);
+    let cut = usize::from(data.first().copied().unwrap_or(0)).min(data.len());
+    let (a, b) = data.split_at(cut);
+    assert_eq!(records(&[a, b]), whole);
 });
+
+/// The NUL-separated records in `chunks`, fed one chunk at a time.
+fn records(chunks: &[&[u8]]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut r = git::parse::Records::default();
+    for chunk in chunks {
+        r.feed(chunk, |rec| out.push(rec.to_vec()));
+    }
+    out
+}
 
 /// A failed exit status, as git's would be.
 fn exit_status() -> std::process::ExitStatus {

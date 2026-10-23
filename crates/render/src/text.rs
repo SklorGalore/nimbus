@@ -756,8 +756,8 @@ mod tests {
             // Columns: a b 漢漢 字字 c d 한한 글글 e f.
             let wide = [(2.0, 4.0), (4.0, 6.0), (8.0, 10.0), (10.0, 12.0)];
             let mut in_wide = 0;
-            for (_, _, glyphs) in frame.layers() {
-                for g in glyphs {
+            for layer in frame.layers() {
+                for g in layer.glyphs {
                     let (left, right) = (g.pos[0], g.pos[0] + g.size[0]);
                     let centre = f32::midpoint(left, right) / cell;
                     if let Some(&(a, b)) = wide.iter().find(|(a, b)| centre > *a && centre < *b) {

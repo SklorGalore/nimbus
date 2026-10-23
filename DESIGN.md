@@ -476,7 +476,11 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
 - **Menus**: the system menu bar with `muda` on macOS, where it sits at the
   top of the screen. On Windows Nimbus draws the menu bar and its
   drop-downs itself, in the theme's colours, and right-click menus are
-  drawn by Nimbus everywhere (`menu/drawn.rs`). On Linux, `muda` needs GTK,
+  drawn by Nimbus everywhere (`menu/drawn.rs`). The Windows window has no
+  system frame (`with_decorations(false)`, keeping the shadow): the menu
+  bar shares its strip with the title and window buttons Nimbus draws,
+  and the app moves and resizes the window through winit's
+  `drag_window` and `drag_resize_window` (`caption.rs`). On Linux, `muda` needs GTK,
   which we avoid, so Linux relies on the command palette.
 - **Clipboard**: `arboard`. **File dialogs**: `rfd`.
 - **Config**: one TOML file in the platform config directory (from `dirs`):
@@ -598,7 +602,7 @@ introduces and points at the code.
 | 24 | International text | In progress: built; the typing benchmark and checks on the owner's Mac wait | CJK and other scripts in the right fonts, variable fonts, editable huge files in other encodings | [m24](docs/milestones/m24-international-text.md) |
 | 25 | Command line | In progress | Install the `nimbus` command from the palette; open files in the running window; `--wait` for git | [m25](docs/milestones/m25-command-line.md) |
 | 26 | Security | In progress | Signed releases with the key off GitHub; protected branches and tags; pinned workflows; reviewed dependencies; untrusted files stay data | [m26](docs/milestones/m26-security.md) |
-| 27 | Git window: viewing | Planned | `nimbus --git`: changes, history with a branch graph, any commit's diffs | [m27](docs/milestones/m27-git-viewer.md) |
+| 27 | Git window: viewing | In progress | `nimbus --git`: changes, history with a branch graph, any commit's diffs | [m27](docs/milestones/m27-git-viewer.md) |
 | 28 | Git window: staging and committing | Planned | Stage files, hunks or lines; discard safely; commit and amend | [m28](docs/milestones/m28-git-staging.md) |
 | 29 | Git window: branches and remotes | Planned | Branches, tags, stashes; fetch, pull and push with your own credentials | [m29](docs/milestones/m29-git-branches-remotes.md) |
 | 30 | Git window: history tools and merging | Planned | Blame, file history, search; merge, rebase, cherry-pick and revert with the merge view | [m30](docs/milestones/m30-git-history-merging.md) |
@@ -873,3 +877,4 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-19 | M22: the screen-reader description (AccessKit) is built only while a reader is active and the window is created hidden until the adapter exists; the editor is one text field holding a window of 200 lines or 256 KB either side of the cursor (not of the view, so a reader's place survives scrolling), one text run per visual row, rebuilt near its edges; not yet described: Search results, the Compare panel, compare and merge rows, preview headings, unfocused groups | §9, m22 |
 | 2026-10-19 | M24 built (in progress until the typing benchmark and the owner's Mac checks): fallback fonts per script (`fallback_fonts`, built-in lists per platform, then M8's rule), `cjk_language` defaulting to the system language and else Simplified Chinese, fallback graphemes shaped per cell with script and language, `font_weight` for variable and static fonts; huge files in another encoding are decoded into a private UTF-8 copy and edited mapped, in every encoding rather than single-byte only, saving back in their encoding; new dependency `sys-locale` | §7, §9, m24 |
 | 2026-10-19 | M25 built (in progress until checked on the owner's Mac): the single-instance socket is `run/` beside the config (so `NIMBUS_CONFIG_DIR` isolates it); only a plain `nimbus [FILE\|FOLDER]... [--wait]` hands off, any other option starts its own window; `--wait` with no Nimbus open starts one in the background (git's `GIT_*` variables removed) and waits on it, so the editor outlives the commit; Windows uses a loopback port with a random token in `%APPDATA%` instead of a named pipe (no crate, no `unsafe`), and edits the user `PATH` through PowerShell, which also tells running programs it changed | §2, m25, docs/security.md |
+| 2026-10-19 | M27 built (in progress until checked on the owner's Mac): the git window is its own winit handler (`GitApp`) reusing the renderer, theme, key bindings, compare view and watcher, not the editor's `App` with another layout; the history first loads HEAD's newest 2,000 commits, because `git log --date-order` with every ref walks to the oldest tip before printing (3 s on a million commits), then the whole history swapped in; a moved ref reloads the history rather than appending; lanes cap at 32; render gains a segment pipeline (lines, cubic curves, dots) with its CPU twin | m27 |
