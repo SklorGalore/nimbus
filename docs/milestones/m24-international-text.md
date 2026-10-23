@@ -149,9 +149,11 @@ Latin, Han, kana, Hangul, emoji, Thai and Devanagari stayed on the grid.
 - **Linux release binary**: 29.2 MB (budget 35 MB). One new
   dependency, `sys-locale` 0.3 (the system language; a few KB),
   certified in `supply-chain/audits.toml` after reading its source.
-- **Startup**: unchanged by design. The fallback preferences are sent
-  to the worker with the GPU state, and no fallback font loads until a
-  glyph needs one. Not measured here (no window); see the Mac checks.
+- **Startup**: unchanged. The fallback preferences are sent to the
+  worker with the GPU state, and no fallback font loads until a glyph
+  needs one. `bench/smoke.sh` on the owner's M5 Pro (2026-10-23): cold
+  726 ms, warm 128.8 / 132.1 / 132.4 / 140.0 ms (median 132 ms, budget
+  500 ms), in line with earlier milestones.
 - **Where the code is**: `render/src/script.rs` (script of a
   character, runs, `CjkLanguage`), `render/src/fallback.rs`
   (`FallbackPrefs`, built-in lists, `find_editor_font` with a weight),
@@ -200,4 +202,4 @@ Left for the owner's Mac (no GPU or macOS fonts here):
 4. `m16_typing_bench` on a mixed-script file, against the M16 budget.
 5. A Windows-1252 file over 256 MB: Reopen with Encoding, edit, save,
    and check the saved bytes.
-6. `bench/smoke.sh` first-frame times.
+6. ~~`bench/smoke.sh` first-frame times~~: done, see Startup above.
