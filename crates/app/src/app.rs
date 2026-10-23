@@ -197,6 +197,9 @@ fn spawn_listing(proxy: &EventLoopProxy<AppEvent>, req: ListRequest) {
     }
 }
 
+/// The tab name of "Show Default Config"'s read-only document.
+const DEFAULT_CONFIG_NAME: &str = "default-config.toml";
+
 /// The least time between automatic reloads of one file changed on disk.
 const RELOAD_GAP: Duration = Duration::from_secs(1);
 
@@ -3476,6 +3479,10 @@ impl App {
             self.say("Already saving; edits wait until it is done", false);
             return Saved::Started;
         }
+        if let Some(why) = self.docs[self.tabs[i].doc].read_only.clone() {
+            self.alert("Could not save", why);
+            return Saved::No;
+        }
         let doc = &self.docs[self.tabs[i].doc];
         let dir = doc
             .path
@@ -4207,6 +4214,7 @@ impl App {
     fn run_setup(&mut self, cmd: Command<'_>) {
         match cmd {
             Command::OpenConfig => self.open_config(),
+            Command::ShowDefaultConfig => self.show_default_config(),
             Command::CheckUpdates => {
                 self.say("Checking GitHub for the latest release…", false);
                 spawn_update_check(&self.proxy, false);
@@ -4290,6 +4298,36 @@ impl App {
         }
         self.open_path(&path);
         self.say("Edit, save, then run Reload Config from the palette", false);
+    }
+
+    /// Show every setting with its default value ([`config::defaults_text`])
+    /// in a read-only tab named `default-config.toml`, coloured as TOML.
+    /// The tab has no file behind it, so it is never saved, watched or
+    /// kept in the session; copy lines from it into Open Config File's.
+    /// Running it again goes back to the tab already open.
+    fn show_default_config(&mut self) {
+        let shown = (0..self.tabs.len()).find(|&i| {
+            self.tabs[i].group == self.groups.focused
+                && self.docs[self.tabs[i].doc].name == Some(DEFAULT_CONFIG_NAME)
+        });
+        if let Some(i) = shown {
+            self.switch_to(i);
+            return;
+        }
+        let mut doc = Document::generated(
+            DEFAULT_CONFIG_NAME,
+            &config::defaults_text(),
+            "The default settings are read-only; copy what you want to change into \
+             Open Config File's config.toml",
+        );
+        doc.detect_language(&self.languages);
+        let tab = Tab::new(self.docs.insert(doc), false);
+        let i = self.add_tab(tab);
+        self.switch_to(i);
+        self.say(
+            "Copy what you want to change into Open Config File's config.toml",
+            false,
+        );
     }
 
     fn open_picker(&mut self, kind: Kind) {
@@ -6201,6 +6239,7 @@ impl App {
             | Command::Palette
             | Command::ReloadConfig
             | Command::OpenConfig
+            | Command::ShowDefaultConfig
             | Command::CompareSaved
             | Command::CompareFile
             | Command::CompareTab

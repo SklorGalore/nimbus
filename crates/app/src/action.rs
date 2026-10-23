@@ -367,6 +367,12 @@ pub const ACTIONS: &[ActionInfo] = &[
         Command::OpenConfig,
         Keys::NONE,
     ),
+    act(
+        "app.showDefaultConfig",
+        "Show Default Config",
+        Command::ShowDefaultConfig,
+        Keys::NONE,
+    ),
     // The menu bar Nimbus draws on Windows; F10 opens it, as in other
     // Windows programs. Does nothing where the system draws the menus.
     act(

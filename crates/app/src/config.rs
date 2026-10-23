@@ -487,6 +487,160 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 # detect = true
 "#;
 
+/// Every setting with its built-in default, as config text, for the
+/// "Show Default Config" palette action.
+///
+/// Unlike [`TEMPLATE`], whose lines are commented examples, each value
+/// here is read from [`Config::default`] and written out live, so the text
+/// cannot fall behind the code: change a default and this changes with it,
+/// and add a field to [`Config`] and this stops compiling until it is
+/// listed (the `let Config { .. }` below names every field). Parsing the
+/// result gives the defaults back; a test checks that.
+///
+/// Three settings have no single value and stay commented: `font_weight`
+/// (unset means the font's own regular weight), and `[editor]`'s
+/// `auto_pairs` and `wrap`, whose defaults depend on the language.
+#[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one format string: the lines are the text it writes"
+)]
+pub fn defaults_text() -> String {
+    let Config {
+        font_size,
+        tab_width,
+        soft_wrap,
+        theme,
+        keys: _,
+        languages: _,
+        encodings: _,
+        check_updates,
+        editor,
+        indent,
+        font,
+        ligatures,
+        font_weight: _,
+        fallback_fonts: _,
+        cjk_language,
+        remember_zoom,
+        remember_workspace,
+        render_whitespace,
+        indent_guides,
+        sticky_scroll,
+        minimap,
+        minimap_width,
+        ui_font,
+        compat,
+    } = Config::default();
+    let quote = |s: &str| toml::Value::String(s.to_owned()).to_string();
+    let theme = quote(&theme);
+    let font = quote(&font);
+    let cjk_language = quote(&cjk_language);
+    let ui_font = quote(&ui_font);
+    let render_whitespace = quote(render_whitespace.name());
+    let editing = editor.for_language(None);
+    let trim = editing.trim_trailing_whitespace;
+    let final_newline = editing.final_newline;
+    let indenting = indent.for_language(None);
+    let (indent_width, indent_tabs, detect) = (
+        indenting.indent.width,
+        indenting.indent.tabs,
+        indenting.detect,
+    );
+    let builtin: Vec<&str> = nimbus_syntax::LanguageId::ALL
+        .iter()
+        .map(|l| l.key())
+        .collect();
+    let builtin = builtin.join(", ");
+    format!(
+        r#"# Nimbus's default settings, generated from the built-in values of
+# this version ({version}). Nothing reads this text: put only the settings
+# you want to change in your own config.toml (Open Config File in the
+# palette), then run Reload Config.
+
+# The editor font's size in points, 6 to 72.
+font_size = {font_size:?}
+# Columns per tab stop, 1 to 16.
+tab_width = {tab_width}
+# Start new tabs with soft wrap on.
+soft_wrap = {soft_wrap}
+# "dark", "light", or NAME for themes/NAME.toml beside config.toml.
+theme = {theme}
+# Ask GitHub once at startup whether a newer release exists.
+check_updates = {check_updates}
+
+# The editor font: an installed font's name or a font file's path. Empty
+# is the bundled Hack Nerd Font Mono.
+font = {font}
+# Join -> != => and friends, in fonts that have ligatures.
+ligatures = {ligatures}
+# The weight to draw the font at: 100 to 900 or a name ("light",
+# "medium", "bold"). Unset is the font's own regular weight.
+# font_weight = 400
+# Which regional shapes Chinese characters take: "ja", "zh-Hans",
+# "zh-Hant" or "ko". Empty follows the system language.
+cjk_language = {cjk_language}
+# Start each session at the zoom the last one ended with.
+remember_zoom = {remember_zoom}
+# Reopen the last session's tabs at startup and save this one.
+remember_workspace = {remember_workspace}
+# Show spaces as · and tabs as →: "selection", "all" or "none".
+render_whitespace = {render_whitespace}
+# A hairline at each indentation level.
+indent_guides = {indent_guides}
+# Pin the enclosing function or heading at the top of the text.
+sticky_scroll = {sticky_scroll}
+# A map of the lines around the view at the right edge, and its width in
+# points (40 to 400).
+minimap = {minimap}
+minimap_width = {minimap_width:?}
+# A proportional font for the sidebar, tabs, status bar and pickers, by
+# name or path. Empty uses the editor font.
+ui_font = {ui_font}
+# Draw on the CPU instead of the GPU (compatibility mode). Nimbus does
+# this by itself when there is no usable GPU. Read at startup.
+compat = {compat}
+
+# Editing, with per-language tables such as [editor.markdown].
+# auto_pairs: typing ( [ {{ " ' or ` inserts the closer. Unset is on for
+# code, off for Markdown and plain text.
+# wrap: soft wrap for files of a language. Unset is on for Markdown,
+# else soft_wrap above.
+[editor]
+trim_trailing_whitespace = {trim}
+final_newline = {final_newline}
+
+# Indentation, with per-language tables such as [indent.python]. With
+# detect on, a file's own indentation wins over width and tabs.
+[indent]
+width = {indent_width}
+tabs = {indent_tabs}
+detect = {detect}
+
+# These tables are empty by default.
+
+# Key bindings: action id = list of chords, such as
+# "view.toggleWrap" = ["Alt+W"]. An empty list unbinds the action.
+[keys]
+
+# A file name or "*.ext" pattern = language, such as "*.jsonc" = "json".
+# Built-in languages:
+# {builtin}.
+[languages]
+
+# A file name or "*.ext" pattern = the encoding to read and save it in,
+# such as "*.csv" = "windows-1252".
+[encodings]
+
+# Fonts to try first for characters the editor font lacks, by script:
+# han, kana, hangul, emoji, symbols, or a script name such as cyrillic.
+# Such as han = ["Hiragino Sans"].
+[fallback_fonts]
+"#,
+        version = env!("CARGO_PKG_VERSION"),
+    )
+}
+
 /// Where the config file lives: `~/Library/Application Support/nimbus` on
 /// macOS, `~/.config/nimbus` on Linux, `%APPDATA%\nimbus` on Windows, or
 /// the folder in `NIMBUS_CONFIG_DIR` if set (for trying a config without
@@ -795,6 +949,41 @@ mod tests {
     #[test]
     fn template_parses_cleanly() {
         assert_eq!(Config::parse(TEMPLATE), (Config::default(), vec![]));
+    }
+
+    #[test]
+    fn defaults_text_parses_back_to_the_defaults() {
+        let text = defaults_text();
+        let (mut parsed, warnings) = Config::parse(&text);
+        assert_eq!(warnings, Vec::<String>::new());
+        // `[editor]` and `[indent]` spell out what unset already means, so
+        // compare what they resolve to for a few kinds of file instead.
+        let d = Config::default();
+        for lang in [None, Some("rust"), Some("markdown"), Some("python")] {
+            assert_eq!(
+                parsed.editor.for_language(lang),
+                d.editor.for_language(lang)
+            );
+            assert_eq!(
+                parsed.indent.for_language(lang),
+                d.indent.for_language(lang)
+            );
+        }
+        parsed.editor = d.editor.clone();
+        parsed.indent = d.indent.clone();
+        assert_eq!(parsed, d);
+    }
+
+    #[test]
+    fn defaults_text_lists_every_setting() {
+        let text = defaults_text();
+        for key in KNOWN {
+            let listed = text.lines().any(|l| {
+                let l = l.strip_prefix("# ").unwrap_or(l);
+                l == format!("[{key}]") || l.starts_with(&format!("{key} = "))
+            });
+            assert!(listed, "{key} missing from defaults_text()");
+        }
     }
 
     #[test]

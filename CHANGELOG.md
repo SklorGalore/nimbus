@@ -28,6 +28,10 @@ fixed.
   The options for testing and measuring moved to `nimbus --help all`. A
   mistyped option suggests the one you probably meant, and every command
   line mistake points at `--help`.
+- Seeing the default settings: **Show Default Config** in the palette
+  opens every setting with its default value in a read-only
+  `default-config.toml` tab. It is made from the built-in defaults, so
+  it cannot go out of date.
 - A git window (M27): `nimbus --git [DIR]`, or **Open Git Window** in
   the palette and View menu, opens a window of its own for the
   repository: your staged, unstaged and untracked changes, the whole

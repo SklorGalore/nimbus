@@ -107,6 +107,7 @@ These keys work while the file tree has the keyboard (`Cmd+Shift+E` /
 | Go to Last Tab | `tab.gotoLast` | `Cmd+9` | `Ctrl+9` |
 | Reload Config | `app.reloadConfig` | — | — |
 | Open Config File | `app.openConfig` | — | — |
+| Show Default Config | `app.showDefaultConfig` | — | — |
 | Check for Updates | `app.checkUpdates` | — | — |
 | Open Latest Release Page | `app.openRelease` | — | — |
 | Install nimbus Command in PATH | `app.installCommand` | — | — |
