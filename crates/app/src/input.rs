@@ -285,6 +285,8 @@ pub enum Command<'a> {
     ReloadConfig,
     /// Open the config file in a tab, creating it if needed.
     OpenConfig,
+    /// Show every setting with its default value in a read-only tab.
+    ShowDefaultConfig,
     /// Open the first menu of the menu bar Nimbus draws (Windows).
     OpenMenuBar,
     /// Ask GitHub whether a newer release exists.
@@ -364,6 +366,7 @@ impl Command<'_> {
         matches!(
             self,
             Command::OpenConfig
+                | Command::ShowDefaultConfig
                 | Command::CheckUpdates
                 | Command::OpenRelease
                 | Command::InstallOnPath

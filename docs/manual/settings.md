@@ -44,6 +44,29 @@ its default.
 The file uses [TOML](https://toml.io): `name = value` lines at the top,
 then `[tables]`.
 
+## Seeing the defaults
+
+To see every setting with the value Nimbus uses when you leave it out:
+
+- Run **Show Default Config** from the command palette. It opens
+  `default-config.toml` in a read-only tab, coloured as TOML. Copy the
+  lines you want to change into your own `config.toml`. The tab has no
+  file behind it, so it cannot be saved and is not kept in the session.
+- Or run `nimbus --default-config` in a terminal. It prints the same text
+  and exits, without opening a window:
+
+  ```sh
+  nimbus --default-config | less
+  nimbus --default-config > ~/defaults.toml
+  ```
+
+The text is made from the defaults built into the version you run, so
+it is always current, and it is valid config: copying it whole into
+`config.toml` changes nothing. A few settings have no single default and
+stay commented out in it: `font_weight` (unset is the font's own regular
+weight), and `auto_pairs` and `wrap` in `[editor]`, which depend on the
+language.
+
 ## Every setting
 
 ### Top level
@@ -199,7 +222,9 @@ detect = false
 
 ## The template
 
-This is the file "Open Config File" writes:
+This is the file "Open Config File" writes. Its lines are examples to
+uncomment, not the defaults; for those, see
+[Seeing the defaults](#seeing-the-defaults).
 
 ```toml
 # Nimbus configuration. Every setting is optional.

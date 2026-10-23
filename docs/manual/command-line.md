@@ -46,6 +46,7 @@ does not overwrite your session.
 | `--git [DIR]` | Open the [git window](git.md) for the repository holding `DIR`, or the current folder, instead of the editor. |
 | `--git-select WHAT` | With `--git`: start with `changes` or the commit whose hash starts with `WHAT` selected (for screenshots and tests). |
 | `--wait` | Return only when the files' tabs are closed (or Nimbus quits). For tools that wait for an editor, such as git: see [Nimbus as git's editor](#nimbus-as-gits-editor). |
+| `--default-config` | Print every setting with its default value, as config text, and exit. See [Seeing the defaults](settings.md#seeing-the-defaults). |
 | `--version`, `-V` | Print the version (`nimbus 0.10.0`) and exit. |
 | `--help`, `-h` | Print a one-line usage summary and exit. |
 
