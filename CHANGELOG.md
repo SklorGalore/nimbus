@@ -55,7 +55,7 @@ section before tagging.
   chapter.
 - The release signing key, `minisign.pub`, is in the repository and
   printed in the README, so `SHA256SUMS.minisig` can be checked.
-- `scripts/publish-packages.sh` puts a signed, published release in the
+- `scripts/publish-packages.ps1` puts a signed, published release in the
   Homebrew tap and opens its winget pull request, with the hashes taken
   from the signed `SHA256SUMS`.
 - The README and manual say how to install with Homebrew
