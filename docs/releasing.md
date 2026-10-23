@@ -22,8 +22,9 @@ released code.
 
 The release workflow ([`release.yml`](../.github/workflows/release.yml))
 runs on the tag. It builds every platform, makes a draft release with
-the packages, the Homebrew cask, the winget manifest and `SHA256SUMS`
-attached. Sign `SHA256SUMS` on the Mac (below), then publish the draft
+the packages, the Homebrew cask and `SHA256SUMS` attached, and then
+the Chocolatey package (`nimbus.X.Y.Z.nupkg`, packed on Windows by
+[`chocolatey.yml`](../.github/workflows/chocolatey.yml)). Sign `SHA256SUMS` on the Mac (below), then publish the draft
 on GitHub when it looks right. Never publish a release without its
 `SHA256SUMS.minisig`.
 
@@ -77,15 +78,15 @@ The first job waits in the `release` environment for your approval
 (Actions tab, the run, **Review deployments**); nothing builds before
 that.
 
-## Homebrew and winget
+## Homebrew and Chocolatey
 
 Once the release is signed and published, put it in the package
 managers from the same checkout:
 
 ```sh
-scripts/publish-packages.sh vX.Y.Z --dry-run   # print the cask and manifest only
+scripts/publish-packages.sh vX.Y.Z --dry-run   # print the cask and Chocolatey scripts only
 scripts/publish-packages.sh vX.Y.Z             # publish both, after asking
-scripts/publish-packages.sh vX.Y.Z --only homebrew   # or --only winget
+scripts/publish-packages.sh vX.Y.Z --only homebrew   # or --only chocolatey
 ```
 
 It downloads `SHA256SUMS` and `SHA256SUMS.minisig`, refuses to go on
@@ -100,11 +101,19 @@ work, shows the files, and asks before sending anything. Then:
   time; `--tap OWNER/homebrew-NAME` picks another), so people install
   with `brew install --cask sklorgalore/nimbus/nimbus`. It never moves
   the tap back to an older version.
-- winget: it forks `microsoft/winget-pkgs` if needed, brings the fork
-  up to date, puts the three manifest files on a branch `nimbus-X.Y.Z`
-  and opens the pull request. The winget bots validate it; the first one
-  asks you to sign Microsoft's CLA in a comment. Nothing is cloned.
+- Chocolatey: it downloads the release's `nimbus.X.Y.Z.nupkg`, checks it
+  holds only the package files and that its install and uninstall
+  scripts are byte for byte the templates in `packaging/chocolatey`
+  filled in from the signed `SHA256SUMS` (they carry the installer's URL
+  and hash), and pushes it to the community repository. It asks for
+  your API key from <https://community.chocolatey.org/account> unless
+  `CHOCOLATEY_API_KEY` is set, and never saves it. Chocolatey's
+  automatic checks run first, then a moderator approves the package
+  (the first version is reviewed most closely); people install it with
+  `choco install nimbus`. For a release made before the Chocolatey
+  workflow existed, run it first: Actions > Chocolatey package > Run
+  workflow, with the tag.
 
 Running it again for a version already published changes nothing.
-Needs `gh` (signed in), `minisign` and `curl`. `--dry-run` also works on
+Needs `gh` (signed in), `minisign`, `curl` and `unzip`. `--dry-run` also works on
 a draft, to look at the files before publishing.

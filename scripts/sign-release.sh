@@ -69,8 +69,9 @@ gh release download "$tag" --repo "$repo" \
 	--pattern '*.deb' --pattern '*.AppImage' --pattern '*-setup.exe' \
 	--pattern 'SHA256SUMS'
 
-# The manifests zip is not a package and is not hashed; everything else
-# downloaded must be in SHA256SUMS, and everything in it must be here.
+# The winget manifests zip (on releases up to 1.2.0) is not a package
+# and is not hashed; everything else downloaded must be in SHA256SUMS,
+# and everything in it must be here.
 listed=$(awk '{ sub(/^\*/, "", $2); print $2 }' SHA256SUMS | sort)
 # (A function, not a case inside $(...): macOS's /bin/sh is bash 3.2,
 # which cannot parse a case pattern's ")" inside a command substitution.)

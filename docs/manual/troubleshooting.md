@@ -46,6 +46,7 @@ Where the new version goes:
 | The AppImage | Replaces the AppImage file. |
 | The Linux tarball | Replaces the `nimbus` binary, when its folder is writable. |
 | Homebrew | Nothing: it tells you to run `brew upgrade --cask nimbus`, so Homebrew's record stays right. |
+| Chocolatey | Nothing: it tells you to run `choco upgrade nimbus` from an administrator terminal, so Chocolatey's record stays right. |
 | The `.deb` | Nothing: it tells you to install the new `.deb` with `sudo apt install ./nimbus_X.Y.Z_amd64.deb`. |
 | A folder Nimbus cannot write, the Windows zip, or a build from source | Nothing: use Open Latest Release Page (or `git pull` and `cargo build` for a build from source). |
 

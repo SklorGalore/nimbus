@@ -7,3 +7,7 @@ crates/app/tests/screenshot/sample.rs text eol=lf
 # Signed test fixtures must keep their exact bytes: a checkout that turns
 # LF into CRLF (Windows with core.autocrlf) breaks their signatures.
 crates/app/src/update/testdata/** -text
+
+# The Chocolatey package's scripts are compared byte for byte against the
+# packed copy (scripts/publish-packages.sh), so they keep LF everywhere.
+packaging/chocolatey/** text eol=lf
