@@ -53,7 +53,7 @@ files and diffs, fast on very large repositories.
       watching `.git` and the working tree.
 - [ ] **Budgets**: first frame under 500 ms in release (git is never
       run before the first frame); on a generated repository of 1
-      million commits (`bench/gen.sh git`), the first screen of history
+      million commits (`bench/gen.ps1 git`), the first screen of history
       shows within 1 s and scrolling the whole history never drops a
       frame; history memory under 150 bytes per commit plus its
       subject; no git call on the event loop.
@@ -61,7 +61,7 @@ files and diffs, fast on very large repositories.
 ## Scope
 
 **In**: the `--git` flag and palette action; the window layout; status,
-history with graph, commit details; refresh on change; `bench/gen.sh
+history with graph, commit details; refresh on change; `bench/gen.ps1
 git`; a manual chapter (`docs/manual/git.md`).
 
 **Deferred**: everything that changes the repository (M28–M30); blame
@@ -133,7 +133,7 @@ history without reloading it.
 
 1. `Repo`, the streaming call and the four parsers in `app/git.rs`,
    with tests against repositories built in a temporary folder.
-2. `bench/gen.sh git`: a repository of 1 million commits with merges,
+2. `bench/gen.ps1 git`: a repository of 1 million commits with merges,
    built with `git fast-import`.
 3. `--git` and "Open Git Window"; the window layout with empty panes and
    the error states.
@@ -179,14 +179,14 @@ Mac.
 
 | Measure | Result |
 |---|---|
-| 1,000,000-commit repository (`bench/gen.sh git`), open | 22 ms (`rev-parse` and the version check) |
+| 1,000,000-commit repository (`bench/gen.ps1 git`), open | 22 ms (`rev-parse` and the version check) |
 | First screen of history | 7 ms after open (the HEAD preview, below) |
 | Whole history, first rows / all rows | 3.1 s / 16 s, on a worker, with the first screen showing meanwhile |
 | History memory | 78 bytes a commit, 117 with subjects |
 | Release binary (Linux) | 29.5 MB (budget 35 MB) |
 | First frame, scrolling frame times | Not measured: needs the Mac (`--smoke`, and scrolling the 1M history) |
 
-Run the history numbers with `bench/gen.sh git` and
+Run the history numbers with `bench/gen.ps1 git` and
 `NIMBUS_GIT_REPO=$PWD/bench/out/git-1m cargo test --release -p nimbus --bin nimbus -- --ignored --nocapture git_history_bench`.
 
 What differs from the plan, and surprises:

@@ -55,12 +55,12 @@ section before tagging.
   chapter.
 - The release signing key, `minisign.pub`, is in the repository and
   printed in the README, so `SHA256SUMS.minisig` can be checked.
-- `scripts/publish-packages.sh` puts a signed, published release in the
-  Homebrew tap and opens its winget pull request, with the hashes taken
+- `scripts/publish-packages.ps1` puts a signed, published release in the
+  Homebrew tap and pushes its Chocolatey package, with the hashes taken
   from the signed `SHA256SUMS`.
 - The README and manual say how to install with Homebrew
-  (`brew install --cask sklorgalore/nimbus/nimbus`) and winget
-  (`winget install SklorGalore.Nimbus`).
+  (`brew install --cask sklorgalore/nimbus/nimbus`) and Chocolatey
+  (`choco install nimbus`).
 - Bidirectional control characters and zero-width characters are drawn
   as a red box, even with whitespace rendering off, so text whose
   display order differs from its bytes ("Trojan Source") cannot hide.
@@ -91,6 +91,15 @@ section before tagging.
 
 ### Changed
 
+- The repository's maintenance scripts (`scripts/` and `bench/`) are
+  PowerShell 7 instead of bash and sh, with the same names and arguments.
+  They need `pwsh` 7.4 or later (`brew install powershell` on macOS).
+- Windows releases go to [Chocolatey](https://community.chocolatey.org/packages/nimbus)
+  (`choco install nimbus`) instead of winget. Each release has a
+  `nimbus.X.Y.Z.nupkg`, packed on Windows by a new workflow, and
+  `scripts/publish-packages.ps1` checks its scripts against the signed
+  `SHA256SUMS` before pushing it. Install Update hands a Chocolatey
+  install to `choco upgrade nimbus`, as it does Homebrew's to `brew`.
 - **The update check at startup is now on by default**
   (`check_updates = true`). Each start asks GitHub's API once, after
   the window appears, whether a newer release exists: one HTTPS request

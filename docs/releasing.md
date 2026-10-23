@@ -22,8 +22,9 @@ released code.
 
 The release workflow ([`release.yml`](../.github/workflows/release.yml))
 runs on the tag. It builds every platform, makes a draft release with
-the packages, the Homebrew cask, the winget manifest and `SHA256SUMS`
-attached. Sign `SHA256SUMS` on the Mac (below), then publish the draft
+the packages, the Homebrew cask and `SHA256SUMS` attached, and then
+the Chocolatey package (`nimbus.X.Y.Z.nupkg`, packed on Windows by
+[`chocolatey.yml`](../.github/workflows/chocolatey.yml)). Sign `SHA256SUMS` on the Mac (below), then publish the draft
 on GitHub when it looks right. Never publish a release without its
 `SHA256SUMS.minisig`.
 
@@ -37,10 +38,10 @@ keep `development`'s own version if it is higher.
 
 ## Packaging scripts and signing setup
 
-The packaging steps are `scripts/bundle-macos.sh`,
-`scripts/dmg-macos.sh`, `scripts/deb-linux.sh`,
-`scripts/appimage-linux.sh`, `packaging/windows/nimbus.iss` and
-`scripts/manifests.sh`. The app icon is drawn by `scripts/make-icons.py`.
+The packaging steps are `scripts/bundle-macos.ps1`,
+`scripts/dmg-macos.ps1`, `scripts/deb-linux.ps1`,
+`scripts/appimage-linux.ps1`, `packaging/windows/nimbus.iss` and
+`scripts/manifests.ps1`. The app icon is drawn by `scripts/make-icons.py`.
 
 The release key is a minisign key made on the owner's Mac with a
 password (`minisign -G`). Its public half is `minisign.pub` at the
@@ -53,8 +54,8 @@ Once the workflow has attached everything to the draft, sign it from
 a checkout on the Mac:
 
 ```sh
-scripts/sign-release.sh vX.Y.Z            # key in ~/.minisign/minisign.key
-scripts/sign-release.sh vX.Y.Z PATH/TO/minisign.key
+scripts/sign-release.ps1 vX.Y.Z           # key in ~/.minisign/minisign.key
+scripts/sign-release.ps1 vX.Y.Z PATH/TO/minisign.key
 ```
 
 It downloads the packages and `SHA256SUMS`, refuses to sign unless
@@ -63,6 +64,8 @@ packages on the release, signs (minisign asks for the password), checks
 the signature against `minisign.pub`, and uploads
 `SHA256SUMS.minisig`. A release that already has a signature is left
 alone. Needs `gh` (signed in) and `minisign` (`brew install minisign`).
+Like every script here it runs under PowerShell 7 (`brew install
+powershell`).
 
 The trusted comment must be exactly `Nimbus X.Y.Z SHA256SUMS`: the
 updater (M31) reads the version from it. The script also signs an already
@@ -77,15 +80,15 @@ The first job waits in the `release` environment for your approval
 (Actions tab, the run, **Review deployments**); nothing builds before
 that.
 
-## Homebrew and winget
+## Homebrew and Chocolatey
 
 Once the release is signed and published, put it in the package
 managers from the same checkout:
 
 ```sh
-scripts/publish-packages.sh vX.Y.Z --dry-run   # print the cask and manifest only
-scripts/publish-packages.sh vX.Y.Z             # publish both, after asking
-scripts/publish-packages.sh vX.Y.Z --only homebrew   # or --only winget
+scripts/publish-packages.ps1 vX.Y.Z --dry-run  # print the cask and Chocolatey scripts only
+scripts/publish-packages.ps1 vX.Y.Z            # publish both, after asking
+scripts/publish-packages.ps1 vX.Y.Z --only homebrew   # or --only chocolatey
 ```
 
 It downloads `SHA256SUMS` and `SHA256SUMS.minisig`, refuses to go on
@@ -100,11 +103,24 @@ work, shows the files, and asks before sending anything. Then:
   time; `--tap OWNER/homebrew-NAME` picks another), so people install
   with `brew install --cask sklorgalore/nimbus/nimbus`. It never moves
   the tap back to an older version.
-- winget: it forks `microsoft/winget-pkgs` if needed, brings the fork
-  up to date, puts the three manifest files on a branch `nimbus-X.Y.Z`
-  and opens the pull request. The winget bots validate it; the first one
-  asks you to sign Microsoft's CLA in a comment. Nothing is cloned.
+- Chocolatey: it downloads the release's `nimbus.X.Y.Z.nupkg`, checks it
+  holds only the package files and that its install and uninstall
+  scripts are byte for byte the templates in `packaging/chocolatey`
+  filled in from the signed `SHA256SUMS` (they carry the installer's URL
+  and hash), and pushes it to the community repository. It needs
+  your API key from <https://community.chocolatey.org/account>: from
+  `CHOCOLATEY_API_KEY` if set, else from the Keychain item
+  `chocolatey-api-key`, else it asks. It never echoes or saves the key.
+  Save it in the Keychain once with
+  `security add-generic-password -a "$USER" -s chocolatey-api-key -w`,
+  which prompts for it, so it stays out of your shell history and
+  dotfiles. Chocolatey's
+  automatic checks run first, then a moderator approves the package
+  (the first version is reviewed most closely); people install it with
+  `choco install nimbus`. For a release made before the Chocolatey
+  workflow existed, run it first: Actions > Chocolatey package > Run
+  workflow, with the tag.
 
 Running it again for a version already published changes nothing.
-Needs `gh` (signed in), `minisign` and `curl`. `--dry-run` also works on
-a draft, to look at the files before publishing.
+Needs `gh` (signed in) and `minisign`. `--dry-run` also works on a
+draft, to look at the files before publishing.

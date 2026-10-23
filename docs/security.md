@@ -79,7 +79,7 @@ replace its hash too, but cannot make a signature without the key.
   release, and once M31 lands a signature is what makes every Nimbus
   install itself.
 - The release workflow builds the packages and `SHA256SUMS` into a draft;
-  `scripts/sign-release.sh vX.Y.Z` on the Mac downloads them, checks
+  `scripts/sign-release.ps1 vX.Y.Z` on the Mac downloads them, checks
   every hash and that the list is exact, signs with the trusted comment
   `Nimbus X.Y.Z SHA256SUMS` (the form M31 reads), verifies against
   `minisign.pub` and uploads `SHA256SUMS.minisig`. Only then is the
@@ -119,7 +119,7 @@ are guarded like code.
   controls that repository; in March 2025 the `tj-actions/changed-files`
   tag was moved to steal secrets from thousands of workflows. A SHA
   cannot be moved. Dependabot updates the SHA and the comment together.
-  `scripts/pin-actions.sh` pins any action added later.
+  `scripts/pin-actions.ps1` pins any action added later.
 - **Tokens start read-only.** Every workflow declares `permissions:
   contents: read`, and each job that writes asks for exactly what it
   needs (the release jobs: `contents: write`; the build job also

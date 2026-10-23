@@ -145,7 +145,7 @@ Download Nimbus from the
 
 > [!NOTE]
 > From v1.0.0 on, each release also has a macOS `.dmg` and Homebrew
-> cask, a Windows installer and winget manifest, and a Linux `.deb` and
+> cask, a Windows installer and Chocolatey package, and a Linux `.deb` and
 > AppImage.
 
 The builds are not code-signed yet, so macOS and Windows show a warning
@@ -161,7 +161,7 @@ On Windows, when SmartScreen says "Windows protected your PC", click
 [installation guide](docs/manual/getting-started.md#installing) covers
 each package in detail.
 
-### With Homebrew or winget
+### With Homebrew or Chocolatey
 
 On macOS with [Homebrew](https://brew.sh):
 
@@ -173,16 +173,17 @@ This also puts the `nimbus` command on your `PATH`. The app is not
 signed, so the first launch still needs right-click > Open or the
 `xattr` command above.
 
-On Windows with winget:
+On Windows with [Chocolatey](https://chocolatey.org), from an
+administrator terminal:
 
 ```powershell
-winget install SklorGalore.Nimbus
+choco install nimbus
 ```
 
-`brew upgrade --cask nimbus` and `winget upgrade SklorGalore.Nimbus`
-install newer releases. Both package managers carry releases from
-v1.1.0 on, and a winget release appears there once Microsoft's
-reviewers accept it, which can take a few days after the release.
+`brew upgrade --cask nimbus` and `choco upgrade nimbus` install newer
+releases. Homebrew carries releases from v1.1.0 on and Chocolatey from
+v1.2.0 on; a Chocolatey release appears once its moderators approve
+it, which can take a few days after the release.
 
 ### Running from a terminal
 
@@ -381,9 +382,13 @@ cargo test --workspace                                          # all tests
 cargo fmt --all --check                                         # formatting
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets  # lints, as CI runs them
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp  # render without a window
-bench/gen.sh                                                    # generate large test files
-scripts/screenshots.sh                                          # remake the README and manual screenshots
+bench/gen.ps1                                                   # generate large test files
+scripts/screenshots.ps1                                         # remake the README and manual screenshots
 ```
+
+The scripts in `scripts/` and `bench/` need
+[PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)
+(`brew install powershell` on macOS).
 
 The lints are strict: no `unwrap`, `expect` or `panic!` outside tests,
 documentation on every public item, and `unsafe` only where it is

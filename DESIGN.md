@@ -16,7 +16,7 @@ and add a line to the decision log (§10).
 |---|---|---|---|
 | Fast startup | First frame in < 500 ms, total time from the top of `main` | `nimbus --smoke` prints `first-frame-ms` | M1: 116–132 ms warm, of which about 3 ms is ours |
 | Typing latency | Keystroke to pixels in < 1 frame (≤ 8 ms at 120 Hz) | Frame timer in debug overlay | — |
-| Huge files | Open a 4 GB log, scroll and search it, under 1 s to interactive | Bench file from `bench/gen.sh` | — |
+| Huge files | Open a 4 GB log, scroll and search it, under 1 s to interactive | Bench file from `bench/gen.ps1` | — |
 | Low footprint | Opening a file adds at most 1.5× its size over an empty window (rope backend); mapped files (M7) add roughly nothing. Syntax highlighting is not counted (§4.2). Total reported, not budgeted. Single binary < 35 MB | `vmmap` physical footprint after settling; CI size job | M2: 45 MB empty, 58 MB with a 10 MB file (1.3×); 7.5 MB binary |
 | Modeless editing | Type to insert; Cmd/Ctrl shortcuts; mouse works | — | — |
 
@@ -517,7 +517,7 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
 - **Runtime**: a debug overlay (`F12`, M8, with a log-only version from M2)
   shows frame time, keystroke-to-present latency, atlas occupancy, buffer
   backend and background task status.
-- **Benchmarks**: `bench/gen.sh` (M2) generates 10 MB, 100 MB, 1 GB and
+- **Benchmarks**: `bench/gen.ps1` (M2) generates 10 MB, 100 MB, 1 GB and
   4 GB files. `criterion` benches cover buffer operations and line layout.
 - **Release profile**: `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`,
   `panic = "abort"`, `strip = true`.
@@ -647,7 +647,7 @@ on 2026-10-19:
   and updates (M31), since updates depend on the signing key and the
   git client on the git rule.
 - The release signing key lives on the owner's Mac with a password and
-  is used by `scripts/sign-release.sh`; it is never an Actions secret.
+  is used by `scripts/sign-release.ps1`; it is never an Actions secret.
 - Dependencies are reviewed with `cargo vet` (imported audits, today's
   versions exempted once), not `cargo deny` alone.
 
@@ -869,7 +869,7 @@ highlighting instead of a syntax tree (§4.2).
 | 2026-10-18 | M27–M30 approved: after M25; the commit graph in smooth curves through a third `render` pipeline (CPU twin in compatibility mode); discards recoverable only while the git window is open; interactive rebase left for a later plan; no git features in the editor beyond Compare with HEAD and "Open Git Window" | §9, m27–m30 |
 | 2026-10-19 | The git window plans move from M26–M29 to M27–M30: the owner put the security milestone (M26) first | §8, m27–m30 |
 | 2026-10-19 | Compatibility mode keeps up with the renderer: any new GPU primitive (first, the git client's commit-graph curves in M27) is added to the CPU painter in the same change; a standing requirement in docs/milestones/README.md | m23, milestones README |
-| 2026-10-19 | M26 Security drafted at the owner's request and put before the git client (M27–M30) and updates (M31): no release has been signed yet (`minisign.pub` never committed), so the key comes first, kept on the owner's Mac and used by `scripts/sign-release.sh`, never an Actions secret; actions pinned by SHA, protected branches and `v*` tags, `cargo vet` (chosen over `cargo deny` alone), provenance, a threat model; M31 owns the update check itself | §9, m26 |
+| 2026-10-19 | M26 Security drafted at the owner's request and put before the git client (M27–M30) and updates (M31): no release has been signed yet (`minisign.pub` never committed), so the key comes first, kept on the owner's Mac and used by `scripts/sign-release.ps1`, never an Actions secret; actions pinned by SHA, protected branches and `v*` tags, `cargo vet` (chosen over `cargo deny` alone), provenance, a threat model; M31 owns the update check itself | §9, m26 |
 | 2026-10-18 | M31 Updates drafted at the owner's request: Install Update downloads the release package, checks it against the `minisign`-signed `SHA256SUMS` with the key compiled in (version pinned in the trusted comment), swaps it in and restarts with the session; no new trust beyond the release key; needs `minisign.pub` committed first | §8, §9, m31 |
 | 2026-10-19 | M26 built (in progress until the owner's GitHub settings land): git's checkout filters are skipped when the repository's own config names a filter program, instead of the plan's `safe.directory` check, which a clone the user owns always passes; a project's `.nimbus/workspace.toml` drops outside roots as well as tabs and folders (named workspaces keep them); the zero-width joiner and non-joiner are not marked as hidden characters, since emoji and scripts need them | m26, docs/security.md |
 | 2026-10-19 | M31: updates install on request only; the startup update check becomes on by default (`check_updates = true`), reversing M15's off default; Homebrew and `.deb` installs are handed back to their package manager | §9, m31 |

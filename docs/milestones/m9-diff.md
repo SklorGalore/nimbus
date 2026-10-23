@@ -201,7 +201,7 @@ building, checked by the keymap conflict test.
 2a. The large-file layers: common start and end trimming, the anchored
     block diff, and long-line splitting, each with a property test that
     the hunks turn the old text into the new; plus the 1 GB and 4 GB log
-    bench files (`bench/gen.sh logs`) for the budgets.
+    bench files (`bench/gen.ps1 logs`) for the budgets.
 3. Local re-diff after edits, with an oracle test: after random edits, the
    locally updated hunks describe the same change as a full re-diff.
 4. Three-way merge on top of two diffs, with property tests (a side
@@ -242,7 +242,7 @@ _In progress; filled in as tasks land._
 
 **Task 2: algorithm and crate** (2026-10-17, release build, Linux
 container with a shared, noisy CPU; the owner's machine is likely faster
-and steadier). Two inputs: the bench pairs from `bench/gen.sh diff`
+and steadier). Two inputs: the bench pairs from `bench/gen.ps1 diff`
 (`src-10mb.rs`, the project's sources repeated, and `src-10mb-edited.rs`,
 a copy with one change every thousand lines, cycling through a changed, a
 deleted and an inserted line; likewise at 100 MB) and a synthetic
@@ -281,7 +281,7 @@ is walked in 32 MB windows, each diffed on its own and kept up to the
 last change not touching the window's end, where the next window starts;
 a window pair with nothing in common is doubled three times, then
 reported as one block. Measured with `compare_bench` on the pairs from
-`bench/gen.sh diff` and `bench/gen.sh difflogs` (the 1 GB log with one
+`bench/gen.ps1 diff` and `bench/gen.ps1 difflogs` (the 1 GB log with one
 edit every 100,000 lines, the 4 GB log with 100,000 lines appended);
 ropes in memory, so the loaded size is in the peak:
 

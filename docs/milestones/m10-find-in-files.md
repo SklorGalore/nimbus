@@ -42,7 +42,7 @@ streaming in while the search runs and the editor never waiting on it.
       than 10,000 matches, narrow the search"), and each result
       holds a file id, a line number, a byte range and at most 200 bytes
       of preview. Measured on a search for `e` over this repository and
-      over a 1 GB tree from `bench/gen.sh`.
+      over a 1 GB tree from `bench/gen.ps1`.
 - [x] Speed: a search of a 100,000-file tree finishes within three times
       `rg`'s wall time on the same machine, recorded in Results. (We do
       not try to beat ripgrep; we try not to embarrass ourselves.)

@@ -14,9 +14,10 @@
 //! release's installer runs after Nimbus has quit and does the
 //! replacing itself (silently, per user, so with no UAC prompt).
 //!
-//! **Who owns the install.** Homebrew and apt keep their own record of
-//! what they installed; replacing their files behind their back would
-//! confuse them. Those installs are handed back to `brew` and `apt`.
+//! **Who owns the install.** Homebrew, apt and Chocolatey keep their own
+//! record of what they installed; replacing their files behind their
+//! back would confuse them. Those installs are handed back to `brew`,
+//! `apt` and `choco`.
 //! Nor is a build from source (`cargo build`, `cargo install`) replaced:
 //! that is updated with git.
 //!
@@ -39,6 +40,9 @@ pub enum Manager {
     Homebrew,
     /// The `.deb` package (apt or dpkg).
     Apt,
+    /// The Chocolatey package (`choco install nimbus`), which runs the
+    /// same installer for all users.
+    Chocolatey,
 }
 
 /// How this copy of Nimbus is updated.
@@ -93,6 +97,9 @@ impl Plan {
             Self::Managed(Manager::Homebrew) => {
                 "Homebrew installed Nimbus; update it with: brew upgrade --cask nimbus".to_owned()
             }
+            Self::Managed(Manager::Chocolatey) => {
+                "Chocolatey installed Nimbus; update it from an administrator terminal with: choco upgrade nimbus".to_owned()
+            }
             Self::Managed(Manager::Apt) => format!(
                 "Nimbus came from a .deb; download nimbus_{version}_amd64.deb from the release page and run: sudo apt install ./nimbus_{version}_amd64.deb"
             ),
@@ -127,6 +134,8 @@ pub struct System {
     pub homebrew_cask: bool,
     /// dpkg lists a `nimbus` package.
     pub dpkg_package: bool,
+    /// Chocolatey lists a `nimbus` package.
+    pub chocolatey_package: bool,
 }
 
 impl System {
@@ -142,12 +151,24 @@ impl System {
             .any(|p| Path::new(p).exists());
         let dpkg_package =
             cfg!(target_os = "linux") && Path::new("/var/lib/dpkg/info/nimbus.list").exists();
+        // Chocolatey keeps each installed package's files under
+        // %ChocolateyInstall%\lib\<id>.
+        let chocolatey_package = cfg!(windows)
+            && std::env::var_os("ChocolateyInstall")
+                .map_or_else(
+                    || PathBuf::from(r"C:\ProgramData\chocolatey"),
+                    PathBuf::from,
+                )
+                .join("lib")
+                .join("nimbus")
+                .exists();
         Self {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
             appimage: std::env::var_os("APPIMAGE").map(PathBuf::from),
             homebrew_cask,
             dpkg_package,
+            chocolatey_package,
         }
     }
 }
@@ -205,6 +226,10 @@ pub fn detect_from(exe: &Path, system: &System, can_write: &dyn Fn(&Path) -> boo
             };
             if !dir.join("unins000.exe").exists() {
                 Plan::Unsupported
+            } else if system.chocolatey_package && !can_write(dir) {
+                // Chocolatey installs for all users, under Program Files;
+                // a per-user install beside it is still ours to update.
+                Plan::Managed(Manager::Chocolatey)
             } else if can_write(dir) {
                 Plan::WindowsSetup
             } else {
@@ -839,7 +864,44 @@ mod tests {
                 .unwrap()
                 .contains("nimbus_2.0.0_amd64.deb")
         );
+        assert!(
+            Plan::Managed(Manager::Chocolatey)
+                .refusal(v)
+                .unwrap()
+                .contains("choco upgrade nimbus")
+        );
         assert!(Plan::WindowsSetup.refusal(v).is_none());
+    }
+
+    #[test]
+    fn a_chocolatey_install_is_handed_to_choco() {
+        let d = Dir::new("chocolatey");
+        let exe = d.0.join("nimbus.exe");
+        fs::write(&exe, "exe").unwrap();
+        fs::write(d.0.join("unins000.exe"), "uninstaller").unwrap();
+        let windows = System {
+            os: "windows",
+            arch: "x86_64",
+            ..System::default()
+        };
+        let choco = System {
+            chocolatey_package: true,
+            ..windows.clone()
+        };
+        let no = |_: &Path| false;
+        let yes = |_: &Path| true;
+        // Under Program Files (not writable) with the package listed.
+        assert_eq!(
+            detect_from(&exe, &choco, &no),
+            Plan::Managed(Manager::Chocolatey)
+        );
+        // A per-user install, even with the package also present.
+        assert_eq!(detect_from(&exe, &choco, &yes), Plan::WindowsSetup);
+        // An all-users install from the installer by hand.
+        assert_eq!(
+            detect_from(&exe, &windows, &no),
+            Plan::ReadOnly(d.0.clone())
+        );
     }
 
     #[test]

@@ -131,3 +131,27 @@ jobs:
           # commits, actions with known vulnerabilities).
           GH_TOKEN: ${{ github.token }}
         run: pipx run zizmor==1.31.1 --min-severity medium .github/workflows
+
+  # The maintenance scripts in scripts/ and bench/ are PowerShell 7. Most
+  # run only on the owner's Mac or at release time, so a syntax error
+  # would otherwise surface late; this parses every one of them.
+  scripts:
+    name: PowerShell scripts parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Parse every .ps1
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in git ls-files '*.ps1') {
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$null, [ref]$errors)
+            foreach ($e in $errors) {
+              "::error file=$file,line=$($e.Extent.StartLineNumber)::$($e.Message)"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
