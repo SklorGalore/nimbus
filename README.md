@@ -381,9 +381,13 @@ cargo test --workspace                                          # all tests
 cargo fmt --all --check                                         # formatting
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets  # lints, as CI runs them
 cargo run -- FILE --headless 1600x1000 --screenshot /tmp/f.bmp  # render without a window
-bench/gen.sh                                                    # generate large test files
-scripts/screenshots.sh                                          # remake the README and manual screenshots
+bench/gen.ps1                                                   # generate large test files
+scripts/screenshots.ps1                                         # remake the README and manual screenshots
 ```
+
+The scripts in `scripts/` and `bench/` need
+[PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)
+(`brew install powershell` on macOS).
 
 The lints are strict: no `unwrap`, `expect` or `panic!` outside tests,
 documentation on every public item, and `unsafe` only where it is

@@ -295,7 +295,7 @@ each task produced, and what is left:
    environment and the rest wait on it; release jobs use no cache;
    `zizmor` runs on every pull request with `--min-severity medium`.
    Every action is pinned to a commit SHA with its version in a comment
-   by `scripts/pin-actions.sh` (run for this branch once Skylar allowed
+   by `scripts/pin-actions.ps1` (run for this branch once Skylar allowed
    the lookup on 2026-10-19), which also filled in the appimagetool
    hash; Dependabot keeps the tag pins current. `dtolnay/rust-toolchain`
    has no release tags, so its two pins (`# stable`, `# nightly`) are

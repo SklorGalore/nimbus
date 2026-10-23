@@ -118,7 +118,7 @@ need them for everyday use.
 | `--screenshot FILE.bmp` | Save the first frame as a BMP image and exit. |
 | `--smoke` | Open the window, print the time to the first frame (`first-frame-ms=…`) and exit. |
 | `--bench-typing N` | Type `N` characters through the normal editing path, print keystroke latency figures and exit. |
-| `--soak` | With `--bench-typing`: mix line breaks, undo, find and saves into the typing and report how much memory grew; exits 1 if it grew more than 20 MB. It saves into the file, so use a copy (`bench/soak.sh` does). |
+| `--soak` | With `--bench-typing`: mix line breaks, undo, find and saves into the typing and report how much memory grew; exits 1 if it grew more than 20 MB. It saves into the file, so use a copy (`bench/soak.ps1` does). |
 | `--backend rope\|mapped` | Hold every file in memory (`rope`) or memory-mapped (`mapped`), whatever its size. |
 | `--wait-index` | With `--headless`: count all of a huge file's lines before drawing. |
 | `--debug-overlay` | Start with the debug overlay (`F12`) showing. |

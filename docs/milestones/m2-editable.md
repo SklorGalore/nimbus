@@ -48,7 +48,7 @@ by `--bench-typing`. **Owner** items need a person at the keyboard.
 
 **In**: `Buffer` trait and `RopeBuffer`; selections with one cursor;
 movement; insertion and deletion; keyboard, IME and mouse input; scrolling;
-gutter; blink; open and save; keystroke latency logging; `bench/gen.sh`.
+gutter; blink; open and save; keystroke latency logging; `bench/gen.ps1`.
 
 **Deferred**: selection extension, clipboard and undo (M3), soft wrap (M3),
 tabs and dialogs to open files (M4), highlighting (M5), huge or non-UTF-8
@@ -95,7 +95,7 @@ maximum. This becomes the overlay value in M8.
 2. `movement.rs` with tests for combining marks, emoji, tabs, CJK width, and
    sticky column.
 3. `line_ending.rs` and `io.rs`, with round-trip tests in a temp directory.
-4. `bench/gen.sh` producing 10 MB and 100 MB source-like files; 1 GB and
+4. `bench/gen.ps1` producing 10 MB and 100 MB source-like files; 1 GB and
    4 GB logs for M7.
 5. `Document` and `View`; render the opened file read-only with gutter.
 6. Scrolling: wheel lines and trackpad pixels.

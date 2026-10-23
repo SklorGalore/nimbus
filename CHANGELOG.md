@@ -91,6 +91,9 @@ section before tagging.
 
 ### Changed
 
+- The repository's maintenance scripts (`scripts/` and `bench/`) are
+  PowerShell 7 instead of bash and sh, with the same names and arguments.
+  They need `pwsh` 7.4 or later (`brew install powershell` on macOS).
 - **The update check at startup is now on by default**
   (`check_updates = true`). Each start asks GitHub's API once, after
   the window appears, whether a newer release exists: one HTTPS request

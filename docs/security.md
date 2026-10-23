@@ -119,7 +119,7 @@ are guarded like code.
   controls that repository; in March 2025 the `tj-actions/changed-files`
   tag was moved to steal secrets from thousands of workflows. A SHA
   cannot be moved. Dependabot updates the SHA and the comment together.
-  `scripts/pin-actions.sh` pins any action added later.
+  `scripts/pin-actions.ps1` pins any action added later.
 - **Tokens start read-only.** Every workflow declares `permissions:
   contents: read`, and each job that writes asks for exactly what it
   needs (the release jobs: `contents: write`; the build job also

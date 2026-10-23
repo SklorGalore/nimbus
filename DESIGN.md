@@ -16,7 +16,7 @@ and add a line to the decision log (§10).
 |---|---|---|---|
 | Fast startup | First frame in < 500 ms, total time from the top of `main` | `nimbus --smoke` prints `first-frame-ms` | M1: 116–132 ms warm, of which about 3 ms is ours |
 | Typing latency | Keystroke to pixels in < 1 frame (≤ 8 ms at 120 Hz) | Frame timer in debug overlay | — |
-| Huge files | Open a 4 GB log, scroll and search it, under 1 s to interactive | Bench file from `bench/gen.sh` | — |
+| Huge files | Open a 4 GB log, scroll and search it, under 1 s to interactive | Bench file from `bench/gen.ps1` | — |
 | Low footprint | Opening a file adds at most 1.5× its size over an empty window (rope backend); mapped files (M7) add roughly nothing. Syntax highlighting is not counted (§4.2). Total reported, not budgeted. Single binary < 35 MB | `vmmap` physical footprint after settling; CI size job | M2: 45 MB empty, 58 MB with a 10 MB file (1.3×); 7.5 MB binary |
 | Modeless editing | Type to insert; Cmd/Ctrl shortcuts; mouse works | — | — |
 
@@ -517,7 +517,7 @@ pixel offset", so wrapped documents never need a prefix sum over every line.
 - **Runtime**: a debug overlay (`F12`, M8, with a log-only version from M2)
   shows frame time, keystroke-to-present latency, atlas occupancy, buffer
   backend and background task status.
-- **Benchmarks**: `bench/gen.sh` (M2) generates 10 MB, 100 MB, 1 GB and
+- **Benchmarks**: `bench/gen.ps1` (M2) generates 10 MB, 100 MB, 1 GB and
   4 GB files. `criterion` benches cover buffer operations and line layout.
 - **Release profile**: `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`,
   `panic = "abort"`, `strip = true`.

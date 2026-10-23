@@ -125,7 +125,7 @@ is cheaper and bounds memory tighter.
 
 Built on 2026-10-18 in a Linux container with no GPU; the owner then
 checked the drawing and behaviour on their Mac the same day and timed
-the first frame there with `bench/smoke.sh`. CI's `release-size` job
+the first frame there with `bench/smoke.ps1`. CI's `release-size` job
 passed the 35 MB budget on all three systems.
 
 | Metric | Value |

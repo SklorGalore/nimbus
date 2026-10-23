@@ -101,7 +101,7 @@ pub struct Options {
     /// breaks, undo, find and saves are mixed in, and memory is sampled
     /// every 1,000 keystrokes; the run fails if it grows more than
     /// [`app::SOAK_BUDGET_MB`] (M21). It saves into the file, so give it a
-    /// scratch copy (`bench/soak.sh` does).
+    /// scratch copy (`bench/soak.ps1` does).
     pub soak: bool,
     /// Open with the find bar searching for this pattern.
     pub find: Option<String>,

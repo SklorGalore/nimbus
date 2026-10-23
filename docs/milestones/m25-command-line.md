@@ -153,7 +153,7 @@ Linux, Windows and macOS targets.
 3. `git config --global core.editor "nimbus --wait"` and `git commit`,
    once with Nimbus open and once with it closed: the commit waits until
    the message tab is closed, and Nimbus stays open afterwards.
-4. `bench/smoke.sh`: `first-frame-ms` unchanged.
+4. `bench/smoke.ps1`: `first-frame-ms` unchanged.
 
 **Surprises and changes from the plan:**
 

@@ -13,7 +13,7 @@ Ticked items were verified here by tests, headless renders or timed
 headless runs (release build, warm cache, M5 Pro). **Owner** items need a
 person at the keyboard; each says what to try.
 
-- [x] A 4 GB log from `bench/gen.sh` shows its first screen in under 1 s
+- [x] A 4 GB log from `bench/gen.ps1` shows its first screen in under 1 s
       and stays interactive while indexing continues. First screen in
       0.02 s; counting goes on in a worker that the main thread only
       receives chunks from (`crates/app/src/indexer.rs`).
@@ -50,7 +50,7 @@ person at the keyboard; each says what to try.
       moved, with the numbers in Results. Kept at 256 MB.
 - [x] **Owner, confirmed:** `cargo build --release && ./target/release/nimbus --smoke`
       twice (cold, warm), for the standing first-frame record.
-- [x] **Owner, confirmed:** open `log-4gb.log` (run `bench/gen.sh logs`; 5 GB of disk)
+- [x] **Owner, confirmed:** open `log-4gb.log` (run `bench/gen.ps1 logs`; 5 GB of disk)
       in a window. The text shows at once and the status line counts lines.
       While it counts: type, press `Primary+End` (the end shows, numbers as
       `~`), and go to line 60,000,000 (Cmd+L / Ctrl+G); the jump happens
@@ -63,7 +63,7 @@ person at the keyboard; each says what to try.
 - [x] **Owner, Windows, confirmed:** open the 1 GB log, edit, save, then save again
       while a search runs; both saves finish. Close the window during the
       line count and during a save; it closes without freezing.
-- [x] **Owner, confirmed:** open `bench/out/longline-100mb.json` (`bench/gen.sh
+- [x] **Owner, confirmed:** open `bench/out/longline-100mb.json` (`bench/gen.ps1
       longline`) and scroll sideways with the trackpad, and with End and
       Home; nothing stalls.
 
@@ -234,7 +234,7 @@ general-purpose subagent at the effort CLAUDE.md sets for them.
 
 All timed headless at 1400×700, release build, warm cache.
 
-**Rope versus mapped threshold** (`bench/threshold.sh`, task 14):
+**Rope versus mapped threshold** (`bench/threshold.ps1`, task 14):
 
 | Size | Rope | Mapped |
 |---|---|---|

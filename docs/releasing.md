@@ -37,9 +37,9 @@ keep `development`'s own version if it is higher.
 
 ## Packaging scripts and signing setup
 
-The packaging steps are `scripts/bundle-macos.sh`,
-`scripts/dmg-macos.sh`, `scripts/deb-linux.sh`,
-`scripts/appimage-linux.sh`, `packaging/windows/nimbus.iss` and
+The packaging steps are `scripts/bundle-macos.ps1`,
+`scripts/dmg-macos.ps1`, `scripts/deb-linux.ps1`,
+`scripts/appimage-linux.ps1`, `packaging/windows/nimbus.iss` and
 `scripts/manifests.sh`. The app icon is drawn by `scripts/make-icons.py`.
 
 The release key is a minisign key made on the owner's Mac with a

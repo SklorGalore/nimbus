@@ -7,3 +7,7 @@ crates/app/tests/screenshot/sample.rs text eol=lf
 # Signed test fixtures must keep their exact bytes: a checkout that turns
 # LF into CRLF (Windows with core.autocrlf) breaks their signatures.
 crates/app/src/update/testdata/** -text
+
+# PowerShell scripts start through their `#!/usr/bin/env pwsh` line on
+# macOS and Linux, which a CRLF line end would break.
+*.ps1 text eol=lf

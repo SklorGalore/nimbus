@@ -282,7 +282,7 @@ nothing new runs before the first frame except reading
 
 1. Set `version = "1.0.0"` in the root `Cargo.toml` (locally, not
    committed), `cargo build --release`, bundle it with
-   `scripts/bundle-macos.sh target/release/nimbus 1.0.0 /tmp/nb`, and
+   `scripts/bundle-macos.ps1 target/release/nimbus 1.0.0 /tmp/nb`, and
    copy the app to a folder you can write, outside `/Applications` if
    Homebrew owns that one. Open it, run Check for Updates (it finds the
    signed 1.0.1), Install Update, then Restart to Update. 1.0.1 should

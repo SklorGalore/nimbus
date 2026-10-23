@@ -57,7 +57,7 @@ env:
   # `cargo audit bin nimbus` can check a shipped copy for advisories.
   CARGO_AUDITABLE_VERSION: 0.7.7
   # appimagetool by exact version and hash, never "continuous": the file is
-  # run with this job's token in scope. scripts/pin-actions.sh fills in the
+  # run with this job's token in scope. scripts/pin-actions.ps1 fills in the
   # hash for a new version.
   APPIMAGETOOL_VERSION: "1.9.0"
   APPIMAGETOOL_SHA256: "46fdd785094c7f6e545b61afcfb0f3d98d8eab243f644b4b17698c01d06083d1"
@@ -144,8 +144,8 @@ jobs:
             target/aarch64-apple-darwin/release/nimbus \
             target/x86_64-apple-darwin/release/nimbus
           lipo -info dist/nimbus
-          zip=$(scripts/bundle-macos.sh dist/nimbus "$version" dist)
-          dmg=$(scripts/dmg-macos.sh dist/Nimbus.app "$version" dist)
+          zip=$(scripts/bundle-macos.ps1 dist/nimbus "$version" dist)
+          dmg=$(scripts/dmg-macos.ps1 dist/Nimbus.app "$version" dist)
           gh release upload "$GITHUB_REF_NAME" "$zip" "$dmg" --clobber
           mkdir -p attest && cp "$zip" "$dmg" attest/
 
@@ -165,17 +165,17 @@ jobs:
           cp LICENSE "dist/$name/"
           cp crates/render/assets/HackNerdFont-LICENSE.md "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          deb=$(scripts/deb-linux.sh target/release/nimbus "$version" dist)
+          deb=$(scripts/deb-linux.ps1 target/release/nimbus "$version" dist)
           dpkg-deb --info "$deb"
           if [ -z "$APPIMAGETOOL_SHA256" ]; then
-            echo "APPIMAGETOOL_SHA256 is empty: run scripts/pin-actions.sh and commit the result." >&2
+            echo "APPIMAGETOOL_SHA256 is empty: run scripts/pin-actions.ps1 and commit the result." >&2
             exit 1
           fi
           curl -fsSL -o dist/appimagetool \
             "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-x86_64.AppImage"
           echo "$APPIMAGETOOL_SHA256  dist/appimagetool" | sha256sum -c -
           chmod +x dist/appimagetool
-          image=$(scripts/appimage-linux.sh target/release/nimbus "$version" dist dist/appimagetool)
+          image=$(scripts/appimage-linux.ps1 target/release/nimbus "$version" dist dist/appimagetool)
           gh release upload "$GITHUB_REF_NAME" "dist/$name.tar.gz" "$deb" "$image" --clobber
           mkdir -p attest && cp "dist/$name.tar.gz" "$deb" "$image" attest/
 

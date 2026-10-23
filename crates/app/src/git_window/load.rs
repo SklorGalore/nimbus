@@ -364,7 +364,7 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    /// M27's history budget on a big repository (`bench/gen.sh git` makes
+    /// M27's history budget on a big repository (`bench/gen.ps1 git` makes
     /// one with a million commits): the first screen of rows, the whole
     /// load, and bytes a commit. Run with
     /// `NIMBUS_GIT_REPO=$PWD/bench/out/git-1m cargo test --release -p nimbus

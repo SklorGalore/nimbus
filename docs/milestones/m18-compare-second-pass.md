@@ -204,5 +204,5 @@ Surprises and deviations from the plan:
   opens on its own; one only in the right opens against an empty side.
 - Not checked here: rendering. The container has no GPU, so there is no
   headless screenshot of the option buttons, the `⤶` rows or the Compare mode yet.
-  Strict clippy passes for Linux and Windows (`scripts/clippy-cross.sh`);
+  Strict clippy passes for Linux and Windows (`scripts/clippy-cross.ps1`);
   macOS is checked by CI.

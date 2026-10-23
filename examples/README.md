@@ -1,7 +1,7 @@
 # Example files
 
 Small, hand-sized inputs for trying features by eye. The bench files from
-`bench/gen.sh` measure; these show. The user manual's
+`bench/gen.ps1` measure; these show. The user manual's
 [Compare and merge](../docs/manual/compare-and-merge.md) chapter explains
 the views they exercise.
 

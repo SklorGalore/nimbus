@@ -123,7 +123,7 @@ fn first_parse_times() {
 fn simple_highlighting_in_a_100mb_file() {
     use nimbus_syntax::lexical::Lexical;
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/out/src-100mb.rs");
-    let src = std::fs::read_to_string(path).expect("run bench/gen.sh first");
+    let src = std::fs::read_to_string(path).expect("run bench/gen.ps1 first");
     let mut buf = RopeBuffer::from_text(&src);
     drop(src);
     let lex = Lexical::new(nimbus_syntax::lexical::builtin(LanguageId::Rust));
