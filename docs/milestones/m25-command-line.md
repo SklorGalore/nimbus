@@ -1,7 +1,7 @@
 # M25 — Command line
 
-**Status: in progress (2026-10-19).** Built on 2026-10-19; the boxes
-are ticked once the owner has tried it on the Mac (see Results).
+**Status: done (2026-10-23).** Built on 2026-10-19; the owner accepted
+it on 2026-10-23 and the boxes are ticked.
 Written on 2026-10-18 at the owner's
 request: an "Install `nimbus` Command" palette action like VS Code's,
 grouped with the two backlog items it pairs with, opening files in the
@@ -17,7 +17,7 @@ works, without the user editing their `PATH` by hand.
 
 ## Done when
 
-- [ ] **Install the command**: "Install `nimbus` Command in PATH" in the
+- [x] **Install the command**: "Install `nimbus` Command in PATH" in the
       palette puts a `nimbus` command on the user's `PATH`, and
       "Uninstall `nimbus` Command" removes it. On macOS it links
       `/usr/local/bin/nimbus` to the running app's binary, asking for an
@@ -27,18 +27,18 @@ works, without the user editing their `PATH` by hand.
       `PATH`, no password. The message line says what was done, or why
       not (for example, a link there already points somewhere else,
       which is never overwritten without asking).
-- [ ] **Open in the running window**: with Nimbus open, `nimbus a.rs b.rs`
+- [x] **Open in the running window**: with Nimbus open, `nimbus a.rs b.rs`
       adds two tabs to that window and brings it to the front, and the
       second process exits at once. With no Nimbus open, it starts as
       today. There is no `--new-window` flag, since one window stays the
       rule (`DESIGN.md` §2); measurement and test flags (`--headless`,
       `--smoke`, `--screenshot`, `--bench-typing`) always start a
       process of their own.
-- [ ] **`--wait`**: `nimbus --wait FILE` returns only when that file's
+- [x] **`--wait`**: `nimbus --wait FILE` returns only when that file's
       tab is closed (or Nimbus quits), with exit code 0, so git can use
       it as `core.editor`. It works whether the file opens in a new
       Nimbus or in the running one.
-- [ ] Budgets: `--smoke` unchanged (the check for a running Nimbus costs
+- [x] Budgets: `--smoke` unchanged (the check for a running Nimbus costs
       under 5 ms before the window is created); handing files to a
       running Nimbus takes under 100 ms from the command to the new tab;
       no new `unsafe`.
@@ -139,7 +139,8 @@ and `--wait` over the socket, a stale socket after a crash, an open
 uninstalling links in a temporary folder. Strict clippy 1.99 passes for
 Linux, Windows and macOS targets.
 
-**For the owner to check on the Mac:**
+**For the owner to check on the Mac** (accepted on 2026-10-23 without
+these as a gate):
 
 1. Install nimbus Command in PATH from the palette: the password prompt
    appears (unless `/usr/local/bin` is writable), `ls -l
