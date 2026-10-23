@@ -22,6 +22,12 @@ fixed.
 
 ### Added
 
+- `nimbus --help` lists the options in groups, one per line, with
+  examples, fitted to an 80-column terminal and with bold headings where
+  the terminal shows them (plain when piped or with `NO_COLOR` set).
+  The options for testing and measuring moved to `nimbus --help all`. A
+  mistyped option suggests the one you probably meant, and every command
+  line mistake points at `--help`.
 - Seeing the default settings: **Show Default Config** in the palette
   opens every setting with its default value in a read-only
   `default-config.toml` tab. It is made from the built-in defaults, so
