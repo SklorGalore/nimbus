@@ -75,6 +75,7 @@ The `[ui]` keys are:
 | `sticky`, `sticky_shadow` | behind the lines sticky scroll pins at the top of the text, and the shadow under them |
 | `minimap_slider` | the minimap's mark over the lines on screen |
 | `hidden_char` | the box on a bidirectional control or zero-width character |
+| `graph_1` … `graph_6` | the lines of the git window's history graph, one colour per lane in turn |
 
 "Toggle Light/Dark Theme" in the palette switches between the two
 built-in themes for the current session; it does not change your config.

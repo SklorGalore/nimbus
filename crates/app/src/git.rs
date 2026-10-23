@@ -1,7 +1,8 @@
-//! Reading a file as it was at a git revision, for "Compare with HEAD".
+//! Running git: reading a file as it was at a git revision, for "Compare
+//! with HEAD", and everything the git window (M27, `nimbus --git`) shows.
 //!
-//! Nimbus does not understand git (a non-goal in `DESIGN.md` §2); this
-//! module is the one exception, and it keeps git at arm's length by running
+//! The editor itself does not understand git (`DESIGN.md` §2); this module
+//! is the only place that runs it, and it keeps git at arm's length by running
 //! the `git` program as a *subprocess* rather than linking a git library.
 //! That costs nothing in binary size and always agrees with the user's own
 //! git, config and filters included.
@@ -12,6 +13,14 @@
 //! enforces a [`TIMEOUT`] and an output cap ([`MAX_OUTPUT`]) and kills git
 //! when either is exceeded. These calls block for up to [`TIMEOUT`], so the
 //! app runs them on a worker thread, never on the event loop.
+//!
+//! The git window adds three submodules: [`parse`] reads git's
+//! machine-readable output (*plumbing*: `status --porcelain=v2`, `log -z`,
+//! `for-each-ref`, `diff-tree`, `cat-file --batch`), never the text git
+//! prints for people, which changes between versions and languages;
+//! [`Repo`] is one repository and the calls the window makes on it; and
+//! [`Stream`] runs a long call such as `git log` whose output is read as
+//! it arrives instead of waiting, capped, for the end.
 //!
 //! # Untrusted repositories (M26)
 //!
@@ -34,6 +43,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+// Paths spelled out so the fuzz targets, which compile this file with
+// `#[path]`, find the submodules too.
+#[path = "git/parse.rs"]
+pub mod parse;
+#[path = "git/repo.rs"]
+mod repo;
+#[path = "git/stream.rs"]
+mod stream;
+
+pub use parse::{Commit, FileChange, Kind, Ref, RefKind, Status, ago, date};
+pub use repo::{Repo, Stash};
+pub use stream::Stream;
+
+#[cfg(test)]
+pub(crate) use repo::tests::{Dir as TestDir, repo as test_repo};
 
 /// How long one git call may take before it is killed. Reading one blob
 /// takes milliseconds; anything near 10 s means git is stuck waiting on
@@ -308,15 +333,40 @@ fn git() -> Command {
 /// [`GitError::TimedOut`] and [`GitError::TooLarge`] for the two limits,
 /// [`GitError::Failed`] with the first lines of stderr when the command
 /// exits unsuccessfully, and [`GitError::Io`] for other failures.
-fn run(mut cmd: Command, timeout: Duration, cap: usize) -> Result<Vec<u8>, GitError> {
+fn run(cmd: Command, timeout: Duration, cap: usize) -> Result<Vec<u8>, GitError> {
+    run_input(cmd, None, timeout, cap)
+}
+
+/// [`run`] with `input` written to git's standard input (then closed), for
+/// commands that read their requests there, such as `cat-file --batch`.
+/// The input is written on a helper thread: git may answer before it has
+/// read everything, and a full output pipe would otherwise deadlock both.
+fn run_input(
+    mut cmd: Command,
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+    cap: usize,
+) -> Result<Vec<u8>, GitError> {
     let deadline = Instant::now() + timeout;
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| match e.kind() {
         ErrorKind::NotFound => GitError::NotFound,
         _ => GitError::Io(e.to_string()),
     })?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        thread::spawn(move || {
+            use std::io::Write as _;
+            // A failed write means git stopped reading: it exited, and its
+            // status says why.
+            let _ = stdin.write_all(&input);
+        });
+    }
     let over = Arc::new(AtomicBool::new(false));
     let stdout = drain(child.stdout.take(), cap, Some(Arc::clone(&over)));
     let stderr = drain(child.stderr.take(), MAX_STDERR, None);

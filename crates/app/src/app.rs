@@ -1650,6 +1650,7 @@ impl App {
             Command::CompareFile => self.compare_with_file(),
             Command::CompareTab => self.compare_with_tab(),
             Command::CompareHead => self.compare_with_revision("HEAD".to_owned()),
+            Command::OpenGitWindow => self.open_git_window(),
             Command::CompareRevision => {
                 if self.doc().path.is_some() {
                     self.open_picker(Kind::Revision);
@@ -2085,6 +2086,20 @@ impl App {
         }
         self.say(said, false);
         self.changed(false);
+    }
+
+    /// Start the git window (M27) for the workspace's first folder: a
+    /// process of its own, so the editor stays one window.
+    fn open_git_window(&mut self) {
+        let root = self.root.clone();
+        let args = [std::ffi::OsStr::new("--git"), root.as_os_str()];
+        match crate::git_window::start_nimbus(&args) {
+            Ok(()) => self.say(
+                format!("Opening the git window for {}", name_of(&root)),
+                false,
+            ),
+            Err(e) => self.say(format!("Cannot start the git window: {e}"), true),
+        }
     }
 
     /// Compare the active tab's file with `rev` from git, read on a worker

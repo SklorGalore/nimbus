@@ -11,6 +11,9 @@
 #   bench/gen.sh difflogs   the 1 GB log with 164 scattered edits and the
 #                           4 GB log with 100,000 lines appended (M9; makes
 #                           the logs first)
+#   bench/gen.sh git        a repository of 1,000,000 commits with a merge
+#                           every 50 and a tag every 10,000, for the git
+#                           window (M27); GIT_COMMITS=N for another size
 #
 # Output goes to bench/out/, which git ignores. Files are reused if present.
 set -euo pipefail
@@ -96,6 +99,59 @@ grown_copy() {
     echo "wrote $out ($(du -h "$out" | cut -f1))"
 }
 
+# A git repository with a long history, built in one pass by `git
+# fast-import` (a stream of commits on stdin, no working tree involved):
+# a main line with a side branch of three commits forked and merged back
+# every 50 commits, so the graph has curves, and a tag every 10,000. Then
+# the commit-graph file, which lets `git log --date-order` stream at once
+# instead of reading every commit first, as `git gc` would write it.
+git_repo() {
+    local out="out/$1" n=$2
+    [[ -d "$out" ]] && { echo "exists: $out"; return; }
+    git init -q "$out"
+    git -C "$out" symbolic-ref HEAD refs/heads/main
+    LC_ALL=C awk -v n="$n" '
+    function commit(ref, from, merge, msg,   body) {
+        mark++; total++; t += 60
+        printf "commit %s\nmark :%d\n", ref, mark
+        printf "author Author %d <a%d@example.com> %d +0000\n", total % 37, total % 37, t
+        printf "committer Bench <bench@example.com> %d +0000\n", t
+        printf "data %d\n%s\n", length(msg), msg
+        if (from) printf "from :%d\n", from
+        if (merge) printf "merge :%d\n", merge
+        body = "line " total "\n"
+        printf "M 100644 inline src/f%d.txt\ndata %d\n%s\n", total % 100, length(body), body
+    }
+    BEGIN {
+        t = 1500000000; mark = 0; total = 0; main = 0; tags = 0
+        while (total < n) {
+            if (total % 50 == 49 && main > 0 && total < n - 4) {
+                side = main
+                for (k = 0; k < 3; k++) {
+                    commit("refs/heads/side", side, 0, "Side work " total)
+                    side = mark
+                }
+                commit("refs/heads/main", main, side, "Merge branch side at " total)
+            } else {
+                commit("refs/heads/main", main, 0, "Change number " total " of the bench history")
+            }
+            main = mark
+            if (int(total / 10000) > tags) {
+                tags++
+                printf "reset refs/tags/v%d\nfrom :%d\n\n", tags, main
+            }
+        }
+    }' | git -C "$out" fast-import --quiet
+    git -C "$out" reset -q --hard main
+    git -C "$out" commit-graph write --reachable
+    echo "wrote $out ($(git -C "$out" rev-list --count --all) commits, $(du -sh "$out" | cut -f1))"
+}
+
+if [[ "${1:-}" == git ]]; then
+    git_repo git-1m "${GIT_COMMITS:-1000000}"
+    exit 0
+fi
+
 source_like src-10mb.rs $((10 * 1024 * 1024))
 source_like src-100mb.rs $((100 * 1024 * 1024))
 
@@ -123,5 +179,5 @@ case "${1:-}" in
         done
         ;;
     "") ;;
-    *) echo "usage: $0 [logs|longline|sizes|diff|difflogs]" >&2; exit 2 ;;
+    *) echo "usage: $0 [logs|longline|sizes|diff|difflogs|git]" >&2; exit 2 ;;
 esac

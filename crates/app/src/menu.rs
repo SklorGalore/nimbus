@@ -103,6 +103,7 @@ pub const LAYOUT: &[(&str, &[&str])] = &[
             "view.toggleStickyScroll",
             "view.toggleMinimap",
             "view.openPreview",
+            "git.openWindow",
             "-",
             "view.zoomIn",
             "view.zoomOut",

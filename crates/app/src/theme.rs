@@ -141,6 +141,19 @@ ui_colors! {
     /// The box marking a character that would otherwise be invisible: a
     /// bidirectional control or a zero-width character (M26).
     hidden_char,
+    /// The git window's history graph (M27): lane colours, used in turn
+    /// from the leftmost lane.
+    graph_1,
+    /// The second lane colour.
+    graph_2,
+    /// The third lane colour.
+    graph_3,
+    /// The fourth lane colour.
+    graph_4,
+    /// The fifth lane colour.
+    graph_5,
+    /// The sixth lane colour.
+    graph_6,
 }
 
 /// A loaded theme.
