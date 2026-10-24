@@ -1,6 +1,6 @@
 [package]
 name = "nimbus-syntax"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license.workspace = true
 
@@ -17,6 +17,7 @@ tree-sitter-html = { version = "0.23.2", optional = true }
 tree-sitter-javascript = { version = "0.25.0", optional = true }
 tree-sitter-json = { version = "0.24.8", optional = true }
 tree-sitter-md = { version = "0.5.3", optional = true }
+tree-sitter-powershell = { version = "0.26.4", optional = true }
 tree-sitter-python = { version = "0.25.0", optional = true }
 tree-sitter-rust = { version = "0.24.2", optional = true }
 tree-sitter-toml-ng = { version = "0.7.0", optional = true }
@@ -28,7 +29,7 @@ tree-sitter-yaml = { version = "0.7.2", optional = true }
 # be left out (DESIGN.md §4.2). JavaScript is needed by TypeScript's query.
 default = [
     "rust", "markdown", "json", "toml", "yaml", "python", "javascript", "typescript", "bash",
-    "c", "go", "html", "css", "tsx",
+    "c", "go", "html", "css", "tsx", "powershell",
 ]
 rust = ["dep:tree-sitter-rust"]
 markdown = ["dep:tree-sitter-md"]
@@ -46,6 +47,8 @@ html = ["dep:tree-sitter-html"]
 css = ["dep:tree-sitter-css"]
 # TSX is a second parser in the TypeScript crate.
 tsx = ["typescript"]
+# Added after 1.3.1 for the project's own .ps1 scripts (and Windows users').
+powershell = ["dep:tree-sitter-powershell"]
 tree-sitter-c = ["dep:tree-sitter-c"]
 tree-sitter-go = ["dep:tree-sitter-go"]
 tree-sitter-html = ["dep:tree-sitter-html"]

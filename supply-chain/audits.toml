@@ -13,6 +13,12 @@ criteria = "safe-to-deploy"
 version = "0.3.2"
 notes = "Read all of src/ (777 lines). No build script, proc macro or dependencies on our targets. FFI only to read the user's preferred languages: CFLocaleCopyPreferredLanguages on Apple (array released on drop), GetUserPreferredUILanguages on Windows (two-call buffer sizing), LANG/LC_* environment variables on other Unix. No file, network or process access."
 
+[[audits.tree-sitter-powershell]]
+who = "Claude Code, reviewing for Skylar (SklorGalore)"
+criteria = "safe-to-deploy"
+version = "0.26.4"
+notes = "Same shape as the other tree-sitter grammar crates. bindings/rust/lib.rs: one extern declaration and LanguageFn::from_raw, plus include_str! of the bundled query and node types. build.rs compiles src/parser.c and src/scanner.c with cc and reads only TARGET (and two wasm header variables on wasm32). parser.c is generated parse tables that include only tree_sitter/parser.h; scanner.c (Microsoft, MIT) is a 70-line lookahead for statement terminators with no allocation and empty serialize/deserialize. No file, network or process access; dependencies tree-sitter-language and cc are already in the tree."
+
 [[audits.webpki-roots]]
 who = "Claude Code (cloud session for SklorGalore)"
 criteria = "safe-to-deploy"

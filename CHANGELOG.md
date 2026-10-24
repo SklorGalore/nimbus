@@ -6,6 +6,13 @@ section before tagging.
 
 ## Unreleased
 
+### Added
+
+- PowerShell highlighting for `.ps1`, `.psm1` and `.psd1` files and
+  scripts starting `#!/usr/bin/env pwsh`, with folding, Go to Symbol
+  (functions, classes, methods, enums) and `powershell` fenced code
+  blocks in Markdown.
+
 ### Changed
 
 - `scripts/publish-packages.ps1` replaces `scripts/publish-packages.sh`:
