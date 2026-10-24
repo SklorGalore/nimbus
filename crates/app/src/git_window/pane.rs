@@ -31,6 +31,7 @@ use crate::languages::Languages;
 use crate::theme::Ui;
 use crate::view::{Layout, View};
 
+pub mod access;
 pub mod draw;
 
 /// Pixel count as `f32`.
@@ -416,7 +417,8 @@ impl GitWindow {
             }
             GitEvent::Syntax(result) => self.parsed(result),
             GitEvent::Disk => self.refresh(),
-            GitEvent::FontLoaded | GitEvent::Say(..) | GitEvent::Fonts(_) => {}
+            GitEvent::FontLoaded | GitEvent::Say(..) | GitEvent::Fonts(_) | GitEvent::Access(_) => {
+            }
         }
         true
     }
@@ -1025,7 +1027,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    fn window(dir: &Path) -> (GitWindow, mpsc::Receiver<GitEvent>) {
+    pub(super) fn window(dir: &Path) -> (GitWindow, mpsc::Receiver<GitEvent>) {
         let (tx, rx) = mpsc::channel::<GitEvent>();
         let tx = std::sync::Mutex::new(tx);
         let send: Send = Arc::new(move |e| tx.lock().is_ok_and(|t| t.send(e).is_ok()));

@@ -217,7 +217,9 @@ What differs from the plan, and surprises:
   lane, as the plan's risk table suggested.
 - **Not yet for screen readers.** The git window does not build an
   AccessKit tree; M22's description covers the editor only. Left for a
-  later milestone.
+  later milestone. (Since done, from the backlog: the window has its own
+  tree, `access/git.rs` and `git_window/pane/access.rs`; see the
+  manual's accessibility chapter.)
 
 To check on the Mac (the owner accepted the milestone on 2026-10-23
 without these as a gate):

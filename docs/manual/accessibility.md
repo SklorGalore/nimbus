@@ -23,6 +23,21 @@ builds its description only once a screen reader asks for it.
 | The Search panel | Labelled query, replacement, include and exclude fields; the result count is spoken when it changes. |
 | The status bar | A status region. It is read when you ask for it, not on every cursor move. |
 | The message line | A polite live region: messages such as "Saved" or "Reloaded from disk" are spoken without moving focus. |
+| The menu bar (Windows) | A menu bar. Each title says whether its menu is open; pressing one opens it. |
+| An open menu: a drop-down from the menu bar, or a right-click menu | A menu. Each item says its name, its shortcut and its place ("2 of 9"); the highlighted item is spoken as you arrow through. The lines between groups are not read. |
+| A question such as "Save changes before closing?" | An alert dialog: its heading and question are read when it opens, and the button that has the keyboard is spoken as you move between them. The default button (the one Enter presses) says so. |
+
+The git window (`nimbus --git`, see [Git](git.md)) has a description
+of its own:
+
+| Part of the git window | What it is described as |
+|---|---|
+| The header | The repository, its branch and how far it is ahead of or behind its upstream, and the number of commits. |
+| The sidebar | A tree: Changes with its count, then Branches, Remotes, Tags and Stashes, each opening and closing. The current branch says so. |
+| The history | A list. Each commit says its subject, its branches and tags, whether it is HEAD or a merge, its author and how long ago. In a long history, the 200 commits either side of the selected one are described. |
+| The details | The commit's message, author, dates and parents as lines of text; for a merge, its parents as a choice of what to compare with; then the changed files as a list, each with how it changed ("Modified", "Renamed b.txt → c.txt") and, in Changes, whether it is staged. |
+| The compare options | Buttons: Open in Editor, Unified, Ignore blank lines and Ignore case say whether they are on; the spaces button says which of its three settings is chosen. |
+| The compare | The new side of the selected file as read-only text, with the compare's status ("change 2 of 5"). Next and Previous Change move its caret to the change. The old side and the changes' colours are not described. |
 
 Not described yet: the Search panel's list of results, the sidebar's
 Compare panel, the rows of the compare and merge views (each side reads

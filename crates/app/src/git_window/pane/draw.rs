@@ -41,7 +41,7 @@ pub enum Outcome {
 }
 
 impl GitWindow {
-    fn geo(&self, gpu: &Gpu, scale: f32) -> Geo {
+    pub(super) fn geo(&self, gpu: &Gpu, scale: f32) -> Geo {
         let (w, h) = gpu.size();
         let (w, h) = (f(w as usize), f(h as usize));
         let m = gpu.metrics();
@@ -1038,7 +1038,7 @@ impl GitWindow {
 
     /// The sidebar line that is selected: Changes, or the first ref at
     /// the selected commit.
-    fn side_selected(&self) -> Option<usize> {
+    pub(super) fn side_selected(&self) -> Option<usize> {
         self.side_items.iter().position(|item| match item {
             SideItem::Changes => self.selected == Selected::Changes,
             SideItem::Ref(r) => self
@@ -1055,7 +1055,7 @@ impl GitWindow {
 
     /// Scroll the details so file `i` is on screen, by the last frame's
     /// line height and pane height.
-    fn reveal_file(&mut self, i: usize) {
+    pub(super) fn reveal_file(&mut self, i: usize) {
         let Some(n) = self.info.iter().position(|l| *l == InfoLine::File(i)) else {
             return;
         };

@@ -6,6 +6,23 @@ section before tagging.
 
 ## Unreleased
 
+### Added
+
+- Screen readers can read and use the menus Nimbus draws: the Windows
+  menu bar, its drop-downs and right-click menus are read as menus with
+  their items and shortcuts, and in-app questions such as "Save changes
+  before closing?" as alert dialogs with their buttons.
+- Screen readers can read the git window (`nimbus --git`): the sidebar
+  as a tree, the history as a list of commits, the details and changed
+  files, the compare options as buttons, and the new side of the
+  selected file's diff as text.
+
+### Fixed
+
+- What a screen reader is told about where things are on screen no
+  longer ignores the drawn title bar (macOS) or menu bar (Windows), so
+  its highlight sits on what it reads.
+
 ### Changed
 
 - `scripts/publish-packages.ps1` replaces `scripts/publish-packages.sh`:
