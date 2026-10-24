@@ -433,8 +433,8 @@ milestone lands on development, move its line up to "Available now". -->
   reviewed dependencies
 - A git window (`nimbus --git`): your changes, history and branches,
   staging, commits and merges, built on Nimbus's compare and merge views
-  (viewing is in development: changes, history with a branch graph and
-  any commit's differences)
+  (viewing is done: changes, history with a branch graph and any
+  commit's differences)
 - Updates from inside Nimbus: install a newer release in one step,
   checked against the release signature first
 

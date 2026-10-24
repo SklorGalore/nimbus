@@ -1,6 +1,8 @@
 # M27 — Git window: viewing
 
-**Status: built (2026-10-19); in progress until checked on a Mac with a GPU (see Results).** Planned 2026-10-18. The first of four plans (M27–M30) for a
+**Status: done (2026-10-23).** Built on 2026-10-19; the owner accepted
+it on 2026-10-23, in place of the remaining checks on the Mac listed in
+Results. Planned 2026-10-18. The first of four plans (M27–M30) for a
 git client built from Nimbus's own parts, written at the owner's request
 after a feasibility study
 showed that the hard half (diff, merge, text) already exists.
@@ -51,7 +53,7 @@ files and diffs, fast on very large repositories.
 - [x] **Live**: committing, checking out or editing files from a
       terminal or the editor updates the window within a second, by
       watching `.git` and the working tree.
-- [ ] **Budgets**: first frame under 500 ms in release (git is never
+- [x] **Budgets**: first frame under 500 ms in release (git is never
       run before the first frame); on a generated repository of 1
       million commits (`bench/gen.ps1 git`), the first screen of history
       shows within 1 s and scrolling the whole history never drops a
@@ -217,7 +219,8 @@ What differs from the plan, and surprises:
   AccessKit tree; M22's description covers the editor only. Left for a
   later milestone.
 
-To check on the Mac:
+To check on the Mac (the owner accepted the milestone on 2026-10-23
+without these as a gate):
 
 - The graph's curves and dots on the GPU look like the compatibility
   mode screenshots (`nimbus --git` in this repository), at 1x and 2x.
