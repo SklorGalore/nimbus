@@ -1977,6 +1977,10 @@ impl Painter<'_, '_> {
     /// The gutter of a line's first row: its number, or `⤶` on a piece
     /// that continues a cut line.
     fn line_gutter(&mut self, line: &LineDraw, top: f32) {
+        // No gutter at all: the git window's message box (M28).
+        if self.layout.gutter_cols == 0 {
+            return;
+        }
         if line.continued {
             self.continuation(top);
         } else {
@@ -1999,6 +2003,9 @@ impl Painter<'_, '_> {
     /// The line number, right-aligned in the gutter, on a line's first row;
     /// `~` where it is not known yet (a mapped file still indexing).
     fn gutter(&mut self, line: Option<usize>, current: bool, top: f32) {
+        if self.layout.gutter_cols == 0 {
+            return;
+        }
         let cell = self.layout.metrics.cell_width;
         self.number.clear();
         match line {

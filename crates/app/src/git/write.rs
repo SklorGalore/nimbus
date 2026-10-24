@@ -332,10 +332,15 @@ fn run_cancellable(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::single_range_in_vec_init,
+    reason = "a pick of one range of lines is a Vec of one range"
+)]
 mod tests {
     use super::super::patch::{self, Apply, Pick};
     use super::super::repo::tests::{Dir, repo};
     use super::*;
+    use std::fmt::Write as _;
 
     fn g(dir: &std::path::Path, args: &[&str]) -> String {
         let mut cmd = super::super::git();
@@ -353,7 +358,10 @@ mod tests {
         let p = dir.0.as_path();
         g(p, &["reset", "-q", "--hard"]);
         let _ = std::fs::remove_file(p.join("new.txt"));
-        let text: String = (1..=10).map(|n| format!("line {n}\n")).collect();
+        let text: String = (1..=10).fold(String::new(), |mut t, n| {
+            let _ = writeln!(t, "line {n}");
+            t
+        });
         dir.write("ten.txt", &text);
         g(p, &["add", "ten.txt"]);
         g(p, &["commit", "-q", "-m", "ten"]);
@@ -589,7 +597,6 @@ mod tests {
         let Some((dir, r)) = ten("git-write-commit") else {
             return;
         };
-        let p = dir.0.as_path();
         let cancel = Arc::new(AtomicBool::new(false));
         dir.write("ten.txt", "committed\n");
         r.stage(&["ten.txt"]).unwrap();
@@ -605,7 +612,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let hook = p.join(".git/hooks/pre-commit");
+            let hook = dir.0.join(".git/hooks/pre-commit");
             std::fs::write(&hook, "#!/bin/sh\necho 'lint: 3 problems' >&2\nexit 1\n").unwrap();
             std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
             dir.write("ten.txt", "again\n");

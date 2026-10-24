@@ -53,7 +53,12 @@ pub struct Pick {
 
 impl Pick {
     /// Every line of both texts: the whole change.
+    #[cfg(test)]
     #[must_use]
+    #[expect(
+        clippy::single_range_in_vec_init,
+        reason = "one range of lines, the whole file"
+    )]
     pub fn all() -> Self {
         Self {
             old: vec![0..usize::MAX],
@@ -212,9 +217,9 @@ pub fn build(
         }
     }
     let _ = writeln!(out, "+++ {}", prefixed("b/", path));
-    let mut patch = out.into_bytes();
-    patch.extend_from_slice(&body);
-    Ok(patch)
+    let mut bytes = out.into_bytes();
+    bytes.extend_from_slice(&body);
+    Ok(bytes)
 }
 
 /// Write one hunk: `ops` cover `count` lines of the target from line
@@ -301,6 +306,10 @@ fn quote(path: &str) -> String {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::single_range_in_vec_init,
+    reason = "a pick of one range of lines is a Vec of one range"
+)]
 mod tests {
     use super::*;
 
@@ -333,7 +342,7 @@ mod tests {
                     break;
                 }
                 let row = rows.next().unwrap();
-                let mut line = row[1..].as_bytes().to_vec();
+                let mut line = row.as_bytes()[1..].to_vec();
                 if rows.peek().is_some_and(|r| r.starts_with('\\')) {
                     rows.next();
                     line.pop();
