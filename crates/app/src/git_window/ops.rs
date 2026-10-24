@@ -417,6 +417,17 @@ mod tests {
             cached: true,
             create: None,
         };
+        // The parts, then the whole.
+        let t = std::time::Instant::now();
+        let clean = repo.clean("big.rs", op.new.to_vec()).unwrap();
+        let t_clean = t.elapsed();
+        let t = std::time::Instant::now();
+        let bytes = patch::build("big.rs", (&op.old, &clean), &op.pick, op.apply, None).unwrap();
+        let t_build = t.elapsed();
+        eprintln!(
+            "clean form {t_clean:?}, diff and patch {t_build:?} ({} bytes)",
+            bytes.len()
+        );
         let started = std::time::Instant::now();
         perform(&repo, Op::Patch(Box::new(op))).unwrap();
         let took = started.elapsed();

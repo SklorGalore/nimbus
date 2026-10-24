@@ -574,8 +574,11 @@ mod tests {
         };
         let p = dir.0.as_path();
         dir.write("ten.txt", "changed\n");
-        dir.write("odd *name.txt", "x\n");
-        r.stage(&["ten.txt", "odd *name.txt"]).unwrap();
+        // A name that is also a pattern (legal on Windows too): only it
+        // is staged, not the file the pattern would match.
+        dir.write("odd [n]ame.txt", "x\n");
+        dir.write("odd name.txt", "y\n");
+        r.stage(&["ten.txt", "odd [n]ame.txt"]).unwrap();
         let s = r.status().unwrap();
         assert_eq!(s.entries.iter().filter(|e| e.is_staged()).count(), 2);
         r.unstage(&["ten.txt"], true).unwrap();
