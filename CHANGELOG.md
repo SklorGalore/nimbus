@@ -13,6 +13,9 @@ section before tagging.
   Chocolatey package, with the hashes taken from the signed `SHA256SUMS`.
 - Windows installs come from Chocolatey (`choco install nimbus`) instead
   of winget; the README and manual say so.
+- The Chocolatey package's source link points at the release's tagged
+  code (`tree/vX.Y.Z`) instead of repeating the project page, as the
+  Chocolatey validator suggests.
 
 ## 1.3.1
 

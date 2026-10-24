@@ -17,7 +17,7 @@
     <authors>SklorGalore</authors>
     <owners>SklorGalore</owners>
     <projectUrl>https://github.com/SklorGalore/nimbus</projectUrl>
-    <projectSourceUrl>https://github.com/SklorGalore/nimbus</projectSourceUrl>
+    <projectSourceUrl>https://github.com/SklorGalore/nimbus/tree/v@VERSION@</projectSourceUrl>
     <packageSourceUrl>https://github.com/SklorGalore/nimbus/tree/main/packaging/chocolatey</packageSourceUrl>
     <docsUrl>https://github.com/SklorGalore/nimbus/blob/main/docs/manual/README.md</docsUrl>
     <bugTrackerUrl>https://github.com/SklorGalore/nimbus/issues</bugTrackerUrl>
