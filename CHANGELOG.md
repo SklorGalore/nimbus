@@ -4,7 +4,22 @@ One section per release, newest first. The release workflow puts the
 tagged version's section into the GitHub release notes, so write the
 section before tagging.
 
-## Unreleased
+## 1.4.0
+
+### Added
+
+- Staging and committing in the git window (M28). Under **Changes**,
+  each file has Stage, Unstage and Discard buttons, the lists have Stage
+  All and Unstage All, and the bar above the compare stages, unstages
+  or discards one change (**Stage Hunk**) or only the rows you pick in
+  the compare (**Stage Lines**). Discarding asks first and **Undo
+  Discard** puts the text back while the window is open; a discarded
+  new file goes to the trash. A message box under the lists edits like
+  Nimbus (undo, several cursors, a ruler at 72 columns) and keeps a
+  draft per repository; **Commit** (`Cmd+Enter` / `Ctrl+Enter`) runs
+  `git commit` with your hooks and signing, shows a refusing hook's
+  output, and can be stopped; **Amend last commit** loads the last
+  message. The git window has its own command palette.
 
 ### Changed
 

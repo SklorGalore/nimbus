@@ -362,4 +362,67 @@ mod tests {
             b"staged\nmore\n"
         );
     }
+
+    /// Staging one hunk of a 10 MB file, start to finish on the worker:
+    /// cleaning the working-tree text, the diff, the patch and `git
+    /// apply`. The M28 budget is the lists updating within 100 ms after
+    /// git returns; this times the whole operation, git included.
+    #[test]
+    #[ignore = "benchmark: writes a 10 MB file"]
+    fn staging_bench() {
+        use std::fmt::Write as _;
+        let Some(dir) = test_repo("git-ops-bench") else {
+            return;
+        };
+        let mut text = String::new();
+        let mut n = 0;
+        while text.len() < 10 << 20 {
+            let _ = writeln!(text, "fn line_{n}() {{ let x = {n}; }}");
+            n += 1;
+        }
+        dir.write("big.rs", &text);
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir.0)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git(&["add", "big.rs"]);
+        git(&["commit", "-q", "-m", "big"]);
+        let edited = text.replacen("let x = 100;", "let x = 101;", 1).replacen(
+            "let x = 90000;",
+            "let x = 90001;",
+            1,
+        );
+        dir.write("big.rs", &edited);
+        let repo = Repo::open(&dir.0).unwrap();
+        let old = Arc::new(text.into_bytes());
+        let new = Arc::new(edited.into_bytes());
+        let first = patch::hunks(&old, &new);
+        assert_eq!(first.len(), 2);
+        let h = &first[0];
+        let pick = Pick {
+            old: vec![h.old.clone()],
+            new: vec![h.new.clone()],
+        };
+        let op = PatchOp {
+            path: "big.rs".into(),
+            old,
+            new,
+            new_is_disk: true,
+            pick,
+            apply: Apply::Forward,
+            cached: true,
+            create: None,
+        };
+        let started = std::time::Instant::now();
+        perform(&repo, Op::Patch(Box::new(op))).unwrap();
+        let took = started.elapsed();
+        eprintln!("staged one hunk of a 10 MB file in {took:?}");
+        let diff = git(&["diff", "--cached", "--numstat"]);
+        assert_eq!(String::from_utf8_lossy(&diff.stdout).trim(), "1\t1\tbig.rs");
+        assert!(took.as_millis() < 2000, "{took:?}");
+    }
 }

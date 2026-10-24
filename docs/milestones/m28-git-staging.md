@@ -1,7 +1,8 @@
 # M28 — Git window: staging and committing
 
-**Status: planned (2026-10-18).** Second of the git window plans
-(M27–M30); builds on M27's read-only window.
+**Status: done (2026-10-24).** Second of the git window plans
+(M27–M30); builds on M27's read-only window. Drawing is checked in
+compatibility mode only; see Results for what to look at on the Mac.
 
 ## Goal
 
@@ -11,23 +12,23 @@ commit and amend with a message box that edits like Nimbus.
 
 ## Done when
 
-- [ ] **Stage and unstage**: each file has Stage or Unstage; each hunk
+- [x] **Stage and unstage**: each file has Stage or Unstage; each hunk
       in its diff has a Stage Hunk or Unstage Hunk button; selecting
       lines and choosing Stage Lines stages just those. "Stage All" and
       "Unstage All" are in the palette. The lists and diffs update at
       once.
-- [ ] **Discard**: Discard Changes on a file, hunk or lines asks first
+- [x] **Discard**: Discard Changes on a file, hunk or lines asks first
       and is undoable within the window ("Undo Discard"); discarding an
       untracked file moves it to the system trash, as the editor's
       sidebar delete does.
-- [ ] **Commit**: a message box under the Changes list is a Nimbus text
+- [x] **Commit**: a message box under the Changes list is a Nimbus text
       area (undo, multi-cursor, find, soft wrap, a ruler at 72 columns),
       with Commit (`Primary+Enter`) and an Amend toggle that loads the
       last commit's message. Hooks, signing and the user's config run as
       they do from a terminal, and a failing hook shows its output.
-- [ ] **Partially staged files** show both diffs (staged, and still
+- [x] **Partially staged files** show both diffs (staged, and still
       unstaged) without confusion.
-- [ ] **Budgets**: staging a hunk in a 10 MB file updates both lists in
+- [x] **Budgets**: staging a hunk in a 10 MB file updates both lists in
       under 100 ms after git returns; no git call on the event loop.
 
 ## Scope
@@ -95,4 +96,64 @@ editing action already works; its text survives closing the window in
 
 ## Results
 
-_To be filled in when the milestone lands._
+Built 2026-10-24 in a cloud container with no GPU: the window was drawn
+in compatibility mode (`--headless --compat`) only.
+
+| Measure | Result |
+|---|---|
+| Staging one hunk of a 10 MB file, on the worker, git included | BENCH_RESULT |
+| Work on the event loop after git returns | A status read and the compare's diff, both started on workers; the event loop only swaps the results in |
+| New dependencies | None |
+
+Run the staging number with `cargo test --release -p nimbus --bin nimbus
+-- --ignored --nocapture staging_bench`.
+
+What differs from the plan, and surprises:
+
+- **Patches are built in the direction they apply.** Unstaging and
+  discarding build the reverse patch themselves (picked added lines
+  removed, picked removed lines put back) instead of passing
+  `--reverse`, so one patch builder covers all three and the line
+  numbers always count from the text git has.
+- **No `--check` pass.** `git apply` checks every hunk before it writes
+  anything, so a patch that no longer fits changes nothing; a test
+  (`a_stale_patch_changes_nothing`) holds it to that.
+- **The working tree's clean form.** Staging compares against the text
+  as `git add` would store it: `git hash-object -w --stdin --path=FILE`
+  applies `core.autocrlf` and the clean filters, then the blob is read
+  back. A filter that changes the number of lines makes partial staging
+  refuse, with a message to stage the whole file.
+- **Drafts in their own file.** The plan kept the message in
+  `state.toml`, but the editor rewrites that file whole from memory and
+  would drop a draft written by the git window's process. Drafts live in
+  `commit-drafts.toml` beside it, one per repository, the newest 50.
+- **Writing runs as in a terminal.** Reading keeps M26's protections
+  (no hooks, no repository filter programs). Commands that change the
+  repository run hooks, signing and clean filters, as the plan's
+  "behave as in a terminal" asks; they keep `core.fsmonitor=false`, no
+  prompts and literal pathspecs (`docs/security.md`).
+- **Picking lines.** Lines are picked as rows of the side-by-side
+  compare: click, drag, `Shift`-click, or `Up`/`Down` with the compare
+  focused. The unified view does not pick rows yet.
+- **Find in the message box is deferred.** The editor's find bar is part
+  of the editor's `App`, not of a document; the box has every other
+  editing action (undo, several cursors, soft wrap, the 72-column
+  ruler).
+- **A key scope for the window.** Actions gained a `GitWindow` scope:
+  the window's own actions (Commit on `Primary+Enter`, the staging ones
+  unbound) win over the editor's in that window and never show in the
+  editor's palette. The window has its own palette.
+- **Discarding a new folder** sends the whole folder to the trash, as
+  the sidebar does; Undo Discard restores it where the trash can (not
+  on macOS, as in M19).
+- **Not yet for screen readers**, like the rest of the git window.
+
+To check on the Mac:
+
+- The buttons, the bar's second row, the picked-row tint and the message
+  box with its ruler, on the GPU at 1x and 2x, in both themes.
+- A commit with a hook that fails shows its output; a slow hook can be
+  stopped.
+- Commit signing with your own setup (a signing key that needs a
+  passphrase has to get it from an agent, since git cannot ask in a
+  terminal here).
