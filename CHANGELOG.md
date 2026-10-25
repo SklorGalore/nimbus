@@ -21,8 +21,6 @@ section before tagging.
   output, and can be stopped; **Amend last commit** loads the last
   message. The git window has its own command palette.
 
-### Added
-
 - PowerShell highlighting for `.ps1`, `.psm1` and `.psd1` files and
   scripts starting `#!/usr/bin/env pwsh`, with folding, Go to Symbol
   (functions, classes, methods, enums) and `powershell` fenced code
