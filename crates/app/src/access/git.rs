@@ -17,7 +17,7 @@
 
 use accesskit::{Action, Live, Node, NodeId, Role, Toggled};
 
-use super::{Bounds, Field, Runs, field_node, rect};
+use super::{Bounds, Field, Picker, Runs, field_node, picker_nodes, rect};
 
 /// Node ids of the git window's tree.
 pub mod id {
@@ -27,47 +27,62 @@ pub mod id {
     /// [`super::super::update`] serves both).
     pub const WINDOW: NodeId = super::super::id::WINDOW;
     /// The header: the repository, its branch, the commit count.
-    pub const HEADER: NodeId = NodeId(2);
+    pub const HEADER: NodeId = NodeId(32);
     /// "Opening the repository…", or why there is none.
-    pub const NOTE: NodeId = NodeId(3);
+    pub const NOTE: NodeId = NodeId(33);
     /// The sidebar's tree.
-    pub const SIDEBAR: NodeId = NodeId(4);
+    pub const SIDEBAR: NodeId = NodeId(34);
     /// The history's list.
-    pub const HISTORY: NodeId = NodeId(5);
+    pub const HISTORY: NodeId = NodeId(35);
     /// The details pane.
-    pub const DETAILS: NodeId = NodeId(6);
+    pub const DETAILS: NodeId = NodeId(36);
     /// The details' list of files.
-    pub const FILES: NodeId = NodeId(7);
+    pub const FILES: NodeId = NodeId(37);
     /// The compare options' toolbar.
-    pub const OPTIONS: NodeId = NodeId(8);
+    pub const OPTIONS: NodeId = NodeId(38);
     /// "Open in Editor".
-    pub const OPEN_IN_EDITOR: NodeId = NodeId(9);
+    pub const OPEN_IN_EDITOR: NodeId = NodeId(39);
     /// The "Spaces" option.
-    pub const WHITESPACE: NodeId = NodeId(10);
+    pub const WHITESPACE: NodeId = NodeId(40);
     /// The "Case" option.
-    pub const CASE: NodeId = NodeId(11);
+    pub const CASE: NodeId = NodeId(41);
     /// The "Blank lines" option.
-    pub const BLANK_LINES: NodeId = NodeId(12);
+    pub const BLANK_LINES: NodeId = NodeId(42);
     /// The "Unified" option.
-    pub const UNIFIED: NodeId = NodeId(13);
+    pub const UNIFIED: NodeId = NodeId(43);
     /// The compare: its new side as text.
-    pub const COMPARE: NodeId = NodeId(14);
+    pub const COMPARE: NodeId = NodeId(44);
     /// The status bar.
-    pub const STATUS: NodeId = NodeId(15);
+    pub const STATUS: NodeId = NodeId(45);
     /// The status bar's message ("Copied …").
-    pub const MESSAGE: NodeId = NodeId(16);
+    pub const MESSAGE: NodeId = NodeId(46);
     /// "Compare with" and a merge's parents.
-    pub const PARENTS: NodeId = NodeId(17);
+    pub const PARENTS: NodeId = NodeId(47);
+    /// The commit message box (M28).
+    pub const MESSAGE_BOX: NodeId = NodeId(48);
+    /// The staging and commit buttons (M28).
+    pub const STAGING: NodeId = NodeId(49);
+    /// The palette: the editor's ids, as the editor's description is used.
+    pub const PICKER: NodeId = super::super::id::PICKER;
+    /// The palette's query field.
+    pub const PICKER_FIELD: NodeId = super::super::id::PICKER_FIELD;
 
     /// The compare's text field, for [`super::super::id::run`].
     pub const COMPARE_FIELD: u8 = 0;
+    /// The commit message box's text field.
+    pub const MESSAGE_FIELD: u8 = 1;
+    /// The palette's query field.
+    pub const PICKER_TEXT: u8 = 2;
 
     const KIND_SHIFT: u32 = 56;
     const SIDE: u64 = 1;
     const ROW: u64 = 2;
-    const FILE: u64 = 3;
+    /// The palette's options: the editor's kind for them.
+    const OPTION: u64 = 3;
     const PARENT: u64 = 4;
     const LINE: u64 = 5;
+    const FILE: u64 = 7;
+    const BUTTON: u64 = 8;
     /// Runs: the kinds `super::super::id::run` gives.
     const RUN: u64 = 16;
     const LOW: u64 = (1 << KIND_SHIFT) - 1;
@@ -100,6 +115,12 @@ pub mod id {
         make(PARENT, n)
     }
 
+    /// Staging button `n`, in the order the frame drew them.
+    #[must_use]
+    pub fn button(n: usize) -> NodeId {
+        make(BUTTON, n)
+    }
+
     /// Line `n` of the details.
     #[must_use]
     pub fn line(n: usize) -> NodeId {
@@ -119,8 +140,13 @@ pub mod id {
         File(usize),
         /// A merge's parent.
         Parent(usize),
-        /// A run of the compare's text.
-        Run,
+        /// A staging button.
+        Button(usize),
+        /// A palette match.
+        Option(usize),
+        /// A run of a text field (see the `*_FIELD` and `PICKER_TEXT`
+        /// numbers).
+        Run(u8),
         /// Nothing that acts (a details line).
         Other,
     }
@@ -135,7 +161,9 @@ pub mod id {
             ROW => Target::Row(n),
             FILE => Target::File(n),
             PARENT => Target::Parent(n),
-            k if k >= RUN => Target::Run,
+            BUTTON => Target::Button(n),
+            OPTION => Target::Option(n),
+            k if k >= RUN => Target::Run(u8::try_from(k - RUN).unwrap_or(u8::MAX)),
             _ => Target::Other,
         }
     }
@@ -232,6 +260,12 @@ pub struct GitScene {
     pub files: (Vec<Item>, String),
     /// Open in Editor and the compare options.
     pub buttons: Vec<Button>,
+    /// The staging and commit buttons the frame drew (M28).
+    pub staging: Vec<Button>,
+    /// The commit message box, when Changes is shown.
+    pub message_box: Option<Field>,
+    /// The palette, when open.
+    pub picker: Option<Picker>,
     /// The compare, and where it is.
     pub compare: (Option<Compare>, Option<Bounds>),
     /// The status bar's message.
@@ -267,12 +301,27 @@ pub fn build(scene: &GitScene, runs: Runs<'_>) -> Vec<(NodeId, Node)> {
         history_nodes(&scene.history.0, scene.history.1, &mut out);
         window.push_child(id::DETAILS);
         details_nodes(scene, &mut out);
+        if let Some(field) = &scene.message_box {
+            window.push_child(id::MESSAGE_BOX);
+            let mut node = field_node(Role::MultilineTextInput, field, runs(id::MESSAGE_BOX));
+            node.add_action(Action::ReplaceSelectedText);
+            out.push((id::MESSAGE_BOX, node));
+        }
+        if !scene.staging.is_empty() {
+            window.push_child(id::STAGING);
+            toolbar(id::STAGING, "Staging", &scene.staging, &mut out);
+        }
         window.push_child(id::OPTIONS);
-        option_nodes(&scene.buttons, &mut out);
+        toolbar(id::OPTIONS, "Compare options", &scene.buttons, &mut out);
         if let Some(compare) = &scene.compare.0 {
             window.push_child(id::COMPARE);
             out.push((id::COMPARE, compare_node(compare, scene.compare.1, runs)));
         }
+    }
+
+    if let Some(picker) = &scene.picker {
+        window.push_child(id::PICKER);
+        picker_nodes(picker, runs, &mut out);
     }
 
     window.push_child(id::STATUS);
@@ -400,9 +449,9 @@ fn details_nodes(scene: &GitScene, out: &mut Vec<(NodeId, Node)>) {
     out.push((id::DETAILS, group));
 }
 
-fn option_nodes(buttons: &[Button], out: &mut Vec<(NodeId, Node)>) {
+fn toolbar(bar_id: NodeId, label: &str, buttons: &[Button], out: &mut Vec<(NodeId, Node)>) {
     let mut bar = Node::new(Role::Toolbar);
-    bar.set_label("Compare options");
+    bar.set_label(label);
     for b in buttons {
         bar.push_child(b.id);
         let mut n = Node::new(Role::Button);
@@ -421,7 +470,7 @@ fn option_nodes(buttons: &[Button], out: &mut Vec<(NodeId, Node)>) {
         }
         out.push((b.id, n));
     }
-    out.push((id::OPTIONS, bar));
+    out.push((bar_id, bar));
 }
 
 fn compare_node(compare: &Compare, bounds: Option<Bounds>, runs: Runs<'_>) -> Node {
@@ -533,6 +582,9 @@ mod tests {
                     bounds: None,
                 },
             ],
+            staging: Vec::new(),
+            message_box: None,
+            picker: None,
             compare: (Some(Compare::Message("Reading…".to_owned())), None),
             message: None,
             focus: id::row(0),
@@ -555,9 +607,15 @@ mod tests {
         assert_eq!(id::target(id::parent(1)), id::Target::Parent(1));
         assert_eq!(id::target(id::line(3)), id::Target::Other);
         assert_eq!(
-            id::target(crate::access::id::run(id::COMPARE_FIELD, 3, 9)),
-            id::Target::Run
+            id::target(crate::access::id::run(id::MESSAGE_FIELD, 3, 9)),
+            id::Target::Run(id::MESSAGE_FIELD)
         );
+        assert_eq!(id::target(id::button(5)), id::Target::Button(5));
+        assert_eq!(
+            id::target(crate::access::id::option(2)),
+            id::Target::Option(2)
+        );
+        assert_ne!(id::file(2), crate::access::id::option(2));
         assert_eq!(id::target(id::CASE), id::Target::Fixed(id::CASE));
     }
 

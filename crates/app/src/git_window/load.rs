@@ -41,6 +41,14 @@ pub enum GitEvent {
     Disk,
     /// Something to say in the status bar, and whether it is an error.
     Say(String, bool),
+    /// A change to the repository finished (M28).
+    Done(Box<super::ops::Done>),
+    /// A commit finished, was refused, or was stopped.
+    Committed(Box<Result<crate::git::CommitOutput, GitError>>),
+    /// Who commits are by, and the last commit's message (for Amend).
+    Prefill(Box<super::ops::Prefill>),
+    /// The palette's matcher has news: draw again.
+    Redraw,
     /// The config's editor and interface fonts, looked up on a worker.
     Fonts(
         Box<(

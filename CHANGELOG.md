@@ -4,7 +4,22 @@ One section per release, newest first. The release workflow puts the
 tagged version's section into the GitHub release notes, so write the
 section before tagging.
 
-## Unreleased
+## 1.4.0
+
+### Added
+
+- Staging and committing in the git window (M28). Under **Changes**,
+  each file has Stage, Unstage and Discard buttons, the lists have Stage
+  All and Unstage All, and the bar above the compare stages, unstages
+  or discards one change (**Stage Hunk**) or only the rows you pick in
+  the compare (**Stage Lines**). Discarding asks first and **Undo
+  Discard** puts the text back while the window is open; a discarded
+  new file goes to the trash. A message box under the lists edits like
+  Nimbus (undo, several cursors, a ruler at 72 columns) and keeps a
+  draft per repository; **Commit** (`Cmd+Enter` / `Ctrl+Enter`) runs
+  `git commit` with your hooks and signing, shows a refusing hook's
+  output, and can be stopped; **Amend last commit** loads the last
+  message. The git window has its own command palette.
 
 ### Added
 
@@ -33,6 +48,19 @@ section before tagging.
 - The Chocolatey package's source link points at the release's tagged
   code (`tree/vX.Y.Z`) instead of repeating the project page, as the
   Chocolatey validator suggests.
+- The Chocolatey package's icon comes from the jsDelivr CDN, pinned to
+  the release's commit, instead of `raw.githubusercontent.com`, which
+  Chocolatey's moderators do not allow.
+
+### Fixed
+
+- A Markdown file with 255 or more nested blocks (for example a line of
+  `>` quote markers) no longer crashes Nimbus. The Markdown grammar wrote
+  its saved state past the end of tree-sitter's buffer; tree-sitter-md
+  0.5.4 caps the nesting and reads deeper markers as text.
+- The git window no longer panics on a commit whose timestamp is near
+  the limits of a 64-bit number; its date and age are worked out with
+  saturating arithmetic.
 
 ## 1.3.1
 

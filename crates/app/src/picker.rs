@@ -155,9 +155,22 @@ impl Drop for Picker {
 impl Picker {
     /// Open the command palette.
     pub fn palette(notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self::palette_of(action::palette_actions(), notify)
+    }
+
+    /// Open the git window's command palette (M28): its own actions and
+    /// the compare and view ones it shares with the editor.
+    pub fn git_palette(notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self::palette_of(action::git_palette_actions(), notify)
+    }
+
+    fn palette_of(
+        actions: impl IntoIterator<Item = &'static action::ActionInfo>,
+        notify: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         let picker = Self::new(Kind::Palette, Config::DEFAULT, notify, PathBuf::new());
         let injector = picker.matcher.injector();
-        for a in action::palette_actions() {
+        for a in actions {
             injector.push(Item::Action(a), |item, cols| {
                 if let Item::Action(a) = item {
                     cols[0] = a.title.into();

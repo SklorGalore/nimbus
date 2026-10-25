@@ -25,8 +25,9 @@ use crate::git::{Kind, RefKind};
 /// History rows described either side of the selected one.
 const HISTORY_WINDOW: usize = 200;
 
-/// The compare's text, as the window last described it: its text window,
-/// the rows of its (never wrapped) lines, and which diff it was built for.
+/// The text fields as the window last described them: the compare's new
+/// side and the commit message box, each with its text window and the
+/// rows of its lines, and what each was built for.
 #[derive(Debug, Default)]
 pub struct CompareText {
     window: Option<TextWindow>,
@@ -34,6 +35,8 @@ pub struct CompareText {
     /// The texts' token the window was built for; another diff starts it
     /// over.
     key: Option<u64>,
+    message: Option<TextWindow>,
+    message_rows: WrapCache,
 }
 
 impl CompareText {
@@ -46,12 +49,29 @@ impl CompareText {
     pub fn reset(&mut self) {
         self.window().reset();
         self.key = None;
+        if let Some(m) = self.message.as_mut() {
+            m.reset();
+        }
     }
 
-    /// The compare field's runs.
+    /// The runs of text field `node`.
     #[must_use]
-    pub fn runs(&self) -> &[NodeId] {
-        self.window.as_ref().map_or(&[], TextWindow::children)
+    pub fn runs(&self, node: NodeId) -> &[NodeId] {
+        let win = match node {
+            id::COMPARE => self.window.as_ref(),
+            id::MESSAGE_BOX => self.message.as_ref(),
+            _ => None,
+        };
+        win.map_or(&[], TextWindow::children)
+    }
+
+    /// The text window of field `field`.
+    fn field(&self, field: u8) -> Option<&TextWindow> {
+        match field {
+            id::COMPARE_FIELD => self.window.as_ref(),
+            id::MESSAGE_FIELD => self.message.as_ref(),
+            _ => None,
+        }
     }
 }
 
@@ -104,6 +124,8 @@ impl GitWindow {
         let (details, parents, files) = self.access_details();
         let buttons = self.access_buttons();
         let compare = self.access_compare(gpu, tab_width, text, out);
+        let staging = self.access_staging();
+        let message_box = self.access_message(gpu, tab_width, text, out);
         let focus = if note.is_some() {
             id::NOTE
         } else {
@@ -117,6 +139,9 @@ impl GitWindow {
                     .filter(|r| history.rows.iter().any(|i| i.index == *r))
                     .map_or(id::HISTORY, id::row),
                 Focus::Files => self.file_sel.map_or(id::FILES, id::file),
+                Focus::Diff => id::COMPARE,
+                Focus::Message if message_box.is_some() => id::MESSAGE_BOX,
+                Focus::Message => id::FILES,
             }
         };
         GitScene {
@@ -130,6 +155,9 @@ impl GitWindow {
             parents,
             files,
             buttons,
+            staging,
+            message_box,
+            picker: None,
             compare: (compare, g.map(|g| pane(g.details, g.bar_bottom, g.bottom))),
             message: None,
             focus,
@@ -297,7 +325,7 @@ impl GitWindow {
         let mut lines = Vec::with_capacity(self.info.len());
         for line in &self.info {
             match line {
-                InfoLine::Text(t, _) => lines.push(t.clone()),
+                InfoLine::Text(t, _) | InfoLine::Heading(_, t) => lines.push(t.clone()),
                 InfoLine::Field(label, value) => lines.push(format!("{label}: {value}")),
                 InfoLine::Parents | InfoLine::File(_) | InfoLine::Blank => {}
             }
@@ -395,6 +423,97 @@ impl GitWindow {
                 bounds: self.hit_rect(hit),
             })
             .collect()
+    }
+
+    /// The staging and commit buttons the last frame drew, in order. A
+    /// file's own button says which file.
+    fn access_staging(&self) -> Vec<Button> {
+        self.drawn_buttons
+            .iter()
+            .filter(|(hit, ..)| matches!(hit, Hit::Git(_) | Hit::FileGit(..) | Hit::StopCommit))
+            .enumerate()
+            .map(|(n, &(hit, label, on, usable))| {
+                let label = match hit {
+                    Hit::FileGit(i, _) => self
+                        .files
+                        .get(i)
+                        .map_or_else(|| label.to_owned(), |f| format!("{label} {}", f.label)),
+                    _ => label.to_owned(),
+                };
+                let toggle = matches!(hit, Hit::Git(crate::input::GitCmd::ToggleAmend));
+                Button {
+                    id: id::button(n),
+                    label,
+                    on: toggle.then_some(on),
+                    disabled: !usable,
+                    bounds: self.hit_rect(hit),
+                }
+            })
+            .collect()
+    }
+
+    /// The hit of staging button `n`, as [`Self::access_staging`] numbers
+    /// them.
+    fn staging_hit(&self, n: usize) -> Option<(Hit, bool)> {
+        self.drawn_buttons
+            .iter()
+            .filter(|(hit, ..)| matches!(hit, Hit::Git(_) | Hit::FileGit(..) | Hit::StopCommit))
+            .nth(n)
+            .map(|&(hit, _, _, usable)| (hit, usable))
+    }
+
+    /// The commit message box, while it is drawn (Changes is shown).
+    fn access_message(
+        &mut self,
+        gpu: Option<&Gpu>,
+        tab_width: usize,
+        text: &mut CompareText,
+        out: &mut Vec<(NodeId, accesskit::Node)>,
+    ) -> Option<Field> {
+        if self.selected != Selected::Changes || self.hit_rect(Hit::Message).is_none() {
+            if let Some(m) = text.message.as_mut() {
+                m.reset();
+            }
+            return None;
+        }
+        let bounds = self.hit_rect(Hit::Message)?;
+        let geometry = gpu.map_or(
+            Geometry {
+                cell: 1.0,
+                line_height: 1.0,
+                tab_width,
+            },
+            |g| Geometry {
+                cell: g.metrics().cell_width,
+                line_height: g.metrics().line_height,
+                tab_width,
+            },
+        );
+        let m = &mut self.message;
+        let sel = m.carets.selection(&m.doc.buffer);
+        let win = text
+            .message
+            .get_or_insert_with(|| TextWindow::new(id::MESSAGE_FIELD));
+        let mut w = WrapView::new(&mut text.message_rows, None, tab_width);
+        let frame = Frame {
+            top: None,
+            geometry,
+            long_scroll: 0.0,
+        };
+        let placed = win.update(&m.doc.buffer, &mut w, sel, frame, out);
+        let label = if m.amend {
+            "Commit message, amending the last commit"
+        } else {
+            "Commit message"
+        };
+        Some(Field {
+            label: label.to_owned(),
+            placeholder: Some("Describe the change".to_owned()),
+            bounds,
+            origin: [f64::from(bounds[0]), f64::from(bounds[1])],
+            selection: placed.selection,
+            read_only: false,
+        })
     }
 
     /// The compare: the new side's text, or the message shown instead.
@@ -516,25 +635,26 @@ impl GitWindow {
                 self.reveal_file(i);
             }
             id::Target::Parent(k) if click => self.choose_parent(k),
-            id::Target::Fixed(node) if click => match node {
-                id::OPEN_IN_EDITOR => {
-                    if let Some(p) = self.selected_path() {
-                        return Outcome::OpenInEditor(p);
-                    }
-                }
-                id::UNIFIED => self.toggle(Toggle::Unified),
-                id::BLANK_LINES => self.toggle(Toggle::BlankLines),
-                id::CASE => self.toggle(Toggle::Case),
-                id::WHITESPACE => self.toggle(Toggle::Whitespace),
-                _ => return Outcome::Done(false),
-            },
-            id::Target::Run | id::Target::Fixed(id::COMPARE)
+            id::Target::Button(n) if click => {
+                // Pressed where it is drawn, so it runs what a click runs.
+                let Some((hit, true)) = self.staging_hit(n) else {
+                    return Outcome::Done(false);
+                };
+                let Some([bx, by, bw, bh]) = self.hit_rect(hit) else {
+                    return Outcome::Done(false);
+                };
+                return self.click(bx + bw / 2.0, by + bh / 2.0, false, false);
+            }
+            id::Target::Fixed(id::MESSAGE_BOX) | id::Target::Run(id::MESSAGE_FIELD) => {
+                return self.access_message_action(req, text);
+            }
+            id::Target::Run(id::COMPARE_FIELD) | id::Target::Fixed(id::COMPARE)
                 if action == Action::SetTextSelection =>
             {
                 let Some(ActionData::SetTextSelection(sel)) = &req.data else {
                     return Outcome::Done(false);
                 };
-                let Some(win) = text.window.as_ref() else {
+                let Some(win) = text.field(id::COMPARE_FIELD) else {
                     return Outcome::Done(false);
                 };
                 let (Some(anchor), Some(head)) = (win.byte_of(sel.anchor), win.byte_of(sel.focus))
@@ -546,6 +666,32 @@ impl GitWindow {
                 }
             }
             _ => return Outcome::Done(false),
+        }
+        Outcome::Done(true)
+    }
+
+    /// A request on the commit message box: focus it, type into it, or
+    /// move its caret.
+    fn access_message_action(&mut self, req: &ActionRequest, text: &CompareText) -> Outcome {
+        self.focus = Focus::Message;
+        match (req.action, &req.data) {
+            (Action::ReplaceSelectedText, Some(ActionData::Value(t))) => {
+                let tab = self.tab_width;
+                self.message
+                    .command(crate::input::Command::Insert(t), None, tab);
+            }
+            (Action::SetTextSelection, Some(ActionData::SetTextSelection(sel))) => {
+                let Some(win) = text.field(id::MESSAGE_FIELD) else {
+                    return Outcome::Done(false);
+                };
+                let (Some(anchor), Some(head)) = (win.byte_of(sel.anchor), win.byte_of(sel.focus))
+                else {
+                    return Outcome::Done(false);
+                };
+                let m = &mut self.message;
+                crate::document::Editor::new(&mut m.doc, &mut m.carets).select_span(anchor, head);
+            }
+            _ => {}
         }
         Outcome::Done(true)
     }
@@ -577,10 +723,7 @@ mod tests {
         let mut text = CompareText::default();
         let mut runs = Vec::new();
         let scene = w.access_scene(None, 1.0, 4, &mut text, &mut runs);
-        let children = text.runs().to_vec();
-        let mut nodes = git::build(&scene, &|n| {
-            if n == id::COMPARE { &children } else { &[] }
-        });
+        let mut nodes = git::build(&scene, &|n| text.runs(n));
         nodes.extend(runs);
         let tree = Tree::new(update(nodes, scene.focus, true), true);
         let root = tree.state().root();
@@ -628,5 +771,52 @@ mod tests {
         w.access_action(&req(id::side(0), Action::Click), &text);
         assert_eq!(w.selected, Selected::Changes);
         assert_eq!(w.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn changes_read_their_message_box_and_a_reader_stages_a_file() {
+        let Some(dir) = test_repo("git-access-staging") else {
+            return;
+        };
+        let (mut w, rx) = super::super::tests::window(&dir.0);
+        w.headless_load(&rx, Some("changes"));
+        let Ok(font) = nimbus_render::Font::bundled() else {
+            return;
+        };
+        // A frame on the CPU painter records what was drawn where.
+        let mut gpu = Gpu::compat_headless(font, 14.0, (1400, 900));
+        let (mut theme, _) = crate::theme::Theme::load("dark");
+        w.draw(&mut gpu, &mut theme, 1.0, None);
+        let mut text = CompareText::default();
+        let mut runs = Vec::new();
+        let scene = w.access_scene(Some(&gpu), 1.0, 4, &mut text, &mut runs);
+        assert!(scene.message_box.is_some(), "Changes shows the message box");
+        let stage = scene
+            .staging
+            .iter()
+            .find(|b| b.label == "Stage new.txt")
+            .expect("new.txt's own Stage button");
+        assert!(!stage.disabled);
+        let labels: Vec<&str> = scene.staging.iter().map(|b| b.label.as_str()).collect();
+        assert!(labels.contains(&"Commit"), "{labels:?}");
+        let mut nodes = git::build(&scene, &|n| text.runs(n));
+        nodes.extend(runs);
+        let tree = Tree::new(update(nodes, scene.focus, true), true);
+        let root = tree.state().root();
+        let field = find(root, id::MESSAGE_BOX).expect("the message box");
+        assert_eq!(field.role(), Role::MultilineTextInput);
+        // Pressing it stages the file, as a click does.
+        let req = ActionRequest {
+            action: Action::Click,
+            target_tree: accesskit::TreeId::ROOT,
+            target_node: stage.id,
+            data: None,
+        };
+        w.access_action(&req, &text);
+        super::super::tests::pump(&mut w, &rx, |w| {
+            w.files
+                .iter()
+                .any(|f| f.path == "new.txt" && f.staged == Some(true))
+        });
     }
 }

@@ -1,13 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Chocolatey package for Nimbus. The release workflow fills in the
-  version (.github/workflows/chocolatey.yml) and packs it with
+  version and the tag's commit (.github/workflows/chocolatey.yml) and
+  packs it with
   `choco pack`; scripts/publish-packages.ps1 checks the packed files
   against these templates and the signed SHA256SUMS, then pushes it to
   the Chocolatey community repository.
 
   The package holds no binaries: tools/chocolateyInstall.ps1 downloads
   the release's Inno Setup installer and checks its SHA-256.
+
+  Chocolatey does not allow raw.githubusercontent.com for iconUrl, so the
+  icon comes from the jsDelivr CDN, pinned to the release's commit so it
+  never changes under a published version.
 -->
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
@@ -22,7 +27,7 @@
     <docsUrl>https://github.com/SklorGalore/nimbus/blob/main/docs/manual/README.md</docsUrl>
     <bugTrackerUrl>https://github.com/SklorGalore/nimbus/issues</bugTrackerUrl>
     <releaseNotes>https://github.com/SklorGalore/nimbus/releases/tag/v@VERSION@</releaseNotes>
-    <iconUrl>https://raw.githubusercontent.com/SklorGalore/nimbus/main/assets/icon/nimbus-1024.png</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/SklorGalore/nimbus@@COMMIT@/assets/icon/nimbus-1024.png</iconUrl>
     <licenseUrl>https://github.com/SklorGalore/nimbus/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <copyright>SklorGalore</copyright>

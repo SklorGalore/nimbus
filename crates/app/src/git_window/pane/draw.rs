@@ -20,10 +20,11 @@ use super::{
     lane_color, lock, whole,
 };
 use crate::compare::Toggle;
+use crate::prompt;
 use nimbus_core::Text as _;
 
 use crate::git::RefKind;
-use crate::input::{Command, Motion};
+use crate::input::{Command, GitCmd, Motion};
 use crate::theme::{Theme, Ui};
 use crate::view::{self, Layout};
 
@@ -57,13 +58,32 @@ impl GitWindow {
             .clamp(20.0 * cell, (rest - 20.0 * cell).max(20.0 * cell))
             .round();
         let split = (w - details_w).max(side_w);
-        let info_bottom = (header + (bottom - header) * self.info_share)
-            .clamp(
-                header + 3.0 * lh,
-                (bottom - 4.0 * lh).max(header + 3.0 * lh),
-            )
+        let changes = self.selected == Selected::Changes;
+        // Changes also holds the commit area: keep room for it, and give
+        // the details at least 60% of the height.
+        let least = if changes { 11.0 } else { 3.0 } * lh;
+        let share = if changes {
+            self.info_share.max(0.6)
+        } else {
+            self.info_share
+        };
+        let info_bottom = (header + (bottom - header) * share)
+            .clamp(header + least, (bottom - 4.0 * lh).max(header + least))
             .round();
-        let bar_bottom = (info_bottom + lh + margin).round();
+        let commit_top = if changes {
+            // Four lines of message and the button row; at most half the
+            // details, so the file lists keep room.
+            let commit_h = (5.0 * lh + 3.0 * margin).min((info_bottom - header) * 0.5);
+            (info_bottom - commit_h).round()
+        } else {
+            info_bottom
+        };
+        let bar_rows = if changes && self.file_sel.is_some() {
+            2
+        } else {
+            1
+        };
+        let bar_bottom = (info_bottom + f(bar_rows) * (lh + margin)).round();
         Geo {
             w,
             lh,
@@ -75,7 +95,9 @@ impl GitWindow {
             history: (side_w, split),
             details: (split, w),
             info_bottom,
+            commit_top,
             bar_bottom,
+            bar_rows,
             row_h: (lh * 1.3).round(),
             line: scale.round().max(1.0),
         }
@@ -102,6 +124,7 @@ impl GitWindow {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
         self.hits.clear();
+        self.drawn_buttons.clear();
         let ui = theme.ui;
         view::begin_frame(gpu, &ui);
         let g = self.geo(gpu, scale);
@@ -131,10 +154,169 @@ impl GitWindow {
         self.draw_side(gpu, &ui, &g, &base);
         self.draw_history(gpu, &ui, &g, &base);
         self.draw_info(gpu, &ui, &g, &base);
+        if self.selected == Selected::Changes {
+            self.draw_commit(gpu, theme, &g, &base, scale);
+        }
         self.draw_bar(gpu, &ui, &g, &base);
         let info = self.draw_compare(gpu, theme, &g, scale);
         self.draw_dividers(gpu, &ui, &g);
+        let busy = self.busy.clone().or_else(|| {
+            self.committing
+                .is_some()
+                .then(|| "Committing… (Escape stops it)".to_owned())
+        });
+        let message = message.or_else(|| busy.as_deref().map(|b| (b, false)));
         view::draw_status(gpu, &ui, &base, message, &info);
+        if let Some(p) = &self.prompt {
+            p.draw(gpu, &ui, &base);
+        }
+        self.window_layout = Some(base);
+    }
+
+    /// A button: `label` in a box at `x`, row top `y`, `h` high; returns
+    /// its right edge. Dimmed when not `usable`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a button's place, look and meaning"
+    )]
+    fn button(
+        &mut self,
+        gpu: &mut Gpu,
+        ui: &Ui,
+        base: &Layout,
+        (x, y, h): (f32, f32, f32),
+        label: &'static str,
+        (on, usable): (bool, bool),
+        hit: Hit,
+    ) -> f32 {
+        let pad = (base.metrics.cell_width * 0.5).round();
+        let w = base.ui.width(label) + 2.0 * pad;
+        let bg = if on { ui.toggle_on } else { ui.field };
+        gpu.push_rect([x, y], [w, h], bg);
+        let ty = (y + (h - base.metrics.line_height) / 2.0).round();
+        let color = if usable { ui.text } else { ui.gutter };
+        gpu.push_ui_text([x + pad, ty], label, color);
+        self.hits.push(([x, y, w, h], hit));
+        self.drawn_buttons.push((hit, label, on, usable));
+        x + w
+    }
+
+    /// Width of [`button`](Self::button) for `label`.
+    fn button_w(base: &Layout, label: &str) -> f32 {
+        base.ui.width(label) + 2.0 * (base.metrics.cell_width * 0.5).round()
+    }
+
+    /// The commit area under Changes' list: the message box, then Commit,
+    /// Amend and who the commit will be by.
+    #[expect(
+        clippy::many_single_char_names,
+        clippy::too_many_lines,
+        reason = "g is the frame geometry and x, y, h a button's place, as everywhere in this file"
+    )]
+    fn draw_commit(&mut self, gpu: &mut Gpu, theme: &Theme, g: &Geo, base: &Layout, scale: f32) {
+        let ui = theme.ui;
+        let (x0, x1) = g.details;
+        let (top, bottom) = (g.commit_top, g.info_bottom);
+        gpu.begin_layer(Some([x0, top, x1 - x0, bottom - top]));
+        gpu.push_rect([x0, top], [x1 - x0, bottom - top], ui.tab_bar);
+        gpu.push_rect([x0, top], [x1 - x0, g.line], ui.picker_border);
+        let row_h = (g.lh + g.margin).round();
+        let box_top = top + g.margin;
+        let box_bottom = (bottom - row_h - g.margin / 2.0).max(box_top + g.lh);
+        let rect = [
+            x0 + g.margin,
+            box_top,
+            x1 - x0 - 2.0 * g.margin,
+            box_bottom - box_top,
+        ];
+        let window = Self::base_layout(gpu, scale, self.message.doc.buffer.len_lines());
+        let placeholder = if self.message.amend {
+            "The amended commit's message"
+        } else {
+            "Commit message"
+        };
+        let focused = self.focus == Focus::Message;
+        self.message.draw(
+            gpu,
+            theme,
+            window,
+            rect,
+            focused,
+            self.tab_width,
+            placeholder,
+        );
+        if focused {
+            let b = g.line;
+            gpu.begin_layer(Some([x0, top, x1 - x0, bottom - top]));
+            let [rx, ry, rw, rh] = rect;
+            for (p, sz) in [
+                ([rx, ry], [rw, b]),
+                ([rx, ry + rh - b], [rw, b]),
+                ([rx, ry], [b, rh]),
+                ([rx + rw - b, ry], [b, rh]),
+            ] {
+                gpu.push_rect(p, sz, ui.tab_accent);
+            }
+        }
+        self.hits.push((rect, Hit::Message));
+        gpu.begin_layer(Some([x0, top, x1 - x0, bottom - top]));
+        let y = (bottom - row_h - g.margin / 4.0).round();
+        let h = row_h - g.margin / 2.0;
+        let mut x = x0 + g.margin;
+        let staged = self.files.iter().any(|f| f.staged == Some(true));
+        if self.committing.is_some() {
+            x = self.button(
+                gpu,
+                &ui,
+                base,
+                (x, y, h),
+                "Stop",
+                (true, true),
+                Hit::StopCommit,
+            );
+        } else {
+            let label = if self.message.amend {
+                "Amend"
+            } else {
+                "Commit"
+            };
+            let usable = (staged || self.message.amend) && !self.message.is_blank();
+            x = self.button(
+                gpu,
+                &ui,
+                base,
+                (x, y, h),
+                label,
+                (usable, usable),
+                Hit::Git(crate::input::GitCmd::Commit),
+            );
+        }
+        x += g.cell;
+        x = self.button(
+            gpu,
+            &ui,
+            base,
+            (x, y, h),
+            "Amend last commit",
+            (self.message.amend, true),
+            Hit::Git(crate::input::GitCmd::ToggleAmend),
+        );
+        x += g.cell;
+        self.scratch.clear();
+        let color = match &self.prefill.author {
+            Ok(a) => {
+                let _ = write!(self.scratch, "by {a}");
+                ui.gutter
+            }
+            Err(e) if e.is_empty() => ui.gutter,
+            Err(e) => {
+                let _ = write!(self.scratch, "no author: {e}");
+                ui.error
+            }
+        };
+        let ty = (y + (h - g.lh) / 2.0).round();
+        let end = base.ui.fit(&self.scratch, (x1 - g.margin - x).max(0.0));
+        gpu.push_ui_text([x, ty], &self.scratch[..end], color);
     }
 
     #[expect(
@@ -516,7 +698,7 @@ impl GitWindow {
                         } else {
                             format!("Not staged ({})", self.files.len() - staged)
                         };
-                        self.info.push(InfoLine::Text(label, ui.gutter));
+                        self.info.push(InfoLine::Heading(k == 0, label));
                     }
                     self.info.push(InfoLine::File(i));
                 }
@@ -591,9 +773,13 @@ impl GitWindow {
         clippy::many_single_char_names,
         reason = "g is the frame geometry and f the float cast, as everywhere in this file"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per kind of line, drawn top to bottom"
+    )]
     fn draw_info(&mut self, gpu: &mut Gpu, ui: &Ui, g: &Geo, base: &Layout) {
         let (x0, x1) = g.details;
-        let (top, bottom) = (g.header, g.info_bottom);
+        let (top, bottom) = (g.header, g.commit_top);
         let width = x1 - x0 - 2.0 * g.margin;
         if (width - self.info_width).abs() > 0.5 {
             self.build_info(ui, base, width);
@@ -607,7 +793,9 @@ impl GitWindow {
         let label_w = 10.0 * g.cell;
         self.info_view = (lh, bottom - top - g.margin);
         let mut y = top + g.margin - self.info_scroll;
-        for line in &self.info {
+        // Taken for the loop, which draws buttons through `self`.
+        let info = std::mem::take(&mut self.info);
+        for line in &info {
             if y + lh < top {
                 y += lh;
                 continue;
@@ -655,6 +843,7 @@ impl GitWindow {
                     let Some(file) = self.files.get(*i) else {
                         continue;
                     };
+                    let (kind, staged, partly) = (file.kind, file.staged, file.partly);
                     if self.file_sel == Some(*i) {
                         let c = if self.focus == Focus::Files {
                             ui.picker_selected
@@ -664,26 +853,85 @@ impl GitWindow {
                         gpu.push_rect([x0, y], [x1 - x0, lh], c);
                     }
                     let mut mark = [0u8; 4];
-                    let mark = file.kind.letter().encode_utf8(&mut mark);
-                    gpu.push_ui_text([x, y], mark, kind_color(ui, file.kind));
+                    let mark = kind.letter().encode_utf8(&mut mark);
+                    gpu.push_ui_text([x, y], mark, kind_color(ui, kind));
                     let fx = x + 2.0 * g.cell;
-                    let end = base.ui.fit(&file.label, (x1 - g.margin - fx).max(0.0));
-                    gpu.push_ui_text([fx, y], &file.label[..end], ui.text);
                     self.hits.push(([x0, y, x1 - x0, lh], Hit::File(*i)));
+                    // Changes' own buttons, right to left.
+                    let buttons: &[(&str, GitCmd)] = match staged {
+                        Some(true) => &[("Unstage", GitCmd::UnstageFile)],
+                        Some(false) => &[
+                            ("Stage", GitCmd::StageFile),
+                            ("Discard", GitCmd::DiscardFile),
+                        ],
+                        None => &[],
+                    };
+                    let mut right = x1 - g.margin;
+                    for &(label, cmd) in buttons {
+                        right -= Self::button_w(base, label);
+                        let usable = self.busy.is_none();
+                        self.button(
+                            gpu,
+                            ui,
+                            base,
+                            (right, y, lh),
+                            label,
+                            (false, usable),
+                            Hit::FileGit(*i, cmd),
+                        );
+                        right -= g.cell * 0.5;
+                    }
+                    let note = match (partly, staged) {
+                        (false, _) => "",
+                        (true, Some(true)) => "  part staged",
+                        (true, _) => "  rest not staged",
+                    };
+                    let Some(file) = self.files.get(*i) else {
+                        continue;
+                    };
+                    let note_w = base.ui.width(note);
+                    let room = (right - g.cell - fx - note_w).max(0.0);
+                    let end = base.ui.fit(&file.label, room);
+                    let after = gpu.push_ui_text([fx, y], &file.label[..end], ui.text);
+                    if !note.is_empty() {
+                        gpu.push_ui_text([after, y], note, ui.gutter);
+                    }
+                }
+                InfoLine::Heading(staged, label) => {
+                    gpu.push_ui_text([x, y], label, ui.gutter);
+                    let (text, cmd) = if *staged {
+                        ("Unstage All", GitCmd::UnstageAll)
+                    } else {
+                        ("Stage All", GitCmd::StageAll)
+                    };
+                    let w = Self::button_w(base, text);
+                    let usable = self.busy.is_none();
+                    self.button(
+                        gpu,
+                        ui,
+                        base,
+                        (x1 - g.margin - w, y, lh),
+                        text,
+                        (false, usable),
+                        Hit::Git(cmd),
+                    );
                 }
                 InfoLine::Blank => {}
             }
             y += lh;
         }
+        self.info = info;
     }
 
-    /// The bar above the compare: the file, the options, Open in Editor.
+    /// The bar above the compare: the file, the options, Open in Editor;
+    /// for Changes, a second row with the hunk and line buttons.
     fn draw_bar(&mut self, gpu: &mut Gpu, ui: &Ui, g: &Geo, base: &Layout) {
         let (x0, x1) = g.details;
-        let (top, bottom) = (g.info_bottom, g.bar_bottom);
-        gpu.begin_layer(Some([x0, top, x1 - x0, bottom - top]));
-        gpu.push_rect([x0, top], [x1 - x0, bottom - top], ui.bar);
+        let (top, end) = (g.info_bottom, g.bar_bottom);
+        gpu.begin_layer(Some([x0, top, x1 - x0, end - top]));
+        gpu.push_rect([x0, top], [x1 - x0, end - top], ui.bar);
         gpu.push_rect([x0, top], [x1 - x0, g.line], ui.picker_border);
+        let bottom = (top + g.lh + g.margin).round().min(end);
         let y = (top + (bottom - top - g.lh) / 2.0).round();
         let pad = (g.cell * 0.5).round();
         // Right to left: Open in Editor, then the toggles.
@@ -734,6 +982,74 @@ impl GitWindow {
                 .fit(&file.label, (right - x0 - 2.0 * g.margin).max(0.0));
             gpu.push_ui_text([x0 + g.margin, y], &file.label[..end], ui.text);
         }
+        if g.bar_rows > 1 {
+            self.draw_part_buttons(gpu, ui, g, base, (bottom, end));
+        }
+    }
+
+    /// The bar's second row under Changes: which side the compare shows,
+    /// then Stage or Unstage, and Discard, for the hunk and the picked
+    /// lines.
+    fn draw_part_buttons(
+        &mut self,
+        gpu: &mut Gpu,
+        ui: &Ui,
+        g: &Geo,
+        base: &Layout,
+        (top, bottom): (f32, f32),
+    ) {
+        let (x0, x1) = g.details;
+        let Some(staged) = self
+            .file_sel
+            .and_then(|i| self.files.get(i))
+            .and_then(|f| f.staged)
+        else {
+            return;
+        };
+        let y = (top + g.margin / 4.0).round();
+        let h = (bottom - top - g.margin / 2.0).max(1.0);
+        let label = if staged {
+            "Staged: HEAD → index"
+        } else {
+            "Not staged: index → working tree"
+        };
+        let ty = (top + (bottom - top - g.lh) / 2.0).round();
+        let compare = matches!(self.diff, Some(DiffPane::Compare { .. }));
+        let picked = self.picked.is_some();
+        let free = self.busy.is_none();
+        let buttons: &[(&str, GitCmd, bool)] = if staged {
+            &[
+                ("Unstage Hunk", GitCmd::UnstageHunk, compare),
+                ("Unstage Lines", GitCmd::UnstageLines, compare && picked),
+            ]
+        } else {
+            &[
+                ("Stage Hunk", GitCmd::StageHunk, compare),
+                ("Stage Lines", GitCmd::StageLines, compare && picked),
+                ("Discard Hunk", GitCmd::DiscardHunk, compare),
+                ("Discard Lines", GitCmd::DiscardLines, compare && picked),
+            ]
+        };
+        let total: f32 = buttons
+            .iter()
+            .map(|(l, ..)| Self::button_w(base, l) + g.cell * 0.5)
+            .sum();
+        let mut x = (x1 - g.margin - total).max(x0 + g.margin);
+        let room = (x - g.cell - x0 - g.margin).max(0.0);
+        let end = base.ui.fit(label, room);
+        gpu.push_ui_text([x0 + g.margin, ty], &label[..end], ui.gutter);
+        for &(text, cmd, usable) in buttons {
+            x = self.button(
+                gpu,
+                ui,
+                base,
+                (x, y, h),
+                text,
+                (false, usable && free),
+                Hit::Git(cmd),
+            );
+            x += g.cell * 0.5;
+        }
     }
 
     /// The compare, or its message; returns the status bar's text.
@@ -757,6 +1073,7 @@ impl GitWindow {
                 carets,
                 view,
                 compare,
+                ..
             }) => {
                 let lines = doc.buffer.len_lines().max(compare.other.buffer.len_lines());
                 let mut layout = Self::base_layout(gpu, scale, lines).column(x0, x1);
@@ -776,6 +1093,25 @@ impl GitWindow {
                     None,
                     (&[], None),
                 );
+                // The picked rows (M28): a tint and a bar at the left
+                // edge, over the text so the compare's own colors show.
+                if let Some((a, b)) = self.picked
+                    && !compare.unified
+                {
+                    let lh = layout.metrics.line_height;
+                    let (lo, hi) = (a.min(b), a.max(b));
+                    let y0 = compare.row_y(lo, &layout).max(top);
+                    let y1 = (compare.row_y(hi, &layout) + lh).min(bottom);
+                    if y1 > y0 {
+                        gpu.begin_layer(Some([x0, top, x1 - x0, bottom - top]));
+                        gpu.push_rect([x0, y0], [x1 - x0, y1 - y0], fade(ui.selection, 0.35));
+                        gpu.push_rect([x0, y0], [3.0 * g.line, y1 - y0], ui.tab_accent);
+                    }
+                }
+                if !compare.unified {
+                    self.hits
+                        .push(([x0, layout.top, x1 - x0, bottom - layout.top], Hit::Compare));
+                }
                 compare.status("").to_owned()
             }
         }
@@ -814,11 +1150,24 @@ impl GitWindow {
             .map(|(_, hit)| *hit)
     }
 
-    /// A click at `(x, y)`; `double` for the second of a double click.
-    pub fn click(&mut self, x: f32, y: f32, double: bool) -> Outcome {
+    /// A click at `(x, y)`; `double` for the second of a double click,
+    /// `shift` to extend a pick of compare rows.
+    pub fn click(&mut self, x: f32, y: f32, double: bool, shift: bool) -> Outcome {
+        if let Some(p) = &self.prompt {
+            // A prompt takes every click; one outside it does nothing.
+            if let Some(layout) = &self.window_layout
+                && let Some(answer) = p.click(layout, x, y)
+            {
+                self.answered(answer);
+            }
+            return Outcome::Done(true);
+        }
         let Some(hit) = self.hit(x, y) else {
             return Outcome::Done(false);
         };
+        if hit != Hit::Message && self.focus == Focus::Message {
+            self.keep_draft_now();
+        }
         match hit {
             Hit::Side(i) => {
                 self.focus = Focus::Sidebar;
@@ -843,12 +1192,40 @@ impl GitWindow {
                 }
             }
             Hit::Divider(k) => self.dragging = Some(k),
+            Hit::Git(cmd) => {
+                self.git_command(cmd);
+            }
+            Hit::FileGit(i, cmd) => {
+                self.focus = Focus::Files;
+                self.file_button(i, cmd);
+            }
+            Hit::Message => {
+                self.focus = Focus::Message;
+                let tab = self.tab_width;
+                self.message.click(x, y, shift, tab);
+                self.message_drag = true;
+            }
+            Hit::Compare => {
+                self.focus = Focus::Diff;
+                self.picking = true;
+                self.pick_at(x, y, shift);
+            }
+            Hit::StopCommit => self.stop_commit(),
         }
         Outcome::Done(true)
     }
 
     /// Move a divider being dragged to `(x, y)`.
     pub fn drag(&mut self, gpu: &Gpu, scale: f32, x: f32, y: f32) -> bool {
+        if self.picking {
+            self.pick_at(x, y, true);
+            return true;
+        }
+        if self.message_drag {
+            let tab = self.tab_width;
+            self.message.click(x, y, true, tab);
+            return true;
+        }
         let Some(k) = self.dragging else { return false };
         let g = self.geo(gpu, scale);
         match k {
@@ -874,6 +1251,8 @@ impl GitWindow {
             self.side_scroll += dy;
         } else if x < g.history.1 {
             self.scroll = (self.scroll + dy / g.row_h).max(0.0);
+        } else if y >= g.commit_top && y < g.info_bottom {
+            self.message.scroll_by(dy, self.tab_width);
         } else if y < g.info_bottom {
             self.info_scroll += dy;
         } else if let (Some(DiffPane::Compare { compare, .. }), Some(layout)) =
@@ -897,8 +1276,27 @@ impl GitWindow {
         clippy::too_many_lines,
         reason = "one arm per editor command the window understands"
     )]
-    /// An editor command, as the user's key bindings produced it.
-    pub fn command(&mut self, cmd: Command<'_>) -> Outcome {
+    /// An editor command, as the user's key bindings produced it;
+    /// `paste` is the clipboard's text for Paste.
+    pub fn command(&mut self, cmd: Command<'_>, paste: Option<&str>) -> Outcome {
+        if self.prompt.is_some() {
+            return self.prompt_key(cmd);
+        }
+        if let Command::Git(g) = cmd {
+            if g != GitCmd::FocusMessage && self.focus == Focus::Message {
+                self.keep_draft_now();
+            }
+            return Outcome::Done(self.git_command(g));
+        }
+        if self.focus == Focus::Message
+            && let Some(out) = self.message_command(cmd, paste)
+        {
+            return out;
+        }
+        if cmd == Command::Escape && self.committing() {
+            self.stop_commit();
+            return Outcome::Done(true);
+        }
         let page = 20;
         let step = |motion: Motion| -> Option<isize> {
             match motion {
@@ -912,11 +1310,14 @@ impl GitWindow {
             }
         };
         match cmd {
-            Command::Move(motion, _) => {
+            Command::Move(motion, extend) => {
                 let Some(d) = step(motion) else {
                     return Outcome::Done(false);
                 };
                 match self.focus {
+                    Focus::Diff => self.step_pick(d, extend),
+                    // Handled above; nothing reaches here.
+                    Focus::Message => {}
                     Focus::History => {
                         let len = self.current.as_ref().map_or(0, |c| lock(&c.history).len());
                         if len == 0 {
@@ -1007,23 +1408,22 @@ impl GitWindow {
                 Outcome::Done(true)
             }
             Command::NextTab | Command::FocusSidebar => {
-                self.focus = match self.focus {
-                    Focus::Sidebar => Focus::History,
-                    Focus::History => Focus::Files,
-                    Focus::Files => Focus::Sidebar,
-                };
+                self.focus = self.next_focus(true);
                 Outcome::Done(true)
             }
             Command::PrevTab => {
-                self.focus = match self.focus {
-                    Focus::Sidebar => Focus::Files,
-                    Focus::History => Focus::Sidebar,
-                    Focus::Files => Focus::History,
-                };
+                self.focus = self.next_focus(false);
                 Outcome::Done(true)
             }
+            // Outside the message box, Undo puts back what was discarded
+            // last (M28).
+            Command::Undo => Outcome::Done(self.git_command(GitCmd::UndoDiscard)),
             Command::Escape => {
-                self.focus = Focus::History;
+                if self.focus == Focus::Diff && self.picked.is_some() {
+                    self.picked = None;
+                } else {
+                    self.focus = Focus::History;
+                }
                 Outcome::Done(true)
             }
             Command::ZoomIn
@@ -1034,6 +1434,92 @@ impl GitWindow {
             | Command::CloseTab => Outcome::Window,
             _ => Outcome::Done(false),
         }
+    }
+
+    /// The pane after (or before) the focused one, in the order Tab
+    /// visits them: the commit box and the compare only under Changes.
+    fn next_focus(&self, forward: bool) -> Focus {
+        let changes = self.selected == Selected::Changes;
+        let compare = matches!(self.diff, Some(DiffPane::Compare { .. }));
+        let mut order = vec![Focus::Sidebar, Focus::History, Focus::Files];
+        if changes && compare {
+            order.push(Focus::Diff);
+        }
+        if changes {
+            order.push(Focus::Message);
+        }
+        let at = order.iter().position(|f| *f == self.focus).unwrap_or(0);
+        let n = order.len();
+        let to = if forward {
+            (at + 1) % n
+        } else {
+            (at + n - 1) % n
+        };
+        order[to]
+    }
+
+    /// A command while the message box has the focus. `None` when the
+    /// box leaves it to the window (Tab to move on, zoom, the palette).
+    fn message_command(&mut self, cmd: Command<'_>, paste: Option<&str>) -> Option<Outcome> {
+        match cmd {
+            Command::Escape => {
+                self.keep_draft_now();
+                self.focus = Focus::Files;
+                Some(Outcome::Done(true))
+            }
+            // Tab types a tab in the editor; here it moves on, as in a
+            // form, and the message has no use for indentation.
+            Command::NextTab
+            | Command::PrevTab
+            | Command::FocusSidebar
+            | Command::Tab
+            | Command::Outdent
+            | Command::ZoomIn
+            | Command::ZoomOut
+            | Command::ResetZoom
+            | Command::ToggleTheme
+            | Command::Close
+            | Command::CloseTab
+            | Command::Palette => {
+                if matches!(cmd, Command::Tab) {
+                    self.keep_draft_now();
+                    self.focus = self.next_focus(true);
+                    return Some(Outcome::Done(true));
+                }
+                if matches!(cmd, Command::Outdent) {
+                    self.keep_draft_now();
+                    self.focus = self.next_focus(false);
+                    return Some(Outcome::Done(true));
+                }
+                None
+            }
+            _ => {
+                let tab = self.tab_width;
+                let copied = self.message.command(cmd, paste, tab);
+                Some(copied.map_or(Outcome::Done(true), Outcome::Copy))
+            }
+        }
+    }
+
+    /// A key while a prompt is open: it answers or moves between the
+    /// buttons; everything else waits.
+    fn prompt_key(&mut self, cmd: Command<'_>) -> Outcome {
+        let key = match cmd {
+            Command::Newline | Command::Insert(" ") => prompt::Key::Press,
+            Command::Escape => prompt::Key::Escape,
+            Command::Tab | Command::Move(Motion::Right, _) => prompt::Key::Next,
+            Command::Outdent | Command::Move(Motion::Left, _) => prompt::Key::Prev,
+            Command::Insert(text) => match text.chars().next() {
+                Some(c) if text.chars().count() == 1 && c.is_alphabetic() => prompt::Key::Letter(c),
+                _ => return Outcome::Done(false),
+            },
+            _ => return Outcome::Done(false),
+        };
+        let answer = self.prompt.as_mut().and_then(|p| p.key(key));
+        if let Some(answer) = answer {
+            self.answered(answer);
+        }
+        Outcome::Done(true)
     }
 
     /// The sidebar line that is selected: Changes, or the first ref at

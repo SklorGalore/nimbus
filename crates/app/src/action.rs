@@ -10,7 +10,7 @@
 use nimbus_core::LineEnding;
 use nimbus_core::transform::{Case, Lines};
 
-use crate::input::{Command, Motion};
+use crate::input::{Command, GitCmd, Motion};
 
 /// When an action applies. A key bound to an action that does not apply
 /// right now is treated as unbound, so it can type its character instead
@@ -21,6 +21,9 @@ pub enum When {
     Always,
     /// Only while the find bar is open.
     FindBar,
+    /// Only in the git window (M28). Its keys win there over the
+    /// editor's, and the editor's palette and menus leave these out.
+    GitWindow,
 }
 
 /// Default keys for one action. Chords use `Primary` for Command on macOS
@@ -103,6 +106,16 @@ const fn find_only(
         command,
         keys,
         when: When::FindBar,
+    }
+}
+
+const fn git_only(id: &'static str, title: &'static str, cmd: GitCmd, keys: Keys) -> ActionInfo {
+    ActionInfo {
+        id,
+        title,
+        command: Command::Git(cmd),
+        keys,
+        when: When::GitWindow,
     }
 }
 
@@ -466,6 +479,82 @@ pub const ACTIONS: &[ActionInfo] = &[
         "git.openWindow",
         "Open Git Window",
         Command::OpenGitWindow,
+        Keys::NONE,
+    ),
+    // Staging and committing, in the git window only (M28).
+    git_only("git.stageFile", "Stage File", GitCmd::StageFile, Keys::NONE),
+    git_only(
+        "git.unstageFile",
+        "Unstage File",
+        GitCmd::UnstageFile,
+        Keys::NONE,
+    ),
+    git_only("git.stageHunk", "Stage Hunk", GitCmd::StageHunk, Keys::NONE),
+    git_only(
+        "git.unstageHunk",
+        "Unstage Hunk",
+        GitCmd::UnstageHunk,
+        Keys::NONE,
+    ),
+    git_only(
+        "git.stageLines",
+        "Stage Lines",
+        GitCmd::StageLines,
+        Keys::NONE,
+    ),
+    git_only(
+        "git.unstageLines",
+        "Unstage Lines",
+        GitCmd::UnstageLines,
+        Keys::NONE,
+    ),
+    git_only(
+        "git.discardFile",
+        "Discard File Changes",
+        GitCmd::DiscardFile,
+        Keys::NONE,
+    ),
+    git_only(
+        "git.discardHunk",
+        "Discard Hunk",
+        GitCmd::DiscardHunk,
+        Keys::NONE,
+    ),
+    git_only(
+        "git.discardLines",
+        "Discard Lines",
+        GitCmd::DiscardLines,
+        Keys::NONE,
+    ),
+    git_only(
+        "git.undoDiscard",
+        "Undo Discard",
+        GitCmd::UndoDiscard,
+        Keys::NONE,
+    ),
+    git_only("git.stageAll", "Stage All", GitCmd::StageAll, Keys::NONE),
+    git_only(
+        "git.unstageAll",
+        "Unstage All",
+        GitCmd::UnstageAll,
+        Keys::NONE,
+    ),
+    git_only(
+        "git.commit",
+        "Commit",
+        GitCmd::Commit,
+        Keys::all(&["Primary+Enter"]),
+    ),
+    git_only(
+        "git.toggleAmend",
+        "Amend Last Commit",
+        GitCmd::ToggleAmend,
+        Keys::NONE,
+    ),
+    git_only(
+        "git.focusMessage",
+        "Write Commit Message",
+        GitCmd::FocusMessage,
         Keys::NONE,
     ),
     act(
@@ -1294,7 +1383,8 @@ pub fn by_id(id: &str) -> Option<&'static ActionInfo> {
 /// cursor movement and typing keys, which nobody searches for by name.
 pub fn palette_actions() -> impl Iterator<Item = &'static ActionInfo> {
     ACTIONS.iter().filter(|a| {
-        !matches!(a.command, Command::Move(..))
+        a.when != When::GitWindow
+            && !matches!(a.command, Command::Move(..))
             && !matches!(
                 a.id,
                 "edit.newline"
@@ -1304,6 +1394,27 @@ pub fn palette_actions() -> impl Iterator<Item = &'static ActionInfo> {
                     | "edit.cancel"
             )
     })
+}
+
+/// The git window's palette (M28): its own actions, then the editor's
+/// that the window understands (the compare options, zoom, theme).
+pub fn git_palette_actions() -> impl Iterator<Item = &'static ActionInfo> {
+    const SHARED: &[&str] = &[
+        "diff.next",
+        "diff.previous",
+        "diff.ignoreWhitespace",
+        "diff.ignoreCase",
+        "diff.ignoreBlankLines",
+        "diff.toggleUnified",
+        "view.zoomIn",
+        "view.zoomOut",
+        "view.resetZoom",
+        "view.toggleTheme",
+    ];
+    ACTIONS
+        .iter()
+        .filter(|a| a.when == When::GitWindow)
+        .chain(ACTIONS.iter().filter(|a| SHARED.contains(&a.id)))
 }
 
 #[cfg(test)]
@@ -1330,5 +1441,14 @@ mod tests {
         assert!(palette_actions().any(|a| a.id == "file.save"));
         assert!(!palette_actions().any(|a| a.id == "cursor.left" || a.id == "edit.newline"));
         assert!(palette_actions().any(|a| a.id == "select.line"));
+    }
+
+    #[test]
+    fn git_window_actions_stay_out_of_the_editors_palette() {
+        assert!(!palette_actions().any(|a| a.when == When::GitWindow));
+        let git: Vec<_> = git_palette_actions().map(|a| a.id).collect();
+        assert!(git.contains(&"git.stageAll") && git.contains(&"git.unstageAll"));
+        // Every shared id exists, so a rename cannot drop one silently.
+        assert_eq!(git.iter().filter(|id| !id.starts_with("git.")).count(), 10);
     }
 }

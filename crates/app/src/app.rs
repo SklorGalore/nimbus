@@ -5181,7 +5181,11 @@ impl App {
                 repeat: event.repeat,
                 mods: self.modifiers,
             },
-            self.find.open,
+            if self.find.open {
+                crate::action::When::FindBar
+            } else {
+                crate::action::When::Always
+            },
             pending,
         );
         let was_pending = pending.is_some() && event.state == ElementState::Pressed;
@@ -7554,7 +7558,7 @@ fn headless_folder_compare(sidebar: &mut Sidebar, left: &Path, right: &Path) {
 
 /// The picker's count of matches, such as "42 files" ("…" while still
 /// listing), or nothing for pickers that do not list.
-fn picker_status(p: &Picker) -> String {
+pub(crate) fn picker_status(p: &Picker) -> String {
     let n = p.match_count();
     let noun = match (p.kind, n == 1) {
         (Kind::Palette, true) => "command",
@@ -7582,7 +7586,7 @@ fn picker_status(p: &Picker) -> String {
 }
 
 /// What the picker is, as a screen reader names it.
-fn picker_title(kind: Kind) -> &'static str {
+pub(crate) fn picker_title(kind: Kind) -> &'static str {
     match kind {
         Kind::Palette => "Command palette",
         Kind::Files => "Go to file",
@@ -7600,7 +7604,7 @@ fn picker_title(kind: Kind) -> &'static str {
 }
 
 /// The hint the picker's empty query field shows.
-fn picker_placeholder(kind: Kind) -> &'static str {
+pub(crate) fn picker_placeholder(kind: Kind) -> &'static str {
     match kind {
         Kind::Palette => "Type a command",
         Kind::Files => "Type a file name",
@@ -7618,7 +7622,7 @@ fn picker_placeholder(kind: Kind) -> &'static str {
 }
 
 /// Draw an open picker over everything else.
-fn draw_picker_overlay(
+pub(crate) fn draw_picker_overlay(
     gpu: &mut Gpu,
     ui: &Ui,
     layout: &Layout,
@@ -7643,7 +7647,7 @@ fn draw_picker_overlay(
 /// Apply a text-editing command to a one-line field (the find bar). Returns
 /// text to put on the clipboard for Copy and Cut. Line breaks are not typed
 /// into fields; pasted ones are kept, so a multi-line literal can be found.
-fn edit_field(
+pub(crate) fn edit_field(
     field: &mut Solo,
     cmd: Command<'_>,
     paste: Option<&str>,

@@ -36,6 +36,9 @@ of its own:
 | The sidebar | A tree: Changes with its count, then Branches, Remotes, Tags and Stashes, each opening and closing. The current branch says so. |
 | The history | A list. Each commit says its subject, its branches and tags, whether it is HEAD or a merge, its author and how long ago. In a long history, the 200 commits either side of the selected one are described. |
 | The details | The commit's message, author, dates and parents as lines of text; for a merge, its parents as a choice of what to compare with; then the changed files as a list, each with how it changed ("Modified", "Renamed b.txt → c.txt") and, in Changes, whether it is staged. |
+| The commit message box (Changes) | A text field you can type in, labelled "Commit message" (and "amending the last commit" while Amend is on). |
+| Stage, Unstage, Discard and Commit | Buttons in a "Staging" toolbar: Stage All and Unstage All, each file's own Stage, Unstage and Discard (named with the file, "Stage new.txt"), the hunk and line buttons above the compare, Commit (or Amend, or Stop while a commit runs) and Amend last commit, which says whether it is on. A button that cannot be used now is read as dimmed. |
+| The command palette | As in the editor: a dialog with a text field and a list of commands. |
 | The compare options | Buttons: Open in Editor, Unified, Ignore blank lines and Ignore case say whether they are on; the spaces button says which of its three settings is chosen. |
 | The compare | The new side of the selected file as read-only text, with the compare's status ("change 2 of 5"). Next and Previous Change move its caret to the change. The old side and the changes' colours are not described. |
 

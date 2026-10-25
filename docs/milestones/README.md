@@ -58,7 +58,7 @@ repeated in each file:
 | 25 | [Command line](m25-command-line.md) | Done |
 | 26 | [Security](m26-security.md) | In progress |
 | 27 | [Git window: viewing](m27-git-viewer.md) | Done |
-| 28 | [Git window: staging and committing](m28-git-staging.md) | Planned |
+| 28 | [Git window: staging and committing](m28-git-staging.md) | Done |
 | 29 | [Git window: branches and remotes](m29-git-branches-remotes.md) | Planned |
 | 30 | [Git window: history tools and merging](m30-git-history-merging.md) | Planned |
 | 31 | [Updates](m31-updates.md) | Done |
