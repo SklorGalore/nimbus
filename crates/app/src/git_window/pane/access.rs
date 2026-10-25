@@ -648,6 +648,18 @@ impl GitWindow {
             id::Target::Fixed(id::MESSAGE_BOX) | id::Target::Run(id::MESSAGE_FIELD) => {
                 return self.access_message_action(req, text);
             }
+            id::Target::Fixed(node) if click => match node {
+                id::OPEN_IN_EDITOR => {
+                    if let Some(p) = self.selected_path() {
+                        return Outcome::OpenInEditor(p);
+                    }
+                }
+                id::UNIFIED => self.toggle(Toggle::Unified),
+                id::BLANK_LINES => self.toggle(Toggle::BlankLines),
+                id::CASE => self.toggle(Toggle::Case),
+                id::WHITESPACE => self.toggle(Toggle::Whitespace),
+                _ => return Outcome::Done(false),
+            },
             id::Target::Run(id::COMPARE_FIELD) | id::Target::Fixed(id::COMPARE)
                 if action == Action::SetTextSelection =>
             {
