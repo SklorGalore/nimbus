@@ -17,6 +17,16 @@ section before tagging.
   code (`tree/vX.Y.Z`) instead of repeating the project page, as the
   Chocolatey validator suggests.
 
+### Fixed
+
+- A Markdown file with 255 or more nested blocks (for example a line of
+  `>` quote markers) no longer crashes Nimbus. The Markdown grammar wrote
+  its saved state past the end of tree-sitter's buffer; tree-sitter-md
+  0.5.4 caps the nesting and reads deeper markers as text.
+- The git window no longer panics on a commit whose timestamp is near
+  the limits of a 64-bit number; its date and age are worked out with
+  saturating arithmetic.
+
 ## 1.3.1
 
 1.3.0 was tagged but never published: its Linux and Windows release
