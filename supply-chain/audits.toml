@@ -13,6 +13,12 @@ criteria = "safe-to-deploy"
 version = "0.3.2"
 notes = "Read all of src/ (777 lines). No build script, proc macro or dependencies on our targets. FFI only to read the user's preferred languages: CFLocaleCopyPreferredLanguages on Apple (array released on drop), GetUserPreferredUILanguages on Windows (two-call buffer sizing), LANG/LC_* environment variables on other Unix. No file, network or process access."
 
+[[audits.tree-sitter-md]]
+who = "Claude Code (cloud session for SklorGalore)"
+criteria = "safe-to-deploy"
+delta = "0.5.3 -> 0.5.4"
+notes = "Fixes a heap buffer overflow found by Nimbus's highlight fuzz target: the block scanner serialized more than tree-sitter's 1024-byte state buffer once 255 or more blocks were open. 0.5.4 caps open blocks (MAX_OPEN_BLOCKS) and clamps serialize. Read the hand-written diff: both scanner.c files (the cap, early returns for long runs of backticks, tildes, stars and underscores, EOF-terminated fences, <!--> handling, ASCII-only digit check), array.h (C++ casts only), parser.rs (a lifetime) and build.rs (drops compiling wasm stdlib sources). parser.c files are generated. No new dependencies, no I/O, no new unsafe Rust."
+
 [[audits.tree-sitter-powershell]]
 who = "Claude Code, reviewing for Skylar (SklorGalore)"
 criteria = "safe-to-deploy"
