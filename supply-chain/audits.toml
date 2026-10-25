@@ -19,6 +19,12 @@ criteria = "safe-to-deploy"
 delta = "0.5.3 -> 0.5.4"
 notes = "Fixes a heap buffer overflow found by Nimbus's highlight fuzz target: the block scanner serialized more than tree-sitter's 1024-byte state buffer once 255 or more blocks were open. 0.5.4 caps open blocks (MAX_OPEN_BLOCKS) and clamps serialize. Read the hand-written diff: both scanner.c files (the cap, early returns for long runs of backticks, tildes, stars and underscores, EOF-terminated fences, <!--> handling, ASCII-only digit check), array.h (C++ casts only), parser.rs (a lifetime) and build.rs (drops compiling wasm stdlib sources). parser.c files are generated. No new dependencies, no I/O, no new unsafe Rust."
 
+[[audits.tree-sitter-powershell]]
+who = "Claude Code, reviewing for Skylar (SklorGalore)"
+criteria = "safe-to-deploy"
+version = "0.26.4"
+notes = "Same shape as the other tree-sitter grammar crates. bindings/rust/lib.rs: one extern declaration and LanguageFn::from_raw, plus include_str! of the bundled query and node types. build.rs compiles src/parser.c and src/scanner.c with cc and reads only TARGET (and two wasm header variables on wasm32). parser.c is generated parse tables that include only tree_sitter/parser.h; scanner.c (Microsoft, MIT) is a 70-line lookahead for statement terminators with no allocation and empty serialize/deserialize. No file, network or process access; dependencies tree-sitter-language and cc are already in the tree."
+
 [[audits.webpki-roots]]
 who = "Claude Code (cloud session for SklorGalore)"
 criteria = "safe-to-deploy"

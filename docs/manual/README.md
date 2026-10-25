@@ -3,7 +3,7 @@
 Nimbus is a fast, lightweight text editor with its own GPU text renderer.
 It is *modeless*: you type and the text changes, like most editors, with
 no separate command mode. It opens a multi-gigabyte log in a fraction of a
-second, edits with several cursors, highlights fourteen languages, and
+second, edits with several cursors, highlights fifteen languages, and
 can compare and merge files.
 
 This manual is for people who use Nimbus. It describes version 0.6.0. If

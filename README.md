@@ -70,7 +70,8 @@ from opening your first file to themes, languages and key bindings.
 **Code**
 
 - Tree-sitter syntax highlighting for Rust, C, Go, Python, JavaScript,
-  TypeScript, TSX, HTML, CSS, Bash, JSON, TOML, YAML and Markdown,
+  TypeScript, TSX, HTML, CSS, Bash, PowerShell, JSON, TOML, YAML and
+  Markdown,
   including code embedded in other code, such as fenced blocks in
   Markdown.
 - Add your own languages and highlight queries.
@@ -127,7 +128,7 @@ from opening your first file to themes, languages and key bindings.
 <td><img src="assets/screenshots/find.png" alt="The find bar with highlighted matches"><br><sub>Find in the current file</sub></td>
 </tr>
 <tr>
-<td><img src="assets/screenshots/languages.png" alt="Python, shell, TOML and YAML highlighted"><br><sub>Fourteen languages built in</sub></td>
+<td><img src="assets/screenshots/languages.png" alt="Python, shell, TOML and YAML highlighted"><br><sub>Fifteen languages built in</sub></td>
 <td><img src="assets/screenshots/hugefile.png" alt="A 4 GB log open at its last line"><br><sub>A 4 GB log, all 65 million lines counted</sub></td>
 </tr>
 </table>

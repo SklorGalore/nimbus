@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "nimbus-syntax"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "log",
  "nimbus-core",
@@ -1055,6 +1055,7 @@ dependencies = [
  "tree-sitter-javascript",
  "tree-sitter-json",
  "tree-sitter-md",
+ "tree-sitter-powershell",
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-toml-ng",
@@ -2291,6 +2292,16 @@ name = "tree-sitter-md"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed661bfe3c264961425f77cd89ad2998bf5d629e71ce8bab1e5d7e940d6246e"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-powershell"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3faf304d44b9ddd4a7d97804bb8de7daf564336dd5a526dc6de5b39238243022"
 dependencies = [
  "cc",
  "tree-sitter-language",

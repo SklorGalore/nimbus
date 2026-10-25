@@ -460,7 +460,7 @@ pub const TEMPLATE: &str = r#"# Nimbus configuration. Every setting is optional.
 
 # Languages: a file name or "*.ext" pattern = language. Built-in languages
 # are rust, markdown, json, toml, yaml, python, javascript, typescript,
-# bash, c, go, html, css and tsx. Add your own as languages/NAME.toml here (simple colouring rules),
+# bash, c, go, html, css, tsx and powershell. Add your own as languages/NAME.toml here (simple colouring rules),
 # and change a built-in's colours with queries/NAME.scm (restart to apply).
 # [languages]
 # "Justfile" = "bash"

@@ -226,6 +226,14 @@ fn source(id: LanguageId) -> Option<(Language, String)> {
                 tree_sitter_typescript::HIGHLIGHTS_QUERY
             ),
         )),
+        // Vendored: the grammar's own query uses capture names no theme
+        // colours (`@array`, `@assignvalue`) and misses parameters,
+        // attributes and `$true`/`$null`.
+        #[cfg(feature = "powershell")]
+        LanguageId::PowerShell => Some((
+            tree_sitter_powershell::LANGUAGE.into(),
+            include_str!("../queries/powershell.scm").to_owned(),
+        )),
         #[cfg_attr(
             all(
                 feature = "rust",
@@ -241,7 +249,8 @@ fn source(id: LanguageId) -> Option<(Language, String)> {
                 feature = "go",
                 feature = "html",
                 feature = "css",
-                feature = "tsx"
+                feature = "tsx",
+                feature = "powershell"
             ),
             expect(
                 unreachable_patterns,
@@ -320,6 +329,8 @@ fn tags_source(id: LanguageId) -> Option<String> {
             "{}\n(const_declaration (const_spec name: (identifier) @name) @definition.constant)\n",
             tree_sitter_go::TAGS_QUERY
         )),
+        #[cfg(feature = "powershell")]
+        LanguageId::PowerShell => Some(include_str!("../queries/powershell-tags.scm").to_owned()),
         _ => None,
     }
 }
@@ -350,6 +361,7 @@ fn folds_source(id: LanguageId) -> String {
         LanguageId::Go => include_str!("../queries/folds/go.scm"),
         LanguageId::Html => include_str!("../queries/folds/html.scm"),
         LanguageId::Css => include_str!("../queries/folds/css.scm"),
+        LanguageId::PowerShell => include_str!("../queries/folds/powershell.scm"),
     };
     own.to_owned()
 }

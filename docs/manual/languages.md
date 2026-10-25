@@ -1,6 +1,6 @@
 # Languages and highlighting
 
-Nimbus highlights fourteen languages with full grammars (tree-sitter),
+Nimbus highlights fifteen languages with full grammars (tree-sitter),
 and any language you describe yourself with simple rules. The status bar
 shows the language of the active tab.
 
@@ -24,6 +24,7 @@ shows the language of the active tab.
 | Go | `go` | `.go` |
 | HTML | `html` | `.html`, `.htm`, `.xhtml` |
 | CSS | `css` | `.css` |
+| PowerShell | `powershell` | `.ps1`, `.psm1`, `.psd1`; `#!` lines naming `pwsh` or `powershell` |
 
 Extensions are matched without regard to case. A file that matches
 nothing is plain text, with no colours. The *name in config* is what you
@@ -56,7 +57,8 @@ Changes to the table apply to open files after "Reload Config".
 - **Code inside other code** is coloured as its own language: fenced
   code blocks in Markdown (by the language named after the fence: `rust`,
   `py`, `sh`, `js`, `ts`, `tsx`, `c`, `go`, `html`, `css`, `json`,
-  `toml`, `yaml`, `markdown` and their usual aliases), and `<script>` and
+  `toml`, `yaml`, `markdown`, `powershell` (or `pwsh`, `ps1`) and their
+  usual aliases), and `<script>` and
   `<style>` in HTML. A fence naming a language Nimbus has no grammar for
   keeps the Markdown colours.
 - **Markdown** prose is coloured too: headings, emphasis, bold, code
@@ -73,7 +75,7 @@ its syntax tree:
 - **Folding** follows the language's blocks, functions and sections (see
   [Navigating](navigation.md#folding)).
 - **Go to Symbol** lists the file's definitions, for Rust, Markdown,
-  Python, JavaScript, TypeScript, TSX, C and Go.
+  Python, JavaScript, TypeScript, TSX, C, Go and PowerShell.
 
 ## Markdown helpers
 

@@ -38,11 +38,13 @@ pub enum LanguageId {
     /// TypeScript with JSX (`.tsx`): a second parser in the TypeScript
     /// grammar, added in M14 once the binary budget had room for it.
     Tsx,
+    /// PowerShell (`.ps1` scripts, `.psm1` modules, `.psd1` data files).
+    PowerShell,
 }
 
 impl LanguageId {
     /// Every language, for tests and listings.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Rust,
         Self::Markdown,
         Self::Json,
@@ -57,6 +59,7 @@ impl LanguageId {
         Self::Html,
         Self::Css,
         Self::Tsx,
+        Self::PowerShell,
     ];
 
     /// Lower-case key used in file names and the config:
@@ -78,6 +81,7 @@ impl LanguageId {
             Self::Html => "html",
             Self::Css => "css",
             Self::Tsx => "tsx",
+            Self::PowerShell => "powershell",
         }
     }
 
@@ -102,6 +106,7 @@ impl LanguageId {
             "h" => Self::C,
             "golang" => Self::Go,
             "htm" | "xhtml" => Self::Html,
+            "ps1" | "pwsh" | "posh" => Self::PowerShell,
             _ => return None,
         })
     }
@@ -139,6 +144,7 @@ impl LanguageId {
             Self::Html => "HTML",
             Self::Css => "CSS",
             Self::Tsx => "TSX",
+            Self::PowerShell => "PowerShell",
         }
     }
 
@@ -179,6 +185,7 @@ impl LanguageId {
             "html" | "htm" | "xhtml" => Self::Html,
             "css" => Self::Css,
             "tsx" => Self::Tsx,
+            "ps1" | "psm1" | "psd1" => Self::PowerShell,
             _ => return None,
         })
     }
@@ -199,6 +206,7 @@ impl LanguageId {
             "node" | "nodejs" | "bun" => Self::JavaScript,
             "deno" | "ts-node" | "tsx" => Self::TypeScript,
             "sh" | "bash" | "zsh" | "dash" | "ksh" => Self::Bash,
+            "pwsh" | "powershell" => Self::PowerShell,
             _ => return None,
         })
     }
@@ -224,6 +232,11 @@ mod tests {
         assert_eq!(LanguageId::from_alias(" sh "), Some(LanguageId::Bash));
         assert_eq!(LanguageId::from_alias("Rust"), Some(LanguageId::Rust));
         assert_eq!(LanguageId::from_alias("tsx"), Some(LanguageId::Tsx));
+        assert_eq!(LanguageId::from_alias("pwsh"), Some(LanguageId::PowerShell));
+        assert_eq!(
+            LanguageId::from_alias("PowerShell"),
+            Some(LanguageId::PowerShell)
+        );
         assert_eq!(LanguageId::from_alias("latex"), None);
         assert_eq!(LanguageId::from_alias(""), None);
     }
@@ -244,6 +257,12 @@ mod tests {
         assert_eq!(path("site.css"), Some(LanguageId::Css));
         assert_eq!(path("x.mjs"), Some(LanguageId::JavaScript));
         assert_eq!(path("/home/u/.zshrc"), Some(LanguageId::Bash));
+        assert_eq!(
+            path("scripts/bundle-macos.ps1"),
+            Some(LanguageId::PowerShell)
+        );
+        assert_eq!(path("Module.PSM1"), Some(LanguageId::PowerShell));
+        assert_eq!(path("Module.psd1"), Some(LanguageId::PowerShell));
         assert_eq!(path("notes.txt"), None);
         assert_eq!(path("Makefile"), None);
     }
@@ -265,6 +284,10 @@ mod tests {
         assert_eq!(
             LanguageId::from_shebang("#!/usr/bin/env -S deno run"),
             Some(LanguageId::TypeScript)
+        );
+        assert_eq!(
+            LanguageId::from_shebang("#!/usr/bin/env pwsh"),
+            Some(LanguageId::PowerShell)
         );
         assert_eq!(LanguageId::from_shebang("#!/usr/bin/env perl"), None);
         assert_eq!(LanguageId::from_shebang("// not a shebang"), None);
