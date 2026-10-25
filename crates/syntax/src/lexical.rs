@@ -364,6 +364,53 @@ const CSS: Rules = Rules {
     ..NONE
 };
 
+/// PowerShell escapes with a backtick, not a backslash, so the strings
+/// take no escapes; a here-string (`@"` to `"@`) runs over lines. Keywords
+/// are listed in lower case, the way scripts usually write them.
+const POWERSHELL: Rules = Rules {
+    line_comments: &["#"],
+    hash_after_space: true,
+    block_comment: Some(("<#", "#>")),
+    strings: &[
+        s("@\"", "\"@", false, true),
+        s("@'", "'@", false, true),
+        s("\"", "\"", false, true),
+        s("'", "'", false, true),
+    ],
+    keywords: &[
+        "begin",
+        "break",
+        "catch",
+        "class",
+        "continue",
+        "data",
+        "do",
+        "dynamicparam",
+        "else",
+        "elseif",
+        "end",
+        "enum",
+        "exit",
+        "filter",
+        "finally",
+        "for",
+        "foreach",
+        "function",
+        "if",
+        "in",
+        "param",
+        "process",
+        "return",
+        "switch",
+        "throw",
+        "trap",
+        "try",
+        "until",
+        "while",
+    ],
+    ..NONE
+};
+
 /// The built-in rules for `language`, used for its files over 16 MB.
 #[must_use]
 pub fn builtin(language: LanguageId) -> &'static Rules {
@@ -381,6 +428,7 @@ pub fn builtin(language: LanguageId) -> &'static Rules {
         LanguageId::Go => &GO,
         LanguageId::Html => &HTML,
         LanguageId::Css => &CSS,
+        LanguageId::PowerShell => &POWERSHELL,
     }
 }
 
@@ -994,6 +1042,22 @@ mod tests {
         assert!(has(&md, "# Title", "text.title"), "{md:?}");
         assert!(has(&md, "code # not a title", "text.literal"), "{md:?}");
         assert!(!md.iter().any(|(t, _)| t == "after"), "{md:?}");
+    }
+
+    #[test]
+    fn powershell_basics() {
+        // Spans stop at line ends; the state carries a comment or a
+        // here-string over to the next line.
+        let src = "<# a\nb #> if\nif ($x) { 'it' } # c\n$s = @\"\nhere # no\n\"@\n";
+        let spans = names(LanguageId::PowerShell, src);
+        assert!(has(&spans, "<# a", "comment"), "{spans:?}");
+        assert!(has(&spans, "b #>", "comment"), "{spans:?}");
+        assert!(has(&spans, "if", "keyword"), "{spans:?}");
+        assert!(has(&spans, "'it'", "string"), "{spans:?}");
+        assert!(has(&spans, "# c", "comment"), "{spans:?}");
+        assert!(has(&spans, "here # no", "string"), "{spans:?}");
+        assert!(has(&spans, "\"@", "string"), "{spans:?}");
+        assert_eq!(comment_tokens(LanguageId::PowerShell).line, Some("#"));
     }
 
     #[test]
