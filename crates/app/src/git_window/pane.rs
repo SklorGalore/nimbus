@@ -24,14 +24,19 @@ use nimbus_syntax::state::{Job, JobResult};
 
 use super::history::{History, MAX_LANES};
 use super::load::{self, Details, GitEvent, Loading, Refresh, Send, Side, Source, Texts};
+use super::message::MessageBox;
+use super::ops::{Discarded, Op, Prefill};
 use crate::compare::{Compare, Other, Toggle};
 use crate::document::{Carets, Document};
 use crate::git::{Commit, FileChange, GitError, Kind, Ref, RefKind, Repo, Stash, Status};
+use crate::input::GitCmd;
 use crate::languages::Languages;
+use crate::prompt::Prompt;
 use crate::theme::Ui;
 use crate::view::{Layout, View};
 
 pub mod draw;
+mod staging;
 
 /// Pixel count as `f32`.
 #[expect(
@@ -62,6 +67,10 @@ pub enum Focus {
     History,
     /// The files of the selected commit or of Changes.
     Files,
+    /// The compare, where rows are picked for Stage Lines (M28).
+    Diff,
+    /// The commit message box.
+    Message,
 }
 
 /// What the right side shows.
@@ -91,6 +100,16 @@ pub enum Hit {
     /// A pane divider: 0 sidebar|history, 1 history|details, 2 details
     /// above the compare.
     Divider(usize),
+    /// A button that runs a git window command (M28).
+    Git(GitCmd),
+    /// A file's own Stage, Unstage or Discard button.
+    FileGit(usize, GitCmd),
+    /// The commit message box.
+    Message,
+    /// The compare's rows, for picking lines.
+    Compare,
+    /// Stop the commit that is running.
+    StopCommit,
 }
 
 /// One line of the sidebar.
@@ -123,6 +142,10 @@ pub struct FileItem {
     pub staged: Option<bool>,
     /// A submodule: there is no text to compare.
     pub submodule: bool,
+    /// The path before a staged rename.
+    pub orig: Option<String>,
+    /// In Changes: the file is in both lists, part staged (M28).
+    pub partly: bool,
 }
 
 /// One line of the details pane, above the compare.
@@ -136,6 +159,8 @@ enum InfoLine {
     Parents,
     /// A file, by index into `GitWindow::files`.
     File(usize),
+    /// Changes' list heading: staged (`true`) or not, with its text.
+    Heading(bool, String),
     /// Space.
     Blank,
 }
@@ -162,6 +187,9 @@ pub enum DiffPane {
         view: View,
         /// The compare, holding the old side.
         compare: Box<Compare>,
+        /// Both sides' bytes as read (old, new), for the patches that
+        /// stage part of the file (M28).
+        raw: [Arc<Vec<u8>>; 2],
     },
     /// Instead of a compare: "binary file", "reading…", an error.
     Message(String),
@@ -189,12 +217,21 @@ struct Geo {
     history: (f32, f32),
     details: (f32, f32),
     info_bottom: f32,
+    /// Top of the commit area under Changes' list (`info_bottom` when
+    /// there is none).
+    commit_top: f32,
     bar_bottom: f32,
+    /// The bar has a second row of staging buttons.
+    bar_rows: usize,
     row_h: f32,
     line: f32,
 }
 
 /// Everything the git window shows.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags: what the mouse is doing, which side a compare reads"
+)]
 pub struct GitWindow {
     /// The repository, once found.
     pub repo: Option<Repo>,
@@ -263,6 +300,41 @@ pub struct GitWindow {
     refresh_again: bool,
     /// Now, in seconds since 1970, for relative dates (set per frame).
     now: i64,
+    /// Rows picked in the compare for Stage Lines: anchor and head (M28).
+    pub picked: Option<(usize, usize)>,
+    /// The mouse is down picking rows.
+    pub picking: bool,
+    /// The mouse is down selecting in the message box.
+    pub message_drag: bool,
+    /// A change to the repository is running: what it is.
+    busy: Option<String>,
+    /// Discards Undo Discard can put back, newest last.
+    undo: Vec<Discarded>,
+    /// A question or report over the window.
+    pub prompt: Option<Prompt<Ask>>,
+    /// The commit message box.
+    pub message: MessageBox,
+    /// A commit is running: set this to stop it.
+    committing: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Who commits are by, and the last message.
+    prefill: Prefill,
+    /// The message's version when its draft was last kept.
+    kept_version: u64,
+    /// Something to say in the status bar, for the window to take.
+    said: Option<(String, bool)>,
+    /// Columns per tab, from the config.
+    pub tab_width: usize,
+    /// The window's layout at the last frame, for prompts' clicks.
+    window_layout: Option<Layout>,
+}
+
+/// What a prompt's answer goes on to do.
+#[derive(Debug, Clone)]
+pub enum Ask {
+    /// Discard, with what to say when it is done.
+    Discard(Box<Op>, String),
+    /// Nothing: a report, such as a hook's output.
+    Report,
 }
 
 /// A colour with its alpha scaled.
@@ -344,6 +416,19 @@ impl GitWindow {
             refreshing: false,
             refresh_again: false,
             now: 0,
+            picked: None,
+            picking: false,
+            message_drag: false,
+            busy: None,
+            undo: Vec::new(),
+            prompt: None,
+            message: MessageBox::default(),
+            committing: None,
+            prefill: Prefill::default(),
+            kept_version: 0,
+            said: None,
+            tab_width: 4,
+            window_layout: None,
         }
     }
 
@@ -398,6 +483,11 @@ impl GitWindow {
     pub fn event(&mut self, event: GitEvent) -> bool {
         match event {
             GitEvent::Opened(Ok(repo)) => {
+                if let Some(draft) = super::message::draft(&repo.top) {
+                    self.message = MessageBox::new(&draft);
+                    self.kept_version = self.message.doc.version;
+                }
+                super::ops::prefill(repo.clone(), Arc::clone(&self.send));
                 self.repo = Some(repo);
                 self.error = None;
                 self.refresh();
@@ -416,7 +506,10 @@ impl GitWindow {
             }
             GitEvent::Syntax(result) => self.parsed(result),
             GitEvent::Disk => self.refresh(),
-            GitEvent::FontLoaded | GitEvent::Say(..) | GitEvent::Fonts(_) => {}
+            GitEvent::Done(d) => self.done(*d),
+            GitEvent::Committed(r) => self.committed(*r),
+            GitEvent::Prefill(p) => self.prefill = *p,
+            GitEvent::FontLoaded | GitEvent::Say(..) | GitEvent::Fonts(_) | GitEvent::Redraw => {}
         }
         true
     }
@@ -588,10 +681,16 @@ impl GitWindow {
         if t.token != self.texts_token {
             return;
         }
+        self.picked = None;
         self.diff = Some(self.make_diff(t));
     }
 
     fn make_diff(&self, t: Texts) -> DiffPane {
+        let bytes = |side: &Side| match side {
+            Side::Text(b) => Arc::new(b.clone()),
+            _ => Arc::new(Vec::new()),
+        };
+        let raw = [bytes(&t.left), bytes(&t.right)];
         let text = |side: Side| -> Result<Option<String>, String> {
             match side {
                 Side::Text(bytes) if is_binary(&bytes) => Err("binary".to_owned()),
@@ -633,6 +732,7 @@ impl GitWindow {
             carets: Carets::default(),
             view,
             compare: Box::new(compare),
+            raw,
         }
     }
 
@@ -740,6 +840,8 @@ impl GitWindow {
                     ),
                     staged: Some(true),
                     submodule: false,
+                    orig: e.orig.clone(),
+                    partly: e.is_unstaged(),
                 });
             }
             for e in s.entries.iter().filter(|e| e.is_unstaged()) {
@@ -764,6 +866,8 @@ impl GitWindow {
                     sides: (left, right),
                     staged: Some(false),
                     submodule: e.path.ends_with('/'),
+                    orig: None,
+                    partly: e.is_staged(),
                 });
             }
         }
@@ -840,6 +944,7 @@ impl GitWindow {
             return;
         };
         self.file_sel = Some(i);
+        self.picked = None;
         self.texts_token += 1;
         if file.submodule {
             self.diff = Some(DiffPane::Message(
@@ -989,6 +1094,8 @@ fn commit_file(fc: FileChange) -> FileItem {
         sides: (blob(fc.old_oid), blob(fc.new_oid)),
         staged: None,
         submodule: fc.submodule,
+        orig: None,
+        partly: false,
     }
 }
 
@@ -1094,6 +1201,155 @@ mod tests {
         );
         // The unstaged side reads the file from disk.
         assert_eq!(w.files[1].sides.1, Source::Disk("a.txt".to_owned()));
+    }
+
+    /// The index's copy of `path`.
+    fn staged(dir: &Path, path: &str) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["show", &format!(":{path}")])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// Wait for the change running to finish and the status read after it.
+    fn settle(w: &mut GitWindow, rx: &mpsc::Receiver<GitEvent>) {
+        pump(w, rx, |w| w.busy.is_none() && w.committing.is_none());
+        // The status read the change started.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline {
+            if let Ok(e) = rx.recv_timeout(Duration::from_millis(50)) {
+                w.event(e);
+            }
+        }
+    }
+
+    #[test]
+    fn stage_discard_undo_and_commit_from_the_window() {
+        let Some(dir) = test_repo("git-pane-staging") else {
+            return;
+        };
+        let (mut w, rx) = window(&dir.0);
+        w.headless_load(&rx, Some("changes"));
+        // Stage new.txt with its own button.
+        let new = w.files.iter().position(|f| f.path == "new.txt").unwrap();
+        w.file_button(new, GitCmd::StageFile);
+        settle(&mut w, &rx);
+        assert_eq!(staged(&dir.0, "new.txt"), "new\n");
+        assert!(
+            w.take_said()
+                .is_some_and(|(t, e)| !e && t.contains("Staged"))
+        );
+        // Discard a.txt's unstaged change, after the prompt says yes.
+        let a = w
+            .files
+            .iter()
+            .position(|f| f.path == "a.txt" && f.staged == Some(false))
+            .unwrap();
+        w.file_button(a, GitCmd::DiscardFile);
+        assert!(w.prompt.is_some(), "discarding asks first");
+        w.answered(crate::prompt::Answer::Yes);
+        settle(&mut w, &rx);
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("a.txt")).unwrap(),
+            "staged\n"
+        );
+        // Undo Discard puts the working-tree text back.
+        w.git_command(GitCmd::UndoDiscard);
+        settle(&mut w, &rx);
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("a.txt")).unwrap(),
+            "unstaged\n"
+        );
+        // Commit what is staged.
+        w.message.set_text("Add new.txt");
+        w.git_command(GitCmd::Commit);
+        settle(&mut w, &rx);
+        assert!(w.message.is_blank(), "a commit clears the box");
+        let log = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir.0)
+            .args(["log", "-1", "--format=%s"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Add new.txt");
+        assert!(
+            w.files.iter().all(|f| f.staged != Some(true)),
+            "nothing staged now"
+        );
+    }
+
+    /// Whether the compare has its changes.
+    fn compared(w: &GitWindow) -> bool {
+        matches!(&w.diff, Some(DiffPane::Compare { compare, .. }) if compare.hunks().is_some())
+    }
+
+    #[test]
+    fn a_hunk_and_picked_lines_stage_from_the_compare() {
+        let Some(dir) = test_repo("git-pane-hunk") else {
+            return;
+        };
+        dir.write("b.txt", "1\n2\n3\n4\n5\n6\n7\n8\n9\n");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir.0)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git(&["reset", "-q"]);
+        git(&["add", "b.txt"]);
+        git(&["commit", "-q", "-m", "numbers"]);
+        dir.write("b.txt", "1\nTWO\n3\n4\n5\n6\n7\nEIGHT\n9\n");
+        let (mut w, rx) = window(&dir.0);
+        w.headless_load(&rx, Some("changes"));
+        let b = w
+            .files
+            .iter()
+            .position(|f| f.path == "b.txt" && f.staged == Some(false))
+            .unwrap();
+        w.select_file(b);
+        pump(&mut w, &rx, compared);
+        // The first change is the current one: stage only it.
+        w.git_command(GitCmd::StageHunk);
+        settle(&mut w, &rx);
+        assert_eq!(staged(&dir.0, "b.txt"), "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n");
+        // The rest is still unstaged.
+        let b = w
+            .files
+            .iter()
+            .position(|f| f.path == "b.txt" && f.staged == Some(false))
+            .unwrap();
+        w.select_file(b);
+        pump(&mut w, &rx, compared);
+        // Nothing picked: Stage Lines says so and changes nothing.
+        w.take_said();
+        w.git_command(GitCmd::StageLines);
+        assert!(w.take_said().is_some());
+        assert_eq!(w.busy, None);
+        // Pick the remaining change's rows and stage them.
+        let rows = match &w.diff {
+            Some(DiffPane::Compare { compare, .. }) => compare.change_rows(0).unwrap(),
+            _ => unreachable!(),
+        };
+        w.picked = Some((rows.start, rows.end - 1));
+        w.git_command(GitCmd::StageLines);
+        settle(&mut w, &rx);
+        assert_eq!(staged(&dir.0, "b.txt"), "1\nTWO\n3\n4\n5\n6\n7\nEIGHT\n9\n");
+        // And unstage the first change again from the staged row.
+        let s = w
+            .files
+            .iter()
+            .position(|f| f.path == "b.txt" && f.staged == Some(true))
+            .unwrap();
+        w.select_file(s);
+        pump(&mut w, &rx, compared);
+        w.git_command(GitCmd::UnstageHunk);
+        settle(&mut w, &rx);
+        assert_eq!(staged(&dir.0, "b.txt"), "1\n2\n3\n4\n5\n6\n7\nEIGHT\n9\n");
     }
 
     #[test]

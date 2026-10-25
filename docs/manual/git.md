@@ -4,9 +4,10 @@
 have changed and not committed yet, the whole history with its branches
 drawn as a graph, and any commit's files and differences. It uses your
 own `git` program, so it agrees with your terminal, your config and
-your credentials. In this version the window only reads: it never
-changes the repository. Staging, committing, branches and merging come
-in later versions.
+your credentials. From the Changes view you can stage, unstage and
+discard whole files, single changes or just the lines you pick, and
+write and make commits. Branches, remotes and merging come in later
+versions.
 
 ## Opening it
 
@@ -68,7 +69,85 @@ a commit:
   listed here too. A new folder is listed as one entry, as `git status`
   does.
 
-A file can be in both lists when part of it is staged.
+A file can be in both lists when part of it is staged: the staged row
+says *part staged* and the other *rest not staged*. Select either row to
+see that part of the change.
+
+## Staging and unstaging
+
+Every file in **Not staged** has a **Stage** button, and every file in
+**Staged** has **Unstage**. **Stage All** and **Unstage All** sit next to
+the two headings. Staging a new folder stages everything in it.
+
+To stage part of a file, select its row and use the second row of the
+bar above the compare:
+
+- **Stage Hunk** stages one change: the one you last stepped to with
+  Next Change (`F7`), or picked a row of, or else the first.
+- **Stage Lines** stages only the rows you picked. Click a row of the
+  compare to pick it, drag or `Shift`-click to pick several, or, with the
+  compare focused, use `Up` and `Down` (`Shift` to extend). Picked rows
+  have a tint and a bar on the left; `Escape` clears them. Picking works
+  in the side-by-side view, not in Unified.
+
+From a **Staged** row the same buttons read **Unstage Hunk** and
+**Unstage Lines**, and take that part back out of the index; the file on
+disk is not touched. The lists and the compare update as soon as git is
+done.
+
+A part of a file is put into the index as a small patch that git applies
+(`git apply --cached`). If the file changed meanwhile so the patch no
+longer fits, git refuses it whole, nothing changes, and the status bar
+says so: look at the compare again and retry. Line endings are kept as
+the file has them, and a missing newline at the end of the file stays
+missing. Files with conflicts, deleted files and submodules are staged
+whole.
+
+## Discarding changes
+
+**Discard** (on a Not staged row), **Discard Hunk** and **Discard Lines**
+throw away changes in your working copy: the file goes back to what is
+staged. The window always asks first. A new file you discard goes to
+the system trash, as deleting from the editor's sidebar does.
+
+**Undo Discard** (in the palette, or `Cmd+Z` / `Ctrl+Z` outside the
+message box) puts back what you discarded last, then the one before,
+while the window stays open. The window keeps the discarded text as a
+git object, which changes no branch and is cleaned up by git in time;
+closing the window ends Undo Discard, and the question before each
+discard says so.
+
+## Committing
+
+Under the Changes lists is the commit message box. It edits like a
+Nimbus document: undo, several cursors, cut, copy and paste, soft wrap
+(Toggle Soft Wrap) and a ruler at 72 columns. `Tab` moves on to the
+next pane instead of typing a tab; `Escape` leaves the box. What you
+type is kept when you click away or close the window, one draft per
+repository, until a commit uses it.
+
+**Commit** (or `Cmd+Enter` / `Ctrl+Enter`) commits what is staged with
+the message. It runs `git commit`, so your hooks, commit signing,
+templates and config work exactly as in a terminal. While it runs, the
+button reads **Stop** and the status bar says so; a long hook can be
+stopped with **Stop** or `Escape`. When git refuses the commit (a
+failing hook, a signing problem), the window shows git's own words.
+
+**Amend last commit** loads the last commit's message into the box, and
+Commit then rewrites that commit with what is staged and the message as
+you leave it. Turn it off again to get your own draft back.
+
+Next to the buttons is who the commit will be by, from git's config
+(`user.name` and `user.email`); when they are not set, the window says
+so, and so would git.
+
+## The palette
+
+`Cmd+Shift+P` / `Ctrl+Shift+P` opens the git window's own palette: every
+staging, discard and commit action, and the compare and view actions it
+shares with the editor. Each has an id (such as `git.stageHunk`) you can
+bind keys to in `config.toml`'s `[keys]`, as in the editor; only Commit
+has a key by default.
 
 ## The bar above the compare
 
@@ -94,8 +173,10 @@ The git window follows your key bindings for the editor's commands:
 | Command | Keys (defaults) | In the git window |
 |---|---|---|
 | Move up and down | `Up`, `Down`, `PageUp`, `PageDown`, `Home` and `End` of the document | Move through the focused list |
-| Next Tab, Previous Tab | `Ctrl+Tab`, `Ctrl+Shift+Tab` | Move the focus between the sidebar, the history and the files |
-| Escape | `Escape` | Focus the history |
+| Next Tab, Previous Tab | `Ctrl+Tab`, `Ctrl+Shift+Tab` | Move the focus between the sidebar, the history, the files, and under Changes the compare and the message box |
+| Escape | `Escape` | Clear picked rows, leave the message box, stop a commit, or focus the history |
+| Undo | `Cmd+Z` / `Ctrl+Z` | In the message box, undo typing; elsewhere, Undo Discard |
+| Command Palette | `Cmd+Shift+P` / `Ctrl+Shift+P` | The git window's palette |
 | Insert Newline | `Enter` | Open the selected file in the editor |
 | Copy | `Cmd+C` / `Ctrl+C` | Copy the selected commit's hash, or with the files focused, the file's path |
 | Next Change, Previous Change | `F7`, `Shift+F7` | Step through the compare's changes |
@@ -137,10 +218,17 @@ Two of git's own features make a large repository faster:
 ## Safety
 
 A repository you cloned can carry config that names programs for git to
-run. The git window runs git with the same protections as Compare with
-HEAD: no filesystem monitor, no hooks, no fetching of missing objects,
-no signature checks (`log.showSignature` is forced off), no password
-prompts, and no locks taken on the index, so it never gets in the way of
-your own git commands. Arguments always go to git as separate words,
+run. While it reads, the git window runs git with the same protections
+as Compare with HEAD: no filesystem monitor, no hooks, no fetching of
+missing objects, no signature checks (`log.showSignature` is forced
+off), no password prompts, and no locks taken on the index, so it never
+gets in the way of your own git commands.
+
+What you ask it to change runs as the same command would in your
+terminal, because that is what you expect of it: committing runs your
+hooks and signs as your config says, and staging applies the
+repository's clean filters (such as Git LFS). The filesystem monitor
+stays off and git never prompts for a password, and file names are
+always passed as names, never as patterns. Arguments always go to git as separate words,
 never through a shell, and commit hashes are checked before they are
 passed on.

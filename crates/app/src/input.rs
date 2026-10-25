@@ -41,6 +41,42 @@ pub enum Motion {
 }
 
 /// What a key press asks the editor to do.
+/// What the git window can do to a repository (M28). Each is an action
+/// that only applies in the git window ([`crate::action::When::GitWindow`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitCmd {
+    /// Stage the selected file whole.
+    StageFile,
+    /// Unstage the selected file whole.
+    UnstageFile,
+    /// Stage the selected change of the selected file.
+    StageHunk,
+    /// Unstage the selected change.
+    UnstageHunk,
+    /// Stage the lines selected in the compare.
+    StageLines,
+    /// Unstage the lines selected in the compare.
+    UnstageLines,
+    /// Discard the selected file's changes in the working tree.
+    DiscardFile,
+    /// Discard the selected change.
+    DiscardHunk,
+    /// Discard the lines selected in the compare.
+    DiscardLines,
+    /// Put back what the last discard removed.
+    UndoDiscard,
+    /// Stage every change.
+    StageAll,
+    /// Unstage everything.
+    UnstageAll,
+    /// Commit the staged changes with the message box's text.
+    Commit,
+    /// Switch between a new commit and amending the last one.
+    ToggleAmend,
+    /// Put the keyboard in the commit message box.
+    FocusMessage,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command<'a> {
     /// Move the cursor; with `extend` (Shift held), grow the selection.
@@ -321,6 +357,8 @@ pub enum Command<'a> {
     /// Open the git window (M27) for the workspace's first folder, in a
     /// process of its own.
     OpenGitWindow,
+    /// A command of the git window (M28); the editor ignores them.
+    Git(GitCmd),
     /// Cycle the compare's whitespace option: off, ends, all (M18).
     DiffWhitespace,
     /// Toggle the compare's ignore-case option.
@@ -597,16 +635,13 @@ pub enum Resolved<'a> {
 pub fn resolve<'a>(
     keymap: &Keymap,
     k: KeyPress<'a>,
-    find_open: bool,
+    scope: When,
     pending: Option<Chord>,
 ) -> Resolved<'a> {
     if !k.pressed {
         return Resolved::Nothing;
     }
-    let applies = |action: &ActionInfo| match action.when {
-        When::Always => true,
-        When::FindBar => find_open,
-    };
+    let applies = |action: &ActionInfo| action.when == When::Always || action.when == scope;
     if let Some(first) = pending {
         if is_modifier(k.key) {
             return Resolved::Prefix(first);
@@ -616,7 +651,7 @@ pub fn resolve<'a>(
             _ => Resolved::Nothing,
         };
     }
-    match keymap.lookup(k.key, k.physical, k.mods, find_open) {
+    match keymap.lookup(k.key, k.physical, k.mods, scope) {
         Lookup::Action(action) if applies(action) => {
             return if !k.repeat || repeats(action.command) {
                 Resolved::Command(action.command)
@@ -694,7 +729,12 @@ mod tests {
 
     /// The command a press resolves to, with no chord pending.
     fn resolve<'a>(km: &Keymap, k: KeyPress<'a>, find_open: bool) -> Option<Command<'a>> {
-        match super::resolve(km, k, find_open, None) {
+        let scope = if find_open {
+            When::FindBar
+        } else {
+            When::Always
+        };
+        match super::resolve(km, k, scope, None) {
             Resolved::Command(c) => Some(c),
             Resolved::Prefix(_) | Resolved::Nothing => None,
         }
@@ -848,7 +888,7 @@ mod tests {
         let first = super::resolve(
             &km,
             press(&k, KeyCode::KeyK, Some("k"), ModifiersState::CONTROL),
-            false,
+            crate::action::When::Always,
             None,
         );
         let Resolved::Prefix(chord) = first else {
@@ -860,7 +900,7 @@ mod tests {
             super::resolve(
                 &km,
                 press(&ctrl, KeyCode::ControlLeft, None, ModifiersState::CONTROL),
-                false,
+                crate::action::When::Always,
                 Some(chord)
             ),
             Resolved::Prefix(chord)
@@ -870,7 +910,7 @@ mod tests {
             super::resolve(
                 &km,
                 press(&c, KeyCode::KeyC, Some("c"), ModifiersState::CONTROL),
-                false,
+                crate::action::When::Always,
                 Some(chord)
             ),
             Resolved::Command(Command::ToggleLineComment)
@@ -881,7 +921,7 @@ mod tests {
             super::resolve(
                 &km,
                 press(&x, KeyCode::KeyX, Some("x"), ModifiersState::empty()),
-                false,
+                crate::action::When::Always,
                 Some(chord)
             ),
             Resolved::Nothing

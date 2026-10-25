@@ -48,14 +48,19 @@ use std::time::{Duration, Instant};
 // `#[path]`, find the submodules too.
 #[path = "git/parse.rs"]
 pub mod parse;
+#[path = "git/patch.rs"]
+pub mod patch;
 #[path = "git/repo.rs"]
 mod repo;
 #[path = "git/stream.rs"]
 mod stream;
+#[path = "git/write.rs"]
+mod write;
 
 pub use parse::{Commit, FileChange, Kind, Ref, RefKind, Status, ago, date};
 pub use repo::{Repo, Stash};
 pub use stream::Stream;
+pub use write::CommitOutput;
 
 #[cfg(test)]
 pub(crate) use repo::tests::{Dir as TestDir, repo as test_repo};
@@ -99,6 +104,9 @@ pub enum GitError {
     /// Something on our side failed: the file's path could not be resolved,
     /// or a pipe to git broke. Holds the system's message.
     Io(String),
+    /// The user stopped a long call (a commit whose hooks were still
+    /// running).
+    Cancelled,
 }
 
 impl fmt::Display for GitError {
@@ -118,6 +126,7 @@ impl fmt::Display for GitError {
             ),
             Self::Failed(message) => write!(f, "git: {message}"),
             Self::Io(message) => write!(f, "could not run git: {message}"),
+            Self::Cancelled => f.write_str("stopped"),
         }
     }
 }

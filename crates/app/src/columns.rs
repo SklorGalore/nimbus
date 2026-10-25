@@ -130,6 +130,26 @@ impl<T: Copy> Columns<T> {
         u.piece(line, piece, t.line_span(t.line_to_byte(line)))
     }
 
+    /// The row under `(x, y)` (M28's line picking), if over a row.
+    #[must_use]
+    pub fn row_under(&self, layout: &Layout, x: f32, y: f32) -> Option<usize> {
+        self.row_at(layout, x, y)
+            .map(|(r, _)| r)
+            .filter(|&r| r < self.rows.len())
+    }
+
+    /// The top of `row` on screen, as the last plan placed it.
+    #[must_use]
+    pub fn row_y(&self, row: usize, layout: &Layout) -> f32 {
+        let lh = layout.metrics.line_height;
+        let rel = if row >= self.scroll_row {
+            f(row - self.scroll_row)
+        } else {
+            -f(self.scroll_row - row)
+        };
+        layout.top + rel * lh - self.scroll_px
+    }
+
     /// The live column's first unit of `line`.
     fn live_unit(&self, line: usize) -> usize {
         self.units

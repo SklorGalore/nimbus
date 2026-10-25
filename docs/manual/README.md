@@ -44,8 +44,8 @@ the repository instead.
 15. [Accessibility](accessibility.md): screen readers, reaching every
     panel from the keyboard, and keys your system may take first.
 16. [The git window](git.md): `nimbus --git`, your uncommitted changes,
-    the history with its branch graph, and any commit's files and
-    differences.
+    the history with its branch graph, any commit's files and
+    differences, and staging, discarding and committing.
 
 ## A note on keys
 
