@@ -111,7 +111,9 @@ work, shows the files, and asks before sending anything. Then:
   holds only the package files and that its install and uninstall
   scripts are byte for byte the templates in `packaging/chocolatey`
   filled in from the signed `SHA256SUMS` (they carry the installer's URL
-  and hash), and pushes it to the community repository. It needs
+  and hash), checks its `iconUrl` is the jsDelivr CDN pinned to the
+  tag's commit (Chocolatey refuses `raw.githubusercontent.com` icons),
+  and pushes it to the community repository. It needs
   your API key from <https://community.chocolatey.org/account>: from
   `CHOCOLATEY_API_KEY` if set, else from the Keychain item
   `chocolatey-api-key`, else it asks. It never echoes or saves the key.
@@ -124,6 +126,13 @@ work, shows the files, and asks before sending anything. Then:
   `choco install nimbus`. For a release made before the Chocolatey
   workflow existed, run it first: Actions > Chocolatey package > Run
   workflow, with the tag.
+
+If a moderator asks for a change to a package that is still waiting
+for review, fix the template on `development`, run the Chocolatey
+package workflow from `development` with the same tag (it replaces the
+release's `.nupkg`), then run
+`scripts/publish-packages.ps1 vX.Y.Z --only chocolatey` again: the
+same version can be pushed again until it is approved.
 
 Running it again for a version already published changes nothing.
 Needs `gh` (signed in) and `minisign`. `--dry-run` also works on a

@@ -16,6 +16,9 @@ section before tagging.
 - The Chocolatey package's source link points at the release's tagged
   code (`tree/vX.Y.Z`) instead of repeating the project page, as the
   Chocolatey validator suggests.
+- The Chocolatey package's icon comes from the jsDelivr CDN, pinned to
+  the release's commit, instead of `raw.githubusercontent.com`, which
+  Chocolatey's moderators do not allow.
 
 ### Fixed
 
