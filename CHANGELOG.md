@@ -34,12 +34,6 @@ section before tagging.
   (functions, classes, methods, enums) and `powershell` fenced code
   blocks in Markdown.
 
-### Fixed
-
-- What a screen reader is told about where things are on screen no
-  longer ignores the drawn title bar (macOS) or menu bar (Windows), so
-  its highlight sits on what it reads.
-
 ### Changed
 
 - `scripts/publish-packages.ps1` replaces `scripts/publish-packages.sh`:
@@ -63,6 +57,9 @@ section before tagging.
 - The git window no longer panics on a commit whose timestamp is near
   the limits of a 64-bit number; its date and age are worked out with
   saturating arithmetic.
+- What a screen reader is told about where things are on screen no
+  longer ignores the drawn title bar (macOS) or menu bar (Windows), so
+  its highlight sits on what it reads.
 
 ## 1.3.1
 
