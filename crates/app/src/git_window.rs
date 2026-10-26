@@ -19,6 +19,7 @@
 //! and the history all start afterwards on workers, so the startup budget
 //! holds however large the repository is.
 
+mod access;
 mod history;
 mod load;
 mod message;
@@ -140,6 +141,8 @@ struct GitApp {
     clipboard: Option<arboard::Clipboard>,
     /// The command palette, when open (M28).
     picker: Option<Picker>,
+    /// The screen reader adapter and what it was last sent.
+    access: access::GitAccess,
     exit_code: i32,
 }
 
@@ -177,6 +180,7 @@ impl GitApp {
             refresh_at: None,
             clipboard: None,
             picker: None,
+            access: access::GitAccess::default(),
             exit_code: 0,
         };
         app.pane.tab_width = app.config.tab_width;
@@ -261,6 +265,8 @@ impl GitApp {
             let ui = self.theme.ui;
             crate::app::draw_picker_overlay(gpu, &ui, &layout, p, &self.keymap, true);
         }
+        // After drawing: the tree takes its rectangles from this frame.
+        self.update_access();
     }
 
     fn present(&mut self, event_loop: &ActiveEventLoop) {
@@ -601,11 +607,18 @@ impl ApplicationHandler<GitEvent> for GitApp {
         if self.window.is_some() {
             return;
         }
+        // Created hidden, given its screen reader adapter, then shown: the
+        // adapter must exist before the window is first visible.
         let attrs = Window::default_attributes()
             .with_title(self.pane.title())
-            .with_inner_size(LogicalSize::new(1200.0, 760.0));
+            .with_inner_size(LogicalSize::new(1200.0, 760.0))
+            .with_visible(false);
         let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
+            Ok(w) => {
+                self.access.attach(event_loop, &w, self.proxy.clone());
+                w.set_visible(true);
+                Arc::new(w)
+            }
             Err(e) => {
                 crate::fatal(&self.options, &format!("Could not create a window: {e}"));
                 self.exit_code = 1;
@@ -627,13 +640,14 @@ impl ApplicationHandler<GitEvent> for GitApp {
         window.request_redraw();
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: GitEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: GitEvent) {
         match event {
             GitEvent::Disk => {
                 self.refresh_at = Some(Instant::now() + SETTLE);
             }
             GitEvent::Say(text, is_error) => self.say(text, is_error),
             GitEvent::FontLoaded => self.redraw(),
+            GitEvent::Access(e) => self.access_event(e, event_loop),
             GitEvent::Fonts(fonts) => {
                 let (font, ui_font) = *fonts;
                 if let Some(gpu) = self.gpu.as_mut() {
@@ -707,6 +721,9 @@ impl ApplicationHandler<GitEvent> for GitApp {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if let Some(window) = self.window.clone() {
+            self.access.window_event(&window, &event);
+        }
         if self.gpu.is_none() {
             return;
         }

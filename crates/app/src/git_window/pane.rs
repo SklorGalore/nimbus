@@ -35,6 +35,7 @@ use crate::prompt::Prompt;
 use crate::theme::Ui;
 use crate::view::{Layout, View};
 
+pub mod access;
 pub mod draw;
 mod staging;
 
@@ -290,6 +291,9 @@ pub struct GitWindow {
     details_share: f32,
     info_share: f32,
     hits: Vec<([f32; 4], Hit)>,
+    /// The buttons the last frame drew: what each does, its label, and
+    /// whether it is on and usable, for the screen reader's tree.
+    drawn_buttons: Vec<(Hit, &'static str, bool, bool)>,
     /// A divider being dragged.
     pub dragging: Option<usize>,
     scratch: String,
@@ -409,6 +413,7 @@ impl GitWindow {
             details_share: 0.48,
             info_share: 0.36,
             hits: Vec::new(),
+            drawn_buttons: Vec::new(),
             dragging: None,
             scratch: String::new(),
             send,
@@ -509,7 +514,11 @@ impl GitWindow {
             GitEvent::Done(d) => self.done(*d),
             GitEvent::Committed(r) => self.committed(*r),
             GitEvent::Prefill(p) => self.prefill = *p,
-            GitEvent::FontLoaded | GitEvent::Say(..) | GitEvent::Fonts(_) | GitEvent::Redraw => {}
+            GitEvent::FontLoaded
+            | GitEvent::Say(..)
+            | GitEvent::Fonts(_)
+            | GitEvent::Redraw
+            | GitEvent::Access(_) => {}
         }
         true
     }
@@ -1132,7 +1141,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    fn window(dir: &Path) -> (GitWindow, mpsc::Receiver<GitEvent>) {
+    pub(super) fn window(dir: &Path) -> (GitWindow, mpsc::Receiver<GitEvent>) {
         let (tx, rx) = mpsc::channel::<GitEvent>();
         let tx = std::sync::Mutex::new(tx);
         let send: Send = Arc::new(move |e| tx.lock().is_ok_and(|t| t.send(e).is_ok()));
@@ -1147,7 +1156,11 @@ mod tests {
     }
 
     /// Feed events to the window until `done` holds.
-    fn pump(w: &mut GitWindow, rx: &mpsc::Receiver<GitEvent>, done: impl Fn(&GitWindow) -> bool) {
+    pub(super) fn pump(
+        w: &mut GitWindow,
+        rx: &mpsc::Receiver<GitEvent>,
+        done: impl Fn(&GitWindow) -> bool,
+    ) {
         let deadline = Instant::now() + Duration::from_secs(30);
         while !done(w) {
             assert!(Instant::now() < deadline, "timed out");
