@@ -20,13 +20,25 @@ section before tagging.
   `git commit` with your hooks and signing, shows a refusing hook's
   output, and can be stopped; **Amend last commit** loads the last
   message. The git window has its own command palette.
-
-### Added
-
+- Screen readers can read and use the menus Nimbus draws: the Windows
+  menu bar, its drop-downs and right-click menus are read as menus with
+  their items and shortcuts, and in-app questions such as "Save changes
+  before closing?" as alert dialogs with their buttons.
+- Screen readers can read the git window (`nimbus --git`): the sidebar
+  as a tree, the history as a list of commits, the details and changed
+  files, the commit message box, the staging, commit and compare
+  buttons, the palette, and the new side of the selected file's diff
+  as text.
 - PowerShell highlighting for `.ps1`, `.psm1` and `.psd1` files and
   scripts starting `#!/usr/bin/env pwsh`, with folding, Go to Symbol
   (functions, classes, methods, enums) and `powershell` fenced code
   blocks in Markdown.
+
+### Fixed
+
+- What a screen reader is told about where things are on screen no
+  longer ignores the drawn title bar (macOS) or menu bar (Windows), so
+  its highlight sits on what it reads.
 
 ### Changed
 

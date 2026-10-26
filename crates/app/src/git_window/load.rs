@@ -56,6 +56,14 @@ pub enum GitEvent {
             Option<nimbus_render::EditorFont>,
         )>,
     ),
+    /// A screen reader asked for the tree, acted, or went away.
+    Access(accesskit_winit::WindowEvent),
+}
+
+impl From<accesskit_winit::Event> for GitEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        GitEvent::Access(event.window_event)
+    }
 }
 
 /// Where workers send their results: the event loop's proxy in a window,

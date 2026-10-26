@@ -22,11 +22,15 @@ use winit::window::{Window, WindowAttributes};
 
 use super::{App, AppEvent};
 use crate::access::text::{Frame, Geometry, TextWindow};
-use crate::access::{self, Field, Find, Picker, Scene, Sent, Sidebar, Tab, TreeRow, id};
+use crate::access::{
+    self, Field, Find, Menu, MenuBar, MenuEntry, Picker, Prompt, Scene, Sent, Sidebar, Tab,
+    TreeRow, id,
+};
 use crate::docs::DocId;
 use crate::document::{Editor, Solo};
 use crate::find::Field as FindField;
 use crate::input::Command;
+use crate::menu::drawn::{self, DRAWS_MENU_BAR, Entry};
 use crate::search_panel::Focus as SearchFocus;
 use crate::sidebar::Mode;
 use crate::view::{self, Layout};
@@ -312,8 +316,17 @@ impl App {
         let find = self.access_find(layout, g, out);
         let picker = self.access_picker(window, g, out);
         let sidebar = self.access_sidebar(window, g, out);
+        let inset = self.gpu.as_ref().map_or(0.0, nimbus_render::Gpu::inset_top);
+        let (menu_bar, menu) = self.access_menus(window, inset);
+        let prompt = self.access_prompt(window);
 
-        let focus = if picker.is_some() {
+        // A prompt and an open menu take every key, so they have the
+        // keyboard before anything else.
+        let focus = if let Some(p) = &prompt {
+            id::button(p.focused)
+        } else if let Some(m) = &menu {
+            m.hover.map_or(id::MENU, id::menu_item)
+        } else if picker.is_some() {
             id::PICKER_FIELD
         } else if self.sidebar.focused && sidebar.is_some() {
             self.sidebar_focus(sidebar.as_ref())
@@ -330,6 +343,10 @@ impl App {
         Scene {
             title: format!("{dirty}{} — Nimbus", self.doc().display_name()),
             size: [width, height],
+            inset,
+            menu_bar,
+            menu,
+            prompt,
             tabs,
             active_tab,
             tab_bar,
@@ -341,6 +358,64 @@ impl App {
             picker,
             focus,
         }
+    }
+
+    /// The drawn menu bar (Windows) and the open drawn menu.
+    fn access_menus(&self, window: Option<Layout>, inset: f32) -> (Option<MenuBar>, Option<Menu>) {
+        let Some(layout) = window else {
+            return (None, None);
+        };
+        let open_bar = self.menus.open_bar_menu();
+        let bar = (DRAWS_MENU_BAR && inset > 0.0).then(|| MenuBar {
+            titles: drawn::bar_items(&layout, inset)
+                .into_iter()
+                .map(|(t, b)| (t.to_owned(), b))
+                .collect(),
+            open: open_bar,
+            bounds: [0.0, -inset, layout.width, inset],
+        });
+        let menu = self.menus.describe(&layout).map(|d| Menu {
+            label: d
+                .bar
+                .and_then(|i| crate::menu::LAYOUT.get(i))
+                .map_or_else(|| "Context menu".to_owned(), |(t, _)| (*t).to_owned()),
+            entries: d
+                .entries
+                .iter()
+                .map(|(e, bounds)| match e {
+                    Entry::Item { title, keys, .. } => {
+                        MenuEntry::Item((*title).to_owned(), keys.clone(), *bounds)
+                    }
+                    Entry::Separator => MenuEntry::Separator,
+                })
+                .collect(),
+            hover: d.hover,
+            bounds: d.frame,
+        });
+        (bar, menu)
+    }
+
+    /// The front prompt, when one is open.
+    fn access_prompt(&self, window: Option<Layout>) -> Option<Prompt> {
+        let (p, layout) = (self.prompts.front()?, window?);
+        let (bounds, rects) = p.rects(&layout);
+        let default = p
+            .buttons
+            .iter()
+            .position(|b| b.answer == crate::prompt::Answer::Yes);
+        Some(Prompt {
+            title: p.title.clone(),
+            text: p.text.clone(),
+            buttons: p
+                .buttons
+                .iter()
+                .zip(rects)
+                .enumerate()
+                .map(|(i, (b, r))| (b.label.to_owned(), r, Some(i) == default))
+                .collect(),
+            focused: p.focused,
+            bounds,
+        })
     }
 
     /// The node with the keyboard while the sidebar has it.
@@ -677,7 +752,18 @@ impl App {
             req.action,
             req.target_node
         );
+        // While a prompt is open it alone answers, as it takes every key
+        // and click.
+        if !self.prompts.is_empty() {
+            if let id::Target::Button(n) = id::target(req.target_node) {
+                self.access_button(n, req.action, event_loop);
+            }
+            return;
+        }
         match id::target(req.target_node) {
+            id::Target::MenuTitle(n) => self.access_menu_title(n, req.action),
+            id::Target::MenuItem(n) => self.access_menu_item(n, req.action, event_loop),
+            id::Target::Button(_) => {}
             id::Target::Tab(n) => {
                 if matches!(req.action, Action::Click | Action::Focus)
                     && let Some(&i) = self.group_tabs(self.groups.focused).get(n)
@@ -713,6 +799,65 @@ impl App {
                 };
                 self.access_text(field, req, event_loop);
             }
+        }
+    }
+
+    /// A request on title `n` of the drawn menu bar: open its menu
+    /// (Click, Expand), or close it (Click on the open one, Collapse), as
+    /// a click on the title does.
+    fn access_menu_title(&mut self, n: usize, action: Action) {
+        let open = self.menus.open_bar_menu() == Some(n);
+        let Some(layout) = self.window_layout() else {
+            return;
+        };
+        match action {
+            Action::Click | Action::Collapse if open => self.menus.close(),
+            Action::Click | Action::Expand if !open => {
+                self.menus.open_bar(n, &layout, &self.keymap, true);
+            }
+            _ => return,
+        }
+        self.changed(false);
+    }
+
+    /// A request on entry `n` of the open menu: highlight it (Focus) or
+    /// run it (Click).
+    fn access_menu_item(&mut self, n: usize, action: Action, event_loop: &ActiveEventLoop) {
+        match action {
+            Action::Focus => {
+                if let Some(layout) = self.window_layout() {
+                    self.menus.set_hover(n, &layout);
+                }
+                self.changed(false);
+            }
+            Action::Click => {
+                if let Some(id) = self.menus.choose(n) {
+                    self.run_menu_item(id, event_loop);
+                }
+                self.changed(false);
+            }
+            _ => {}
+        }
+    }
+
+    /// A request on button `n` of the front prompt: focus it, or press it.
+    fn access_button(&mut self, n: usize, action: Action, event_loop: &ActiveEventLoop) {
+        let Some(p) = self.prompts.front_mut() else {
+            return;
+        };
+        let Some(answer) = p.buttons.get(n).map(|b| b.answer) else {
+            return;
+        };
+        match action {
+            Action::Focus => {
+                p.focused = n;
+                self.changed(false);
+            }
+            Action::Click => {
+                self.prompt_answered(answer, event_loop);
+                self.changed(false);
+            }
+            _ => {}
         }
     }
 

@@ -7558,7 +7558,7 @@ fn headless_folder_compare(sidebar: &mut Sidebar, left: &Path, right: &Path) {
 
 /// The picker's count of matches, such as "42 files" ("…" while still
 /// listing), or nothing for pickers that do not list.
-fn picker_status(p: &Picker) -> String {
+pub(crate) fn picker_status(p: &Picker) -> String {
     let n = p.match_count();
     let noun = match (p.kind, n == 1) {
         (Kind::Palette, true) => "command",
@@ -7586,7 +7586,7 @@ fn picker_status(p: &Picker) -> String {
 }
 
 /// What the picker is, as a screen reader names it.
-fn picker_title(kind: Kind) -> &'static str {
+pub(crate) fn picker_title(kind: Kind) -> &'static str {
     match kind {
         Kind::Palette => "Command palette",
         Kind::Files => "Go to file",
@@ -7604,7 +7604,7 @@ fn picker_title(kind: Kind) -> &'static str {
 }
 
 /// The hint the picker's empty query field shows.
-fn picker_placeholder(kind: Kind) -> &'static str {
+pub(crate) fn picker_placeholder(kind: Kind) -> &'static str {
     match kind {
         Kind::Palette => "Type a command",
         Kind::Files => "Type a file name",

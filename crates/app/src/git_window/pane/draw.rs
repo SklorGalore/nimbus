@@ -42,7 +42,7 @@ pub enum Outcome {
 }
 
 impl GitWindow {
-    fn geo(&self, gpu: &Gpu, scale: f32) -> Geo {
+    pub(super) fn geo(&self, gpu: &Gpu, scale: f32) -> Geo {
         let (w, h) = gpu.size();
         let (w, h) = (f(w as usize), f(h as usize));
         let m = gpu.metrics();
@@ -124,6 +124,7 @@ impl GitWindow {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
         self.hits.clear();
+        self.drawn_buttons.clear();
         let ui = theme.ui;
         view::begin_frame(gpu, &ui);
         let g = self.geo(gpu, scale);
@@ -184,7 +185,7 @@ impl GitWindow {
         ui: &Ui,
         base: &Layout,
         (x, y, h): (f32, f32, f32),
-        label: &str,
+        label: &'static str,
         (on, usable): (bool, bool),
         hit: Hit,
     ) -> f32 {
@@ -196,6 +197,7 @@ impl GitWindow {
         let color = if usable { ui.text } else { ui.gutter };
         gpu.push_ui_text([x + pad, ty], label, color);
         self.hits.push(([x, y, w, h], hit));
+        self.drawn_buttons.push((hit, label, on, usable));
         x + w
     }
 
@@ -1522,7 +1524,7 @@ impl GitWindow {
 
     /// The sidebar line that is selected: Changes, or the first ref at
     /// the selected commit.
-    fn side_selected(&self) -> Option<usize> {
+    pub(super) fn side_selected(&self) -> Option<usize> {
         self.side_items.iter().position(|item| match item {
             SideItem::Changes => self.selected == Selected::Changes,
             SideItem::Ref(r) => self
@@ -1539,7 +1541,7 @@ impl GitWindow {
 
     /// Scroll the details so file `i` is on screen, by the last frame's
     /// line height and pane height.
-    fn reveal_file(&mut self, i: usize) {
+    pub(super) fn reveal_file(&mut self, i: usize) {
         let Some(n) = self.info.iter().position(|l| *l == InfoLine::File(i)) else {
             return;
         };
