@@ -4,6 +4,18 @@ One section per release, newest first. The release workflow puts the
 tagged version's section into the GitHub release notes, so write the
 section before tagging.
 
+## Unreleased
+
+### Added
+
+- Highlighting for git's own files: ignore patterns (`.gitignore`,
+  `.git/info/exclude`), `.gitattributes`, config files (`.gitconfig`,
+  `.gitmodules`, `.git/config`), commit messages (`COMMIT_EDITMSG` and
+  the like, including the diff `git commit -v` adds) and interactive
+  rebase to-do lists (`git-rebase-todo`). They use simple line rules, so
+  no new grammar adds to the download size. Themes gain `diff.plus` and
+  `diff.minus` for added and removed lines.
+
 ## 1.4.0
 
 ### Added
