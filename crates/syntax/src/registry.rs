@@ -135,10 +135,6 @@ impl Injections {
 /// builds on another: TypeScript's own query covers only TypeScript
 /// additions, so JavaScript's comes first and TypeScript's after it (later
 /// patterns win).
-#[expect(
-    clippy::too_many_lines,
-    reason = "one arm per grammar; splitting it would hide the list"
-)]
 fn source(id: LanguageId) -> Option<(Language, String)> {
     match id {
         #[cfg(feature = "rust")]
@@ -234,29 +230,8 @@ fn source(id: LanguageId) -> Option<(Language, String)> {
             tree_sitter_powershell::LANGUAGE.into(),
             include_str!("../queries/powershell.scm").to_owned(),
         )),
-        #[cfg_attr(
-            all(
-                feature = "rust",
-                feature = "markdown",
-                feature = "json",
-                feature = "toml",
-                feature = "yaml",
-                feature = "python",
-                feature = "javascript",
-                feature = "typescript",
-                feature = "bash",
-                feature = "c",
-                feature = "go",
-                feature = "html",
-                feature = "css",
-                feature = "tsx",
-                feature = "powershell"
-            ),
-            expect(
-                unreachable_patterns,
-                reason = "reachable only when a grammar feature is off"
-            )
-        )]
+        // Git's own formats have no grammar (`LanguageId::simple_only`),
+        // and neither does a language whose feature is off.
         _ => None,
     }
 }
@@ -338,7 +313,8 @@ fn tags_source(id: LanguageId) -> Option<String> {
 /// The fold query for a language: nodes captured as `@fold` are regions
 /// M13's folding can collapse. All vendored in `queries/folds/`;
 /// TypeScript's and TSX's are JavaScript's plus TypeScript's additions.
-fn folds_source(id: LanguageId) -> String {
+/// `None` for the git formats, which have no grammar to fold by.
+fn folds_source(id: LanguageId) -> Option<String> {
     let own = match id {
         LanguageId::Rust => include_str!("../queries/folds/rust.scm"),
         LanguageId::Markdown => include_str!("../queries/folds/markdown.scm"),
@@ -350,11 +326,11 @@ fn folds_source(id: LanguageId) -> String {
             let js = include_str!("../queries/folds/javascript.scm");
             let ts = include_str!("../queries/folds/typescript.scm");
             let jsx = include_str!("../queries/folds/jsx.scm");
-            return match id {
+            return Some(match id {
                 LanguageId::JavaScript => format!("{js}\n{jsx}"),
                 LanguageId::TypeScript => format!("{js}\n{ts}"),
                 _ => format!("{js}\n{ts}\n{jsx}"),
-            };
+            });
         }
         LanguageId::Bash => include_str!("../queries/folds/bash.scm"),
         LanguageId::C => include_str!("../queries/folds/c.scm"),
@@ -362,8 +338,13 @@ fn folds_source(id: LanguageId) -> String {
         LanguageId::Html => include_str!("../queries/folds/html.scm"),
         LanguageId::Css => include_str!("../queries/folds/css.scm"),
         LanguageId::PowerShell => include_str!("../queries/folds/powershell.scm"),
+        LanguageId::GitIgnore
+        | LanguageId::GitAttributes
+        | LanguageId::GitConfig
+        | LanguageId::GitCommit
+        | LanguageId::GitRebase => return None,
     };
-    own.to_owned()
+    Some(own.to_owned())
 }
 
 /// A query loaded on first use beside the grammar: the tags or folds
@@ -394,7 +375,7 @@ pub fn folds_query(id: LanguageId) -> Option<&'static Query> {
         [const { OnceLock::new() }; LanguageId::ALL.len()];
     SLOTS
         .get(id.index())?
-        .get_or_init(|| side_query(id, "folds", Some(folds_source(id))))
+        .get_or_init(|| side_query(id, "folds", folds_source(id)))
         .as_ref()
 }
 

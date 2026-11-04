@@ -74,6 +74,8 @@ from opening your first file to themes, languages and key bindings.
   Markdown,
   including code embedded in other code, such as fenced blocks in
   Markdown.
+- Git's own files highlighted too: `.gitignore`, `.gitattributes`,
+  `.gitconfig` and `.gitmodules`, commit messages and rebase to-do lists.
 - Add your own languages and highlight queries.
 - Code folding based on each language's structure.
 

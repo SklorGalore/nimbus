@@ -86,6 +86,12 @@ spans, `text.uri` and `text.reference` for links. Code inside a fenced
 block is coloured by that language's own captures, so `keyword` colours a
 Rust keyword in a Markdown file too.
 
+Git's files use `property` for setting and attribute names, `type` for
+config sections, `string.special` for wildcards in ignore patterns,
+`keyword` for a `!` exception, `text.title` for a commit message's
+summary line, and `diff.plus` and `diff.minus` for the added and removed
+lines of the diff that `git commit -v` puts below the message.
+
 ## Which language a file is
 
 Map file names or `*.ext` patterns in `config.toml`:
@@ -98,7 +104,9 @@ Map file names or `*.ext` patterns in `config.toml`:
 ```
 
 Built-in languages: `rust`, `markdown`, `json`, `toml`, `yaml`, `python`,
-`javascript`, `typescript`, `tsx`, `bash`, `c`, `go`, `html`, `css`. An
+`javascript`, `typescript`, `tsx`, `bash`, `c`, `go`, `html`, `css`,
+`powershell`, and for git's own files `gitignore`, `gitattributes`,
+`gitconfig`, `gitcommit` and `gitrebase`. An
 exact file name beats a pattern, and a longer pattern beats a shorter one
 (`*.d.ts` before `*.ts`). The table beats everything else. Next come your
 own languages' extensions, then the built-in detection (extension, file

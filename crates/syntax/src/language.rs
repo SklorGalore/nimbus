@@ -40,11 +40,23 @@ pub enum LanguageId {
     Tsx,
     /// PowerShell (`.ps1` scripts, `.psm1` modules, `.psd1` data files).
     PowerShell,
+    /// Git's ignore files: `.gitignore`, `.git/info/exclude`. This and the
+    /// other git formats below have no tree-sitter grammar; they are
+    /// coloured line by line ([`LanguageId::simple_only`]).
+    GitIgnore,
+    /// Git's `.gitattributes`.
+    GitAttributes,
+    /// Git's config files: `.gitconfig`, `.gitmodules`, `.git/config`.
+    GitConfig,
+    /// A commit message being written: `COMMIT_EDITMSG` and the like.
+    GitCommit,
+    /// The to-do list of an interactive rebase (`git-rebase-todo`).
+    GitRebase,
 }
 
 impl LanguageId {
     /// Every language, for tests and listings.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 20] = [
         Self::Rust,
         Self::Markdown,
         Self::Json,
@@ -60,6 +72,11 @@ impl LanguageId {
         Self::Css,
         Self::Tsx,
         Self::PowerShell,
+        Self::GitIgnore,
+        Self::GitAttributes,
+        Self::GitConfig,
+        Self::GitCommit,
+        Self::GitRebase,
     ];
 
     /// Lower-case key used in file names and the config:
@@ -82,6 +99,11 @@ impl LanguageId {
             Self::Css => "css",
             Self::Tsx => "tsx",
             Self::PowerShell => "powershell",
+            Self::GitIgnore => "gitignore",
+            Self::GitAttributes => "gitattributes",
+            Self::GitConfig => "gitconfig",
+            Self::GitCommit => "gitcommit",
+            Self::GitRebase => "gitrebase",
         }
     }
 
@@ -107,6 +129,9 @@ impl LanguageId {
             "golang" => Self::Go,
             "htm" | "xhtml" => Self::Html,
             "ps1" | "pwsh" | "posh" => Self::PowerShell,
+            "git-config" => Self::GitConfig,
+            "git-commit" => Self::GitCommit,
+            "git-rebase-todo" | "git-rebase" => Self::GitRebase,
             _ => return None,
         })
     }
@@ -145,7 +170,28 @@ impl LanguageId {
             Self::Css => "CSS",
             Self::Tsx => "TSX",
             Self::PowerShell => "PowerShell",
+            Self::GitIgnore => "Git Ignore",
+            Self::GitAttributes => "Git Attributes",
+            Self::GitConfig => "Git Config",
+            Self::GitCommit => "Git Commit",
+            Self::GitRebase => "Git Rebase",
         }
+    }
+
+    /// Whether the language is coloured only by the line-by-line rules in
+    /// [`crate::lexical`], at any size. Git's own files are: each line
+    /// stands on its own (a pattern, a setting, a rebase step), so simple
+    /// rules colour them fully and no grammar is worth its binary size.
+    #[must_use]
+    pub fn simple_only(self) -> bool {
+        matches!(
+            self,
+            Self::GitIgnore
+                | Self::GitAttributes
+                | Self::GitConfig
+                | Self::GitCommit
+                | Self::GitRebase
+        )
     }
 
     /// Detect from a file path and, failing that, the file's first line.
@@ -164,7 +210,14 @@ impl LanguageId {
             ".bashrc" | ".bash_profile" | ".profile" | ".zshrc" | ".zprofile" | ".envrc" => {
                 Some(Self::Bash)
             }
-            _ => None,
+            ".gitignore" => Some(Self::GitIgnore),
+            ".gitattributes" => Some(Self::GitAttributes),
+            ".gitconfig" | ".gitmodules" | ".lfsconfig" => Some(Self::GitConfig),
+            "COMMIT_EDITMSG" | "MERGE_MSG" | "SQUASH_MSG" | "TAG_EDITMSG" | "NOTES_EDITMSG" => {
+                Some(Self::GitCommit)
+            }
+            "git-rebase-todo" => Some(Self::GitRebase),
+            _ => Self::from_git_dir(path, name),
         };
         if by_name.is_some() {
             return by_name;
@@ -186,8 +239,34 @@ impl LanguageId {
             "css" => Self::Css,
             "tsx" => Self::Tsx,
             "ps1" | "psm1" | "psd1" => Self::PowerShell,
+            // Collections of ignore patterns or included config files,
+            // such as `Rust.gitignore` or `work.gitconfig`.
+            "gitignore" => Self::GitIgnore,
+            "gitconfig" => Self::GitConfig,
             _ => return None,
         })
+    }
+
+    /// Git files known by their folder rather than their name alone:
+    /// `.git/config`, `.git/info/exclude` and `.git/info/attributes` in a
+    /// repository, and `config`, `ignore` and `attributes` in the user's
+    /// `~/.config/git` folder. A bare `config` elsewhere (`~/.ssh/config`)
+    /// is not git's.
+    fn from_git_dir(path: &Path, name: &str) -> Option<Self> {
+        fn folder(p: Option<&Path>) -> Option<&str> {
+            p.and_then(Path::file_name).and_then(|n| n.to_str())
+        }
+        let parent = path.parent();
+        let grandparent = parent.and_then(Path::parent);
+        let in_user_git = folder(parent) == Some("git") && folder(grandparent) == Some(".config");
+        let in_info = folder(parent) == Some("info") && folder(grandparent) == Some(".git");
+        match name {
+            "config" if folder(parent) == Some(".git") || in_user_git => Some(Self::GitConfig),
+            "exclude" if in_info => Some(Self::GitIgnore),
+            "ignore" if in_user_git => Some(Self::GitIgnore),
+            "attributes" if in_info || in_user_git => Some(Self::GitAttributes),
+            _ => None,
+        }
     }
 
     /// Detect from a `#!` line such as `#!/usr/bin/env python3`.
@@ -239,6 +318,38 @@ mod tests {
         );
         assert_eq!(LanguageId::from_alias("latex"), None);
         assert_eq!(LanguageId::from_alias(""), None);
+    }
+
+    #[test]
+    fn git_files() {
+        use LanguageId::{GitAttributes, GitCommit, GitConfig, GitIgnore, GitRebase};
+        assert_eq!(path("repo/.gitignore"), Some(GitIgnore));
+        assert_eq!(path("templates/Rust.gitignore"), Some(GitIgnore));
+        assert_eq!(path("repo/.git/info/exclude"), Some(GitIgnore));
+        assert_eq!(path("/home/me/.config/git/ignore"), Some(GitIgnore));
+        assert_eq!(path("repo/.gitattributes"), Some(GitAttributes));
+        assert_eq!(path("repo/.git/info/attributes"), Some(GitAttributes));
+        assert_eq!(path("/home/me/.gitconfig"), Some(GitConfig));
+        assert_eq!(path("repo/.gitmodules"), Some(GitConfig));
+        assert_eq!(path("repo/.git/config"), Some(GitConfig));
+        assert_eq!(path("/home/me/.config/git/config"), Some(GitConfig));
+        assert_eq!(path("work.gitconfig"), Some(GitConfig));
+        assert_eq!(path("repo/.git/COMMIT_EDITMSG"), Some(GitCommit));
+        assert_eq!(path("repo/.git/MERGE_MSG"), Some(GitCommit));
+        assert_eq!(
+            path("repo/.git/rebase-merge/git-rebase-todo"),
+            Some(GitRebase)
+        );
+        // Names git uses only inside its own folders.
+        assert_eq!(path("/home/me/.ssh/config"), None);
+        assert_eq!(path("docs/info/exclude"), None);
+        assert_eq!(path("ignore"), None);
+        for l in [GitIgnore, GitAttributes, GitConfig, GitCommit, GitRebase] {
+            assert!(l.simple_only());
+        }
+        assert!(!LanguageId::Rust.simple_only());
+        assert_eq!(LanguageId::from_name("Git Config"), Some(GitConfig));
+        assert_eq!(LanguageId::from_alias("git-commit"), Some(GitCommit));
     }
 
     fn path(p: &str) -> Option<LanguageId> {
