@@ -16,6 +16,15 @@ section before tagging.
   no new grammar adds to the download size. Themes gain `diff.plus` and
   `diff.minus` for added and removed lines.
 
+### Changed
+
+- Without a project open (Nimbus started with files rather than a
+  folder, a workspace or a remembered session), the sidebar follows the
+  files you open: one from outside its folder (Open…, recent files,
+  Finder or Explorer, a drop, or a later `nimbus FILE`) moves the sidebar
+  to the file's folder and selects it. With a project open the sidebar
+  stays on the project.
+
 ## 1.4.0
 
 ### Added

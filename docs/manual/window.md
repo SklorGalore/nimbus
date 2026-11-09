@@ -55,6 +55,12 @@ project tree:
 - Click a folder to open or close it, click a file to open it. The
   active tab's file is highlighted, and the tree opens folders down to it
   when you switch tabs.
+- Without a project open (Nimbus started with files, such as
+  `nimbus notes.txt`, rather than a folder, a workspace or a remembered
+  session), the sidebar follows the files you open: one from outside its
+  folder (Open…, recent files, Finder or Explorer, a drop on the window,
+  or a later `nimbus FILE`) moves the sidebar to that file's folder. With
+  a project open, the sidebar keeps showing the project.
 - The tree follows changes on disk: create, delete or rename files from
   a terminal and it updates within about a second. Only folders you have
   opened are watched.
