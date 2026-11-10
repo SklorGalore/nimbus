@@ -41,6 +41,19 @@ pub struct Startup {
     pub workspace: Option<String>,
 }
 
+impl Startup {
+    /// Whether the run opens a project: a folder or workspace named, a
+    /// session to save, or a compare or merge (whose sidebar must stay as
+    /// it was). Without one, the sidebar follows the files opened.
+    pub(super) fn is_project(&self, options: &crate::Options) -> bool {
+        self.session_root.is_some()
+            || self.workspace.is_some()
+            || options.diff.is_some()
+            || options.merge.is_some()
+            || options.files.iter().any(|p| p.is_dir())
+    }
+}
+
 /// How long after a tab opens or closes the state file is written: a burst
 /// of changes (closing five tabs) writes once.
 const STATE_SAVE_DELAY: Duration = Duration::from_secs(1);
@@ -88,14 +101,19 @@ pub(super) struct Workspace {
     pub(super) undo_moves: Vec<UndoMove>,
     /// Operations Undo Move started, still running: not recorded again.
     pub(super) undo_ops: Vec<crate::tree_ops::Op>,
+    /// The window shows a project: a folder or workspace was opened, or a
+    /// session restored. Without one, the sidebar follows the files opened
+    /// ([`App::follow_file`](super::App::follow_file)).
+    pub(super) project: bool,
 }
 
 impl Workspace {
     /// A workspace at startup, nothing done yet.
-    pub(super) fn new(state: State, session_root: Option<PathBuf>) -> Self {
+    pub(super) fn new(state: State, session_root: Option<PathBuf>, project: bool) -> Self {
         Self {
             state,
             session_root,
+            project,
             save_at: None,
             restore_started: false,
             closed: Vec::new(),
@@ -528,6 +546,7 @@ impl App {
         let (visible, width) = (self.sidebar.visible, self.sidebar.width);
         self.sidebar = Sidebar::new(session.root.clone(), visible, width);
         self.sidebar.workspace = workspace;
+        self.ws.project = true;
         // With `remember_workspace = false` the switch still happens (it
         // was asked for), but the new session is not saved either.
         if !self.options.unattended() && self.config.remember_workspace {

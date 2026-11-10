@@ -813,6 +813,7 @@ impl App {
         proxy: EventLoopProxy<AppEvent>,
         mut warnings: Vec<String>,
     ) -> Self {
+        let project = startup.is_project(&options);
         let Startup {
             mut state,
             restore,
@@ -821,7 +822,6 @@ impl App {
             workspace,
         } = startup;
         let session_root = session_root.filter(|_| !options.unattended());
-        let debug_overlay = options.debug_overlay;
         let (keymap, key_warnings) = Keymap::new(&config.keys);
         let (theme, theme_warnings) = Theme::load(&config.theme);
         let watch = disk_watch(&proxy);
@@ -844,6 +844,8 @@ impl App {
         warnings.extend(key_warnings.into_iter().chain(theme_warnings));
         let message = startup_message(warnings, note);
         Self {
+            // Before `options` moves in.
+            debug: Debug::new(options.debug_overlay),
             options,
             started,
             font_size: starting_zoom(&config, &state),
@@ -871,7 +873,6 @@ impl App {
             active,
             blink: Blink::new(started),
             preedit: None,
-            debug: Debug::new(debug_overlay),
             soak_memory: Vec::new(),
             mouse: PhysicalPosition::new(0.0, 0.0),
             ime_area: None,
@@ -900,7 +901,7 @@ impl App {
             sidebar,
             watch,
             zoom_started: None,
-            ws: Workspace::new(state, session_root),
+            ws: Workspace::new(state, session_root, project),
             updater: updates::Updater::default(),
             cursor_icon: CursorIcon::Default,
             caption: Caption::default(),
@@ -2900,7 +2901,6 @@ impl App {
         true
     }
 
-    /// Open `path` in a tab, or switch to it if it is already open.
     /// A sidebar folder listing finished on its worker.
     fn listing_arrived(&mut self, req: &ListRequest, result: Result<Vec<Entry>, String>) {
         let requests = match result {
@@ -2932,6 +2932,9 @@ impl App {
         self.changed(false);
     }
 
+    /// Open `path` in a tab, or switch to it if it is already open; a
+    /// file outside the sidebar's folders moves the sidebar to its folder
+    /// ([`App::follow_file`]).
     fn open_path(&mut self, path: &Path) {
         // Whatever asked (the sidebar, the picker, a dialog), the file
         // gets the keyboard.
@@ -2950,10 +2953,12 @@ impl App {
             .iter()
             .find(|&&i| self.tabs[i].group == self.groups.focused);
         if let Some(&i) = here {
+            self.follow_file(&canonical);
             self.switch_to(i);
             return;
         }
         if let Some(&other) = showing.first() {
+            self.follow_file(&canonical);
             let tab = Tab::new(self.tabs[other].doc, self.tabs[other].view.wrap);
             let i = self.add_tab(tab);
             self.switch_to(i);
@@ -2969,6 +2974,8 @@ impl App {
                     && !self.docs[self.tabs[0].doc].is_dirty();
                 if let Some(c) = &doc.canonical {
                     self.ws.state.note_recent(c);
+                    let c = c.clone();
+                    self.follow_file(&c);
                 }
                 let wrap = wrap_for(&self.config, &doc);
                 let tab = Tab::new(self.docs.insert(doc), wrap);

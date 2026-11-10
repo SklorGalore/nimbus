@@ -4,7 +4,7 @@
 //!
 //! A child module of `app`, so it can reach the app's fields.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rfd::FileDialog;
 
@@ -41,6 +41,33 @@ impl App {
         true
     }
 
+    /// Show the folder of `file` (canonical), a file just opened, in the
+    /// sidebar. A file inside one of the roots is only revealed, which the
+    /// tab switch does. One outside them all re-roots the sidebar on its
+    /// folder and selects it there, as starting `nimbus FILE` would have,
+    /// but only while the window has no project (a folder, workspace or
+    /// session, [`Workspace::project`](super::workspace::Workspace)): a
+    /// project stays in the sidebar whatever file is opened.
+    pub(super) fn follow_file(&mut self, file: &Path) {
+        if self.ws.project {
+            return;
+        }
+        let Some(dir) = folder_to_follow(&self.sidebar.tree.roots(), file) else {
+            return;
+        };
+        self.root.clone_from(&dir);
+        let (visible, width) = (self.sidebar.visible, self.sidebar.width);
+        self.sidebar = Sidebar::new(dir, visible, width);
+        if visible {
+            // List the new root and select the file once it is listed.
+            let mut requests = self.sidebar.tree.start();
+            let layout = self.window_layout();
+            requests.extend(self.sidebar.reveal(file, layout.as_ref()));
+            self.start_listings(requests);
+        }
+        self.sync_watch();
+    }
+
     /// Ask for a folder and add it to the workspace.
     fn add_root_dialog(&mut self) {
         let mut dialog = FileDialog::new()
@@ -61,6 +88,7 @@ impl App {
             self.say(e, true);
             return;
         }
+        self.ws.project = true;
         if let Some(id) = self.sidebar.tree.root_of(&dir) {
             // Asked for, so shown open; one restored from a session waits
             // until it is opened.
@@ -131,6 +159,7 @@ impl App {
                 };
                 self.say(format!("Saved workspace {name}{note}"), false);
                 self.sidebar.workspace = Some(name);
+                self.ws.project = true;
             }
             Err(e) => self.say(format!("Cannot save the workspace: {e}"), true),
         }
@@ -280,4 +309,37 @@ pub(super) fn startup_tabs_and_roots(
         (n, o) => n.or(o),
     };
     (sidebar, (tabs, groups, active, note))
+}
+
+/// The folder the sidebar moves to when `file` (canonical) opens: its
+/// parent, when no root holds it; `None` when one does, or it has none.
+fn folder_to_follow(roots: &[PathBuf], file: &Path) -> Option<PathBuf> {
+    if roots.iter().any(|r| file.starts_with(r)) {
+        return None;
+    }
+    file.parent().map(Path::to_path_buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::folder_to_follow;
+
+    #[test]
+    fn only_a_file_outside_every_root_moves_the_sidebar() {
+        let roots = [PathBuf::from("/p"), PathBuf::from("/q/r")];
+        // Inside a root, however deep: revealed, not followed.
+        assert_eq!(folder_to_follow(&roots, Path::new("/p/src/a.rs")), None);
+        assert_eq!(folder_to_follow(&roots, Path::new("/q/r/b.rs")), None);
+        // Outside them all, including beside a root or above one.
+        assert_eq!(
+            folder_to_follow(&roots, Path::new("/q/c.rs")),
+            Some(PathBuf::from("/q"))
+        );
+        assert_eq!(
+            folder_to_follow(&roots, Path::new("/pp/d.rs")),
+            Some(PathBuf::from("/pp"))
+        );
+    }
 }
