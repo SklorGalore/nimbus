@@ -43,11 +43,11 @@ pub struct Stash {
 
 /// Whether `s` looks like an object id: hex digits only, so it can never
 /// be read as an option or a revision expression.
-fn is_oid(s: &str) -> bool {
+pub(super) fn is_oid(s: &str) -> bool {
     (4..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn not_an_oid(s: &str) -> GitError {
+pub(super) fn not_an_oid(s: &str) -> GitError {
     GitError::Failed(format!("not an object id: {s:?}"))
 }
 
@@ -103,7 +103,7 @@ impl Repo {
     }
 
     /// A git command run in the top folder.
-    fn cmd(&self) -> Command {
+    pub(super) fn cmd(&self) -> Command {
         let mut cmd = git();
         cmd.arg("-C").arg(&self.top);
         cmd

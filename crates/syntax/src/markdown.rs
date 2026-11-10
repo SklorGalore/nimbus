@@ -340,6 +340,20 @@ mod tests {
         assert_eq!(joined(&buf, &b[4]).trim(), "Under");
     }
 
+    /// Each `>` opens a block the Markdown scanner keeps in its saved
+    /// state, and tree-sitter gives that state 1024 bytes. tree-sitter-md
+    /// 0.5.3 wrote past them from 255 nested quotes on, corrupting the
+    /// parser's memory (found by the `highlight` fuzz target). 0.5.4 stops
+    /// opening blocks at the limit and reads further markers as text.
+    #[test]
+    fn deeply_nested_quotes_stay_within_the_scanner_state() {
+        for depth in [254, 255, 400, 2000] {
+            let src = format!("{} deep\n", ">".repeat(depth));
+            let (_, b) = parse(&src);
+            assert!(!b.is_empty(), "depth {depth}");
+        }
+    }
+
     #[test]
     fn lists_and_quotes_lose_their_prefixes() {
         let src = "- one\n- two\n  1. inner\n- [x] done\n\n> quoted\n> lines\n";

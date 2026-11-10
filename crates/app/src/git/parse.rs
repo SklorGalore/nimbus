@@ -574,7 +574,9 @@ fn ident(value: &str) -> Ident {
 /// Hinnant's `civil_from_days`), and nothing else in Nimbus needs dates.
 #[must_use]
 pub fn date(time: i64, offset: i32) -> String {
-    let local = time + i64::from(offset) * 60;
+    // A commit can carry any timestamp (git only checks that it is a
+    // number), so saturate rather than overflow on one near the i64 limits.
+    let local = time.saturating_add(i64::from(offset) * 60);
     let days = local.div_euclid(86_400);
     let secs = local.rem_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
@@ -616,7 +618,8 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// `4 weeks`, `7 months`, `2 years`.
 pub fn ago(out: &mut String, time: i64, now: i64) {
     out.clear();
-    let secs = (now - time).max(0);
+    // Saturating, as in `date`: the time comes from the commit.
+    let secs = now.saturating_sub(time).max(0);
     let (n, unit) = match secs {
         s if s < 60 => {
             out.push_str("now");
@@ -864,6 +867,25 @@ mod tests {
         // A leap day.
         assert_eq!(date(951_782_400, 0), "2000-02-29 00:00 +0000");
         assert_eq!(date(-86_400, 0), "1969-12-31 00:00 +0000");
+    }
+
+    /// A commit's timestamp is whatever number its author wrote, so the
+    /// limits of `i64` must not overflow (found by the `git_output` fuzz
+    /// target: `author A <a> 9223372036854775807 +9959`).
+    #[test]
+    fn extreme_timestamps_do_not_overflow() {
+        let c = commit(
+            b"author A <a> 9223372036854775807 +9959\ncommitter B <b> -9223372036854775808 -9959\n\n",
+        );
+        assert_eq!(c.author.time, i64::MAX);
+        assert_eq!(c.committer.time, i64::MIN);
+        assert_ne!(date(c.author.time, c.author.offset), "");
+        assert_ne!(date(c.committer.time, c.committer.offset), "");
+        let mut s = String::new();
+        ago(&mut s, c.committer.time, c.author.time);
+        assert!(s.ends_with("years"), "{s}");
+        ago(&mut s, c.author.time, c.committer.time);
+        assert_eq!(s, "now");
     }
 
     #[test]

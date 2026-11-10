@@ -22,6 +22,7 @@
 //! first time one wants the tree, and until then every update is skipped
 //! before any of this runs.
 
+pub mod git;
 pub mod text;
 
 use std::collections::{HashMap, HashSet};
@@ -78,6 +79,14 @@ pub mod id {
     pub const SEARCH_EXCLUDE: NodeId = NodeId(19);
     /// The Search panel's result count.
     pub const SEARCH_COUNT: NodeId = NodeId(20);
+    /// The menu bar Nimbus draws (Windows).
+    pub const MENU_BAR: NodeId = NodeId(21);
+    /// The open drawn menu: a bar menu's drop-down or a right-click menu.
+    pub const MENU: NodeId = NodeId(22);
+    /// The open prompt ("Save changes?").
+    pub const PROMPT: NodeId = NodeId(23);
+    /// The prompt's text.
+    pub const PROMPT_TEXT: NodeId = NodeId(24);
 
     /// Text fields, for [`run`]: each field's runs have ids of their own.
     pub mod field {
@@ -103,6 +112,9 @@ pub mod id {
     const TAB: u64 = 1;
     const TREE_ITEM: u64 = 2;
     const OPTION: u64 = 3;
+    const MENU_TITLE: u64 = 4;
+    const MENU_ITEM: u64 = 5;
+    const BUTTON: u64 = 6;
     /// Runs take kinds `RUN..RUN + fields`.
     const RUN: u64 = 16;
     const LOW: u64 = (1 << KIND_SHIFT) - 1;
@@ -129,6 +141,24 @@ pub mod id {
         make(OPTION, n)
     }
 
+    /// Title `n` of the drawn menu bar.
+    #[must_use]
+    pub fn menu_title(n: usize) -> NodeId {
+        make(MENU_TITLE, n)
+    }
+
+    /// Entry `n` of the open menu, counted with its separators.
+    #[must_use]
+    pub fn menu_item(n: usize) -> NodeId {
+        make(MENU_ITEM, n)
+    }
+
+    /// Button `n` of the open prompt, in the prompt's own order.
+    #[must_use]
+    pub fn button(n: usize) -> NodeId {
+        make(BUTTON, n)
+    }
+
     /// Run `index` of text field `field`'s window `generation`.
     #[must_use]
     pub fn run(field: u8, generation: u16, index: usize) -> NodeId {
@@ -147,6 +177,12 @@ pub mod id {
         TreeItem(usize),
         /// A picker match.
         Option(usize),
+        /// A title of the drawn menu bar.
+        MenuTitle(usize),
+        /// An entry of the open menu.
+        MenuItem(usize),
+        /// A button of the open prompt.
+        Button(usize),
         /// A run of a text field.
         Run(u8),
     }
@@ -160,6 +196,9 @@ pub mod id {
             TAB => Target::Tab(n),
             TREE_ITEM => Target::TreeItem(n),
             OPTION => Target::Option(n),
+            MENU_TITLE => Target::MenuTitle(n),
+            MENU_ITEM => Target::MenuItem(n),
+            BUTTON => Target::Button(n),
             k if k >= RUN => Target::Run(u8::try_from(k - RUN).unwrap_or(u8::MAX)),
             _ => Target::Fixed(id),
         }
@@ -274,13 +313,74 @@ pub struct Find {
     pub bounds: Bounds,
 }
 
+/// The menu bar Nimbus draws (Windows): its titles and the open one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuBar {
+    /// Each title and where it is drawn.
+    pub titles: Vec<(String, Bounds)>,
+    /// The title whose menu is open.
+    pub open: Option<usize>,
+    /// Where the bar is.
+    pub bounds: Bounds,
+}
+
+/// One entry of an open drawn menu.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MenuEntry {
+    /// An item: its title, its shortcut ("Ctrl+S", or empty) and where it
+    /// is drawn (`None` while scrolled out of the box).
+    Item(String, String, Option<Bounds>),
+    /// A line between groups; not described, but it keeps the entries'
+    /// numbers the menu's own.
+    Separator,
+}
+
+/// An open drawn menu: a bar menu's drop-down, or a right-click menu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Menu {
+    /// The bar title it drops down from, or "Context menu".
+    pub label: String,
+    /// Its entries, in order.
+    pub entries: Vec<MenuEntry>,
+    /// The highlighted entry.
+    pub hover: Option<usize>,
+    /// Where the box is.
+    pub bounds: Bounds,
+}
+
+/// An open prompt: a question the app waits on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Prompt {
+    /// Its heading, such as "Unsaved changes".
+    pub title: String,
+    /// The question.
+    pub text: String,
+    /// Each button's label, where it is drawn, and whether it is the
+    /// default (the one Enter presses when the prompt opens).
+    pub buttons: Vec<(String, Bounds, bool)>,
+    /// The button with the keyboard.
+    pub focused: usize,
+    /// Where the box is.
+    pub bounds: Bounds,
+}
+
 /// Everything the tree describes, gathered by the app for one update.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scene {
     /// The window's title.
     pub title: String,
-    /// The window's size, `[width, height]`.
+    /// The window's size, `[width, height]`, below the inset.
     pub size: [f32; 2],
+    /// The space the renderer keeps above the layout for the drawn title
+    /// bar or menu bar (`Gpu::inset_top`). Layout coordinates start below
+    /// it, so the window's node moves everything down by it.
+    pub inset: f32,
+    /// The drawn menu bar (Windows).
+    pub menu_bar: Option<MenuBar>,
+    /// The open drawn menu.
+    pub menu: Option<Menu>,
+    /// The front prompt, when one is open.
+    pub prompt: Option<Prompt>,
     /// The focused group's tabs and which is active.
     pub tabs: Vec<Tab>,
     /// The active tab's position in `tabs`.
@@ -313,8 +413,19 @@ pub fn build(scene: &Scene, runs: Runs<'_>) -> Vec<(NodeId, Node)> {
     let mut out = Vec::with_capacity(32);
     let mut window = Node::new(Role::Window);
     window.set_label(scene.title.as_str());
-    window.set_bounds(rect([0.0, 0.0, scene.size[0], scene.size[1]]));
+    // Every position below is in layout pixels, which start under the
+    // inset; the window's transform moves them to where they are on
+    // screen, and its own rectangle (in the same moved coordinates)
+    // starts above, at the window's top edge.
+    let inset = scene.inset.max(0.0);
+    window.set_transform(Affine::translate((0.0, f64::from(inset))));
+    window.set_bounds(rect([0.0, -inset, scene.size[0], scene.size[1] + inset]));
     let mut children = Vec::with_capacity(8);
+
+    if let Some(bar) = &scene.menu_bar {
+        children.push(id::MENU_BAR);
+        menu_bar_nodes(bar, &mut out);
+    }
 
     if let Some((sidebar, bounds)) = &scene.sidebar {
         children.push(id::SIDEBAR);
@@ -387,6 +498,16 @@ pub fn build(scene: &Scene, runs: Runs<'_>) -> Vec<(NodeId, Node)> {
     if let Some(picker) = &scene.picker {
         children.push(id::PICKER);
         picker_nodes(picker, runs, &mut out);
+    }
+
+    // Last, as they are drawn over everything else.
+    if let Some(menu) = &scene.menu {
+        children.push(id::MENU);
+        menu_nodes(menu, &mut out);
+    }
+    if let Some(prompt) = &scene.prompt {
+        children.push(id::PROMPT);
+        prompt_nodes(prompt, &mut out);
     }
 
     window.set_children(children);
@@ -544,6 +665,102 @@ fn picker_nodes(picker: &Picker, runs: Runs<'_>, out: &mut Vec<(NodeId, Node)>) 
     out.push((id::PICKER, dialog));
 }
 
+fn menu_bar_nodes(bar: &MenuBar, out: &mut Vec<(NodeId, Node)>) {
+    let mut node = Node::new(Role::MenuBar);
+    node.set_label("Menu bar");
+    node.set_bounds(rect(bar.bounds));
+    for (n, (title, bounds)) in bar.titles.iter().enumerate() {
+        let tid = id::menu_title(n);
+        node.push_child(tid);
+        // A title is a menu item with a menu behind it: "File, menu",
+        // open or closed. Pressing it opens its menu.
+        let mut item = Node::new(Role::MenuItem);
+        item.set_label(title.as_str());
+        item.set_bounds(rect(*bounds));
+        item.set_has_popup(accesskit::HasPopup::Menu);
+        item.set_expanded(bar.open == Some(n));
+        item.set_position_in_set(n + 1);
+        item.set_size_of_set(bar.titles.len());
+        item.add_action(Action::Click);
+        item.add_action(if bar.open == Some(n) {
+            Action::Collapse
+        } else {
+            Action::Expand
+        });
+        if bar.open == Some(n) {
+            item.push_controlled(id::MENU);
+        }
+        out.push((tid, item));
+    }
+    out.push((id::MENU_BAR, node));
+}
+
+fn menu_nodes(menu: &Menu, out: &mut Vec<(NodeId, Node)>) {
+    let mut node = Node::new(Role::Menu);
+    node.set_label(menu.label.as_str());
+    node.set_bounds(rect(menu.bounds));
+    let items = menu
+        .entries
+        .iter()
+        .filter(|e| matches!(e, MenuEntry::Item(..)))
+        .count();
+    let mut position = 0;
+    for (n, entry) in menu.entries.iter().enumerate() {
+        let MenuEntry::Item(title, keys, bounds) = entry else {
+            continue;
+        };
+        position += 1;
+        let iid = id::menu_item(n);
+        node.push_child(iid);
+        let mut item = Node::new(Role::MenuItem);
+        item.set_label(title.as_str());
+        if !keys.is_empty() {
+            // Read after the title, as a native menu's shortcut is.
+            item.set_keyboard_shortcut(keys.as_str());
+        }
+        if let Some(b) = bounds {
+            item.set_bounds(rect(*b));
+        }
+        item.set_position_in_set(position);
+        item.set_size_of_set(items);
+        item.set_selected(menu.hover == Some(n));
+        item.add_action(Action::Click);
+        item.add_action(Action::Focus);
+        out.push((iid, item));
+    }
+    out.push((id::MENU, node));
+}
+
+fn prompt_nodes(prompt: &Prompt, out: &mut Vec<(NodeId, Node)>) {
+    // An alert dialog: a reader speaks its title and text when it opens,
+    // and keeps its reading inside it until it is answered, as the prompt
+    // keeps the keyboard.
+    let mut dialog = Node::new(Role::AlertDialog);
+    dialog.set_label(prompt.title.as_str());
+    dialog.set_modal();
+    dialog.set_bounds(rect(prompt.bounds));
+    dialog.push_child(id::PROMPT_TEXT);
+    dialog.push_described_by(id::PROMPT_TEXT);
+    let mut text = Node::new(Role::Label);
+    text.set_value(prompt.text.as_str());
+    out.push((id::PROMPT_TEXT, text));
+    for (n, (label, bounds, default)) in prompt.buttons.iter().enumerate() {
+        let bid = id::button(n);
+        dialog.push_child(bid);
+        let mut b = Node::new(if *default {
+            Role::DefaultButton
+        } else {
+            Role::Button
+        });
+        b.set_label(label.as_str());
+        b.set_bounds(rect(*bounds));
+        b.add_action(Action::Click);
+        b.add_action(Action::Focus);
+        out.push((bid, b));
+    }
+    out.push((id::PROMPT, dialog));
+}
+
 /// The nodes as last sent, so an update carries only what changed.
 #[derive(Debug, Default)]
 pub struct Sent {
@@ -611,6 +828,10 @@ mod tests {
         Scene {
             title: "a.rs — Nimbus".to_owned(),
             size: [1000.0, 600.0],
+            inset: 0.0,
+            menu_bar: None,
+            menu: None,
+            prompt: None,
             tabs: vec![
                 Tab {
                     name: "a.rs".to_owned(),
@@ -757,6 +978,92 @@ mod tests {
             get(id::PICKER_FIELD).data().active_descendant(),
             Some(id::option(6))
         );
+    }
+
+    #[test]
+    fn drawn_menus_read_as_a_menu_bar_and_a_menu_without_separators() {
+        let mut s = scene();
+        s.inset = 30.0;
+        s.menu_bar = Some(MenuBar {
+            titles: vec![
+                ("File".to_owned(), [0.0, -30.0, 50.0, 30.0]),
+                ("Edit".to_owned(), [50.0, -30.0, 50.0, 30.0]),
+            ],
+            open: Some(1),
+            bounds: [0.0, -30.0, 1000.0, 30.0],
+        });
+        s.menu = Some(Menu {
+            label: "Edit".to_owned(),
+            entries: vec![
+                MenuEntry::Item("Undo".to_owned(), "Ctrl+Z".to_owned(), None),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    "Cut".to_owned(),
+                    String::new(),
+                    Some([50.0, 40.0, 200.0, 30.0]),
+                ),
+            ],
+            hover: Some(2),
+            bounds: [50.0, 0.0, 200.0, 80.0],
+        });
+        s.focus = id::menu_item(2);
+        let tree = tree_of(&s);
+        let get = |n| get(&tree, n);
+        assert_eq!(get(id::MENU_BAR).role(), Role::MenuBar);
+        let edit = get(id::menu_title(1));
+        assert_eq!(edit.data().is_expanded(), Some(true));
+        assert_eq!(get(id::menu_title(0)).data().is_expanded(), Some(false));
+        assert_eq!(
+            get(id::menu_item(0)).data().keyboard_shortcut(),
+            Some("Ctrl+Z")
+        );
+        let cut = get(id::menu_item(2));
+        assert_eq!(cut.role(), Role::MenuItem);
+        assert_eq!(
+            cut.position_in_set(),
+            Some(2),
+            "the separator is not counted"
+        );
+        assert_eq!(cut.is_selected(), Some(true));
+        assert_eq!(get(id::MENU).children().count(), 2);
+        // Layout pixels start under the inset: on screen, the bar is at the
+        // window's top and the item 30 pixels lower than its layout y.
+        let bar = get(id::menu_title(0)).bounding_box().expect("a box");
+        assert_eq!((bar.y0, bar.y1), (0.0, 30.0));
+        let item = cut.bounding_box().expect("a box");
+        assert_eq!(item.y0, 70.0);
+        let focus = tree.state().focus().map(|f| f.locate().0);
+        assert_eq!(focus, Some(id::menu_item(2)));
+    }
+
+    #[test]
+    fn a_prompt_is_an_alert_dialog_with_its_default_button() {
+        let mut s = scene();
+        s.prompt = Some(Prompt {
+            title: "Unsaved changes".to_owned(),
+            text: "Save changes to a.rs before closing?".to_owned(),
+            buttons: vec![
+                ("Don't Save".to_owned(), [0.0; 4], false),
+                ("Cancel".to_owned(), [0.0; 4], false),
+                ("Save".to_owned(), [0.0; 4], true),
+            ],
+            focused: 2,
+            bounds: [200.0, 100.0, 500.0, 200.0],
+        });
+        s.focus = id::button(2);
+        let tree = tree_of(&s);
+        let dialog = get(&tree, id::PROMPT);
+        assert_eq!(dialog.role(), Role::AlertDialog);
+        assert_eq!(dialog.label().as_deref(), Some("Unsaved changes"));
+        assert_eq!(get(&tree, id::button(2)).role(), Role::DefaultButton);
+        assert_eq!(get(&tree, id::button(0)).role(), Role::Button);
+        assert_eq!(
+            label(&tree, id::PROMPT_TEXT).as_deref(),
+            Some("Save changes to a.rs before closing?")
+        );
+        assert_eq!(id::target(id::button(1)), id::Target::Button(1));
+        assert_eq!(id::target(id::menu_item(7)), id::Target::MenuItem(7));
+        assert_eq!(id::target(id::menu_title(3)), id::Target::MenuTitle(3));
     }
 
     #[test]

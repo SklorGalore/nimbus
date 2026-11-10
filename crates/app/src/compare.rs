@@ -394,6 +394,85 @@ impl Compare {
         self.columns.set_units(units);
     }
 
+    /// How many rows the compare has.
+    #[must_use]
+    pub fn row_count(&self) -> usize {
+        self.columns.rows.len()
+    }
+
+    /// The row under `(x, y)`, if any (M28: picking lines to stage).
+    #[must_use]
+    pub fn row_under(&self, layout: &Layout, x: f32, y: f32) -> Option<usize> {
+        self.columns.row_under(layout, x, y)
+    }
+
+    /// The top of `row` on screen.
+    #[must_use]
+    pub fn row_y(&self, row: usize, layout: &Layout) -> f32 {
+        self.columns.row_y(row, layout)
+    }
+
+    /// Scroll so `row` is on screen.
+    pub fn show_row(&mut self, row: usize, layout: &Layout) {
+        self.columns.show_row(row, layout);
+    }
+
+    /// The change `row` is part of, by number.
+    #[must_use]
+    pub fn change_at(&self, row: usize) -> Option<usize> {
+        self.columns
+            .rows
+            .at(row)
+            .and_then(|r| r.change)
+            .map(|(_, n)| n)
+    }
+
+    /// The change stepped to last (Next Change), if any.
+    #[must_use]
+    pub fn current_change(&self) -> Option<usize> {
+        self.columns.current
+    }
+
+    /// The rows of change `n`.
+    #[must_use]
+    pub fn change_rows(&self, n: usize) -> Option<Range<usize>> {
+        let start = self.columns.rows.change_row(n)?;
+        let mut end = start;
+        while self.change_at(end) == Some(n) {
+            end += 1;
+        }
+        Some(start..end)
+    }
+
+    /// The changed lines on `rows`, per side (old, new), as sorted ranges:
+    /// what staging those rows picks. Equal rows and fillers give none.
+    #[must_use]
+    pub fn lines_in(&self, rows: Range<usize>) -> [Vec<Range<usize>>; 2] {
+        let mut out: [Vec<Range<usize>>; 2] = [Vec::new(), Vec::new()];
+        for row in rows {
+            let Some(r) = self.columns.rows.at(row) else {
+                break;
+            };
+            if r.change.is_none() {
+                continue;
+            }
+            for (c, side) in out.iter_mut().enumerate() {
+                if let nimbus_core::Cell::Line(unit) = r.cells[c] {
+                    let line = self.columns.locate(c, unit).0;
+                    match side.last_mut() {
+                        Some(last) if last.end == line => last.end = line + 1,
+                        Some(last) if last.contains(&line) => {}
+                        _ => side.push(line..line + 1),
+                    }
+                }
+            }
+        }
+        for side in &mut out {
+            side.sort_by_key(|r| r.start);
+        }
+        out
+    }
+
     /// Switch between two columns and one.
     pub fn toggle_unified(&mut self) {
         self.unified = !self.unified;

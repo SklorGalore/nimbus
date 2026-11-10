@@ -66,19 +66,26 @@ jobs:
           $actual = (Get-FileHash -Algorithm SHA256 "dl/$setup").Hash.ToLower()
           if ($hash -ne $actual) { throw "$setup is $actual, but SHA256SUMS says $hash" }
 
+          # The commit the tag points at, for the icon's pinned CDN URL.
+          $commit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$env:TAG" --jq .sha
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $commit = "$commit".Trim()
+          if ($commit -notmatch '^[0-9a-f]{40}$') { throw "no commit for $env:TAG (got '$commit')" }
+
           # Fill in byte for byte (LF, no BOM), as publish-packages.ps1 does.
           $src = 'packaging/chocolatey'
           $out = 'choco/nimbus'
           New-Item -ItemType Directory -Force "$out/tools" | Out-Null
           function Fill($from, $to) {
             $text = [IO.File]::ReadAllText((Resolve-Path $from))
-            $text = $text.Replace('@VERSION@', $version).Replace('@SHA256@', $hash)
+            $text = $text.Replace('@VERSION@', $version).Replace('@SHA256@', $hash).Replace('@COMMIT@', $commit)
             [IO.File]::WriteAllText((Join-Path $PWD $to), $text, [Text.UTF8Encoding]::new($false))
           }
           Fill "$src/nimbus.nuspec.in" "$out/nimbus.nuspec"
           Fill "$src/tools/chocolateyInstall.ps1.in" "$out/tools/chocolateyInstall.ps1"
           Fill "$src/tools/chocolateyUninstall.ps1" "$out/tools/chocolateyUninstall.ps1"
           Get-Content "$out/tools/chocolateyInstall.ps1"
+          Select-String -Path "$out/nimbus.nuspec" -Pattern '<iconUrl>'
 
           # Chocolatey is on every windows-latest runner.
           choco pack "$out/nimbus.nuspec" --outputdirectory choco

@@ -282,4 +282,22 @@ mod tests {
             "{tsx:?}"
         );
     }
+
+    #[cfg(feature = "powershell")]
+    #[test]
+    fn powershell_finds_functions_classes_and_enums() {
+        let ps = list(
+            "function Get-Thing { 1 }\nclass Point {\n    [int] Sum() { return 1 }\n}\nenum Color { Red }\n",
+            LanguageId::PowerShell,
+        );
+        assert_eq!(
+            ps,
+            [
+                ("Get-Thing".to_owned(), SymbolKind::Function),
+                ("Point".to_owned(), SymbolKind::Class),
+                ("Sum".to_owned(), SymbolKind::Method),
+                ("Color".to_owned(), SymbolKind::Class),
+            ]
+        );
+    }
 }

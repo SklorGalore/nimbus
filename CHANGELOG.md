@@ -4,6 +4,76 @@ One section per release, newest first. The release workflow puts the
 tagged version's section into the GitHub release notes, so write the
 section before tagging.
 
+## 1.4.0
+
+### Added
+
+- Highlighting for git's own files: ignore patterns (`.gitignore`,
+  `.git/info/exclude`), `.gitattributes`, config files (`.gitconfig`,
+  `.gitmodules`, `.git/config`), commit messages (`COMMIT_EDITMSG` and
+  the like, including the diff `git commit -v` adds) and interactive
+  rebase to-do lists (`git-rebase-todo`). They use simple line rules, so
+  no new grammar adds to the download size. Themes gain `diff.plus` and
+  `diff.minus` for added and removed lines.
+- Staging and committing in the git window (M28). Under **Changes**,
+  each file has Stage, Unstage and Discard buttons, the lists have Stage
+  All and Unstage All, and the bar above the compare stages, unstages
+  or discards one change (**Stage Hunk**) or only the rows you pick in
+  the compare (**Stage Lines**). Discarding asks first and **Undo
+  Discard** puts the text back while the window is open; a discarded
+  new file goes to the trash. A message box under the lists edits like
+  Nimbus (undo, several cursors, a ruler at 72 columns) and keeps a
+  draft per repository; **Commit** (`Cmd+Enter` / `Ctrl+Enter`) runs
+  `git commit` with your hooks and signing, shows a refusing hook's
+  output, and can be stopped; **Amend last commit** loads the last
+  message. The git window has its own command palette.
+- Screen readers can read and use the menus Nimbus draws: the Windows
+  menu bar, its drop-downs and right-click menus are read as menus with
+  their items and shortcuts, and in-app questions such as "Save changes
+  before closing?" as alert dialogs with their buttons.
+- Screen readers can read the git window (`nimbus --git`): the sidebar
+  as a tree, the history as a list of commits, the details and changed
+  files, the commit message box, the staging, commit and compare
+  buttons, the palette, and the new side of the selected file's diff
+  as text.
+- PowerShell highlighting for `.ps1`, `.psm1` and `.psd1` files and
+  scripts starting `#!/usr/bin/env pwsh`, with folding, Go to Symbol
+  (functions, classes, methods, enums) and `powershell` fenced code
+  blocks in Markdown.
+
+### Changed
+
+- Without a project open (Nimbus started with files rather than a
+  folder, a workspace or a remembered session), the sidebar follows the
+  files you open: one from outside its folder (Open…, recent files,
+  Finder or Explorer, a drop, or a later `nimbus FILE`) moves the sidebar
+  to the file's folder and selects it. With a project open the sidebar
+  stays on the project.
+- `scripts/publish-packages.ps1` replaces `scripts/publish-packages.sh`:
+  it puts a signed, published release in the Homebrew tap and pushes its
+  Chocolatey package, with the hashes taken from the signed `SHA256SUMS`.
+- Windows installs come from Chocolatey (`choco install nimbus`) instead
+  of winget; the README and manual say so.
+- The Chocolatey package's source link points at the release's tagged
+  code (`tree/vX.Y.Z`) instead of repeating the project page, as the
+  Chocolatey validator suggests.
+- The Chocolatey package's icon comes from the jsDelivr CDN, pinned to
+  the release's commit, instead of `raw.githubusercontent.com`, which
+  Chocolatey's moderators do not allow.
+
+### Fixed
+
+- A Markdown file with 255 or more nested blocks (for example a line of
+  `>` quote markers) no longer crashes Nimbus. The Markdown grammar wrote
+  its saved state past the end of tree-sitter's buffer; tree-sitter-md
+  0.5.4 caps the nesting and reads deeper markers as text.
+- The git window no longer panics on a commit whose timestamp is near
+  the limits of a 64-bit number; its date and age are worked out with
+  saturating arithmetic.
+- What a screen reader is told about where things are on screen no
+  longer ignores the drawn title bar (macOS) or menu bar (Windows), so
+  its highlight sits on what it reads.
+
 ## 1.3.1
 
 1.3.0 was tagged but never published: its Linux and Windows release
@@ -12,6 +82,16 @@ fixed.
 
 ### Added
 
+- `nimbus --help` lists the options in groups, one per line, with
+  examples, fitted to an 80-column terminal and with bold headings where
+  the terminal shows them (plain when piped or with `NO_COLOR` set).
+  The options for testing and measuring moved to `nimbus --help all`. A
+  mistyped option suggests the one you probably meant, and every command
+  line mistake points at `--help`.
+- Seeing the default settings: **Show Default Config** in the palette
+  opens every setting with its default value in a read-only
+  `default-config.toml` tab. It is made from the built-in defaults, so
+  it cannot go out of date.
 - A git window (M27): `nimbus --git [DIR]`, or **Open Git Window** in
   the palette and View menu, opens a window of its own for the
   repository: your staged, unstaged and untracked changes, the whole

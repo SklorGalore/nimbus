@@ -19,8 +19,11 @@
 //! and the history all start afterwards on workers, so the startup budget
 //! holds however large the repository is.
 
+mod access;
 mod history;
 mod load;
+mod message;
+mod ops;
 mod pane;
 
 use std::path::PathBuf;
@@ -39,9 +42,10 @@ use winit::window::{CursorIcon, Window, WindowId};
 use nimbus_render::{Font, FrameStatus, Gpu, GpuContext, GpuError};
 
 use crate::config::Config;
-use crate::input::{self, Command, Resolved};
+use crate::input::{self, Command, Motion, Resolved};
 use crate::keymap::Keymap;
 use crate::languages::Languages;
+use crate::picker::{self, Item, Picker};
 use crate::state::State;
 use crate::theme::Theme;
 use crate::watch::Watch;
@@ -135,6 +139,10 @@ struct GitApp {
     watch: Option<Watch>,
     refresh_at: Option<Instant>,
     clipboard: Option<arboard::Clipboard>,
+    /// The command palette, when open (M28).
+    picker: Option<Picker>,
+    /// The screen reader adapter and what it was last sent.
+    access: access::GitAccess,
     exit_code: i32,
 }
 
@@ -171,8 +179,11 @@ impl GitApp {
             watch: None,
             refresh_at: None,
             clipboard: None,
+            picker: None,
+            access: access::GitAccess::default(),
             exit_code: 0,
         };
+        app.pane.tab_width = app.config.tab_width;
         let warnings: Vec<String> = key_warnings.into_iter().chain(theme_warnings).collect();
         if !warnings.is_empty() {
             app.say(warnings.join("; "), true);
@@ -250,6 +261,12 @@ impl GitApp {
         let Some(gpu) = self.gpu.as_mut() else { return };
         let message = self.message.as_ref().map(|m| (m.text.as_str(), m.is_error));
         self.pane.draw(gpu, &mut self.theme, scale, message);
+        if let (Some(p), Some(layout)) = (&self.picker, self.pane.window_layout()) {
+            let ui = self.theme.ui;
+            crate::app::draw_picker_overlay(gpu, &ui, &layout, p, &self.keymap, true);
+        }
+        // After drawing: the tree takes its rectangles from this frame.
+        self.update_access();
     }
 
     fn present(&mut self, event_loop: &ActiveEventLoop) {
@@ -367,7 +384,27 @@ impl GitApp {
     }
 
     fn run(&mut self, cmd: Command<'_>, event_loop: &ActiveEventLoop) {
-        match self.pane.command(cmd) {
+        if self.picker.is_some() {
+            self.run_picker(cmd, event_loop);
+            return;
+        }
+        if cmd == Command::Palette {
+            let proxy = self.proxy.clone();
+            let notify = Arc::new(move || {
+                let _ = proxy.send_event(GitEvent::Redraw);
+            });
+            let mut p = Picker::git_palette(notify);
+            p.tick();
+            self.picker = Some(p);
+            self.redraw();
+            return;
+        }
+        let paste = (cmd == Command::Paste)
+            .then(|| self.clipboard_text())
+            .flatten();
+        let outcome = self.pane.command(cmd, paste.as_deref());
+        self.after_pane();
+        match outcome {
             Outcome::Done(changed) => {
                 if changed {
                     self.redraw();
@@ -377,6 +414,63 @@ impl GitApp {
             Outcome::Copy(text) => self.copy(text),
             Outcome::Window => self.window_command(cmd, event_loop),
         }
+    }
+
+    /// A command while the palette is open.
+    fn run_picker(&mut self, cmd: Command<'_>, event_loop: &ActiveEventLoop) {
+        let Some(p) = self.picker.as_mut() else {
+            return;
+        };
+        let page = isize::try_from(picker::VISIBLE_ROWS).unwrap_or(1);
+        match cmd {
+            Command::Escape | Command::Palette => self.picker = None,
+            Command::Move(Motion::Up, _) => p.move_selection(-1),
+            Command::Move(Motion::Down, _) => p.move_selection(1),
+            Command::Move(Motion::PageUp, _) => p.move_selection(-page),
+            Command::Move(Motion::PageDown, _) => p.move_selection(page),
+            Command::Newline => {
+                let chosen = p.chosen();
+                self.picker = None;
+                if let Some(Item::Action(a)) = chosen {
+                    self.run(a.command, event_loop);
+                }
+            }
+            _ => {
+                let paste = (cmd == Command::Paste)
+                    .then(|| self.clipboard_text())
+                    .flatten();
+                let tab = self.config.tab_width;
+                let Some(p) = self.picker.as_mut() else {
+                    return;
+                };
+                if let Some(text) = crate::app::edit_field(&mut p.input, cmd, paste.as_deref(), tab)
+                {
+                    self.copy(text);
+                }
+                if let Some(p) = self.picker.as_mut() {
+                    p.tick();
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    /// Say what the pane has to say, if anything.
+    fn after_pane(&mut self) {
+        if let Some((text, is_error)) = self.pane.take_said() {
+            self.say(text, is_error);
+        }
+    }
+
+    /// The clipboard's text, for Paste.
+    fn clipboard_text(&mut self) -> Option<String> {
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(c) => self.clipboard = Some(c),
+                Err(e) => log::warn!("clipboard unavailable: {e}"),
+            }
+        }
+        self.clipboard.as_mut().and_then(|c| c.get_text().ok())
     }
 
     fn window_command(&mut self, cmd: Command<'_>, event_loop: &ActiveEventLoop) {
@@ -395,7 +489,10 @@ impl GitApp {
                 }
                 self.redraw();
             }
-            Command::Close | Command::CloseTab => event_loop.exit(),
+            Command::Close | Command::CloseTab => {
+                self.pane.keep_draft_now();
+                event_loop.exit();
+            }
             _ => {}
         }
     }
@@ -436,7 +533,15 @@ impl GitApp {
             now.duration_since(at) < DOUBLE_CLICK && (px - x).abs() < 4.0 && (py - y).abs() < 4.0
         });
         self.last_click = if double { None } else { Some((now, (x, y))) };
-        match self.pane.click(x, y, double) {
+        if self.picker.take().is_some() {
+            // A click closes the palette, as Escape does.
+            self.redraw();
+            return;
+        }
+        let shift = self.modifiers.shift_key();
+        let outcome = self.pane.click(x, y, double, shift);
+        self.after_pane();
+        match outcome {
             Outcome::OpenInEditor(p) => self.open_in_editor(p),
             Outcome::Copy(t) => self.copy(t),
             Outcome::Done(true) => self.redraw(),
@@ -488,7 +593,7 @@ impl GitApp {
                 repeat: event.repeat,
                 mods: self.modifiers,
             },
-            false,
+            crate::action::When::GitWindow,
             None,
         );
         if let Resolved::Command(cmd) = resolved {
@@ -502,11 +607,18 @@ impl ApplicationHandler<GitEvent> for GitApp {
         if self.window.is_some() {
             return;
         }
+        // Created hidden, given its screen reader adapter, then shown: the
+        // adapter must exist before the window is first visible.
         let attrs = Window::default_attributes()
             .with_title(self.pane.title())
-            .with_inner_size(LogicalSize::new(1200.0, 760.0));
+            .with_inner_size(LogicalSize::new(1200.0, 760.0))
+            .with_visible(false);
         let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
+            Ok(w) => {
+                self.access.attach(event_loop, &w, self.proxy.clone());
+                w.set_visible(true);
+                Arc::new(w)
+            }
             Err(e) => {
                 crate::fatal(&self.options, &format!("Could not create a window: {e}"));
                 self.exit_code = 1;
@@ -528,13 +640,14 @@ impl ApplicationHandler<GitEvent> for GitApp {
         window.request_redraw();
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: GitEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: GitEvent) {
         match event {
             GitEvent::Disk => {
                 self.refresh_at = Some(Instant::now() + SETTLE);
             }
             GitEvent::Say(text, is_error) => self.say(text, is_error),
             GitEvent::FontLoaded => self.redraw(),
+            GitEvent::Access(e) => self.access_event(e, event_loop),
             GitEvent::Fonts(fonts) => {
                 let (font, ui_font) = *fonts;
                 if let Some(gpu) = self.gpu.as_mut() {
@@ -548,11 +661,18 @@ impl ApplicationHandler<GitEvent> for GitApp {
                 self.pane.relayout();
                 self.redraw();
             }
+            GitEvent::Redraw => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.tick();
+                }
+                self.redraw();
+            }
             event => {
                 let refreshed = matches!(event, GitEvent::Refreshed(_) | GitEvent::Opened(_));
                 if self.pane.event(event) {
                     self.redraw();
                 }
+                self.after_pane();
                 if refreshed {
                     self.set_title();
                     self.sync_watch();
@@ -601,11 +721,17 @@ impl ApplicationHandler<GitEvent> for GitApp {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if let Some(window) = self.window.clone() {
+            self.access.window_event(&window, &event);
+        }
         if self.gpu.is_none() {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.pane.keep_draft_now();
+                event_loop.exit();
+            }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } => self.key(&event, event_loop),
             WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
@@ -618,6 +744,8 @@ impl ApplicationHandler<GitEvent> for GitApp {
                     self.mouse_down();
                 } else {
                     self.pane.dragging = None;
+                    self.pane.picking = false;
+                    self.pane.message_drag = false;
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
@@ -628,6 +756,8 @@ impl ApplicationHandler<GitEvent> for GitApp {
                     self.pane.refresh();
                 }
             }
+            // Leaving the window keeps the message being written.
+            WindowEvent::Focused(false) => self.pane.keep_draft_now(),
             WindowEvent::ScaleFactorChanged { .. } => {
                 let px = self.font_px();
                 if let Some(gpu) = self.gpu.as_mut() {

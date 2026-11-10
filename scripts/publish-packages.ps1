@@ -169,7 +169,8 @@ try {
     $cask = Join-Path $work 'nimbus.rb'
     Write-Template "$here/packaging/homebrew/nimbus.rb.in" $cask $dmgHash
     # The Chocolatey scripts as they must appear in the .nupkg. (The nuspec
-    # is rewritten by `choco pack`, so only its id and version are checked.)
+    # is rewritten by `choco pack`, so only its id, version and icon are
+    # checked.)
     $choco = Join-Path $work 'choco'
     New-Item -ItemType Directory "$choco/tools" | Out-Null
     $scripts = 'chocolateyInstall.ps1', 'chocolateyUninstall.ps1'
@@ -323,6 +324,19 @@ try {
         $nuspec = [Text.Encoding]::UTF8.GetString($packed['nimbus.nuspec'])
         if (-not $nuspec.Contains('<id>nimbus</id>')) { Stop-Script "$nupkg's nuspec is not for the package id nimbus" }
         if (-not $nuspec.Contains("<version>$version</version>")) { Stop-Script "$nupkg's nuspec is not version $version" }
+        # Its icon must be the template's jsDelivr URL pinned to the tag's
+        # commit: Chocolatey's moderators refuse raw.githubusercontent.com,
+        # and a .nupkg packed before that fix still has it.
+        $commit = Invoke-Checked gh api "repos/$repo/commits/$tag" --jq .sha
+        if ($null -eq $commit) { Stop-Script "could not find the commit $tag points at" }
+        $commit = "$commit".Trim()
+        $iconLine = [IO.File]::ReadAllLines("$here/packaging/chocolatey/nimbus.nuspec.in") |
+            Where-Object { $_.Contains('<iconUrl>') } | Select-Object -First 1
+        if (-not $iconLine) { Stop-Script 'packaging/chocolatey/nimbus.nuspec.in has no iconUrl' }
+        $icon = $iconLine.Trim().Replace('@COMMIT@', $commit)
+        if (-not $nuspec.Contains($icon)) {
+            Stop-Script "$nupkg's iconUrl is not $icon; rerun the Chocolatey package workflow for $tag (Actions > Chocolatey package > Run workflow) and try again"
+        }
         "$nupkg matches the signed SHA256SUMS."
 
         $key = $env:CHOCOLATEY_API_KEY

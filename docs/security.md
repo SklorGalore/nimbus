@@ -238,7 +238,12 @@ each was done.
   settings as `git.rs` (`git()`): no fsmonitor, no hooks, no lazy
   fetch, no repository-defined filter programs. Commands that write
   (commit, merge, checkout) run only on the user's action, in a
-  repository the user opened.
+  repository the user opened. M28's staging and committing run as the
+  same command would in the user's terminal: hooks, signing and the
+  repository's clean filters on, since that is what the user asked for;
+  `core.fsmonitor=false`, `GIT_TERMINAL_PROMPT=0` and literal pathspecs
+  (`GIT_LITERAL_PATHSPECS=1`) still apply, and partial staging passes
+  its patch on stdin, never through a temporary file (`git/write.rs`).
 - **M31 (updates)**: verify the signature with the built-in key list and
   the exact version before writing anything to the install location;
   never install on a failed check; refuse downgrades.

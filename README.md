@@ -7,7 +7,7 @@
 **A fast, lightweight text editor for macOS, Linux and Windows, with its own GPU text renderer.**
 
 [![CI](https://github.com/SklorGalore/nimbus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SklorGalore/nimbus/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/badge/latest%20release-v1.0.0-blue)](https://github.com/SklorGalore/nimbus/releases)
+[![Latest release](https://img.shields.io/github/v/release/SklorGalore/nimbus?label=latest%20release&color=blue)](https://github.com/SklorGalore/nimbus/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#installation)
@@ -70,9 +70,12 @@ from opening your first file to themes, languages and key bindings.
 **Code**
 
 - Tree-sitter syntax highlighting for Rust, C, Go, Python, JavaScript,
-  TypeScript, TSX, HTML, CSS, Bash, JSON, TOML, YAML and Markdown,
+  TypeScript, TSX, HTML, CSS, Bash, PowerShell, JSON, TOML, YAML and
+  Markdown,
   including code embedded in other code, such as fenced blocks in
   Markdown.
+- Git's own files highlighted too: `.gitignore`, `.gitattributes`,
+  `.gitconfig` and `.gitmodules`, commit messages and rebase to-do lists.
 - Add your own languages and highlight queries.
 - Code folding based on each language's structure.
 
@@ -127,7 +130,7 @@ from opening your first file to themes, languages and key bindings.
 <td><img src="assets/screenshots/find.png" alt="The find bar with highlighted matches"><br><sub>Find in the current file</sub></td>
 </tr>
 <tr>
-<td><img src="assets/screenshots/languages.png" alt="Python, shell, TOML and YAML highlighted"><br><sub>Fourteen languages built in</sub></td>
+<td><img src="assets/screenshots/languages.png" alt="Python, shell, TOML and YAML highlighted"><br><sub>Fifteen languages built in</sub></td>
 <td><img src="assets/screenshots/hugefile.png" alt="A 4 GB log open at its last line"><br><sub>A 4 GB log, all 65 million lines counted</sub></td>
 </tr>
 </table>
@@ -433,8 +436,9 @@ milestone lands on development, move its line up to "Available now". -->
   reviewed dependencies
 - A git window (`nimbus --git`): your changes, history and branches,
   staging, commits and merges, built on Nimbus's compare and merge views
-  (viewing is in development: changes, history with a branch graph and
-  any commit's differences)
+  (viewing, staging and committing are done: changes, history with a
+  branch graph, any commit's differences, and staging files, hunks or
+  lines)
 - Updates from inside Nimbus: install a newer release in one step,
   checked against the release signature first
 

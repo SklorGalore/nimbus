@@ -202,7 +202,7 @@ impl SyntaxState {
     pub fn new(language: Option<LanguageId>, len: usize) -> Self {
         let phase = match language {
             None => Phase::Off(Off::NoLanguage),
-            Some(l) if len > MAX_HIGHLIGHT_BYTES => {
+            Some(l) if len > MAX_HIGHLIGHT_BYTES || l.simple_only() => {
                 Phase::Lexical(Lexical::new(lexical::builtin(l)))
             }
             Some(_) => Phase::Waiting,
@@ -210,7 +210,8 @@ impl SyntaxState {
         Self {
             language,
             phase,
-            lexical_only: false,
+            // Git's formats have no grammar, so never wait for a parse.
+            lexical_only: language.is_some_and(LanguageId::simple_only),
             cancel: Arc::new(AtomicBool::new(false)),
             rev: 0,
             injected: RefCell::new(Injected::default()),
@@ -585,6 +586,27 @@ impl SyntaxState {
             let result = j.run();
             job = self.finish(result, text, Duration::MAX);
         }
+    }
+}
+
+#[cfg(test)]
+mod git_tests {
+    use super::*;
+    use nimbus_core::{Buffer, RopeBuffer};
+
+    #[test]
+    fn git_files_use_the_simple_rules_at_any_size() {
+        let mut buf = RopeBuffer::from_text("*.log\n");
+        let mut state = SyntaxState::new(Some(LanguageId::GitIgnore), buf.len_bytes());
+        assert!(state.lexical().is_some());
+        assert!(state.take_job(&buf).is_none(), "no grammar to parse with");
+        let edit = buf.replace(0..0, "!").unwrap();
+        state.edit(&buf, &edit);
+        assert!(
+            state.lexical().is_some(),
+            "an edit does not wait for a parse"
+        );
+        assert_eq!(state.language(), Some(LanguageId::GitIgnore));
     }
 }
 

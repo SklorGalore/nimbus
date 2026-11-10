@@ -13,6 +13,7 @@ mod action;
 mod app;
 mod bmp;
 mod caption;
+mod cli;
 mod columns;
 mod compare;
 mod compare_panel;
@@ -272,9 +273,6 @@ pub fn to_f32(v: f64) -> f32 {
     v as f32
 }
 
-/// What `--help` prints.
-const USAGE: &str = "usage: nimbus [FILE|FOLDER]... [--workspace NAME] [--no-session] [--find PATTERN] [--search PATTERN] [--wrap] [--theme NAME] [--backend rope|mapped] [--encoding NAME] [--headless WxH [--wait-index] [--picker palette|files|line|symbols[:QUERY]] [--prompt] [--title-bar] [--menu NAME]] [--debug-overlay] [--preview] [--linear-blend] [--compat] [--cursors N,N] [--smoke] [--screenshot FILE.bmp] [--bench-typing N [--soak]] [--diff A B] [--merge BASE LOCAL REMOTE -o RESULT] [--git [DIR]] [--wait] [--version]";
-
 /// A comma-separated list of numbers, such as `3,10,20`; anything that is
 /// not a number is skipped.
 fn numbers(arg: Option<std::ffi::OsString>) -> Vec<usize> {
@@ -293,16 +291,14 @@ fn parse_size(arg: Option<std::ffi::OsString>) -> (u32, u32) {
         Some((w.parse().ok()?, h.parse().ok()?))
     });
     size.unwrap_or_else(|| {
-        print_err("nimbus: --headless needs a size like 1600x1000");
-        std::process::exit(2);
+        usage_error("nimbus: --headless needs a size like 1600x1000");
     })
 }
 
 /// The two paths after an option, or exit with a usage error.
 fn two_paths(args: &mut Args, option: &str) -> (PathBuf, PathBuf) {
     let (Some(a), Some(b)) = (args.next(), args.next()) else {
-        print_err(&format!("nimbus: {option} needs two files"));
-        std::process::exit(2);
+        usage_error(&format!("nimbus: {option} needs two files"));
     };
     (PathBuf::from(a), PathBuf::from(b))
 }
@@ -325,14 +321,15 @@ fn parse_options() -> Options {
             continue;
         }
         if flag.starts_with("--") {
-            print_err(&format!("nimbus: unknown option {flag:?}"));
-            std::process::exit(2);
+            let hint = cli::suggest(flag)
+                .map(|n| format!(" (did you mean {n}?)"))
+                .unwrap_or_default();
+            usage_error(&format!("nimbus: unknown option {flag}{hint}"));
         }
         o.files.push(PathBuf::from(arg));
     }
     if o.wait && merge.is_none() && o.files.iter().all(|f| f.is_dir()) {
-        print_err("nimbus: --wait needs a file to wait for");
-        std::process::exit(2);
+        usage_error("nimbus: --wait needs a file to wait for");
     }
     o.merge = merge.map(|(base, local, remote)| MergeArgs {
         out: merge_out.unwrap_or_else(|| local.clone()),
@@ -348,9 +345,23 @@ type Args = std::iter::Skip<std::env::ArgsOs>;
 /// The value after an option, or exit with `needs`.
 fn value(args: &mut Args, option: &str, needs: &str) -> std::ffi::OsString {
     args.next().unwrap_or_else(|| {
-        print_err(&format!("nimbus: {option} needs {needs}"));
-        std::process::exit(2);
+        usage_error(&format!("nimbus: {option} needs {needs}"));
     })
+}
+
+/// The UTF-8 text after an option, or exit with `needs`.
+fn text(args: &mut Args, option: &str, needs: &str) -> String {
+    value(args, option, needs)
+        .into_string()
+        .unwrap_or_else(|_| usage_error(&format!("nimbus: {option} needs {needs}")))
+}
+
+/// Report a mistake on the command line, point at `--help`, and exit with
+/// code 2. `msg` starts with `nimbus: `, as every error does.
+fn usage_error(msg: &str) -> ! {
+    print_err(msg);
+    print_err("Run nimbus --help to see every option.");
+    std::process::exit(2);
 }
 
 /// Options about how the window runs. `true` when `flag` was one.
@@ -365,8 +376,7 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
                 .to_str()
                 .and_then(|n| n.parse().ok())
                 .unwrap_or_else(|| {
-                    print_err("nimbus: --bench-typing needs a count");
-                    std::process::exit(2);
+                    usage_error("nimbus: --bench-typing needs a count");
                 });
         }
         "--soak" => o.soak = true,
@@ -377,18 +387,17 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
         "--linear-blend" => o.linear_blend = true,
         "--compat" => o.compat = true,
         "--git" => o.git = true,
-        "--git-select" => o.git_select = args.next().and_then(|w| w.into_string().ok()),
+        "--git-select" => o.git_select = Some(text(args, flag, "changes or a commit hash")),
         "--preview" => o.preview = true,
-        "--cursors" => o.cursors = numbers(args.next()),
-        "--picker" => o.picker = args.next().and_then(|p| p.into_string().ok()),
+        "--cursors" => o.cursors = numbers(Some(value(args, flag, "byte offsets like 4,19"))),
+        "--picker" => o.picker = Some(text(args, flag, "palette, files, line or symbols")),
         "--prompt" => o.prompt = true,
         "--title-bar" => o.title_bar = true,
-        "--menu" => o.menu = args.next().and_then(|m| m.into_string().ok()),
-        "--theme" => o.theme = args.next().and_then(|t| t.into_string().ok()),
+        "--menu" => o.menu = Some(text(args, flag, "a menu name, such as File")),
+        "--theme" => o.theme = Some(text(args, flag, "a theme name, such as dark or light")),
         "--workspace" => {
             let Ok(name) = value(args, flag, "a workspace name").into_string() else {
-                print_err("nimbus: --workspace needs a UTF-8 name");
-                std::process::exit(2);
+                usage_error("nimbus: --workspace needs a UTF-8 name");
             };
             o.workspace = Some(name);
         }
@@ -397,8 +406,7 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
                 .next()
                 .and_then(|b| b.to_str().and_then(io::Backend::parse))
             else {
-                print_err("nimbus: --backend needs rope or mapped");
-                std::process::exit(2);
+                usage_error("nimbus: --backend needs rope or mapped");
             };
             o.backend = Some(b);
         }
@@ -407,11 +415,10 @@ fn run_flag(o: &mut Options, flag: &str, args: &mut Args) -> bool {
                 .next()
                 .and_then(|e| e.to_str().and_then(encoding::Encoding::from_label))
             else {
-                print_err(
+                usage_error(
                     "nimbus: --encoding needs an encoding name, such as utf-8, utf-16le, \
                      windows-1252 or latin1",
                 );
-                std::process::exit(2);
             };
             o.encoding = Some(e);
         }
@@ -451,8 +458,7 @@ fn file_flag(
         }
         "--find" | "--search" => {
             let Ok(pattern) = value(args, flag, "a pattern").into_string() else {
-                print_err(&format!("nimbus: {flag} needs a UTF-8 pattern"));
-                std::process::exit(2);
+                usage_error(&format!("nimbus: {flag} needs a UTF-8 pattern"));
             };
             if flag == "--find" {
                 o.find = Some(pattern);
@@ -465,7 +471,10 @@ fn file_flag(
             std::process::exit(0);
         }
         "--help" | "-h" => {
-            print_out(USAGE);
+            // `--help all` adds the testing options. Whatever follows is
+            // read and dropped otherwise, as nothing runs after the help.
+            let all = args.next().is_some_and(|a| a == "all");
+            print_out(&cli::help(all, cli::styled()));
             std::process::exit(0);
         }
         _ => return false,

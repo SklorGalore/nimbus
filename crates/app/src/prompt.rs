@@ -156,6 +156,15 @@ impl<T> Prompt<T> {
             .map(|i| self.buttons[i].answer)
     }
 
+    /// Where the box and each button are drawn, for the accessibility
+    /// tree: the box, then each button's rectangle in the order of
+    /// [`Prompt::buttons`].
+    #[must_use]
+    pub fn rects(&self, layout: &Layout) -> ([f32; 4], Vec<[f32; 4]>) {
+        let g = self.geometry(layout);
+        (g.rect, g.buttons)
+    }
+
     /// Where everything goes in a window of `layout`'s size.
     fn geometry(&self, layout: &Layout) -> Geometry {
         let cell = layout.metrics.cell_width;

@@ -197,6 +197,9 @@ fn spawn_listing(proxy: &EventLoopProxy<AppEvent>, req: ListRequest) {
     }
 }
 
+/// The tab name of "Show Default Config"'s read-only document.
+const DEFAULT_CONFIG_NAME: &str = "default-config.toml";
+
 /// The least time between automatic reloads of one file changed on disk.
 const RELOAD_GAP: Duration = Duration::from_secs(1);
 
@@ -810,6 +813,7 @@ impl App {
         proxy: EventLoopProxy<AppEvent>,
         mut warnings: Vec<String>,
     ) -> Self {
+        let project = startup.is_project(&options);
         let Startup {
             mut state,
             restore,
@@ -818,7 +822,6 @@ impl App {
             workspace,
         } = startup;
         let session_root = session_root.filter(|_| !options.unattended());
-        let debug_overlay = options.debug_overlay;
         let (keymap, key_warnings) = Keymap::new(&config.keys);
         let (theme, theme_warnings) = Theme::load(&config.theme);
         let watch = disk_watch(&proxy);
@@ -841,6 +844,8 @@ impl App {
         warnings.extend(key_warnings.into_iter().chain(theme_warnings));
         let message = startup_message(warnings, note);
         Self {
+            // Before `options` moves in.
+            debug: Debug::new(options.debug_overlay),
             options,
             started,
             font_size: starting_zoom(&config, &state),
@@ -868,7 +873,6 @@ impl App {
             active,
             blink: Blink::new(started),
             preedit: None,
-            debug: Debug::new(debug_overlay),
             soak_memory: Vec::new(),
             mouse: PhysicalPosition::new(0.0, 0.0),
             ime_area: None,
@@ -897,7 +901,7 @@ impl App {
             sidebar,
             watch,
             zoom_started: None,
-            ws: Workspace::new(state, session_root),
+            ws: Workspace::new(state, session_root, project),
             updater: updates::Updater::default(),
             cursor_icon: CursorIcon::Default,
             caption: Caption::default(),
@@ -2897,7 +2901,6 @@ impl App {
         true
     }
 
-    /// Open `path` in a tab, or switch to it if it is already open.
     /// A sidebar folder listing finished on its worker.
     fn listing_arrived(&mut self, req: &ListRequest, result: Result<Vec<Entry>, String>) {
         let requests = match result {
@@ -2929,6 +2932,9 @@ impl App {
         self.changed(false);
     }
 
+    /// Open `path` in a tab, or switch to it if it is already open; a
+    /// file outside the sidebar's folders moves the sidebar to its folder
+    /// ([`App::follow_file`]).
     fn open_path(&mut self, path: &Path) {
         // Whatever asked (the sidebar, the picker, a dialog), the file
         // gets the keyboard.
@@ -2947,10 +2953,12 @@ impl App {
             .iter()
             .find(|&&i| self.tabs[i].group == self.groups.focused);
         if let Some(&i) = here {
+            self.follow_file(&canonical);
             self.switch_to(i);
             return;
         }
         if let Some(&other) = showing.first() {
+            self.follow_file(&canonical);
             let tab = Tab::new(self.tabs[other].doc, self.tabs[other].view.wrap);
             let i = self.add_tab(tab);
             self.switch_to(i);
@@ -2966,6 +2974,8 @@ impl App {
                     && !self.docs[self.tabs[0].doc].is_dirty();
                 if let Some(c) = &doc.canonical {
                     self.ws.state.note_recent(c);
+                    let c = c.clone();
+                    self.follow_file(&c);
                 }
                 let wrap = wrap_for(&self.config, &doc);
                 let tab = Tab::new(self.docs.insert(doc), wrap);
@@ -3475,6 +3485,10 @@ impl App {
         if self.docs[self.tabs[i].doc].is_saving() {
             self.say("Already saving; edits wait until it is done", false);
             return Saved::Started;
+        }
+        if let Some(why) = self.docs[self.tabs[i].doc].read_only.clone() {
+            self.alert("Could not save", why);
+            return Saved::No;
         }
         let doc = &self.docs[self.tabs[i].doc];
         let dir = doc
@@ -4207,6 +4221,7 @@ impl App {
     fn run_setup(&mut self, cmd: Command<'_>) {
         match cmd {
             Command::OpenConfig => self.open_config(),
+            Command::ShowDefaultConfig => self.show_default_config(),
             Command::CheckUpdates => {
                 self.say("Checking GitHub for the latest release…", false);
                 spawn_update_check(&self.proxy, false);
@@ -4290,6 +4305,36 @@ impl App {
         }
         self.open_path(&path);
         self.say("Edit, save, then run Reload Config from the palette", false);
+    }
+
+    /// Show every setting with its default value ([`config::defaults_text`])
+    /// in a read-only tab named `default-config.toml`, coloured as TOML.
+    /// The tab has no file behind it, so it is never saved, watched or
+    /// kept in the session; copy lines from it into Open Config File's.
+    /// Running it again goes back to the tab already open.
+    fn show_default_config(&mut self) {
+        let shown = (0..self.tabs.len()).find(|&i| {
+            self.tabs[i].group == self.groups.focused
+                && self.docs[self.tabs[i].doc].name == Some(DEFAULT_CONFIG_NAME)
+        });
+        if let Some(i) = shown {
+            self.switch_to(i);
+            return;
+        }
+        let mut doc = Document::generated(
+            DEFAULT_CONFIG_NAME,
+            &config::defaults_text(),
+            "The default settings are read-only; copy what you want to change into \
+             Open Config File's config.toml",
+        );
+        doc.detect_language(&self.languages);
+        let tab = Tab::new(self.docs.insert(doc), false);
+        let i = self.add_tab(tab);
+        self.switch_to(i);
+        self.say(
+            "Copy what you want to change into Open Config File's config.toml",
+            false,
+        );
     }
 
     fn open_picker(&mut self, kind: Kind) {
@@ -5143,7 +5188,11 @@ impl App {
                 repeat: event.repeat,
                 mods: self.modifiers,
             },
-            self.find.open,
+            if self.find.open {
+                crate::action::When::FindBar
+            } else {
+                crate::action::When::Always
+            },
             pending,
         );
         let was_pending = pending.is_some() && event.state == ElementState::Pressed;
@@ -6201,6 +6250,7 @@ impl App {
             | Command::Palette
             | Command::ReloadConfig
             | Command::OpenConfig
+            | Command::ShowDefaultConfig
             | Command::CompareSaved
             | Command::CompareFile
             | Command::CompareTab
@@ -7515,7 +7565,7 @@ fn headless_folder_compare(sidebar: &mut Sidebar, left: &Path, right: &Path) {
 
 /// The picker's count of matches, such as "42 files" ("…" while still
 /// listing), or nothing for pickers that do not list.
-fn picker_status(p: &Picker) -> String {
+pub(crate) fn picker_status(p: &Picker) -> String {
     let n = p.match_count();
     let noun = match (p.kind, n == 1) {
         (Kind::Palette, true) => "command",
@@ -7543,7 +7593,7 @@ fn picker_status(p: &Picker) -> String {
 }
 
 /// What the picker is, as a screen reader names it.
-fn picker_title(kind: Kind) -> &'static str {
+pub(crate) fn picker_title(kind: Kind) -> &'static str {
     match kind {
         Kind::Palette => "Command palette",
         Kind::Files => "Go to file",
@@ -7561,7 +7611,7 @@ fn picker_title(kind: Kind) -> &'static str {
 }
 
 /// The hint the picker's empty query field shows.
-fn picker_placeholder(kind: Kind) -> &'static str {
+pub(crate) fn picker_placeholder(kind: Kind) -> &'static str {
     match kind {
         Kind::Palette => "Type a command",
         Kind::Files => "Type a file name",
@@ -7579,7 +7629,7 @@ fn picker_placeholder(kind: Kind) -> &'static str {
 }
 
 /// Draw an open picker over everything else.
-fn draw_picker_overlay(
+pub(crate) fn draw_picker_overlay(
     gpu: &mut Gpu,
     ui: &Ui,
     layout: &Layout,
@@ -7604,7 +7654,7 @@ fn draw_picker_overlay(
 /// Apply a text-editing command to a one-line field (the find bar). Returns
 /// text to put on the clipboard for Copy and Cut. Line breaks are not typed
 /// into fields; pasted ones are kept, so a multi-line literal can be found.
-fn edit_field(
+pub(crate) fn edit_field(
     field: &mut Solo,
     cmd: Command<'_>,
     paste: Option<&str>,

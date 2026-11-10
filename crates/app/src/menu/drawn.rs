@@ -466,6 +466,78 @@ impl Menus {
     }
 }
 
+/// The open menu as a screen reader is told about it (M22's tree,
+/// `crate::access`): its entries with where each is drawn, and which is
+/// highlighted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Described<'a> {
+    /// The entries, each with its rectangle in layout pixels, or `None`
+    /// while it is scrolled out of the box.
+    pub entries: Vec<(&'a Entry, Option<[f32; 4]>)>,
+    /// The highlighted entry.
+    pub hover: Option<usize>,
+    /// The bar menu it drops down from, if any.
+    pub bar: Option<usize>,
+    /// The box, in layout pixels.
+    pub frame: [f32; 4],
+}
+
+impl Menus {
+    /// The open menu, for the accessibility tree.
+    #[must_use]
+    pub fn describe(&self, layout: &Layout) -> Option<Described<'_>> {
+        let popup = self.open.as_ref()?;
+        let geo = geometry(popup, layout);
+        let [x, _, w, _] = geo.frame;
+        let (view_top, view_bottom) = geo.view;
+        let entries = popup
+            .entries
+            .iter()
+            .zip(&geo.rows)
+            .map(|(e, &(top, h))| {
+                let shown = top + h > view_top && top < view_bottom;
+                (e, shown.then_some([x, top, w, h]))
+            })
+            .collect();
+        Some(Described {
+            entries,
+            hover: popup.hover,
+            bar: popup.bar,
+            frame: geo.frame,
+        })
+    }
+
+    /// Highlight entry `i` of the open menu, as moving the pointer onto it
+    /// does (a screen reader focusing it). Separators are skipped.
+    pub fn set_hover(&mut self, i: usize, layout: &Layout) {
+        if let Some(popup) = self.open.as_mut()
+            && popup.entries.get(i).is_some_and(Entry::is_item)
+        {
+            popup.hover = Some(i);
+            reveal(popup, layout);
+        }
+    }
+
+    /// Choose entry `i` of the open menu, as a click on it does. Returns
+    /// its action, and closes the menu, when it is an item.
+    pub fn choose(&mut self, i: usize) -> Option<&'static str> {
+        let id = item_id(self.open.as_ref()?.entries.get(i)?)?;
+        self.open = None;
+        Some(id)
+    }
+}
+
+/// The bar's titles with where each is drawn, in layout pixels (the bar is
+/// above the layout, at negative y, `height` tall).
+#[must_use]
+pub fn bar_items(layout: &Layout, height: f32) -> Vec<(&'static str, [f32; 4])> {
+    super::LAYOUT
+        .iter()
+        .zip(bar_titles(layout))
+        .map(|((title, _), (x, w))| (*title, [x, -height, w, height]))
+        .collect()
+}
+
 /// The action id of an item entry.
 fn item_id(entry: &Entry) -> Option<&'static str> {
     match entry {

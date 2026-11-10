@@ -25,6 +25,10 @@ use nimbus_core::{Edit, LineSpan, Text, long_line};
 use crate::LanguageId;
 use crate::highlight::Span;
 
+mod git;
+
+use git::GitFile;
+
 /// Capture names of the spans this module produces, indexed by
 /// [`Span::capture`]. Themes colour them like tree-sitter captures.
 pub const CAPTURES: &[&str] = &[
@@ -35,6 +39,17 @@ pub const CAPTURES: &[&str] = &[
     "constant.builtin",
     "text.title",
     "text.literal",
+    // The rest are used by git's formats (see `git`).
+    "operator",
+    "string.special",
+    "string.escape",
+    "property",
+    "type",
+    "label",
+    "diff.plus",
+    "diff.minus",
+    "text.uri",
+    "punctuation",
 ];
 
 const COMMENT: u32 = 0;
@@ -44,6 +59,16 @@ const NUMBER: u32 = 3;
 const CONSTANT: u32 = 4;
 const TITLE: u32 = 5;
 const LITERAL: u32 = 6;
+const OPERATOR: u32 = 7;
+const SPECIAL: u32 = 8;
+const ESCAPE: u32 = 9;
+const PROPERTY: u32 = 10;
+const TYPE: u32 = 11;
+const LABEL: u32 = 12;
+const DIFF_PLUS: u32 = 13;
+const DIFF_MINUS: u32 = 14;
+const URI: u32 = 15;
+const PUNCTUATION: u32 = 16;
 
 /// Save the state at the start of every this many lines.
 pub const CHECKPOINT_LINES: usize = 256;
@@ -96,6 +121,9 @@ pub struct Rules {
     constants: &'static [&'static str],
     /// Headings and fenced code blocks instead of the rules above.
     markdown: bool,
+    /// One of git's own formats, coloured by its own line rules instead
+    /// of the ones above (which still give the comment marker).
+    git: Option<GitFile>,
 }
 
 const NONE: Rules = Rules {
@@ -108,6 +136,7 @@ const NONE: Rules = Rules {
     keywords: &[],
     constants: &[],
     markdown: false,
+    git: None,
 };
 
 const RUST: Rules = Rules {
@@ -364,7 +393,70 @@ const CSS: Rules = Rules {
     ..NONE
 };
 
-/// The built-in rules for `language`, used for its files over 16 MB.
+/// PowerShell escapes with a backtick, not a backslash, so the strings
+/// take no escapes; a here-string (`@"` to `"@`) runs over lines. Keywords
+/// are listed in lower case, the way scripts usually write them.
+const POWERSHELL: Rules = Rules {
+    line_comments: &["#"],
+    hash_after_space: true,
+    block_comment: Some(("<#", "#>")),
+    strings: &[
+        s("@\"", "\"@", false, true),
+        s("@'", "'@", false, true),
+        s("\"", "\"", false, true),
+        s("'", "'", false, true),
+    ],
+    keywords: &[
+        "begin",
+        "break",
+        "catch",
+        "class",
+        "continue",
+        "data",
+        "do",
+        "dynamicparam",
+        "else",
+        "elseif",
+        "end",
+        "enum",
+        "exit",
+        "filter",
+        "finally",
+        "for",
+        "foreach",
+        "function",
+        "if",
+        "in",
+        "param",
+        "process",
+        "return",
+        "switch",
+        "throw",
+        "trap",
+        "try",
+        "until",
+        "while",
+    ],
+    ..NONE
+};
+
+/// Git's formats: `#` comments, the rest by [`git`]'s line rules.
+const fn git_rules(file: GitFile) -> Rules {
+    Rules {
+        line_comments: &["#"],
+        git: Some(file),
+        ..NONE
+    }
+}
+
+const GIT_IGNORE: Rules = git_rules(GitFile::Ignore);
+const GIT_ATTRIBUTES: Rules = git_rules(GitFile::Attributes);
+const GIT_CONFIG: Rules = git_rules(GitFile::Config);
+const GIT_COMMIT: Rules = git_rules(GitFile::Commit);
+const GIT_REBASE: Rules = git_rules(GitFile::Rebase);
+
+/// The built-in rules for `language`: used for its files over 16 MB, and
+/// always for git's formats, which have no grammar.
 #[must_use]
 pub fn builtin(language: LanguageId) -> &'static Rules {
     match language {
@@ -381,6 +473,12 @@ pub fn builtin(language: LanguageId) -> &'static Rules {
         LanguageId::Go => &GO,
         LanguageId::Html => &HTML,
         LanguageId::Css => &CSS,
+        LanguageId::PowerShell => &POWERSHELL,
+        LanguageId::GitIgnore => &GIT_IGNORE,
+        LanguageId::GitAttributes => &GIT_ATTRIBUTES,
+        LanguageId::GitConfig => &GIT_CONFIG,
+        LanguageId::GitCommit => &GIT_COMMIT,
+        LanguageId::GitRebase => &GIT_REBASE,
     }
 }
 
@@ -536,6 +634,7 @@ impl Rules {
             keywords: leak_all(&spec.keywords),
             constants: leak_all(&spec.constants),
             markdown: false,
+            git: None,
         }));
         if let Ok(mut m) = stored.lock() {
             m.insert(spec.clone(), rules);
@@ -555,6 +654,8 @@ enum LexState {
     Str(u8),
     /// A Markdown fenced code block.
     Fence,
+    /// Where one of git's formats is, numbered by [`git`].
+    Git(u8),
 }
 
 /// Scan a block comment from `i`, `depth` levels deep, to its end or the
@@ -656,7 +757,7 @@ fn resume(
             emit(0..end, STRING);
             closed.then_some(end)
         }
-        LexState::Normal | LexState::Fence => Some(0),
+        LexState::Normal | LexState::Fence | LexState::Git(_) => Some(0),
     }
 }
 
@@ -670,6 +771,9 @@ fn lex_line(
 ) -> LexState {
     if rules.markdown {
         return markdown_line(line, state, emit);
+    }
+    if let Some(file) = rules.git {
+        return git::line(file, line, state, emit);
     }
     let bytes = line.as_bytes();
     let Some(mut i) = resume(rules, bytes, state, emit) else {
@@ -994,6 +1098,22 @@ mod tests {
         assert!(has(&md, "# Title", "text.title"), "{md:?}");
         assert!(has(&md, "code # not a title", "text.literal"), "{md:?}");
         assert!(!md.iter().any(|(t, _)| t == "after"), "{md:?}");
+    }
+
+    #[test]
+    fn powershell_basics() {
+        // Spans stop at line ends; the state carries a comment or a
+        // here-string over to the next line.
+        let src = "<# a\nb #> if\nif ($x) { 'it' } # c\n$s = @\"\nhere # no\n\"@\n";
+        let spans = names(LanguageId::PowerShell, src);
+        assert!(has(&spans, "<# a", "comment"), "{spans:?}");
+        assert!(has(&spans, "b #>", "comment"), "{spans:?}");
+        assert!(has(&spans, "if", "keyword"), "{spans:?}");
+        assert!(has(&spans, "'it'", "string"), "{spans:?}");
+        assert!(has(&spans, "# c", "comment"), "{spans:?}");
+        assert!(has(&spans, "here # no", "string"), "{spans:?}");
+        assert!(has(&spans, "\"@", "string"), "{spans:?}");
+        assert_eq!(comment_tokens(LanguageId::PowerShell).line, Some("#"));
     }
 
     #[test]

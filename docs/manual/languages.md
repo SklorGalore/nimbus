@@ -1,7 +1,9 @@
 # Languages and highlighting
 
-Nimbus highlights fourteen languages with full grammars (tree-sitter),
-and any language you describe yourself with simple rules. The status bar
+Nimbus highlights fifteen languages with full grammars (tree-sitter),
+git's own files (ignore, attributes, config, commit messages and rebase
+to-do lists) with simple rules, and any language you describe yourself
+with simple rules. The status bar
 shows the language of the active tab.
 
 ## Built-in languages
@@ -24,6 +26,25 @@ shows the language of the active tab.
 | Go | `go` | `.go` |
 | HTML | `html` | `.html`, `.htm`, `.xhtml` |
 | CSS | `css` | `.css` |
+| PowerShell | `powershell` | `.ps1`, `.psm1`, `.psd1`; `#!` lines naming `pwsh` or `powershell` |
+
+### Git's files
+
+Git's own files are coloured too, by simple line rules rather than a full
+grammar (they are made of lines that each stand alone, so nothing is
+lost). They have no folding or Go to Symbol.
+
+| File | Name in config | Chosen for | Coloured |
+|---|---|---|---|
+| Ignore patterns | `gitignore` | `.gitignore`, `*.gitignore`, `.git/info/exclude`, `~/.config/git/ignore` | comments, `!` exceptions, wildcards and `[a-z]` sets, `\` escapes |
+| Attributes | `gitattributes` | `.gitattributes`, `.git/info/attributes`, `~/.config/git/attributes` | patterns, attribute names, `-` and `!`, `=value`, `[attr]` macros |
+| Config | `gitconfig` | `.gitconfig`, `*.gitconfig`, `.gitmodules`, `.lfsconfig`, `.git/config`, `~/.config/git/config` | `[section "name"]`, keys, quoted values, booleans and numbers, `#` and `;` comments |
+| Commit message | `gitcommit` | `COMMIT_EDITMSG`, `MERGE_MSG`, `SQUASH_MSG`, `TAG_EDITMSG`, `NOTES_EDITMSG` | the summary line, `#` comments, trailers such as `Signed-off-by:`, and the diff `git commit -v` adds |
+| Rebase to-do | `gitrebase` | `git-rebase-todo` | commands (`pick`, `fixup -C`, `merge`...), commit ids, labels |
+
+So when Nimbus is [git's editor](command-line.md#nimbus-as-gits-editor),
+the messages and to-do lists git opens in it are coloured. Another file in one of these formats can be
+mapped in the `[languages]` table, such as `".dockerignore" = "gitignore"`.
 
 Extensions are matched without regard to case. A file that matches
 nothing is plain text, with no colours. The *name in config* is what you
@@ -56,7 +77,8 @@ Changes to the table apply to open files after "Reload Config".
 - **Code inside other code** is coloured as its own language: fenced
   code blocks in Markdown (by the language named after the fence: `rust`,
   `py`, `sh`, `js`, `ts`, `tsx`, `c`, `go`, `html`, `css`, `json`,
-  `toml`, `yaml`, `markdown` and their usual aliases), and `<script>` and
+  `toml`, `yaml`, `markdown`, `powershell` (or `pwsh`, `ps1`) and their
+  usual aliases), and `<script>` and
   `<style>` in HTML. A fence naming a language Nimbus has no grammar for
   keeps the Markdown colours.
 - **Markdown** prose is coloured too: headings, emphasis, bold, code
@@ -73,7 +95,7 @@ its syntax tree:
 - **Folding** follows the language's blocks, functions and sections (see
   [Navigating](navigation.md#folding)).
 - **Go to Symbol** lists the file's definitions, for Rust, Markdown,
-  Python, JavaScript, TypeScript, TSX, C and Go.
+  Python, JavaScript, TypeScript, TSX, C, Go and PowerShell.
 
 ## Markdown helpers
 

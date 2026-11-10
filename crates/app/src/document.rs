@@ -439,6 +439,11 @@ pub struct Document {
     opener: Option<Opener>,
     /// Where it saves to; `None` for an untitled buffer.
     pub path: Option<PathBuf>,
+    /// The tab's name for a document Nimbus made rather than read, such
+    /// as `default-config.toml` ([`Document::generated`]); `None` for a
+    /// file or an untitled buffer. It names no file: the document stays
+    /// untitled for saving, watching and the session.
+    pub name: Option<&'static str>,
     /// Inserted by Enter, detected when the file was opened.
     pub line_ending: LineEnding,
     /// Increments when the text is swapped wholesale (a save switching
@@ -793,6 +798,20 @@ impl Document {
         doc
     }
 
+    /// A read-only document holding text Nimbus made, shown in a tab
+    /// called `name`, such as the default settings. `name` also picks the
+    /// language (`.toml` colours it as TOML), but it is not a path: there
+    /// is no file, so nothing saves it and the session leaves it out.
+    /// `why` is what an edit or a save is told.
+    #[must_use]
+    pub fn generated(name: &'static str, text: &str, why: &str) -> Self {
+        Self {
+            name: Some(name),
+            read_only: Some(why.to_owned()),
+            ..Self::with_text(None, text)
+        }
+    }
+
     /// Open `path`. A path that does not exist yet gives an empty document
     /// that will be created on first save.
     ///
@@ -1136,7 +1155,8 @@ impl Document {
         // Only a shebang needs the text, and only its start: never copy a
         // whole (possibly huge) first line.
         let head = self.buffer.slice(0..self.buffer.len_bytes().min(256));
-        let detected = languages.detect(self.path.as_deref(), head.lines().next().unwrap_or(""));
+        let path = self.path.as_deref().or(self.name.map(Path::new));
+        let detected = languages.detect(path, head.lines().next().unwrap_or(""));
         drop(head);
         let key = detected.map(Detected::key);
         if key == self.language && self.syntax.off_reason().is_none() {
@@ -1258,6 +1278,9 @@ impl Document {
     /// Short name for the window title: file name, or "untitled".
     #[must_use]
     pub fn display_name(&self) -> String {
+        if let Some(name) = self.name {
+            return name.to_owned();
+        }
         self.path.as_ref().and_then(|p| p.file_name()).map_or_else(
             || "untitled".to_owned(),
             |n| n.to_string_lossy().into_owned(),
@@ -2822,6 +2845,17 @@ mod tests {
         assert_eq!(d.ed().cursor(), 0);
         d.ed().click(3, false);
         assert_eq!(d.ed().cursor(), 2);
+    }
+
+    #[test]
+    fn generated_document_is_named_read_only_and_unsaved() {
+        let mut d = Document::generated("default-config.toml", "a = 1\n", "made, not read");
+        assert_eq!(d.display_name(), "default-config.toml");
+        assert_eq!(d.path, None);
+        assert_eq!(d.canonical, None);
+        assert!(!d.is_dirty());
+        assert_eq!(d.read_only.as_deref(), Some("made, not read"));
+        assert!(d.save().is_err());
     }
 
     #[test]

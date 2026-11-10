@@ -394,23 +394,25 @@ impl Keymap {
         ]
     }
 
-    /// What a key press is bound to: an action that applies now (find-bar
-    /// actions when `find_open`), or the start of a two-chord binding.
+    /// What a key press is bound to: an action that applies now (those of
+    /// `scope`, such as the find bar's while it is open, ahead of the
+    /// editor's), or the start of a two-chord binding.
     #[must_use]
     pub fn lookup(
         &self,
         key: &Key,
         physical: PhysicalKey,
         mods: ModifiersState,
-        find_open: bool,
+        scope: When,
     ) -> Lookup {
         for chord in Self::chords_for(key, physical, mods).into_iter().flatten() {
             if let Some(list) = self.map.get(&chord) {
-                // The find bar's binding first while it is open, so its
-                // keys take precedence over the editor's.
+                // The find bar's binding first while it is open (and the
+                // git window's in that window), so its keys take
+                // precedence over the editor's.
                 let pick = list
                     .iter()
-                    .find(|a| a.when == When::FindBar && find_open)
+                    .find(|a| a.when == scope && scope != When::Always)
                     .or_else(|| list.iter().find(|a| a.when == When::Always))
                     .or_else(|| list.first());
                 if let Some(a) = pick {
@@ -574,7 +576,7 @@ mod tests {
     }
 
     fn id(km: &Keymap, key: &Key, physical: KeyCode, mods: ModifiersState) -> Option<&'static str> {
-        match km.lookup(key, PhysicalKey::Code(physical), mods, false) {
+        match km.lookup(key, PhysicalKey::Code(physical), mods, When::Always) {
             Lookup::Action(a) => Some(a.id),
             Lookup::Prefix(_) | Lookup::None => None,
         }
@@ -726,7 +728,12 @@ mod tests {
             id(&km, &enter, KeyCode::Enter, primary()),
             Some("edit.insertLineBelow")
         );
-        let found = km.lookup(&enter, PhysicalKey::Code(KeyCode::Enter), primary(), true);
+        let found = km.lookup(
+            &enter,
+            PhysicalKey::Code(KeyCode::Enter),
+            primary(),
+            When::FindBar,
+        );
         assert!(matches!(found, Lookup::Action(a) if a.id == "find.replaceAll"));
     }
 
@@ -748,7 +755,7 @@ mod tests {
                 &k,
                 PhysicalKey::Code(KeyCode::KeyK),
                 ModifiersState::CONTROL,
-                false
+                When::Always
             ),
             Lookup::Prefix(_)
         ));

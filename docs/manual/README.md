@@ -3,7 +3,7 @@
 Nimbus is a fast, lightweight text editor with its own GPU text renderer.
 It is *modeless*: you type and the text changes, like most editors, with
 no separate command mode. It opens a multi-gigabyte log in a fraction of a
-second, edits with several cursors, highlights fourteen languages, and
+second, edits with several cursors, highlights fifteen languages, and
 can compare and merge files.
 
 This manual is for people who use Nimbus. It describes version 0.6.0. If
@@ -44,8 +44,8 @@ the repository instead.
 15. [Accessibility](accessibility.md): screen readers, reaching every
     panel from the keyboard, and keys your system may take first.
 16. [The git window](git.md): `nimbus --git`, your uncommitted changes,
-    the history with its branch graph, and any commit's files and
-    differences.
+    the history with its branch graph, any commit's files and
+    differences, and staging, discarding and committing.
 
 ## A note on keys
 

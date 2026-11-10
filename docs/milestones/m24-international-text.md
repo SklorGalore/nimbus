@@ -1,7 +1,8 @@
 # M24 — International text
 
-**Status: in progress, built (2026-10-19); the mixed-script typing
-benchmark and the checks on the owner's Mac (Results) wait.** Written on 2026-10-18 from what M16 and
+**Status: done (2026-10-23).** Built on 2026-10-19; the owner accepted
+it as built on 2026-10-23, in place of the remaining checks on the Mac
+listed in Results. Written on 2026-10-18 from what M16 and
 M17 deferred for text that is not Latin: font fallback per script
 (M16), variable fonts (M16), East Asian encodings (M17, behind a cargo
 feature that is off) and transcoding mapped files (M17). Bidirectional
@@ -49,7 +50,7 @@ them is no longer read-only.
       threshold, as M17 left them. _As built: decoded into a private
       UTF-8 copy instead, which makes every known encoding editable,
       multi-byte ones included (Results)._
-- [ ] Budgets: the first frame still draws with Hack only (fallback
+- [x] Budgets: the first frame still draws with Hack only (fallback
       fonts load on a worker on first need, as in M8); a line of mixed
       scripts shapes within the M16 typing budget; Linux binary under
       35 MB.
@@ -191,7 +192,8 @@ Surprises and changes from the plan:
   `random_edits_to_a_decoded_copy_save_exactly` test stands in for
   the oracle run on a mapped Windows-1252 file.
 
-Left for the owner's Mac (no GPU or macOS fonts here):
+Left for the owner's Mac (no GPU or macOS fonts here); the owner
+accepted the milestone on 2026-10-23 without these as a gate:
 
 1. A file mixing Latin, Japanese, Chinese and Hangul at 1× and 2×:
    wide characters in two cells, nothing overlapping.

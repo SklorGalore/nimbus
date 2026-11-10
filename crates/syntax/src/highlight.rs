@@ -406,4 +406,37 @@ mod tests {
         assert_eq!(name_of(&spans, "\"s\""), Some("string"));
         assert_eq!(name_of(&spans, "number"), Some("type.builtin"));
     }
+
+    #[cfg(feature = "powershell")]
+    #[test]
+    fn powershell_highlights() {
+        let src = "<# help #>\n[CmdletBinding()]\nparam([string]$Path)\n\
+                   function Get-Thing {\n    If ($Path -eq $null) { return \"at $Path\" }\n\
+                   \x20   Write-Host -ForegroundColor Red $_.Length\n\
+                   \x20   $h = @{ Key = 0x1F }\n    [IO.File]::ReadAllText($env:HOME) # done\n}\n";
+        let spans = names(src, LanguageId::PowerShell);
+        let is = |text, name| assert_eq!(name_of(&spans, text), Some(name), "{text}: {spans:?}");
+        is("<# help #>", "comment");
+        is("# done", "comment");
+        is("CmdletBinding", "attribute");
+        is("param", "keyword");
+        is("function", "keyword");
+        // Keywords match in any case.
+        is("If", "keyword");
+        is("return", "keyword");
+        is("-eq", "keyword.operator");
+        is("$null", "constant.builtin");
+        is("Get-Thing", "function");
+        is("Write-Host", "function");
+        is("-ForegroundColor", "label");
+        is("$_", "variable.builtin");
+        is("Length", "property");
+        is("Key", "property");
+        is("0x1F", "number");
+        is("ReadAllText", "function.method");
+        is("$env:HOME", "variable.builtin");
+        // An interpolated variable breaks the string's colour.
+        is("\"at ", "string");
+        is("$Path", "variable");
+    }
 }
