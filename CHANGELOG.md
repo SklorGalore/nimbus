@@ -4,7 +4,7 @@ One section per release, newest first. The release workflow puts the
 tagged version's section into the GitHub release notes, so write the
 section before tagging.
 
-## Unreleased
+## 1.4.0
 
 ### Added
 
@@ -15,20 +15,6 @@ section before tagging.
   rebase to-do lists (`git-rebase-todo`). They use simple line rules, so
   no new grammar adds to the download size. Themes gain `diff.plus` and
   `diff.minus` for added and removed lines.
-
-### Changed
-
-- Without a project open (Nimbus started with files rather than a
-  folder, a workspace or a remembered session), the sidebar follows the
-  files you open: one from outside its folder (Open…, recent files,
-  Finder or Explorer, a drop, or a later `nimbus FILE`) moves the sidebar
-  to the file's folder and selects it. With a project open the sidebar
-  stays on the project.
-
-## 1.4.0
-
-### Added
-
 - Staging and committing in the git window (M28). Under **Changes**,
   each file has Stage, Unstage and Discard buttons, the lists have Stage
   All and Unstage All, and the bar above the compare stages, unstages
@@ -57,6 +43,12 @@ section before tagging.
 
 ### Changed
 
+- Without a project open (Nimbus started with files rather than a
+  folder, a workspace or a remembered session), the sidebar follows the
+  files you open: one from outside its folder (Open…, recent files,
+  Finder or Explorer, a drop, or a later `nimbus FILE`) moves the sidebar
+  to the file's folder and selects it. With a project open the sidebar
+  stays on the project.
 - `scripts/publish-packages.ps1` replaces `scripts/publish-packages.sh`:
   it puts a signed, published release in the Homebrew tap and pushes its
   Chocolatey package, with the hashes taken from the signed `SHA256SUMS`.
